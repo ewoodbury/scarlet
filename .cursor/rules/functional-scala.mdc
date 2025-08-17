@@ -16,6 +16,7 @@ WartRemover Rules
 - Avoid `var`, use `val` instead.
 - When using .toLowerCase or .toUpperCase, pass in the English locale: `s.toUpperCase(java.util.Locale.ENGLISH)`.
 - Avoid using `null`.
+- Avoid writign code that results in inferred Any types. Type Anys explicitly.
 
 Documentation
 - Do not use all-caps or emojis in technical documentation
