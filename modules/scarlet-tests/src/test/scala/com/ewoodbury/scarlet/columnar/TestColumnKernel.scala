@@ -362,14 +362,14 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
   "pipelines" should "fuse filters and projects without invoking functions for nulls" in {
     val column = Int32Column.of(Array(2, 42, 3), Validity.pack(3, row => row != 1), 3)
     val batch = single(column)
-    val fusedFilter = ColumnKernel.pipelineInt32FP(
+    val fusedFilter = Int32Pipeline.FP(
       batch,
       _ > 0,
       value =>
         if (value == 42) then throw new IllegalStateException("mapper saw a null slot")
         else value * 10,
     )
-    val fusedProjects = ColumnKernel.pipelineInt32PP(
+    val fusedProjects = Int32Pipeline.PP(
       batch,
       _ + 1,
       value =>
@@ -383,8 +383,8 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
 
   it should "size compacted int buffers to the live rows" in {
     val input = Int32Column.of(Array(1, 2, 3, 99, 100), Validity.allValid(5), length = 3)
-    val first = ColumnKernel.pipelineInt32FP(single(input), _ > 1, value => value)
-    val second = ColumnKernel.pipelineInt32FP(first, _ > 2, _ + 1)
+    val first = Int32Pipeline.FP(single(input), _ > 1, value => value)
+    val second = Int32Pipeline.FP(first, _ > 2, _ + 1)
 
     BatchCodec.decodeInts(first) shouldBe Seq(2, 3)
     BatchCodec.decodeInts(second) shouldBe Seq(4)
@@ -398,7 +398,7 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
     val input = single(
       Float64Column.of(Array(-1.0, 42.0, 2.0, 0.0), Validity.pack(4, row => row != 1), 4),
     )
-    val fusedFilter = ColumnKernel.pipelineFloat64FP(
+    val fusedFilter = Float64Pipeline.FP(
       input,
       _ > 0.0,
       value =>
@@ -410,7 +410,7 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
       0,
       _ * 10.0,
     )
-    val fusedProject = ColumnKernel.pipelineFloat64PF(
+    val fusedProject = Float64Pipeline.PF(
       input,
       value =>
         if (value == 42.0) then throw new IllegalStateException("mapper saw a null slot")
@@ -430,7 +430,7 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
       0,
       _ > 0.0,
     )
-    val fusedMaps = ColumnKernel.pipelineFloat64PP(
+    val fusedMaps = Float64Pipeline.PP(
       input,
       value =>
         if (value == 42.0) then throw new IllegalStateException("mapper saw a null slot")
@@ -466,14 +466,14 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
       Validity.allValid(3),
       length = 2,
     )
-    val projected = ColumnKernel.pipelineFloat64PP(
+    val projected = Float64Pipeline.PP(
       single(input),
       value =>
         if (value == 99.0) then throw new IllegalStateException("read past length")
         else value,
       value => value,
     )
-    val filtered = ColumnKernel.pipelineFloat64FP(
+    val filtered = Float64Pipeline.FP(
       single(input),
       value => java.lang.Double.doubleToRawLongBits(value) < 0,
       value => value,
@@ -491,7 +491,7 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
   it should "share a filter-only string dictionary and keep a null the predicate accepts" in {
     val rows = Seq(Some("a"), None, Some("bb"), Some("a"))
     val input = BatchCodec.nullableStrings(rows)
-    val fused = ColumnKernel.pipelineUtf8FF(
+    val fused = Utf8Pipeline.FF(
       input,
       value =>
         Option(value) match
@@ -526,7 +526,7 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
   it should "drop an empty cell and not hand it to a later function" in {
     val rows = Seq(Some("a"), None, Some("bb"))
     val input = BatchCodec.nullableStrings(rows)
-    val fused = ColumnKernel.pipelineUtf8FF(
+    val fused = Utf8Pipeline.FF(
       input,
       value => Option(value).exists(_.length > 1),
       value =>
@@ -534,7 +534,7 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
           throw new IllegalStateException("second predicate saw an empty cell")
         else true,
     )
-    val projected = ColumnKernel.pipelineUtf8FP(
+    val projected = Utf8Pipeline.FP(
       input,
       value => Option(value).nonEmpty,
       value =>
@@ -550,7 +550,7 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
   it should "intern only the strings a projecting pipeline stores" in {
     val rows = Seq(Some("a"), None, Some("bb"), Some("a"))
     val input = BatchCodec.nullableStrings(rows)
-    val fusedMaps = ColumnKernel.pipelineUtf8PP(
+    val fusedMaps = Utf8Pipeline.PP(
       input,
       value =>
         Option(value) match
@@ -578,7 +578,7 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
           case Some(text) => text
           case None => BatchCodec.stringElement(None),
     )
-    val fusedDrop = ColumnKernel.pipelineUtf8PF(
+    val fusedDrop = Utf8Pipeline.PF(
       input,
       value =>
         Option(value) match
@@ -604,9 +604,9 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
     an[IllegalArgumentException] should be thrownBy ColumnKernel.filterInt64(ints, 0, _ > 0L)
     an[IllegalArgumentException] should be thrownBy ColumnKernel.projectFloat64(pairs, 0, _ * 2.0)
     an[IllegalArgumentException] should be thrownBy ColumnKernel.projectBool(ints, 0, value => value)
-    an[IllegalArgumentException] should be thrownBy ColumnKernel.pipelineInt32PP(pairs, _ + 1, _ + 1)
+    an[IllegalArgumentException] should be thrownBy Int32Pipeline.PP(pairs, _ + 1, _ + 1)
     an[IllegalArgumentException] should be thrownBy
-      ColumnKernel.pipelineFloat64PP(pairs, _ + 1.0, _ + 1.0)
+      Float64Pipeline.PP(pairs, _ + 1.0, _ + 1.0)
     an[IllegalArgumentException] should be thrownBy
-      ColumnKernel.pipelineUtf8PP(pairs, (value: String) => value, (value: String) => value)
+      Utf8Pipeline.PP(pairs, (value: String) => value, (value: String) => value)
   }
