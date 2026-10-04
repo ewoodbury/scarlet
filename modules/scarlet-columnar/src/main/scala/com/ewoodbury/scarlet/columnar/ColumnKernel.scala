@@ -16,7 +16,8 @@ package com.ewoodbury.scarlet.columnar
  * published bitmap.
  *
  * Primitive loops keep the row index in a `var` so the bodies stay allocation-free. Each primitive
- * has its own loop so the copy stays monomorphic.
+ * has its own loop so the copy stays monomorphic. Fused runs of two to four filters and projects
+ * are [[Int32Pipeline]], [[Float64Pipeline]], and [[Utf8Pipeline]].
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object ColumnKernel:
@@ -316,7 +317,7 @@ object ColumnKernel:
     DictUtf8Column.of(words.toArray, out, Validity.fromWords(dstWords, capacity), live)
 
   /** An empty cell does not index the dictionary. */
-  private def utf8String(column: DictUtf8Column, row: Int): String =
+  private[columnar] def utf8String(column: DictUtf8Column, row: Int): String =
     if (Validity.isSet(column.validity.words, row)) then column.dictionary(column.codes(row))
     else BatchCodec.stringElement(None)
 
@@ -457,14 +458,14 @@ object ColumnKernel:
     }
     new ColumnBatch(batch.schema, columns, batch.length)
 
-  private def columnAt(batch: ColumnBatch, ordinal: Int): Column =
+  private[columnar] def columnAt(batch: ColumnBatch, ordinal: Int): Column =
     batch.columns.lift(ordinal).getOrElse {
       throw new IllegalArgumentException(
         s"ordinal $ordinal outside width ${batch.columns.length}",
       )
     }
 
-  private def asInt32(column: Column, ordinal: Int): Int32Column =
+  private[columnar] def asInt32(column: Column, ordinal: Int): Int32Column =
     column match
       case int32: Int32Column => int32
       case other =>
@@ -480,7 +481,7 @@ object ColumnKernel:
           s"column $ordinal is ${other.logicalType}, expected Int64",
         )
 
-  private def asFloat64(column: Column, ordinal: Int): Float64Column =
+  private[columnar] def asFloat64(column: Column, ordinal: Int): Float64Column =
     column match
       case float64: Float64Column => float64
       case other =>
@@ -496,7 +497,7 @@ object ColumnKernel:
           s"column $ordinal is ${other.logicalType}, expected Bool",
         )
 
-  private def asUtf8(column: Column, ordinal: Int): DictUtf8Column =
+  private[columnar] def asUtf8(column: Column, ordinal: Int): DictUtf8Column =
     column match
       case utf8: DictUtf8Column => utf8
       case other =>
