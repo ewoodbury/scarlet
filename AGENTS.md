@@ -12,8 +12,8 @@ Environment
 
 Commands (fast feedback loop)
 - Iterate on one suite: `make test-one T=com.ewoodbury.scarlet.core.TestActionContracts` (substitute the suite you changed).
-- Full suite before declaring anything done: `make test` (268 tests, ~30s).
-- Lint fix / lint check: `make lint` / `make test-lint`. Always run `make lint` before committing; it rewrites formatting.
+- Full suite before declaring anything done: `make test` (419 tests, ~30s).
+- Lint fix / lint check: `make lint` / `make test-lint`. Always run `make lint` before committing; it rewrites formatting. Both commands run `checkFileLength`.
 - Run all three gates before opening or updating a PR.
 
 Testing Conventions
@@ -32,6 +32,7 @@ Code Style
 - Use single-letter variables only for functions which are taken in as arguments. Use descriptive names for all named functions and for all variables.
 - Do not use full classpaths in core code. Import relevant packages at the top of the file instead.
 - Use a single format: one blank line after `object X {` and after `object X:` openers, matching scalafmt so `make lint` produces no diff.
+- Keep each Scala file focused. Aim for about 1000 lines. `checkFileLength` fails the build above 1200.
 
 WartRemover Rules
 - Avoid `var`, use `val` instead.

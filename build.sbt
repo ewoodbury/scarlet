@@ -2,6 +2,13 @@ ThisBuild / organization := "com.ewoodbury"
 ThisBuild / scalaVersion := "3.3.5"
 ThisBuild / version := "0.1.0-SNAPSHOT"
 
+// AGENTS.md asks for about 1000 lines. This is the hard cap, with room for a focused file to grow.
+val maxScalaFileLines = 1200
+
+lazy val checkFileLength = taskKey[Unit](
+  "Fail if a hand-written Scala source exceeds maxScalaFileLines"
+)
+
 lazy val commonSettings = Seq(
   semanticdbEnabled := true,
   scalacOptions ++= List(
@@ -48,7 +55,24 @@ lazy val commonSettings = Seq(
     Wart.ExplicitImplicitTypes,
     Wart.SizeIs,
     Wart.DefaultArguments,
-  )
+  ),
+  checkFileLength := {
+    val maxLines = maxScalaFileLines
+    val sources =
+      ((Compile / unmanagedSources).value ++ (Test / unmanagedSources).value)
+        .filter(_.getName.endsWith(".scala"))
+    val over = sources.flatMap { file =>
+      val count = sbt.IO.readLines(file).length
+      if (count > maxLines) Some(s"${file.getPath} ($count lines)") else None
+    }
+    if (over.nonEmpty) {
+      sys.error(
+        s"Scala sources exceed $maxLines lines. Split the file.\n" + over.mkString("\n"),
+      )
+    }
+  },
+  Compile / compile := (Compile / compile).dependsOn(checkFileLength).value,
+  Test / compile := (Test / compile).dependsOn(checkFileLength).value,
 )
 
 lazy val catsCore = "org.typelevel" %% "cats-core" % "2.10.0"
@@ -129,5 +153,8 @@ lazy val root = (project in file("."))
     Compile / sources := Seq.empty,
     Test / sources := Seq.empty,
     Compile / resourceDirectories := Nil,
-    Test / resourceDirectories := Nil
+    Test / resourceDirectories := Nil,
+    // Subprojects do the real check. This definition lets `sbt checkFileLength` run here and
+    // aggregate.
+    checkFileLength := {},
   )
