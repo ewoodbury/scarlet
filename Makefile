@@ -2,11 +2,11 @@
 
 .PHONY: lint
 lint: ## Run linting and formatting
-	sbt ";scalafixAll; scalafmt"
+	sbt ";checkFileLength; scalafixAll; scalafmt"
 
 .PHONY: test-lint
 test-lint: ## Run linting without fixing
-	sbt ";scalafixAll --check; scalafmtCheck"
+	sbt ";checkFileLength; scalafixAll --check; scalafmtCheck"
 
 .PHONY: test
 test: ## Run tests
