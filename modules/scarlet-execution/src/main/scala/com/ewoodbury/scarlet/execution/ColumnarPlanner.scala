@@ -29,7 +29,8 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * order and the input partition count. `Double` and `String` select filter and map only. A filter
  * over a join result is not columnar. `reduceByKey` applies the user's function and wraps at
  * `Int`. `join` hash-partitions both sides and probes one bucket at a time. Output width for those
- * two is `defaultShufflePartitions`.
+ * two is `defaultShufflePartitions`. [[tryCount]], [[trySumInt]], and [[trySumDouble]] read the
+ * finished columns and do not decode. `collect` does.
  *
  * A null string is a value. Classification skips a leading null and keeps looking for a `String`.
  * An all-null source stays on the row path, because there is no witness.
@@ -66,6 +67,49 @@ object ColumnarPlanner:
       case Some(op) =>
         try Some(decode(interpret(plan, op)).asInstanceOf[Seq[Partition[A]]])
         catch case _: ClassCastException => None
+
+  /**
+   * Row count of a columnar plan. `None` means the row path. This reads batch lengths and does not
+   * decode.
+   */
+  def tryCount(plan: Plan[_]): Option[Long] =
+    consume(plan) { case columns =>
+      ColumnReduce.count(batchesOf(columns))
+    }
+
+  /**
+   * Wide sum of a finished int column. `None` means the row path, including a plan whose result is
+   * not an int column. Null slots are skipped. This does not decode.
+   */
+  def trySumInt(plan: Plan[_]): Option[Long] =
+    consume(plan) { case Columns.Ints(parts) =>
+      ColumnReduce.sumInt32(parts)
+    }
+
+  /**
+   * Sum of a finished double column. `None` means the row path, including a plan whose result is
+   * not a double column. Null slots are skipped. This does not decode.
+   */
+  def trySumDouble(plan: Plan[_]): Option[Double] =
+    consume(plan) { case Columns.Floats(parts) =>
+      ColumnReduce.sumFloat64(parts)
+    }
+
+  private def consume[A](plan: Plan[_])(read: PartialFunction[Columns, A]): Option[A] =
+    accepted(plan) match
+      case None => None
+      case Some(op) =>
+        try
+          val columns = interpret(plan, op)
+          if (read.isDefinedAt(columns)) Some(read(columns)) else None
+        catch case _: ClassCastException => None
+
+  private def batchesOf(columns: Columns): Vector[ColumnBatch] = columns match
+    case Columns.Ints(parts) => parts
+    case Columns.Floats(parts) => parts
+    case Columns.Pairs(parts) => parts
+    case Columns.Triples(parts) => parts
+    case Columns.Strings(parts) => parts
 
   private enum Columns:
     case Ints(parts: Vector[ColumnBatch])

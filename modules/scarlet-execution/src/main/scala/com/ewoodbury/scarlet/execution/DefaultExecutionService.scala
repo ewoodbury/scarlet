@@ -30,7 +30,23 @@ class DefaultExecutionService extends ExecutionService {
   }
 
   def count[A](plan: Plan[A]): Long =
-    execute(plan).size.toLong
+    ColumnarPlanner.tryCount(plan).getOrElse {
+      executePartitions(plan).foldLeft(0L)((total, partition) => total + partition.data.size)
+    }
+
+  def sumInt(plan: Plan[Int]): Long =
+    ColumnarPlanner.trySumInt(plan).getOrElse {
+      executePartitions(plan).foldLeft(0L) { (total, partition) =>
+        partition.data.foldLeft(total)((acc, value) => acc + value.toLong)
+      }
+    }
+
+  def sumDouble(plan: Plan[Double]): Double =
+    ColumnarPlanner.trySumDouble(plan).getOrElse {
+      executePartitions(plan).foldLeft(0.0) { (total, partition) =>
+        partition.data.foldLeft(total)((acc, value) => acc + value)
+      }
+    }
 
   def take[A](plan: Plan[A], n: Int): Seq[A] =
     if (n <= 0) Seq.empty
