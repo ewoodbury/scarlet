@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -38,11 +40,41 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
   }
 
   it should "stay correct when morsels split a partition" in {
-    ScarletConf.set(originalConf.copy(columnarBatchSize = 2, threadPoolSize = 4))
+    ScarletConf.set(
+      originalConf.copy(columnarExecution = true, columnarBatchSize = 2, threadPoolSize = 4),
+    )
     val values = DistCollection(Seq(1, 2, 3, 4, 5), 1).filter(_ > 1)
 
     values.count() shouldBe 4L
     values.sum shouldBe 14L
+  }
+
+  it should "fall back from a mistyped map once" in {
+    ScarletConf.set(originalConf.copy(columnarExecution = true, threadPoolSize = 1))
+    val hits = new AtomicInteger
+    def mapped = DistCollection(Seq(1, 2, 3), 1).map { value =>
+      hits.incrementAndGet()
+      value.toString
+    }
+
+    mapped.count() shouldBe 3L
+    val afterCount = hits.getAndSet(0)
+    mapped.collect() shouldBe Seq("1", "2", "3")
+    hits.get() shouldBe afterCount
+  }
+
+  it should "fall back from a mistyped double map once" in {
+    ScarletConf.set(originalConf.copy(columnarExecution = true, threadPoolSize = 1))
+    val hits = new AtomicInteger
+    def mapped = DistCollection(Seq(1.0, 2.0), 1).map { value =>
+      hits.incrementAndGet()
+      value.toInt
+    }
+
+    mapped.sum shouldBe 3L
+    val afterSum = hits.getAndSet(0)
+    mapped.collect() shouldBe Seq(1, 2)
+    hits.get() shouldBe afterSum
   }
 
   "sum" should "add a filtered int column as a long" in {

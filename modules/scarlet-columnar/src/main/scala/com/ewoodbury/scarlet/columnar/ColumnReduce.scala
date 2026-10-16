@@ -3,9 +3,8 @@ package com.ewoodbury.scarlet.columnar
 /**
  * Reduces finished batches to a scalar.
  *
- * `count` is the sum of batch lengths, so a null row still counts. `sumInt32` and `sumFloat64`
- * skip null slots. A fully present column adds values with no per-row bit test. An empty batch
- * contributes zero.
+ * `count` includes null slots. Sums skip them. When every live row is present the add does not
+ * test the bitmap, including a filter result whose bitmap is longer than the survivor count.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object ColumnReduce:
@@ -24,7 +23,7 @@ object ColumnReduce:
     val values = column.values
     var total = 0L
     var row = 0
-    if (ColumnHash.fullyPresent(column)) then
+    if (liveRowsPresent(column)) then
       while (row < live) {
         total += values(row).toLong
         row += 1
@@ -42,7 +41,7 @@ object ColumnReduce:
     val values = column.values
     var total = 0.0
     var row = 0
-    if (ColumnHash.fullyPresent(column)) then
+    if (liveRowsPresent(column)) then
       while (row < live) {
         total += values(row)
         row += 1
@@ -54,6 +53,24 @@ object ColumnReduce:
         row += 1
       }
     total
+
+  /** Spare capacity past `length` does not count. A hole in the live prefix does. */
+  private def liveRowsPresent(column: Column): Boolean =
+    val live = column.length
+    if (live == 0) then true
+    else
+      val words = column.validity.words
+      val fullWords = live >>> 6
+      var index = 0
+      var dense = true
+      while (index < fullWords && dense) {
+        if (words(index) != -1L) then dense = false
+        index += 1
+      }
+      if (!dense) then false
+      else
+        val tail = live & 63
+        tail == 0 || (words(fullWords) & ((1L << tail) - 1L)) == (1L << tail) - 1L
 
   private def int32(batch: ColumnBatch): Int32Column =
     require(batch.columns.length == 1, s"int sum expects one column, got ${batch.columns.length}")
