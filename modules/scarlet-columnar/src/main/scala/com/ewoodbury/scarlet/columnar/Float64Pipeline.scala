@@ -401,6 +401,436 @@ object Float64Pipeline:
     gate.value = value
     true
 
+  def sumFF(
+      batch: ColumnBatch,
+      first: Float64Predicate,
+      second: Float64Predicate,
+  ): Double =
+    sumFloat(batch, true, (value, gate) => first(value) && second(value) && accept(gate, value))
+
+  def sumPF(
+      batch: ColumnBatch,
+      first: Float64Map,
+      second: Float64Predicate,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) => {
+        val mapped0 = first(value)
+        second(mapped0) && accept(gate, mapped0)
+      },
+    )
+
+  def sumFP(
+      batch: ColumnBatch,
+      first: Float64Predicate,
+      second: Float64Map,
+  ): Double =
+    sumFloat(batch, true, (value, gate) => first(value) && accept(gate, second(value)))
+
+  def sumPP(
+      batch: ColumnBatch,
+      first: Float64Map,
+      second: Float64Map,
+  ): Double =
+    sumFloat(batch, false, (value, gate) => accept(gate, second(first(value))))
+
+  def sumFFF(
+      batch: ColumnBatch,
+      first: Float64Predicate,
+      second: Float64Predicate,
+      third: Float64Predicate,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) => first(value) && second(value) && third(value) && accept(gate, value),
+    )
+
+  def sumPFF(
+      batch: ColumnBatch,
+      first: Float64Map,
+      second: Float64Predicate,
+      third: Float64Predicate,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) => {
+        val mapped0 = first(value)
+        second(mapped0) && third(mapped0) && accept(gate, mapped0)
+      },
+    )
+
+  def sumFPF(
+      batch: ColumnBatch,
+      first: Float64Predicate,
+      second: Float64Map,
+      third: Float64Predicate,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) =>
+        first(value) &&
+          {
+            val mapped1 = second(value)
+            third(mapped1) && accept(gate, mapped1)
+          },
+    )
+
+  def sumPPF(
+      batch: ColumnBatch,
+      first: Float64Map,
+      second: Float64Map,
+      third: Float64Predicate,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) => {
+        val mapped1 = second(first(value))
+        third(mapped1) && accept(gate, mapped1)
+      },
+    )
+
+  def sumFFP(
+      batch: ColumnBatch,
+      first: Float64Predicate,
+      second: Float64Predicate,
+      third: Float64Map,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) => first(value) && second(value) && accept(gate, third(value)),
+    )
+
+  def sumPFP(
+      batch: ColumnBatch,
+      first: Float64Map,
+      second: Float64Predicate,
+      third: Float64Map,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) => {
+        val mapped0 = first(value)
+        second(mapped0) && accept(gate, third(mapped0))
+      },
+    )
+
+  def sumFPP(
+      batch: ColumnBatch,
+      first: Float64Predicate,
+      second: Float64Map,
+      third: Float64Map,
+  ): Double =
+    sumFloat(batch, true, (value, gate) => first(value) && accept(gate, third(second(value))))
+
+  def sumPPP(
+      batch: ColumnBatch,
+      first: Float64Map,
+      second: Float64Map,
+      third: Float64Map,
+  ): Double =
+    sumFloat(batch, false, (value, gate) => accept(gate, third(second(first(value)))))
+
+  def sumFFFF(
+      batch: ColumnBatch,
+      first: Float64Predicate,
+      second: Float64Predicate,
+      third: Float64Predicate,
+      fourth: Float64Predicate,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) =>
+        first(value) && second(value) && third(value) && fourth(value) && accept(gate, value),
+    )
+
+  def sumPFFF(
+      batch: ColumnBatch,
+      first: Float64Map,
+      second: Float64Predicate,
+      third: Float64Predicate,
+      fourth: Float64Predicate,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) => {
+        val mapped0 = first(value)
+        second(mapped0) && third(mapped0) && fourth(mapped0) && accept(gate, mapped0)
+      },
+    )
+
+  def sumFPFF(
+      batch: ColumnBatch,
+      first: Float64Predicate,
+      second: Float64Map,
+      third: Float64Predicate,
+      fourth: Float64Predicate,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) =>
+        first(value) &&
+          {
+            val mapped1 = second(value)
+            third(mapped1) && fourth(mapped1) && accept(gate, mapped1)
+          },
+    )
+
+  def sumPPFF(
+      batch: ColumnBatch,
+      first: Float64Map,
+      second: Float64Map,
+      third: Float64Predicate,
+      fourth: Float64Predicate,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) => {
+        val mapped1 = second(first(value))
+        third(mapped1) && fourth(mapped1) && accept(gate, mapped1)
+      },
+    )
+
+  def sumFFPF(
+      batch: ColumnBatch,
+      first: Float64Predicate,
+      second: Float64Predicate,
+      third: Float64Map,
+      fourth: Float64Predicate,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) =>
+        first(value) &&
+          second(value) &&
+          {
+            val mapped2 = third(value)
+            fourth(mapped2) && accept(gate, mapped2)
+          },
+    )
+
+  def sumPFPF(
+      batch: ColumnBatch,
+      first: Float64Map,
+      second: Float64Predicate,
+      third: Float64Map,
+      fourth: Float64Predicate,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) => {
+        val mapped0 = first(value)
+        second(mapped0) &&
+        {
+          val mapped2 = third(mapped0)
+          fourth(mapped2) && accept(gate, mapped2)
+        }
+      },
+    )
+
+  def sumFPPF(
+      batch: ColumnBatch,
+      first: Float64Predicate,
+      second: Float64Map,
+      third: Float64Map,
+      fourth: Float64Predicate,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) =>
+        first(value) &&
+          {
+            val mapped2 = third(second(value))
+            fourth(mapped2) && accept(gate, mapped2)
+          },
+    )
+
+  def sumPPPF(
+      batch: ColumnBatch,
+      first: Float64Map,
+      second: Float64Map,
+      third: Float64Map,
+      fourth: Float64Predicate,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) => {
+        val mapped2 = third(second(first(value)))
+        fourth(mapped2) && accept(gate, mapped2)
+      },
+    )
+
+  def sumFFFP(
+      batch: ColumnBatch,
+      first: Float64Predicate,
+      second: Float64Predicate,
+      third: Float64Predicate,
+      fourth: Float64Map,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) => first(value) && second(value) && third(value) && accept(gate, fourth(value)),
+    )
+
+  def sumPFFP(
+      batch: ColumnBatch,
+      first: Float64Map,
+      second: Float64Predicate,
+      third: Float64Predicate,
+      fourth: Float64Map,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) => {
+        val mapped0 = first(value)
+        second(mapped0) && third(mapped0) && accept(gate, fourth(mapped0))
+      },
+    )
+
+  def sumFPFP(
+      batch: ColumnBatch,
+      first: Float64Predicate,
+      second: Float64Map,
+      third: Float64Predicate,
+      fourth: Float64Map,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) =>
+        first(value) &&
+          {
+            val mapped1 = second(value)
+            third(mapped1) && accept(gate, fourth(mapped1))
+          },
+    )
+
+  def sumPPFP(
+      batch: ColumnBatch,
+      first: Float64Map,
+      second: Float64Map,
+      third: Float64Predicate,
+      fourth: Float64Map,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) => {
+        val mapped1 = second(first(value))
+        third(mapped1) && accept(gate, fourth(mapped1))
+      },
+    )
+
+  def sumFFPP(
+      batch: ColumnBatch,
+      first: Float64Predicate,
+      second: Float64Predicate,
+      third: Float64Map,
+      fourth: Float64Map,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) => first(value) && second(value) && accept(gate, fourth(third(value))),
+    )
+
+  def sumPFPP(
+      batch: ColumnBatch,
+      first: Float64Map,
+      second: Float64Predicate,
+      third: Float64Map,
+      fourth: Float64Map,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) => {
+        val mapped0 = first(value)
+        second(mapped0) && accept(gate, fourth(third(mapped0)))
+      },
+    )
+
+  def sumFPPP(
+      batch: ColumnBatch,
+      first: Float64Predicate,
+      second: Float64Map,
+      third: Float64Map,
+      fourth: Float64Map,
+  ): Double =
+    sumFloat(
+      batch,
+      true,
+      (value, gate) => first(value) && accept(gate, fourth(third(second(value)))),
+    )
+
+  def sumPPPP(
+      batch: ColumnBatch,
+      first: Float64Map,
+      second: Float64Map,
+      third: Float64Map,
+      fourth: Float64Map,
+  ): Double =
+    sumFloat(batch, false, (value, gate) => accept(gate, fourth(third(second(first(value))))))
+
+  def sumFiltered(batch: ColumnBatch, predicate: Float64Predicate): Double =
+    sumFloat(batch, true, (value, gate) => predicate(value) && accept(gate, value))
+
+  def sumProjected(batch: ColumnBatch, mapper: Float64Map): Double =
+    sumFloat(batch, false, (value, gate) => accept(gate, mapper(value)))
+
+  /** Add the fused values. Does not allocate an output column. */
+  private inline def sumFloat(
+      batch: ColumnBatch,
+      inline compact: Boolean,
+      inline step: (Double, Gate) => Boolean,
+  ): Double =
+    require(
+      batch.columns.length == 1,
+      s"float pipeline expects a single-column batch, got ${batch.columns.length}",
+    )
+    val column = ColumnKernel.asFloat64(ColumnKernel.columnAt(batch, 0), 0)
+    val live = column.length
+    val values = column.values
+    val words = column.validity.words
+    val gate = new Gate
+    var total = 0.0
+    var row = 0
+    if (Validity.livePresent(column.validity, live)) then
+      while (row < live) {
+        val kept = step(values(row), gate)
+        inline if (compact) then
+          if (kept) then total += gate.value
+        else if (kept) then total += gate.value
+        row += 1
+      }
+    else
+      while (row < live) {
+        if (Validity.isSet(words, row)) then
+          val kept = step(values(row), gate)
+          inline if (compact) then
+            if (kept) then total += gate.value
+          else if (kept) then total += gate.value
+        row += 1
+      }
+    total
+
   private inline def fuse(
       batch: ColumnBatch,
       inline compact: Boolean,
