@@ -5,7 +5,8 @@ import ColumnKernel.{Int32Map, Int32Predicate}
 /**
  * One loop per int filter/project pattern of length 2–4.
  *
- * A filter drops a null without calling the predicate. A project skips a null and stores 0.
+ * A filter drops a null without calling the predicate. A project skips a null and stores 0. When
+ * every live row is present, the loop does not test the validity bit.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object Int32Pipeline:
@@ -402,16 +403,27 @@ object Int32Pipeline:
     val out = new Array[Int](capacity)
     var written = 0
     var row = 0
-    while (row < live) {
-      if (Validity.isSet(words, row)) then
+    if (Validity.livePresent(column.validity, live)) then
+      while (row < live) {
         val result = process(in(row))
         inline if (compact) then
           if ((result & 1L) != 0L) then
             out(written) = (result >> 1).toInt
             written += 1
         else out(row) = (result >> 1).toInt
-      row += 1
-    }
+        row += 1
+      }
+    else
+      while (row < live) {
+        if (Validity.isSet(words, row)) then
+          val result = process(in(row))
+          inline if (compact) then
+            if ((result & 1L) != 0L) then
+              out(written) = (result >> 1).toInt
+              written += 1
+          else out(row) = (result >> 1).toInt
+        row += 1
+      }
     val length = inline if (compact) then written else live
     val validity =
       inline if (compact) then Validity.prefixValid(capacity, written)
