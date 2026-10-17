@@ -5,8 +5,9 @@ import ColumnKernel.{Utf8Map, Utf8Predicate}
 /**
  * One loop per string filter/project pattern of length 2–4.
  *
- * Filters and projects see empty cells. A filter-only run shares the input dictionary. A run that
- * projects interns only the strings it stores.
+ * Filters and projects see empty cells. When every live row is present, the loop does not test the
+ * validity bit. A filter-only run shares the input dictionary. A run that projects interns only
+ * the strings it stores.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object Utf8Pipeline:
@@ -419,14 +420,23 @@ object Utf8Pipeline:
     val dstWords = Validity.allocate(live)
     var written = 0
     var row = 0
-    while (row < live) {
-      if (keep(ColumnKernel.utf8String(column, row))) then
-        if (Validity.isSet(words, row)) then
+    if (Validity.livePresent(column.validity, live)) then
+      while (row < live) {
+        if (keep(column.dictionary(codes(row)))) then
           out(written) = codes(row)
           Validity.setBit(dstWords, written)
-        written += 1
-      row += 1
-    }
+          written += 1
+        row += 1
+      }
+    else
+      while (row < live) {
+        if (keep(ColumnKernel.utf8String(column, row))) then
+          if (Validity.isSet(words, row)) then
+            out(written) = codes(row)
+            Validity.setBit(dstWords, written)
+          written += 1
+        row += 1
+      }
     val result = DictUtf8Column.of(
       column.dictionary,
       out,
@@ -457,20 +467,36 @@ object Utf8Pipeline:
     val gate = new Gate
     var written = 0
     var row = 0
-    while (row < live) {
-      gate.present = false
-      val kept = step(ColumnKernel.utf8String(column, row), gate)
-      inline if (compact) then
-        if (kept) then
-          if (gate.present) then
-            out(written) = words.intern(gate.text)
-            Validity.setBit(dstWords, written)
-          written += 1
-      else if (kept && gate.present) then
-        out(row) = words.intern(gate.text)
-        Validity.setBit(dstWords, row)
-      row += 1
-    }
+    if (Validity.livePresent(column.validity, live)) then
+      while (row < live) {
+        gate.present = false
+        val kept = step(column.dictionary(column.codes(row)), gate)
+        inline if (compact) then
+          if (kept) then
+            if (gate.present) then
+              out(written) = words.intern(gate.text)
+              Validity.setBit(dstWords, written)
+            written += 1
+        else if (kept && gate.present) then
+          out(row) = words.intern(gate.text)
+          Validity.setBit(dstWords, row)
+        row += 1
+      }
+    else
+      while (row < live) {
+        gate.present = false
+        val kept = step(ColumnKernel.utf8String(column, row), gate)
+        inline if (compact) then
+          if (kept) then
+            if (gate.present) then
+              out(written) = words.intern(gate.text)
+              Validity.setBit(dstWords, written)
+            written += 1
+        else if (kept && gate.present) then
+          out(row) = words.intern(gate.text)
+          Validity.setBit(dstWords, row)
+        row += 1
+      }
     val length = inline if (compact) then written else live
     val result =
       DictUtf8Column.of(words.toArray, out, Validity.fromWords(dstWords, capacity), length)

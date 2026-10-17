@@ -5,8 +5,9 @@ import ColumnKernel.{Float64Map, Float64Predicate}
 /**
  * One loop per double filter/project pattern of length 2–4.
  *
- * A filter drops a null without calling the predicate. A project skips a null and stores 0. The
- * step returns whether the row survives, so a missing keep decision does not compile.
+ * A filter drops a null without calling the predicate. A project skips a null and stores 0. When
+ * every live row is present, the loop does not test the validity bit. The step returns whether the
+ * row survives, so a missing keep decision does not compile.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object Float64Pipeline:
@@ -418,16 +419,27 @@ object Float64Pipeline:
     val gate = new Gate
     var written = 0
     var row = 0
-    while (row < live) {
-      if (Validity.isSet(words, row)) then
+    if (Validity.livePresent(column.validity, live)) then
+      while (row < live) {
         val kept = step(in(row), gate)
         inline if (compact) then
           if (kept) then
             out(written) = gate.value
             written += 1
         else if (kept) then out(row) = gate.value
-      row += 1
-    }
+        row += 1
+      }
+    else
+      while (row < live) {
+        if (Validity.isSet(words, row)) then
+          val kept = step(in(row), gate)
+          inline if (compact) then
+            if (kept) then
+              out(written) = gate.value
+              written += 1
+          else if (kept) then out(row) = gate.value
+        row += 1
+      }
     val length = inline if (compact) then written else live
     val validity =
       inline if (compact) then Validity.prefixValid(capacity, written) else column.validity
