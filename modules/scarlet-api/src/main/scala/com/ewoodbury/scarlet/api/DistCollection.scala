@@ -247,10 +247,19 @@ final case class DistCollection[A](plan: Plan[A]):
     ExecutionService.get.execute(this.plan)
 
   /**
-   * Action: Executes the plan and returns the count of elements. This triggers computation.
+   * Action: Executes the plan and returns the count of elements. This triggers computation. A
+   * columnar plan counts column lengths and does not build a `Seq`.
    */
   def count(): Long =
     ExecutionService.get.count(this.plan)
+
+  /**
+   * Action: Sums an `Int` collection as a `Long`, or a `Double` collection as a `Double`. Empty
+   * input returns zero. An `Int` sum does not wrap. A columnar plan adds the finished column and
+   * does not build a `Seq`.
+   */
+  def sum[R](using result: DistCollection.SumOf[A, R]): R =
+    result(this.plan)
 
   /**
    * Action: Executes the plan and returns the first n elements. This triggers computation.
@@ -302,6 +311,18 @@ end DistCollection
 
 // Companion object for creating a DistCollection from a source
 object DistCollection:
+
+  /** Sum of an `Int` column as a `Long`, or a `Double` column as a `Double`. */
+  trait SumOf[A, R]:
+    def apply(plan: Plan[A]): R
+
+  object SumOf:
+    given SumOf[Int, Long] with
+      def apply(plan: Plan[Int]): Long = ExecutionService.get.sumInt(plan)
+
+    given SumOf[Double, Double] with
+      def apply(plan: Plan[Double]): Double = ExecutionService.get.sumDouble(plan)
+
   // Lazy initialization to ensure execution service is available
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   @volatile private var initialized = false
