@@ -385,6 +385,421 @@ object Int32Pipeline:
   ): ColumnBatch =
     fuseInt32(batch, false, value => accepted(fourth(third(second(first(value))))))
 
+  def sumFF(
+      batch: ColumnBatch,
+      first: Int32Predicate,
+      second: Int32Predicate,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value => if (first(value) && second(value)) then accepted(value) else 0L,
+    )
+
+  def sumFP(
+      batch: ColumnBatch,
+      first: Int32Predicate,
+      second: Int32Map,
+  ): Long =
+    sumInt32(batch, true, value => if (first(value)) then accepted(second(value)) else 0L)
+
+  def sumPF(
+      batch: ColumnBatch,
+      first: Int32Map,
+      second: Int32Predicate,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        val mapped = first(value)
+        if (second(mapped)) then accepted(mapped) else 0L,
+    )
+
+  def sumPP(
+      batch: ColumnBatch,
+      first: Int32Map,
+      second: Int32Map,
+  ): Long = sumInt32(batch, false, value => accepted(second(first(value))))
+
+  def sumFFF(
+      batch: ColumnBatch,
+      first: Int32Predicate,
+      second: Int32Predicate,
+      third: Int32Predicate,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value => if (first(value) && second(value) && third(value)) then accepted(value) else 0L,
+    )
+
+  def sumFFP(
+      batch: ColumnBatch,
+      first: Int32Predicate,
+      second: Int32Predicate,
+      third: Int32Map,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value => if (first(value) && second(value)) then accepted(third(value)) else 0L,
+    )
+
+  def sumFPF(
+      batch: ColumnBatch,
+      first: Int32Predicate,
+      second: Int32Map,
+      third: Int32Predicate,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        if (first(value)) then
+          val mapped = second(value)
+          if (third(mapped)) then accepted(mapped) else 0L
+        else 0L,
+    )
+
+  def sumFPP(
+      batch: ColumnBatch,
+      first: Int32Predicate,
+      second: Int32Map,
+      third: Int32Map,
+  ): Long =
+    sumInt32(batch, true, value => if (first(value)) then accepted(third(second(value))) else 0L)
+
+  def sumPFF(
+      batch: ColumnBatch,
+      first: Int32Map,
+      second: Int32Predicate,
+      third: Int32Predicate,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        val mapped = first(value)
+        if (second(mapped) && third(mapped)) then accepted(mapped) else 0L,
+    )
+
+  def sumPFP(
+      batch: ColumnBatch,
+      first: Int32Map,
+      second: Int32Predicate,
+      third: Int32Map,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        val mapped = first(value)
+        if (second(mapped)) then accepted(third(mapped)) else 0L,
+    )
+
+  def sumPPF(
+      batch: ColumnBatch,
+      first: Int32Map,
+      second: Int32Map,
+      third: Int32Predicate,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        val mapped = second(first(value))
+        if (third(mapped)) then accepted(mapped) else 0L,
+    )
+
+  def sumPPP(
+      batch: ColumnBatch,
+      first: Int32Map,
+      second: Int32Map,
+      third: Int32Map,
+  ): Long = sumInt32(batch, false, value => accepted(third(second(first(value)))))
+
+  def sumFFFF(
+      batch: ColumnBatch,
+      first: Int32Predicate,
+      second: Int32Predicate,
+      third: Int32Predicate,
+      fourth: Int32Predicate,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        if (first(value) && second(value) && third(value) && fourth(value)) then accepted(value)
+        else 0L,
+    )
+
+  def sumFFFP(
+      batch: ColumnBatch,
+      first: Int32Predicate,
+      second: Int32Predicate,
+      third: Int32Predicate,
+      fourth: Int32Map,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        if (first(value) && second(value) && third(value)) then accepted(fourth(value)) else 0L,
+    )
+
+  def sumFFPF(
+      batch: ColumnBatch,
+      first: Int32Predicate,
+      second: Int32Predicate,
+      third: Int32Map,
+      fourth: Int32Predicate,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        if (first(value) && second(value)) then
+          val mapped = third(value)
+          if (fourth(mapped)) then accepted(mapped) else 0L
+        else 0L,
+    )
+
+  def sumFFPP(
+      batch: ColumnBatch,
+      first: Int32Predicate,
+      second: Int32Predicate,
+      third: Int32Map,
+      fourth: Int32Map,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value => if (first(value) && second(value)) then accepted(fourth(third(value))) else 0L,
+    )
+
+  def sumFPFF(
+      batch: ColumnBatch,
+      first: Int32Predicate,
+      second: Int32Map,
+      third: Int32Predicate,
+      fourth: Int32Predicate,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        if (first(value)) then
+          val mapped = second(value)
+          if (third(mapped) && fourth(mapped)) then accepted(mapped) else 0L
+        else 0L,
+    )
+
+  def sumFPFP(
+      batch: ColumnBatch,
+      first: Int32Predicate,
+      second: Int32Map,
+      third: Int32Predicate,
+      fourth: Int32Map,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        if (first(value)) then
+          val mapped = second(value)
+          if (third(mapped)) then accepted(fourth(mapped)) else 0L
+        else 0L,
+    )
+
+  def sumFPPF(
+      batch: ColumnBatch,
+      first: Int32Predicate,
+      second: Int32Map,
+      third: Int32Map,
+      fourth: Int32Predicate,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        if (first(value)) then
+          val mapped = third(second(value))
+          if (fourth(mapped)) then accepted(mapped) else 0L
+        else 0L,
+    )
+
+  def sumFPPP(
+      batch: ColumnBatch,
+      first: Int32Predicate,
+      second: Int32Map,
+      third: Int32Map,
+      fourth: Int32Map,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value => if (first(value)) then accepted(fourth(third(second(value)))) else 0L,
+    )
+
+  def sumPFFF(
+      batch: ColumnBatch,
+      first: Int32Map,
+      second: Int32Predicate,
+      third: Int32Predicate,
+      fourth: Int32Predicate,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        val mapped = first(value)
+        if (second(mapped) && third(mapped) && fourth(mapped)) then accepted(mapped) else 0L,
+    )
+
+  def sumPFFP(
+      batch: ColumnBatch,
+      first: Int32Map,
+      second: Int32Predicate,
+      third: Int32Predicate,
+      fourth: Int32Map,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        val mapped = first(value)
+        if (second(mapped) && third(mapped)) then accepted(fourth(mapped)) else 0L,
+    )
+
+  def sumPFPF(
+      batch: ColumnBatch,
+      first: Int32Map,
+      second: Int32Predicate,
+      third: Int32Map,
+      fourth: Int32Predicate,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        val mapped = first(value)
+        if (second(mapped)) then
+          val next = third(mapped)
+          if (fourth(next)) then accepted(next) else 0L
+        else 0L,
+    )
+
+  def sumPFPP(
+      batch: ColumnBatch,
+      first: Int32Map,
+      second: Int32Predicate,
+      third: Int32Map,
+      fourth: Int32Map,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        val mapped = first(value)
+        if (second(mapped)) then accepted(fourth(third(mapped))) else 0L,
+    )
+
+  def sumPPFF(
+      batch: ColumnBatch,
+      first: Int32Map,
+      second: Int32Map,
+      third: Int32Predicate,
+      fourth: Int32Predicate,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        val mapped = second(first(value))
+        if (third(mapped) && fourth(mapped)) then accepted(mapped) else 0L,
+    )
+
+  def sumPPFP(
+      batch: ColumnBatch,
+      first: Int32Map,
+      second: Int32Map,
+      third: Int32Predicate,
+      fourth: Int32Map,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        val mapped = second(first(value))
+        if (third(mapped)) then accepted(fourth(mapped)) else 0L,
+    )
+
+  def sumPPPF(
+      batch: ColumnBatch,
+      first: Int32Map,
+      second: Int32Map,
+      third: Int32Map,
+      fourth: Int32Predicate,
+  ): Long =
+    sumInt32(
+      batch,
+      true,
+      value =>
+        val mapped = third(second(first(value)))
+        if (fourth(mapped)) then accepted(mapped) else 0L,
+    )
+
+  def sumPPPP(
+      batch: ColumnBatch,
+      first: Int32Map,
+      second: Int32Map,
+      third: Int32Map,
+      fourth: Int32Map,
+  ): Long =
+    sumInt32(batch, false, value => accepted(fourth(third(second(first(value))))))
+
+  def sumFiltered(batch: ColumnBatch, predicate: Int32Predicate): Long =
+    sumInt32(batch, true, value => if (predicate(value)) then accepted(value) else 0L)
+
+  def sumProjected(batch: ColumnBatch, mapper: Int32Map): Long =
+    sumInt32(batch, false, value => accepted(mapper(value)))
+
+  /** Add the fused values. Does not allocate an output column. */
+  private inline def sumInt32(
+      batch: ColumnBatch,
+      inline compact: Boolean,
+      inline process: Int => Long,
+  ): Long =
+    require(
+      batch.columns.length == 1,
+      s"int pipeline expects a single-column batch, got ${batch.columns.length}",
+    )
+    val column = ColumnKernel.asInt32(ColumnKernel.columnAt(batch, 0), 0)
+    val live = column.length
+    val values = column.values
+    val words = column.validity.words
+    var total = 0L
+    var row = 0
+    if (Validity.livePresent(column.validity, live)) then
+      while (row < live) {
+        val result = process(values(row))
+        inline if (compact) then
+          if ((result & 1L) != 0L) then total += result >> 1
+        else total += result >> 1
+        row += 1
+      }
+    else
+      while (row < live) {
+        if (Validity.isSet(words, row)) then
+          val result = process(values(row))
+          inline if (compact) then
+            if ((result & 1L) != 0L) then total += result >> 1
+          else total += result >> 1
+        row += 1
+      }
+    total
+
   private inline def fuseInt32(
       batch: ColumnBatch,
       inline compact: Boolean,

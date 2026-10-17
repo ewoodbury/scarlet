@@ -173,8 +173,8 @@ Roadmap and sequencing are tracked externally; the headline items:
   shuffle write per stage.
 - Fusion is limited to straight int, double, and string filter/project runs of up to four steps.
   There is no cost model and no predicate pushdown. A fused loop tests a validity bit per row only
-  when a live slot is null. `sum` adds the column the pipeline wrote; it does not yet fold into
-  that loop.
+  when a live slot is null. `sum` of a filter/project chain adds in that loop and does not write
+  the chain's output column. `collect` still writes it.
 - `collect` decodes every output row into a `Seq`.
 - Sort-merge join is a hash grouping wearing a sort-merge name; a true typed sort-merge join is
   deferred.

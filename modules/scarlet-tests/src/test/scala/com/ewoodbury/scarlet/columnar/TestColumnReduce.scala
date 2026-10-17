@@ -24,6 +24,15 @@ class TestColumnReduce extends AnyFlatSpec with Matchers:
     ColumnReduce.sumInt32(Vector.empty) shouldBe 0L
   }
 
+  "sumFiltered" should "skip a non-zero hole and add only survivors" in {
+    val values = Array(5, 9, 7)
+    val column = Int32Column.of(values, Validity.pack(values.length, row => row != 1), values.length)
+    val batch = new ColumnBatch(Vector(column.logicalType), Vector(column), column.length)
+
+    Int32Pipeline.sumFiltered(batch, _ => true) shouldBe 12L
+    Int32Pipeline.sumFP(batch, value => value > 0, value => value * 2) shouldBe 24L
+  }
+
   "sumFloat64" should "skip a non-zero hole and add a dense column" in {
     val hole = Array(1.5, 8.0, 2.5)
     val sparse = Float64Column.of(hole, Validity.pack(hole.length, row => row != 1), hole.length)

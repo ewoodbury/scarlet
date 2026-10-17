@@ -29,8 +29,9 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * order and the input partition count. `Double` and `String` select filter and map only. A filter
  * over a join result is not columnar. `reduceByKey` applies the user's function and wraps at
  * `Int`. `join` hash-partitions both sides and probes one bucket at a time. Output width for those
- * two is `defaultShufflePartitions`. [[tryCount]], [[trySumInt]], and [[trySumDouble]] read the
- * finished columns and do not decode. `collect` does.
+ * two is `defaultShufflePartitions`. [[tryCount]] reads finished column lengths. [[trySumInt]] and
+ * [[trySumDouble]] add a filter/project chain in the fused loop and do not write that chain's
+ * output column. `collect` still does.
  *
  * A null string is a value. Classification skips a leading null and keeps looking for a `String`.
  * An all-null source stays on the row path, because there is no witness.
@@ -82,18 +83,94 @@ object ColumnarPlanner:
    * not an int column. Null slots are skipped. This does not decode.
    */
   def trySumInt(plan: Plan[_]): Option[Long] =
-    consume(plan) { case Columns.Ints(parts) =>
-      ColumnReduce.sumInt32(parts)
-    }
+    accepted(plan) match
+      case None => None
+      case Some(op) =>
+        try Some(sumInt(plan, op))
+        catch case _: ClassCastException => None
 
   /**
-   * Sum of a finished double column. `None` means the row path, including a plan whose result is
-   * not a double column. Null slots are skipped. This does not decode.
+   * Sum of a double plan. `None` means the row path. A filter/project chain adds in the fused loop
+   * and does not write that chain's output column. Null slots are skipped.
    */
   def trySumDouble(plan: Plan[_]): Option[Double] =
-    consume(plan) { case Columns.Floats(parts) =>
-      ColumnReduce.sumFloat64(parts)
-    }
+    accepted(plan) match
+      case None => None
+      case Some(op) =>
+        try Some(sumDouble(plan, op))
+        catch case _: ClassCastException => None
+
+  private def sumInt(plan: Plan[_], op: PhysicalOp): Long = (plan, op) match
+    case (Plan.Source(partitions), PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) =>
+      ColumnReduce.sumInt32(encodeInts(partitions))
+    case (Plan.FilterOp(source, predicate), PhysicalOp.Filter(child, PhysicalOp.Slot.Element))
+        if isInt(child) =>
+      val keep = predicate.asInstanceOf[Int => Boolean]
+      foldLong(batchesOf(interpret(source, child))) { batch =>
+        Int32Pipeline.sumFiltered(batch, value => keep(value))
+      }
+    case (Plan.MapOp(source, mapper), PhysicalOp.Project(child)) if isInt(child) =>
+      val fn = mapper.asInstanceOf[Int => Int]
+      foldLong(batchesOf(interpret(source, child))) { batch =>
+        Int32Pipeline.sumProjected(batch, value => fn(value))
+      }
+    case (logical, PhysicalOp.Pipeline(child, length)) if isInt(child) =>
+      val (source, steps) = elementSteps(logical, length)
+      if (steps.length < length) then
+        throw new IllegalStateException("pipeline does not match logical element steps")
+      foldLong(batchesOf(interpret(source, child))) { batch =>
+        ElementSum.sumInts(batch, steps)
+      }
+    case _ =>
+      ColumnReduce.sumInt32(batchesOf(interpret(plan, op)))
+
+  private def sumDouble(plan: Plan[_], op: PhysicalOp): Double = (plan, op) match
+    case (Plan.Source(partitions), PhysicalOp.Scan(PhysicalOp.Kind.Floats, _)) =>
+      ColumnReduce.sumFloat64(encodeFloats(partitions))
+    case (
+          Plan.FilterOp(source, predicate),
+          PhysicalOp.Filter(child, PhysicalOp.Slot.Element),
+        ) if isFloat(child) =>
+      val keep = predicate.asInstanceOf[Double => Boolean]
+      foldDouble(batchesOf(interpret(source, child))) { batch =>
+        Float64Pipeline.sumFiltered(batch, value => keep(value))
+      }
+    case (Plan.MapOp(source, mapper), PhysicalOp.Project(child)) if isFloat(child) =>
+      val fn = mapper.asInstanceOf[Double => Double]
+      foldDouble(batchesOf(interpret(source, child))) { batch =>
+        Float64Pipeline.sumProjected(batch, value => fn(value))
+      }
+    case (logical, PhysicalOp.Pipeline(child, length)) if isFloat(child) =>
+      val (source, steps) = elementSteps(logical, length)
+      if (steps.length < length) then
+        throw new IllegalStateException("pipeline does not match logical element steps")
+      foldDouble(batchesOf(interpret(source, child))) { batch =>
+        ElementSum.sumFloats(batch, steps)
+      }
+    case _ =>
+      ColumnReduce.sumFloat64(batchesOf(interpret(plan, op)))
+
+  private def isInt(op: PhysicalOp): Boolean = op.kind match
+    case PhysicalOp.Kind.Ints => true
+    case _ => false
+
+  private def isFloat(op: PhysicalOp): Boolean = op.kind match
+    case PhysicalOp.Kind.Floats => true
+    case _ => false
+
+  private def foldLong(parts: Vector[ColumnBatch])(fn: ColumnBatch => Long): Long =
+    if (parts.isEmpty) then 0L
+    else
+      val morsels = parts.flatMap(part => ColumnBatches.slice(part, batchSize))
+      val partials = MorselScheduler.map(morsels, parallelism)((_, morsel) => fn(morsel))
+      partials.foldLeft(0L)(_ + _)
+
+  private def foldDouble(parts: Vector[ColumnBatch])(fn: ColumnBatch => Double): Double =
+    if (parts.isEmpty) then 0.0
+    else
+      val morsels = parts.flatMap(part => ColumnBatches.slice(part, batchSize))
+      val partials = MorselScheduler.map(morsels, parallelism)((_, morsel) => fn(morsel))
+      partials.foldLeft(0.0)(_ + _)
 
   private def consume[A](plan: Plan[_])(read: PartialFunction[Columns, A]): Option[A] =
     accepted(plan) match
