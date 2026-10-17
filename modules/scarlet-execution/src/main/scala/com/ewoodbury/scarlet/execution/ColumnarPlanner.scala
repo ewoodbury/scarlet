@@ -168,8 +168,9 @@ object ColumnarPlanner:
   private def foldDouble(parts: Vector[ColumnBatch])(fn: ColumnBatch => Double): Double =
     if (parts.isEmpty) then 0.0
     else
-      val morsels = parts.flatMap(part => ColumnBatches.slice(part, batchSize))
-      val partials = MorselScheduler.map(morsels, parallelism)((_, morsel) => fn(morsel))
+      // One left fold per partition. Double addition is not associative, so morsel totals
+      // would not match a scan of the whole column.
+      val partials = MorselScheduler.map(parts, parallelism)((_, part) => fn(part))
       partials.foldLeft(0.0)(_ + _)
 
   private def consume[A](plan: Plan[_])(read: PartialFunction[Columns, A]): Option[A] =
