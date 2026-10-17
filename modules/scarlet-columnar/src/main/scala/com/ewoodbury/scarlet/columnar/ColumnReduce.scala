@@ -23,7 +23,7 @@ object ColumnReduce:
     val values = column.values
     var total = 0L
     var row = 0
-    if (liveRowsPresent(column)) then
+    if (Validity.livePresent(column.validity, live)) then
       while (row < live) {
         total += values(row).toLong
         row += 1
@@ -41,7 +41,7 @@ object ColumnReduce:
     val values = column.values
     var total = 0.0
     var row = 0
-    if (liveRowsPresent(column)) then
+    if (Validity.livePresent(column.validity, live)) then
       while (row < live) {
         total += values(row)
         row += 1
@@ -53,24 +53,6 @@ object ColumnReduce:
         row += 1
       }
     total
-
-  /** Spare capacity past `length` does not count. A hole in the live prefix does. */
-  private def liveRowsPresent(column: Column): Boolean =
-    val live = column.length
-    if (live == 0) then true
-    else
-      val words = column.validity.words
-      val fullWords = live >>> 6
-      var index = 0
-      var dense = true
-      while (index < fullWords && dense) {
-        if (words(index) != -1L) then dense = false
-        index += 1
-      }
-      if (!dense) then false
-      else
-        val tail = live & 63
-        tail == 0 || (words(fullWords) & ((1L << tail) - 1L)) == (1L << tail) - 1L
 
   private def int32(batch: ColumnBatch): Int32Column =
     require(batch.columns.length == 1, s"int sum expects one column, got ${batch.columns.length}")

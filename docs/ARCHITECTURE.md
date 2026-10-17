@@ -172,8 +172,9 @@ Roadmap and sequencing are tracked externally; the headline items:
 - No cross-branch dedup: reusing a `DistCollection` in two places recomputes it; at most one
   shuffle write per stage.
 - Fusion is limited to straight int, double, and string filter/project runs of up to four steps.
-  There is no cost model and no predicate pushdown. The fused loop still tests a validity bit on
-  every row. `sum` adds the column the pipeline wrote; it does not yet fold into that loop.
+  There is no cost model and no predicate pushdown. A fused loop tests a validity bit per row only
+  when a live slot is null. `sum` adds the column the pipeline wrote; it does not yet fold into
+  that loop.
 - `collect` decodes every output row into a `Seq`.
 - Sort-merge join is a hash grouping wearing a sort-merge name; a true typed sort-merge join is
   deferred.

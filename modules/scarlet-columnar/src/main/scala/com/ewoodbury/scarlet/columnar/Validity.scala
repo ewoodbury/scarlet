@@ -17,6 +17,27 @@ final class Validity private (val words: Array[Long], val capacity: Int):
 
 object Validity:
 
+  /**
+   * Every row below `live` is present. Spare bits past `live` are ignored, so a filter result
+   * whose bitmap is longer than the survivor count still qualifies.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private[columnar] def livePresent(validity: Validity, live: Int): Boolean =
+    if (live == 0) then true
+    else
+      val words = validity.words
+      val fullWords = live >>> 6
+      var index = 0
+      var dense = true
+      while (index < fullWords && dense) {
+        if (words(index) != -1L) then dense = false
+        index += 1
+      }
+      if (!dense) then false
+      else
+        val tail = live & 63
+        tail == 0 || (words(fullWords) & ((1L << tail) - 1L)) == (1L << tail) - 1L
+
   /** Row is in range and `words` covers it. Kernels use this on the hot path. */
   private[columnar] inline def isSet(words: Array[Long], row: Int): Boolean =
     ((words(row >>> 6) >>> (row & 63)) & 1L) != 0L
