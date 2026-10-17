@@ -22,15 +22,38 @@ class DefaultExecutionService extends ExecutionService {
       s.partitions
 
     case _ =>
-      ColumnarPlanner.tryRun(plan).getOrElse {
-        val rt = ScarletRuntime.get
-        val scheduler = new DAGScheduler[IO](rt.shuffle, rt.scheduler, rt.partitioner)
-        scheduler.executePartitions(plan).unsafeRunSync()
-      }
+      ColumnarPlanner.tryRun(plan).getOrElse(runRow(plan))
   }
 
   def count[A](plan: Plan[A]): Long =
-    execute(plan).size.toLong
+    ColumnarPlanner.tryCount(plan).getOrElse {
+      rowPartitions(plan).foldLeft(0L)((total, partition) => total + partition.data.size)
+    }
+
+  def sumInt(plan: Plan[Int]): Long =
+    ColumnarPlanner.trySumInt(plan).getOrElse {
+      rowPartitions(plan).foldLeft(0L) { (total, partition) =>
+        partition.data.foldLeft(total)((acc, value) => acc + value.toLong)
+      }
+    }
+
+  def sumDouble(plan: Plan[Double]): Double =
+    ColumnarPlanner.trySumDouble(plan).getOrElse {
+      rowPartitions(plan).foldLeft(0.0) { (total, partition) =>
+        partition.data.foldLeft(total)((acc, value) => acc + value)
+      }
+    }
+
+  private def rowPartitions[A](plan: Plan[A]): Seq[Partition[A]] = plan match {
+    case source: Plan.Source[A] => source.partitions
+    case _ => runRow(plan)
+  }
+
+  private def runRow[A](plan: Plan[A]): Seq[Partition[A]] = {
+    val runtime = ScarletRuntime.get
+    val scheduler = new DAGScheduler[IO](runtime.shuffle, runtime.scheduler, runtime.partitioner)
+    scheduler.executePartitions(plan).unsafeRunSync()
+  }
 
   def take[A](plan: Plan[A], n: Int): Seq[A] =
     if (n <= 0) Seq.empty

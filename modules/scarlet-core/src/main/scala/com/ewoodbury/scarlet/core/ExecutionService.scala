@@ -23,6 +23,16 @@ trait ExecutionService {
   def count[A](plan: Plan[A]): Long
 
   /**
+   * Sums an `Int` plan as a `Long`. Does not wrap. Empty input returns zero.
+   */
+  def sumInt(plan: Plan[Int]): Long
+
+  /**
+   * Sums a `Double` plan. Empty input returns zero.
+   */
+  def sumDouble(plan: Plan[Double]): Double
+
+  /**
    * Executes a plan and returns the first n results.
    */
   def take[A](plan: Plan[A], n: Int): Seq[A]
@@ -48,6 +58,18 @@ object ExecutionService {
     }
 
     def count[A](plan: Plan[A]): Long = {
+      throw new UnsupportedOperationException(
+        "No execution service registered. Please ensure the execution module is properly initialized.",
+      )
+    }
+
+    def sumInt(plan: Plan[Int]): Long = {
+      throw new UnsupportedOperationException(
+        "No execution service registered. Please ensure the execution module is properly initialized.",
+      )
+    }
+
+    def sumDouble(plan: Plan[Double]): Double = {
       throw new UnsupportedOperationException(
         "No execution service registered. Please ensure the execution module is properly initialized.",
       )

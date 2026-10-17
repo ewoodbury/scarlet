@@ -69,6 +69,10 @@ input partition count. `reduceByKey` and `join` hash with `floorMod` into
 `columnarBatchSize` (default 8192) is the morsel width. Set `columnarExecution` false to force
 the row path.
 
+`count` and `sum` on an eligible plan read the finished columns. `count` sums batch lengths.
+`sum` of `Int` returns a `Long` and does not wrap. `sum` of `Double` returns a `Double`. Empty
+input sums to zero. `collect` is the action that decodes a `Seq`.
+
 On the row path, narrow-only plans compile to a one-stage graph and flow through the same path
 as wide plans.
 
@@ -168,6 +172,8 @@ Roadmap and sequencing are tracked externally; the headline items:
 - No cross-branch dedup: reusing a `DistCollection` in two places recomputes it; at most one
   shuffle write per stage.
 - Fusion is limited to straight int, double, and string filter/project runs of up to four steps.
-  There is no cost model and no predicate pushdown.
+  There is no cost model and no predicate pushdown. The fused loop still tests a validity bit on
+  every row. `sum` adds the column the pipeline wrote; it does not yet fold into that loop.
+- `collect` decodes every output row into a `Seq`.
 - Sort-merge join is a hash grouping wearing a sort-merge name; a true typed sort-merge join is
   deferred.
