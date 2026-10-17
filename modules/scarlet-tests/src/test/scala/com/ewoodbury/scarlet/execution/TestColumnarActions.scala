@@ -101,6 +101,19 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(DistCollection(Seq.empty[Double], 1).sum) shouldBe 0.0
   }
 
+  it should "left-fold a double partition across morsel boundaries" in {
+    ScarletConf.set(
+      originalConf.copy(columnarExecution = true, columnarBatchSize = 2, threadPoolSize = 4),
+    )
+    val values = Seq(1.0, 1.0e16, -1.0e16, 1.0)
+    val rows = DistCollection(values, 1)
+
+    rows.sum shouldBe 1.0
+    rows.map(value => value).sum shouldBe 1.0
+    rows.filter((_: Double) => true).sum shouldBe 1.0
+    row(rows.sum) shouldBe 1.0
+  }
+
   it should "sum a filtered double column" in {
     def summed = DistCollection(Seq(1.0, -2.0, 3.5), 2).filter(_ > 0.0).sum
 
