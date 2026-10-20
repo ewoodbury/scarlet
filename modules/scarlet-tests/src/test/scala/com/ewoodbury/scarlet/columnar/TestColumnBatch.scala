@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import scala.collection.immutable.ArraySeq
+
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -18,6 +20,70 @@ class TestColumnBatch extends AnyFlatSpec with Matchers:
     BatchCodec.decodeLongs(BatchCodec.longs(Seq.empty[Long])) shouldBe Seq.empty[Long]
     BatchCodec.decodeIntPairs(BatchCodec.intPairs(Seq.empty[(Int, Int)])) shouldBe
       Seq.empty[(Int, Int)]
+    BatchCodec.decodeInts(BatchCodec.ints(new ArraySeq.ofInt(Array.empty[Int]))) shouldBe
+      Seq.empty[Int]
+    BatchCodec.decodeFloat64s(
+      BatchCodec.float64s(new ArraySeq.ofDouble(Array.empty[Double])),
+    ) shouldBe Seq.empty[Double]
+    BatchCodec.decodeIntPairs(BatchCodec.intPairs(Array.empty[Int], Array.empty[Int])) shouldBe
+      Seq.empty[(Int, Int)]
+  }
+
+  it should "copy a primitive int array into the column" in {
+    val raw = Array(1, -2, 0)
+    val batch = BatchCodec.ints(new ArraySeq.ofInt(raw))
+    val column = batch.columns match {
+      case Seq(ints: Int32Column) => ints
+      case other => fail(s"expected an Int32 column, got $other")
+    }
+
+    column.values should not be theSameInstanceAs(raw)
+    raw(0) = 99
+    column.values.toSeq shouldBe Seq(1, -2, 0)
+    BatchCodec.decodeInts(batch) shouldBe Seq(1, -2, 0)
+    BatchCodec.decodeInts(BatchCodec.ints(Vector(1, -2, 0))) shouldBe Seq(1, -2, 0)
+    BatchCodec.decodeInts(BatchCodec.ints(List(1, -2, 0))) shouldBe Seq(1, -2, 0)
+  }
+
+  it should "copy a primitive double array into the column" in {
+    val raw = Array(1.5, -0.25)
+    val batch = BatchCodec.float64s(new ArraySeq.ofDouble(raw))
+    val column = batch.columns match {
+      case Seq(floats: Float64Column) => floats
+      case other => fail(s"expected a Float64 column, got $other")
+    }
+
+    column.values should not be theSameInstanceAs(raw)
+    raw(0) = 9.0
+    BatchCodec.decodeFloat64s(batch) shouldBe Seq(1.5, -0.25)
+    BatchCodec.decodeFloat64s(BatchCodec.float64s(Vector(1.5, -0.25))) shouldBe Seq(1.5, -0.25)
+    BatchCodec.decodeFloat64s(BatchCodec.float64s(List(1.5, -0.25))) shouldBe Seq(1.5, -0.25)
+  }
+
+  it should "copy primitive int-pair arrays into the columns" in {
+    val keys = Array(1, 2)
+    val values = Array(10, 20)
+    val batch = BatchCodec.intPairs(keys, values)
+    val (left, right) = batch.columns match {
+      case Seq(keysColumn: Int32Column, valuesColumn: Int32Column) =>
+        (keysColumn, valuesColumn)
+      case other => fail(s"expected two Int32 columns, got $other")
+    }
+
+    left.values should not be theSameInstanceAs(keys)
+    right.values should not be theSameInstanceAs(values)
+    keys(0) = 7
+    values(1) = 8
+    BatchCodec.decodeIntPairs(batch) shouldBe Seq((1, 10), (2, 20))
+    BatchCodec.decodeIntPairs(BatchCodec.intPairs(Vector((1, 10), (2, 20)))) shouldBe Seq(
+      (1, 10),
+      (2, 20),
+    )
+    BatchCodec.decodeIntPairs(BatchCodec.intPairs(List((1, 10), (2, 20)))) shouldBe Seq(
+      (1, 10),
+      (2, 20),
+    )
+    an[IllegalArgumentException] should be thrownBy BatchCodec.intPairs(Array(1), Array.empty[Int])
   }
 
   "nulls" should "roundtrip through the validity bitmap" in {

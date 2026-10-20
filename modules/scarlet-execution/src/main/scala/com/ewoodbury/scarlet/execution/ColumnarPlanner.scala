@@ -3,7 +3,7 @@ package com.ewoodbury.scarlet.execution
 import scala.annotation.tailrec
 
 import com.ewoodbury.scarlet.columnar.*
-import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
+import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
 
 /**
  * Lowers `Int`, `Double`, `(Int, Int)`, and `String` plans to [[PhysicalOp]] and runs that tree on
@@ -32,6 +32,10 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * two is `defaultShufflePartitions`. [[tryCount]] reads finished column lengths. [[trySumInt]] and
  * [[trySumDouble]] add a filter/project chain in the fused loop and do not write that chain's
  * output column. `collect` still does.
+ *
+ * A source of `ArraySeq.ofInt`, `ArraySeq.ofDouble`, or [[IntPairArrays]] is copied into the
+ * column with `System.arraycopy`. A boxed `Vector` or `List` is still read through its iterator.
+ * That copy stays on the calling thread.
  *
  * A null string is a value. Classification skips a leading null and keeps looking for a `String`.
  * An all-null source stays on the row path, because there is no witness.
@@ -492,7 +496,12 @@ object ColumnarPlanner:
 
   private def encodePairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
     partitions.map { partition =>
-      BatchCodec.intPairs(partition.data.asInstanceOf[Iterable[(Int, Int)]])
+      partition.data match
+        case pairs: IntPairArrays =>
+          // The partition owns these arrays. The column gets its own copy.
+          BatchCodec.intPairs(pairs.keys, pairs.values)
+        case other =>
+          BatchCodec.intPairs(other.asInstanceOf[Iterable[(Int, Int)]])
     }.toVector
 
   private def encodeStrings(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =

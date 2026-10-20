@@ -135,6 +135,63 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(left.union(right).sum) shouldBe Int.MaxValue.toLong + 1L
   }
 
+  "primitive sources" should "sum an int array like a boxed vector or list" in {
+    val values = Array(1, 2, 3, 4, 5)
+
+    def primitive = DistCollection.ofInts(values, 3).filter(_ > 0).map(_ * 2).sum
+    def boxed = DistCollection(values.toVector, 3).filter(_ > 0).map(_ * 2).sum
+    def listed = DistCollection(values.toList, 3).filter(_ > 0).map(_ * 2).sum
+
+    columnar(primitive) shouldBe 30L
+    columnar(primitive) shouldBe columnar(boxed)
+    columnar(listed) shouldBe columnar(boxed)
+    row(primitive) shouldBe row(boxed)
+  }
+
+  it should "sum the copied ints after the caller mutates the array" in {
+    val input = Array(1, 2, 3, 4)
+    val rows = DistCollection.ofInts(input, 2)
+    input(0) = 100
+
+    columnar(rows.sum) shouldBe 10L
+    columnar(rows.map(value => value).collect()) shouldBe Seq(1, 2, 3, 4)
+    row(rows.sum) shouldBe 10L
+  }
+
+  it should "sum a primitive int source when morsels split a partition" in {
+    ScarletConf.set(
+      originalConf.copy(columnarExecution = true, columnarBatchSize = 2, threadPoolSize = 4),
+    )
+
+    DistCollection.ofInts(Array(1, 2, 3, 4, 5), 1).filter(_ > 1).sum shouldBe 14L
+  }
+
+  it should "sum a double array like a boxed vector" in {
+    val values = Array(1.5, -2.0, 3.25)
+
+    def primitive = DistCollection.ofDoubles(values, 2).filter(_ > 0.0).sum
+    def boxed = DistCollection(values.toVector, 2).filter(_ > 0.0).sum
+
+    columnar(primitive) shouldBe 4.75
+    columnar(primitive) shouldBe columnar(boxed)
+    row(primitive) shouldBe row(boxed)
+  }
+
+  it should "reduce an int-pair array like a boxed vector without wrapping" in {
+    val keys = Array(1, 2, 1, 3, 2)
+    val values = Array(10, 20, 5, 7, 1)
+    val expected = Map(1 -> 15, 2 -> 21, 3 -> 7)
+
+    def primitive =
+      DistCollection.ofIntPairs(keys, values, 2).reduceByKey[Int, Int](_ + _).collect().toMap
+    def boxed =
+      DistCollection(keys.zip(values).toVector, 2).reduceByKey[Int, Int](_ + _).collect().toMap
+
+    columnar(primitive) shouldBe expected
+    columnar(primitive) shouldBe columnar(boxed)
+    row(primitive) shouldBe row(boxed)
+  }
+
   private def columnar[A](body: => A): A =
     ScarletRuntime.get.shuffle.clear()
     ScarletConf.set(originalConf.copy(columnarExecution = true))
