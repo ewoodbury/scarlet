@@ -367,87 +367,56 @@ object DistCollection:
    */
   def apply[A](data: Iterable[A], numPartitions: Int): DistCollection[A] =
     require(numPartitions > 0, "Number of partitions must be positive.")
-    DistCollection(Plan.Source(splitIntoPartitions(data, numPartitions)))
+    val elements = data.toVector
+    splitSource(elements.length, numPartitions)((start, end) => elements.slice(start, end))
 
   /**
-   * Creates a `DistCollection[Int]` from a primitive array. Each partition stores an
-   * `ArraySeq.ofInt` of its own range. The caller's array is copied once and is not retained.
-   * Empty input produces exactly `numPartitions` empty partitions.
+   * Partitions a primitive `Int` array. Each partition is an `ArraySeq.ofInt` copy of its range.
+   * The caller's array is not retained.
    */
-  def ofInts(values: Array[Int], numPartitions: Int): DistCollection[Int] = {
-    require(numPartitions > 0, "Number of partitions must be positive.")
-    val partitions = splitRanges[Int](values.length, numPartitions) { (start, end) =>
-      new ArraySeq.ofInt(copyInts(values, start, end))
+  def ofInts(values: Array[Int], numPartitions: Int): DistCollection[Int] =
+    splitSource(values.length, numPartitions) { (start, end) =>
+      new ArraySeq.ofInt(values.slice(start, end))
     }
-    DistCollection(Plan.Source(partitions))
-  }
 
   /**
-   * Creates a `DistCollection[Double]` from a primitive array. Each partition stores an
-   * `ArraySeq.ofDouble` of its own range. The caller's array is copied once and is not retained.
-   * Empty input produces exactly `numPartitions` empty partitions.
+   * Partitions a primitive `Double` array. Each partition is an `ArraySeq.ofDouble` copy of its
+   * range. The caller's array is not retained.
    */
-  def ofDoubles(values: Array[Double], numPartitions: Int): DistCollection[Double] = {
-    require(numPartitions > 0, "Number of partitions must be positive.")
-    val partitions = splitRanges[Double](values.length, numPartitions) { (start, end) =>
-      new ArraySeq.ofDouble(copyDoubles(values, start, end))
+  def ofDoubles(values: Array[Double], numPartitions: Int): DistCollection[Double] =
+    splitSource(values.length, numPartitions) { (start, end) =>
+      new ArraySeq.ofDouble(values.slice(start, end))
     }
-    DistCollection(Plan.Source(partitions))
-  }
 
   /**
-   * Creates a `DistCollection[(Int, Int)]` from primitive key and value arrays. Each partition
-   * stores an [[IntPairArrays]] of its own ranges. Both arrays are copied once and are not
-   * retained, and the partition does not expose those arrays. Empty input produces exactly
-   * `numPartitions` empty partitions.
+   * Partitions primitive `(Int, Int)` keys and values. Each partition is an [[IntPairArrays]] copy
+   * of its range and does not expose those arrays.
    */
   def ofIntPairs(
       keys: Array[Int],
       values: Array[Int],
       numPartitions: Int,
-  ): DistCollection[(Int, Int)] = {
+  ): DistCollection[(Int, Int)] =
     require(numPartitions > 0, "Number of partitions must be positive.")
     require(keys.length == values.length, "key and value arrays differ in length")
-    val partitions = splitRanges[(Int, Int)](keys.length, numPartitions) { (start, end) =>
-      IntPairArrays.fromOwned(copyInts(keys, start, end), copyInts(values, start, end))
+    splitSource(keys.length, numPartitions) { (start, end) =>
+      IntPairArrays.fromOwned(keys.slice(start, end), values.slice(start, end))
     }
-    DistCollection(Plan.Source(partitions))
-  }
 
   /**
-   * Splits source data into exactly `numPartitions` balanced, contiguous partitions while
-   * preserving record order. The first `size % numPartitions` partitions receive one extra record.
-   * A boxed `Vector` or `List` stays boxed.
+   * Splits `length` into exactly `numPartitions` contiguous ranges, preserving order. The first
+   * `length % numPartitions` ranges receive one extra index.
    */
-  private def splitIntoPartitions[A](data: Iterable[A], numPartitions: Int): Seq[Partition[A]] = {
-    val elements = data.toVector
-    splitRanges(elements.length, numPartitions) { (start, end) =>
-      elements.slice(start, end)
-    }
-  }
-
-  /** The first `length % numPartitions` ranges receive one extra index. */
-  private def splitRanges[A](length: Int, numPartitions: Int)(
+  private def splitSource[A](length: Int, numPartitions: Int)(
       slice: (Int, Int) => Iterable[A],
-  ): Seq[Partition[A]] = {
+  ): DistCollection[A] =
+    require(numPartitions > 0, "Number of partitions must be positive.")
     val baseSize = length / numPartitions
     val remainder = length % numPartitions
     val boundaries =
       Seq.tabulate(numPartitions + 1)(index => index * baseSize + math.min(index, remainder))
-    boundaries.zip(boundaries.drop(1)).map { case (start, end) =>
+    val partitions = boundaries.zip(boundaries.drop(1)).map { case (start, end) =>
       Partition(slice(start, end))
     }
-  }
-
-  private def copyInts(values: Array[Int], start: Int, end: Int): Array[Int] = {
-    val slice = new Array[Int](end - start)
-    System.arraycopy(values, start, slice, 0, slice.length)
-    slice
-  }
-
-  private def copyDoubles(values: Array[Double], start: Int, end: Int): Array[Double] = {
-    val slice = new Array[Double](end - start)
-    System.arraycopy(values, start, slice, 0, slice.length)
-    slice
-  }
+    DistCollection(Plan.Source(partitions))
 end DistCollection

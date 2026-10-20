@@ -33,9 +33,8 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
  * [[trySumDouble]] add a filter/project chain in the fused loop and do not write that chain's
  * output column. `collect` still does.
  *
- * A source of `ArraySeq.ofInt`, `ArraySeq.ofDouble`, or [[IntPairArrays]] is copied into the
- * column with `System.arraycopy`. A boxed `Vector` or `List` is still read through its iterator.
- * That copy stays on the calling thread.
+ * An `ArraySeq.ofInt`, `ArraySeq.ofDouble`, or [[IntPairArrays]] source is copied into the column
+ * on the calling thread. A boxed `Vector` or `List` is still read through its iterator.
  *
  * A null string is a value. Classification skips a leading null and keeps looking for a `String`.
  * An all-null source stays on the row path, because there is no witness.
@@ -497,11 +496,8 @@ object ColumnarPlanner:
   private def encodePairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
     partitions.map { partition =>
       partition.data match
-        case pairs: IntPairArrays =>
-          // Package-scoped arrays. The column gets its own copy, and the source is left unchanged.
-          BatchCodec.intPairs(pairs.keys, pairs.values)
-        case other =>
-          BatchCodec.intPairs(other.asInstanceOf[Iterable[(Int, Int)]])
+        case pairs: IntPairArrays => BatchCodec.intPairs(pairs.keys, pairs.values)
+        case other => BatchCodec.intPairs(other.asInstanceOf[Iterable[(Int, Int)]])
     }.toVector
 
   private def encodeStrings(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =

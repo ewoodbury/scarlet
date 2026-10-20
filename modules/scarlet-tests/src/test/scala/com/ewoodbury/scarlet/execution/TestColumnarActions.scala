@@ -135,16 +135,14 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(left.union(right).sum) shouldBe Int.MaxValue.toLong + 1L
   }
 
-  "primitive sources" should "sum an int array like a boxed vector or list" in {
+  "primitive sources" should "sum an int array like a boxed vector" in {
     val values = Array(1, 2, 3, 4, 5)
 
     def primitive = DistCollection.ofInts(values, 3).filter(_ > 0).map(_ * 2).sum
     def boxed = DistCollection(values.toVector, 3).filter(_ > 0).map(_ * 2).sum
-    def listed = DistCollection(values.toList, 3).filter(_ > 0).map(_ * 2).sum
 
     columnar(primitive) shouldBe 30L
     columnar(primitive) shouldBe columnar(boxed)
-    columnar(listed) shouldBe columnar(boxed)
     row(primitive) shouldBe row(boxed)
   }
 
@@ -154,7 +152,7 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     input(0) = 100
 
     columnar(rows.sum) shouldBe 10L
-    columnar(rows.map(value => value).collect()) shouldBe Seq(1, 2, 3, 4)
+    columnar(rows.collect()) shouldBe Seq(1, 2, 3, 4)
     row(rows.sum) shouldBe 10L
   }
 

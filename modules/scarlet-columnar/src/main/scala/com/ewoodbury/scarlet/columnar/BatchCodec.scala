@@ -1,36 +1,29 @@
 package com.ewoodbury.scarlet.columnar
 
+import java.util.Arrays
+
 import scala.collection.immutable.ArraySeq
 
 /** Encode Scala sequences into batches, and read those batches back. */
 object BatchCodec:
 
-  /**
-   * A primitive `ArraySeq.ofInt` is copied with `System.arraycopy`. A boxed `Iterable`, including
-   * `Vector` and `List`, is filled from its iterator.
-   */
-  def ints(values: Iterable[Int]): ColumnBatch = values match
-    case primitive: ArraySeq.ofInt => copiedInts(primitive.unsafeArray)
-    case _ => iteratedInts(values)
-
-  private def copiedInts(source: Array[Int]): ColumnBatch =
-    val length = source.length
-    val buffer = new Array[Int](length)
-    System.arraycopy(source, 0, buffer, 0, length)
-    batch(Int32Column.of(buffer, Validity.allValid(length), length))
-
-  /** One array fill. `size` then the iterator, so a `Seq` is not copied twice. */
+  /** An `ArraySeq.ofInt` is copied. Any other iterable is filled from its iterator. */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private def iteratedInts(values: Iterable[Int]): ColumnBatch =
-    val length = values.size
-    val buffer = new Array[Int](length)
-    val iterator = values.iterator
-    var row = 0
-    while (row < length) {
-      buffer(row) = iterator.next()
-      row += 1
-    }
-    batch(Int32Column.of(buffer, Validity.allValid(length), length))
+  def ints(values: Iterable[Int]): ColumnBatch =
+    val buffer = values match
+      case primitive: ArraySeq.ofInt => Arrays.copyOf(primitive.unsafeArray, primitive.length)
+      case _ =>
+        // `size` then the iterator, so a `Seq` is not copied twice.
+        val n = values.size
+        val filled = new Array[Int](n)
+        val iterator = values.iterator
+        var row = 0
+        while (row < n) {
+          filled(row) = iterator.next()
+          row += 1
+        }
+        filled
+    batch(Int32Column.of(buffer, Validity.allValid(buffer.length), buffer.length))
 
   def nullableInts(values: Seq[Option[Int]]): ColumnBatch =
     batch(Int32Column.fromNullable(values))
@@ -41,32 +34,23 @@ object BatchCodec:
   def nullableLongs(values: Seq[Option[Long]]): ColumnBatch =
     batch(Int64Column.fromNullable(values))
 
-  /**
-   * A primitive `ArraySeq.ofDouble` is copied with `System.arraycopy`. A boxed `Iterable`,
-   * including `Vector` and `List`, is filled from its iterator.
-   */
-  def float64s(values: Iterable[Double]): ColumnBatch = values match
-    case primitive: ArraySeq.ofDouble => copiedFloat64s(primitive.unsafeArray)
-    case _ => iteratedFloat64s(values)
-
-  private def copiedFloat64s(source: Array[Double]): ColumnBatch =
-    val length = source.length
-    val buffer = new Array[Double](length)
-    System.arraycopy(source, 0, buffer, 0, length)
-    batch(Float64Column.of(buffer, Validity.allValid(length), length))
-
-  /** One array fill. `size` then the iterator, so a `Seq` is not copied twice. */
+  /** An `ArraySeq.ofDouble` is copied. Any other iterable is filled from its iterator. */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private def iteratedFloat64s(values: Iterable[Double]): ColumnBatch =
-    val length = values.size
-    val buffer = new Array[Double](length)
-    val iterator = values.iterator
-    var row = 0
-    while (row < length) {
-      buffer(row) = iterator.next()
-      row += 1
-    }
-    batch(Float64Column.of(buffer, Validity.allValid(length), length))
+  def float64s(values: Iterable[Double]): ColumnBatch =
+    val buffer = values match
+      case primitive: ArraySeq.ofDouble => Arrays.copyOf(primitive.unsafeArray, primitive.length)
+      case _ =>
+        // `size` then the iterator, so a `Seq` is not copied twice.
+        val n = values.size
+        val filled = new Array[Double](n)
+        val iterator = values.iterator
+        var row = 0
+        while (row < n) {
+          filled(row) = iterator.next()
+          row += 1
+        }
+        filled
+    batch(Float64Column.of(buffer, Validity.allValid(buffer.length), buffer.length))
 
   def nullableFloat64s(values: Seq[Option[Double]]): ColumnBatch =
     batch(Float64Column.fromNullable(values))
@@ -83,20 +67,13 @@ object BatchCodec:
   def nullableStrings(values: Seq[Option[String]]): ColumnBatch =
     batch(DictUtf8Column.fromNullable(values))
 
-  /**
-   * Copies primitive key and value arrays into the column. The column does not retain `keys` or
-   * `values`.
-   */
+  /** Copies `keys` and `values`. The column does not retain either array. */
   def intPairs(keys: Array[Int], values: Array[Int]): ColumnBatch =
     require(keys.length == values.length, "key and value arrays differ in length")
-    val length = keys.length
-    val left = new Array[Int](length)
-    val right = new Array[Int](length)
-    System.arraycopy(keys, 0, left, 0, length)
-    System.arraycopy(values, 0, right, 0, length)
+    val n = keys.length
     pairBatch(
-      Int32Column.of(left, Validity.allValid(length), length),
-      Int32Column.of(right, Validity.allValid(length), length),
+      Int32Column.of(Arrays.copyOf(keys, n), Validity.allValid(n), n),
+      Int32Column.of(Arrays.copyOf(values, n), Validity.allValid(n), n),
     )
 
   /** One fill of each column. `size` then the iterator, so a `Seq` is not copied twice. */

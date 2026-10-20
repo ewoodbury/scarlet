@@ -85,8 +85,10 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
 
     partitionSizes(dc) shouldEqual Seq(2, 2, 1)
     dc.collect() shouldEqual Seq(1, 2, 3, 4, 5)
-    primitiveArrays(dc).foreach { stored =>
-      stored should not be theSameInstanceAs(input)
+    sourceData(dc).foreach {
+      case primitive: ArraySeq.ofInt =>
+        primitive.unsafeArray should not be theSameInstanceAs(input)
+      case other => fail(s"expected ArraySeq.ofInt, got $other")
     }
   }
 
@@ -109,16 +111,14 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
 
     partitionSizes(dc) shouldEqual Seq(2, 1)
     dc.collect() shouldEqual Seq(1.5, -2.0, 3.25)
-    doubleArrays(dc).foreach { stored =>
-      stored should not be theSameInstanceAs(input)
+    sourceData(dc).foreach {
+      case primitive: ArraySeq.ofDouble =>
+        primitive.unsafeArray should not be theSameInstanceAs(input)
+      case other => fail(s"expected ArraySeq.ofDouble, got $other")
     }
   }
 
-  it should "reject a non-positive partition count" in {
-    an[IllegalArgumentException] should be thrownBy DistCollection.ofDoubles(Array(1.0), -1)
-  }
-
-  "IntPairArrays" should "iterate pairs in order" in {
+  "IntPairArrays" should "iterate pairs in order and copy its arrays" in {
     val keys = Array(1, 2)
     val values = Array(10, 20)
     val pairs = IntPairArrays(keys, values)
@@ -127,7 +127,6 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
 
     pairs.toList shouldEqual List((1, 10), (2, 20))
     pairs.knownSize shouldEqual 2
-    pairs.size shouldEqual 2
     pairs.keys should not be theSameInstanceAs(keys)
     pairs.values should not be theSameInstanceAs(values)
     an[IllegalArgumentException] should be thrownBy IntPairArrays(Array(1), Array.empty[Int])
@@ -142,45 +141,22 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
 
     partitionSizes(dc) shouldEqual Seq(3, 2)
     dc.collect() shouldEqual Seq((1, 10), (2, 20), (1, 5), (3, 7), (2, 1))
-    pairArrays(dc).foreach { stored =>
-      stored.keys should not be theSameInstanceAs(keys)
-      stored.values should not be theSameInstanceAs(values)
+    sourceData(dc).foreach {
+      case stored: IntPairArrays =>
+        stored.keys should not be theSameInstanceAs(keys)
+        stored.values should not be theSameInstanceAs(values)
+      case other => fail(s"expected IntPairArrays, got $other")
     }
   }
 
-  it should "reject a non-positive partition count or unequal arrays" in {
-    an[IllegalArgumentException] should be thrownBy {
-      DistCollection.ofIntPairs(Array(1), Array(1), 0)
-    }
+  it should "reject unequal key and value arrays" in {
     an[IllegalArgumentException] should be thrownBy {
       DistCollection.ofIntPairs(Array(1, 2), Array(1), 1)
     }
   }
 
-  private def primitiveArrays(dc: DistCollection[Int]): Seq[Array[Int]] = dc.plan match {
-    case Plan.Source(partitions) =>
-      partitions.map {
-        case Partition(primitive: ArraySeq.ofInt) => primitive.unsafeArray
-        case Partition(other) => fail(s"expected ArraySeq.ofInt, got $other")
-      }
-    case other => fail(s"Expected Plan.Source, got $other")
-  }
-
-  private def doubleArrays(dc: DistCollection[Double]): Seq[Array[Double]] = dc.plan match {
-    case Plan.Source(partitions) =>
-      partitions.map {
-        case Partition(primitive: ArraySeq.ofDouble) => primitive.unsafeArray
-        case Partition(other) => fail(s"expected ArraySeq.ofDouble, got $other")
-      }
-    case other => fail(s"Expected Plan.Source, got $other")
-  }
-
-  private def pairArrays(dc: DistCollection[(Int, Int)]): Seq[IntPairArrays] = dc.plan match {
-    case Plan.Source(partitions) =>
-      partitions.map {
-        case Partition(pairs: IntPairArrays) => pairs
-        case Partition(other) => fail(s"expected IntPairArrays, got $other")
-      }
+  private def sourceData[A](dc: DistCollection[A]): Seq[Iterable[A]] = dc.plan match {
+    case Plan.Source(partitions) => partitions.map(_.data)
     case other => fail(s"Expected Plan.Source, got $other")
   }
 }

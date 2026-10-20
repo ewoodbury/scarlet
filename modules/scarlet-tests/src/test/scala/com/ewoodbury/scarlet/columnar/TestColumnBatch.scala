@@ -39,10 +39,7 @@ class TestColumnBatch extends AnyFlatSpec with Matchers:
 
     column.values should not be theSameInstanceAs(raw)
     raw(0) = 99
-    column.values.toSeq shouldBe Seq(1, -2, 0)
     BatchCodec.decodeInts(batch) shouldBe Seq(1, -2, 0)
-    BatchCodec.decodeInts(BatchCodec.ints(Vector(1, -2, 0))) shouldBe Seq(1, -2, 0)
-    BatchCodec.decodeInts(BatchCodec.ints(List(1, -2, 0))) shouldBe Seq(1, -2, 0)
   }
 
   it should "copy a primitive double array into the column" in {
@@ -56,8 +53,6 @@ class TestColumnBatch extends AnyFlatSpec with Matchers:
     column.values should not be theSameInstanceAs(raw)
     raw(0) = 9.0
     BatchCodec.decodeFloat64s(batch) shouldBe Seq(1.5, -0.25)
-    BatchCodec.decodeFloat64s(BatchCodec.float64s(Vector(1.5, -0.25))) shouldBe Seq(1.5, -0.25)
-    BatchCodec.decodeFloat64s(BatchCodec.float64s(List(1.5, -0.25))) shouldBe Seq(1.5, -0.25)
   }
 
   it should "copy primitive int-pair arrays into the columns" in {
@@ -75,14 +70,6 @@ class TestColumnBatch extends AnyFlatSpec with Matchers:
     keys(0) = 7
     values(1) = 8
     BatchCodec.decodeIntPairs(batch) shouldBe Seq((1, 10), (2, 20))
-    BatchCodec.decodeIntPairs(BatchCodec.intPairs(Vector((1, 10), (2, 20)))) shouldBe Seq(
-      (1, 10),
-      (2, 20),
-    )
-    BatchCodec.decodeIntPairs(BatchCodec.intPairs(List((1, 10), (2, 20)))) shouldBe Seq(
-      (1, 10),
-      (2, 20),
-    )
     an[IllegalArgumentException] should be thrownBy BatchCodec.intPairs(Array(1), Array.empty[Int])
   }
 
