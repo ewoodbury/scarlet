@@ -1,6 +1,8 @@
 package com.ewoodbury.scarlet.api
 
-import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan}
+import scala.collection.immutable.ArraySeq
+
+import com.ewoodbury.scarlet.core.{ExecutionService, IntPairArrays, Partition, Plan}
 
 /**
  * A lazy, immutable representation of a "distributed" collection. Operations build up a Plan,
@@ -365,22 +367,56 @@ object DistCollection:
    */
   def apply[A](data: Iterable[A], numPartitions: Int): DistCollection[A] =
     require(numPartitions > 0, "Number of partitions must be positive.")
-    DistCollection(Plan.Source(splitIntoPartitions(data, numPartitions)))
+    val elements = data.toVector
+    splitSource(elements.length, numPartitions)((start, end) => elements.slice(start, end))
 
   /**
-   * Splits source data into exactly `numPartitions` balanced, contiguous partitions while
-   * preserving record order. The first `size % numPartitions` partitions receive one extra record.
+   * Partitions a primitive `Int` array. Each partition is an `ArraySeq.ofInt` copy of its range.
+   * The caller's array is not retained.
    */
-  private def splitIntoPartitions[A](data: Iterable[A], numPartitions: Int): Seq[Partition[A]] = {
-    val elements = data.toVector
-    val baseSize = elements.length / numPartitions
-    val remainder = elements.length % numPartitions
+  def ofInts(values: Array[Int], numPartitions: Int): DistCollection[Int] =
+    splitSource(values.length, numPartitions) { (start, end) =>
+      new ArraySeq.ofInt(values.slice(start, end))
+    }
 
+  /**
+   * Partitions a primitive `Double` array. Each partition is an `ArraySeq.ofDouble` copy of its
+   * range. The caller's array is not retained.
+   */
+  def ofDoubles(values: Array[Double], numPartitions: Int): DistCollection[Double] =
+    splitSource(values.length, numPartitions) { (start, end) =>
+      new ArraySeq.ofDouble(values.slice(start, end))
+    }
+
+  /**
+   * Partitions primitive `(Int, Int)` keys and values. Each partition is an [[IntPairArrays]] copy
+   * of its range and does not expose those arrays.
+   */
+  def ofIntPairs(
+      keys: Array[Int],
+      values: Array[Int],
+      numPartitions: Int,
+  ): DistCollection[(Int, Int)] =
+    require(numPartitions > 0, "Number of partitions must be positive.")
+    require(keys.length == values.length, "key and value arrays differ in length")
+    splitSource(keys.length, numPartitions) { (start, end) =>
+      IntPairArrays.fromOwned(keys.slice(start, end), values.slice(start, end))
+    }
+
+  /**
+   * Splits `length` into exactly `numPartitions` contiguous ranges, preserving order. The first
+   * `length % numPartitions` ranges receive one extra index.
+   */
+  private def splitSource[A](length: Int, numPartitions: Int)(
+      slice: (Int, Int) => Iterable[A],
+  ): DistCollection[A] =
+    require(numPartitions > 0, "Number of partitions must be positive.")
+    val baseSize = length / numPartitions
+    val remainder = length % numPartitions
     val boundaries =
       Seq.tabulate(numPartitions + 1)(index => index * baseSize + math.min(index, remainder))
-
-    boundaries
-      .zip(boundaries.drop(1))
-      .map { case (start, end) => Partition(elements.slice(start, end)) }
-  }
+    val partitions = boundaries.zip(boundaries.drop(1)).map { case (start, end) =>
+      Partition(slice(start, end))
+    }
+    DistCollection(Plan.Source(partitions))
 end DistCollection
