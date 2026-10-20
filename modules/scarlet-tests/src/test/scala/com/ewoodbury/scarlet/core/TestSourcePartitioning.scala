@@ -119,10 +119,17 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
   }
 
   "IntPairArrays" should "iterate pairs in order" in {
-    val pairs = IntPairArrays(Array(1, 2), Array(10, 20))
+    val keys = Array(1, 2)
+    val values = Array(10, 20)
+    val pairs = IntPairArrays(keys, values)
+    keys(0) = 9
+    values(1) = 9
 
     pairs.toList shouldEqual List((1, 10), (2, 20))
     pairs.knownSize shouldEqual 2
+    pairs.size shouldEqual 2
+    pairs.keys should not be theSameInstanceAs(keys)
+    pairs.values should not be theSameInstanceAs(values)
     an[IllegalArgumentException] should be thrownBy IntPairArrays(Array(1), Array.empty[Int])
   }
 

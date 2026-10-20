@@ -398,7 +398,8 @@ object DistCollection:
   /**
    * Creates a `DistCollection[(Int, Int)]` from primitive key and value arrays. Each partition
    * stores an [[IntPairArrays]] of its own ranges. Both arrays are copied once and are not
-   * retained. Empty input produces exactly `numPartitions` empty partitions.
+   * retained, and the partition does not expose those arrays. Empty input produces exactly
+   * `numPartitions` empty partitions.
    */
   def ofIntPairs(
       keys: Array[Int],
@@ -408,7 +409,7 @@ object DistCollection:
     require(numPartitions > 0, "Number of partitions must be positive.")
     require(keys.length == values.length, "key and value arrays differ in length")
     val partitions = splitRanges[(Int, Int)](keys.length, numPartitions) { (start, end) =>
-      IntPairArrays(copyInts(keys, start, end), copyInts(values, start, end))
+      IntPairArrays.fromOwned(copyInts(keys, start, end), copyInts(values, start, end))
     }
     DistCollection(Plan.Source(partitions))
   }

@@ -498,7 +498,7 @@ object ColumnarPlanner:
     partitions.map { partition =>
       partition.data match
         case pairs: IntPairArrays =>
-          // The partition owns these arrays. The column gets its own copy.
+          // Package-scoped arrays. The column gets its own copy, and the source is left unchanged.
           BatchCodec.intPairs(pairs.keys, pairs.values)
         case other =>
           BatchCodec.intPairs(other.asInstanceOf[Iterable[(Int, Int)]])
