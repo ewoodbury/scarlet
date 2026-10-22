@@ -73,6 +73,19 @@ class TestColumnBatch extends AnyFlatSpec with Matchers:
     an[IllegalArgumentException] should be thrownBy BatchCodec.intPairs(Array(1), Array.empty[Int])
   }
 
+  it should "share a pair column when narrowing to one column" in {
+    val batch = BatchCodec.intPairs(Array(1, 2), Array(10, 20))
+    val values = ColumnBatches.takeColumn(batch, 1)
+
+    values.length shouldBe 2
+    values.schema shouldBe Vector(LogicalType.Int32)
+    val (view, source) = (values.columns, batch.columns) match
+      case (Seq(column), Seq(_, valueColumn)) => (column, valueColumn)
+      case other => fail(s"expected a one-column view of the value column, got $other")
+    view should be theSameInstanceAs source
+    BatchCodec.decodeInts(values) shouldBe Seq(10, 20)
+  }
+
   "nulls" should "roundtrip through the validity bitmap" in {
     val ints = Seq(Some(3), None, Some(0), None)
     val longs = Seq(None, Some(8L))

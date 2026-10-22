@@ -2,7 +2,7 @@ package com.ewoodbury.scarlet.columnar
 
 /**
  * A published batch. `length` is the row count every column shares. The batch does not copy column
- * buffers.
+ * buffers. Construction counts toward [[ColumnMetrics]] when that counter is armed.
  */
 final class ColumnBatch(
     val schema: IndexedSeq[LogicalType],
@@ -25,3 +25,4 @@ final class ColumnBatch(
       s"column $ordinal length ${column.length} does not match batch length $length",
     )
   }
+  ColumnMetrics.noteBatch()

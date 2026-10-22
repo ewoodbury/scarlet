@@ -2,8 +2,8 @@
 
 Scarlet is a data processing engine inspired by Spark, written in pure functional Scala 3. This
 document describes the system as it exists today: a row path and a columnar path for `Int`,
-`(Int, Int)`, and `String` filter and map, a clean logical/physical split, and type erasure
-confined to named boundaries.
+`(Int, Int)`, and `String` filter and map, plus `keys`, `values`, and int `mapValues` on int
+pairs, a clean logical/physical split, and type erasure confined to named boundaries.
 
 ## Module layout
 
@@ -29,10 +29,12 @@ Two vocabularies, separated at the module level:
 - **Physical** (`scarlet-execution`): `StageGraph` — stages, dependencies, shuffle boundaries.
   Narrow operations are fused into stages; wide operations become shuffle stages carrying a
   structured `WideOp` record. The columnar path has a second tree, `PhysicalOp`, with `Scan`,
-  `Filter`, `Project`, `Pipeline`, `Exchange`, `HashAggregate`, and `HashJoin` nodes.
+  `Filter`, `Project`, `Pipeline`, `Key`, `Value`, `MapValue`, `Exchange`, `HashAggregate`, and
+  `HashJoin` nodes.
   `ColumnarPlanner.lower` builds it and does not run user functions. Straight int, double, and
   string filter/project runs of two to four steps use one fused pipeline kernel; longer runs are
-  cut into chunks of four. Pair operations, aggregates, and joins remain separate nodes.
+  cut into chunks of four. Pair operations, aggregates, and joins remain separate nodes. `keys`
+  and `values` are one int column. `mapValues` is one node when the value stays an int.
   `Exchange` is the boundary under an aggregate and on each side of a join; those kernels perform
   the shuffle.
 
@@ -59,18 +61,21 @@ DistCollection action
 
 A bare `Plan.Source` short-circuits to its partitions. `ColumnarPlanner` runs filter, map,
 filterKeys, filterValues, reduceByKey, and inner join when the values it sees are `Int` or
-`(Int, Int)`, and filter and map when they are `Double` or `String`, if
-`ScarletConf.columnarExecution` is true (the default). Any other node keeps the whole plan on
-the row path. `Double` is the float64 column. A 32-bit `Float` stays on the row path. Strings are a
-dictionary of JVM strings plus int codes (`Utf8Dict`). A null string is a value, so filter and
-map see it. Group-by and join stay on int keys. Narrow columnar ops keep input order and the
+`(Int, Int)`, and filter and map when they are `Double` or `String`. `keys` and `values` of an
+int pair narrow to that int column. `mapValues` runs when the new value stays an unboxed `Int`.
+Any other node keeps the whole plan on the row path. This requires
+`ScarletConf.columnarExecution` (the default). `Double` is the float64 column. A 32-bit `Float`
+stays on the row path. Strings are a dictionary of JVM strings plus int codes (`Utf8Dict`). A
+null string is a value, so filter and map see it. Group-by and join stay on int keys. Narrow columnar ops keep input order and the
 input partition count. `reduceByKey` and `join` hash with `floorMod` into
 `defaultShufflePartitions`.
 `columnarBatchSize` (default 8192) is the morsel width. Set `columnarExecution` false to force
 the row path.
 
 `count` and `sum` on an eligible plan read the finished columns. `count` sums batch lengths.
-`sum` of `Int` returns a `Long` and does not wrap. `sum` of `Double` returns a `Double`.
+`sum` of `Int` returns a `Long` and does not wrap. `sum` of `Double` returns a `Double`. `sum` of
+`keys`, `values`, or the values after an int `mapValues` reads the pair column in the morsel loop
+and does not build another batch. The key or value column is a view: its arrays are shared.
 `groupedSum` on `(Int, Int)` runs the wide grouped sum and folds the `Int64` group sums into one
 `Long`. A non-empty source, `filterKeys`, or `filterValues` of int pairs stays on that kernel. A
 completely empty source has no runtime type witness, so that sum returns zero on the row path.

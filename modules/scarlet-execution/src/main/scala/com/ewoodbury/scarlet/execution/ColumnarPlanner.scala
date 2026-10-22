@@ -27,13 +27,19 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
  * source order first. One step stays a [[PhysicalOp.Filter]] or [[PhysicalOp.Project]]. Pair
  * filters, aggregates, and joins stay one node per operator. Narrow map and filter keep input
  * order and the input partition count. `Double` and `String` select filter and map only. A filter
- * over a join result is not columnar. `reduceByKey` applies the user's function and wraps at
- * `Int`. `join` hash-partitions both sides and probes one bucket at a time. Output width for those
- * two is `defaultShufflePartitions`. [[tryCount]] reads finished column lengths. [[trySumInt]] and
+ * over a join result is not columnar. `keys` and `values` of an int pair are that column. The
+ * arrays are shared: a published column is not mutated, so a view is cheaper than a copy and still
+ * correct. `mapValues` lowers only when the function declares an unboxed `Int` result. A wider
+ * primitive or a reference result stays on the row path. That check reads the method descriptor
+ * and does not call the function. `reduceByKey` applies the user's function and wraps at `Int`.
+ * `join` hash-partitions both sides and probes one bucket at a time. Output width for those two is
+ * `defaultShufflePartitions`. [[tryCount]] reads finished column lengths. [[trySumInt]] and
  * [[trySumDouble]] add a filter/project chain in the fused loop and do not write that chain's
- * output column. [[tryGroupedSum]] runs [[ColumnPipeline.sumByKey]] on a witnessed pair source,
- * `filterKeys`, or `filterValues`, then folds the `Int64` group sums. An empty source has no
- * witness and is refused. It does not decode. `collect` still does.
+ * output column. Sum of `keys`, `values`, or an int `mapValues` reads the pair column in that
+ * morsel loop and does not build the projection. [[tryGroupedSum]] runs
+ * [[ColumnPipeline.sumByKey]] on a witnessed pair source, `filterKeys`, or `filterValues`, then
+ * folds the `Int64` group sums. An empty source has no witness and is refused. It does not decode.
+ * `collect` still does.
  *
  * An `ArraySeq.ofInt`, `ArraySeq.ofDouble`, or [[IntPairArrays]] source is copied into the column
  * on the calling thread. A boxed `Vector` or `List` is still read through its iterator.
@@ -147,6 +153,18 @@ object ColumnarPlanner:
       foldLong(batchesOf(interpret(source, child))) { batch =>
         ElementSum.sumInts(batch, steps)
       }
+    case (
+          Plan.ValuesOp(Plan.MapValuesOp(source, mapper)),
+          PhysicalOp.Value(PhysicalOp.MapValue(child)),
+        ) =>
+      val fn = mapper.asInstanceOf[Int => Int]
+      foldLong(pairsOf(interpret(source, child))) { batch =>
+        ColumnReduce.sumMappedInt32(batch, ordinal = 1, value => fn(value))
+      }
+    case (Plan.KeysOp(source), PhysicalOp.Key(child)) =>
+      sumPairColumn(source, child, ordinal = 0)
+    case (Plan.ValuesOp(source), PhysicalOp.Value(child)) =>
+      sumPairColumn(source, child, ordinal = 1)
     case _ =>
       ColumnReduce.sumInt32(batchesOf(interpret(plan, op)))
 
@@ -191,6 +209,12 @@ object ColumnarPlanner:
   private def isFloat(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Floats => true
     case _ => false
+
+  /** Read one int column of a pair plan. Does not allocate a projection batch. */
+  private def sumPairColumn(source: Plan[_], child: PhysicalOp, ordinal: Int): Long =
+    foldLong(pairsOf(interpret(source, child))) { batch =>
+      ColumnReduce.sumInt32At(batch, ordinal)
+    }
 
   private def foldLong(parts: Vector[ColumnBatch])(fn: ColumnBatch => Long): Long =
     if (parts.isEmpty) then 0L
@@ -249,6 +273,12 @@ object ColumnarPlanner:
       columnFilter(source, PhysicalOp.Slot.Key)
     case Plan.FilterValuesOp(source, _) =>
       columnFilter(source, PhysicalOp.Slot.Value)
+    case Plan.KeysOp(source) =>
+      pairColumn(source, key = true)
+    case Plan.ValuesOp(source) =>
+      pairColumn(source, key = false)
+    case Plan.MapValuesOp(source, mapper) =>
+      if (returnsUnboxedInt(mapper)) then mapValue(source) else None
     case Plan.ReduceByKeyOp(source, _) =>
       lowerPlan(source).flatMap { child =>
         child.kind match
@@ -316,6 +346,49 @@ object ColumnarPlanner:
         case _ => PhysicalOp.Pipeline(current, group.length)
     }
 
+  private def pairColumn(source: Plan[_], key: Boolean): Option[PhysicalOp] =
+    lowerPlan(source).flatMap { child =>
+      child.kind match
+        case PhysicalOp.Kind.Pairs =>
+          if (key) then Some(PhysicalOp.Key(child)) else Some(PhysicalOp.Value(child))
+        case _ => None
+    }
+
+  private def mapValue(source: Plan[_]): Option[PhysicalOp] =
+    lowerPlan(source).flatMap { child =>
+      child.kind match
+        case PhysicalOp.Kind.Pairs => Some(PhysicalOp.MapValue(child))
+        case _ => None
+    }
+
+  /**
+   * True when `function` declares an unboxed `Int => Int` apply. A declared `apply` that returns
+   * some other reference type is a change of type, including the bridge on an anonymous class, so
+   * the plan stays on the row path. This does not call `function`.
+   */
+  private def returnsUnboxedInt(function: Any): Boolean =
+    val methods = function.getClass.getDeclaredMethods
+    methods.exists(isUnboxedIntApply) && !methods.exists(isOtherReferenceApply)
+
+  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+  private def isUnboxedIntApply(method: java.lang.reflect.Method): Boolean =
+    val named = method.getName match
+      case "apply" | "apply$mcII$sp" => true
+      case _ => false
+    named &&
+    method.getReturnType.eq(classOf[Int]) &&
+    method.getParameterCount == 1 &&
+    method.getParameterTypes()(0).eq(classOf[Int])
+
+  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+  private def isOtherReferenceApply(method: java.lang.reflect.Method): Boolean =
+    val named = method.getName match
+      case "apply" => true
+      case _ => false
+    named &&
+    !method.getReturnType.eq(classOf[Int]) &&
+    !method.getReturnType.eq(classOf[AnyRef])
+
   private def columnFilter(source: Plan[_], slot: PhysicalOp.Slot): Option[PhysicalOp] =
     lowerPlan(source).flatMap { child =>
       child.kind match
@@ -353,6 +426,9 @@ object ColumnarPlanner:
     case PhysicalOp.Filter(child, _) => infoOf(child)
     case PhysicalOp.Project(child) => infoOf(child)
     case PhysicalOp.Pipeline(child, _) => infoOf(child)
+    case PhysicalOp.Key(child) => infoOf(child).withoutPairDistribution
+    case PhysicalOp.Value(child) => infoOf(child).withoutPairDistribution
+    case PhysicalOp.MapValue(child) => infoOf(child)
     case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin => hashed
     case PhysicalOp.Exchange(_) =>
       throw new IllegalStateException("exchange is only a child of aggregate or join")
@@ -381,6 +457,21 @@ object ColumnarPlanner:
           PhysicalOp.Filter(child, PhysicalOp.Slot.Value),
         ) =>
       applyFilter(interpret(source, child), predicate, PhysicalOp.Slot.Value)
+    case (Plan.KeysOp(source), PhysicalOp.Key(child)) =>
+      val columns = pairsOf(interpret(source, child)).map { batch =>
+        ColumnBatches.takeColumn(batch, 0)
+      }
+      Columns.Ints(columns)
+    case (Plan.ValuesOp(source), PhysicalOp.Value(child)) =>
+      val columns = pairsOf(interpret(source, child)).map { batch =>
+        ColumnBatches.takeColumn(batch, 1)
+      }
+      Columns.Ints(columns)
+    case (Plan.MapValuesOp(source, mapper), PhysicalOp.MapValue(child)) =>
+      val fn = mapper.asInstanceOf[Int => Int]
+      Columns.Pairs(onEach(pairsOf(interpret(source, child))) { batch =>
+        ColumnKernel.projectInt32(batch, 1, value => fn(value))
+      })
     case (
           Plan.ReduceByKeyOp(source, reduceFunc),
           PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)),
