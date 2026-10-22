@@ -106,22 +106,22 @@ object ColumnKernel:
   ): ColumnBatch =
     val column = asUtf8(columnAt(batch, ordinal), ordinal)
     val codes = values.iterator.map(column.codeOf).filter(_ >= 0).toSet
-    filterUtf8ByCodes(batch, ordinal, codes)
-
-  private def filterUtf8ByCodes(
-      batch: ColumnBatch,
-      ordinal: Int,
-      codes: Set[Int],
-  ): ColumnBatch =
-    val column = asUtf8(columnAt(batch, ordinal), ordinal)
     val codeColumn = Int32Column.of(column.codes, column.validity, column.length)
-    val withCodes = new ColumnBatch(
-      LogicalType.Int32 +: batch.schema,
-      codeColumn +: batch.columns,
-      batch.length,
+    val selection = new Array[Int](batch.length)
+    val scanned = scanInt32(
+      codeColumn,
+      value => codes.contains(value),
+      record = true,
+      selection = selection,
     )
-    val filtered = filterInt32(withCodes, 0, value => codes.contains(value))
-    new ColumnBatch(batch.schema, filtered.columns.drop(1), filtered.length)
+    val filteredCodes = asInt32(scanned.column, ordinal)
+    val filtered = DictUtf8Column.of(
+      column.dictionary,
+      filteredCodes.values,
+      filteredCodes.validity,
+      scanned.count,
+    )
+    assemble(batch, ordinal, filtered, selection, scanned.count)
 
   def filterBool(batch: ColumnBatch, ordinal: Int, predicate: BoolPredicate): ColumnBatch =
     val column = asBool(columnAt(batch, ordinal), ordinal)

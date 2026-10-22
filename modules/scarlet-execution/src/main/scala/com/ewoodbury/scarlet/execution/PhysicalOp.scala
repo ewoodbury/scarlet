@@ -8,9 +8,9 @@ import com.ewoodbury.scarlet.core.Partition
  * User functions stay on the logical plan, so lowering and interpretation have to agree node for
  * node. A straight int, float, or string filter/project chain can be one [[PhysicalOp.Pipeline]]
  * node. Other filters and projects remain one node per step. [[PhysicalOp.Project]] and `Pipeline`
- * keep the child kind. [[PhysicalOp.Key]] and [[PhysicalOp.Value]] narrow a pair to one int column
- * and share that column's arrays. [[PhysicalOp.MapValue]] rewrites an int value and keeps the
- * pair. [[PhysicalOp.Exchange]] sits under [[PhysicalOp.HashAggregate]] and on each side of
+ * keep the child kind. [[PhysicalOp.Column]] narrows a pair to one int column and shares its
+ * arrays. [[PhysicalOp.MapValue]] rewrites an int value and keeps the pair.
+ * [[PhysicalOp.Exchange]] sits under [[PhysicalOp.HashAggregate]] and on each side of
  * [[PhysicalOp.HashJoin]]. Those kernels perform the shuffle. Interpreting the boundary on its own
  * does not.
  */
@@ -19,11 +19,8 @@ enum PhysicalOp:
   case Filter(child: PhysicalOp, slot: PhysicalOp.Slot)
   case Project(child: PhysicalOp)
 
-  /** Key column of an int pair. Kind is [[PhysicalOp.Kind.Ints]]. */
-  case Key(child: PhysicalOp)
-
-  /** Value column of an int pair. Kind is [[PhysicalOp.Kind.Ints]]. */
-  case Value(child: PhysicalOp)
+  /** One column of an int pair. Kind is [[PhysicalOp.Kind.Ints]]. */
+  case Column(child: PhysicalOp, columnOrdinal: Int)
 
   /** `mapValues` whose new value is an unboxed int. Kind stays [[PhysicalOp.Kind.Pairs]]. */
   case MapValue(child: PhysicalOp)
@@ -43,8 +40,7 @@ enum PhysicalOp:
     case Project(child) => child.kind
     case Pipeline(child, _) => child.kind
     case Exchange(child) => child.kind
-    case Key(_) => PhysicalOp.Kind.Ints
-    case Value(_) => PhysicalOp.Kind.Ints
+    case Column(_, _) => PhysicalOp.Kind.Ints
     case MapValue(_) => PhysicalOp.Kind.Pairs
     case HashAggregate(_) => PhysicalOp.Kind.Pairs
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
@@ -56,8 +52,12 @@ enum PhysicalOp:
     case Project(child) => s"Project(${child.shape})"
     case Pipeline(child, length) => s"Pipeline$length(${child.shape})"
     case Exchange(child) => s"Exchange(${child.shape})"
-    case Key(child) => s"Key(${child.shape})"
-    case Value(child) => s"Value(${child.shape})"
+    case Column(child, columnOrdinal) =>
+      val label = columnOrdinal match
+        case 0 => "Key"
+        case 1 => "Value"
+        case other => s"Column$other"
+      s"$label(${child.shape})"
     case MapValue(child) => s"MapValue(${child.shape})"
     case HashAggregate(child) => s"HashAggregate(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
