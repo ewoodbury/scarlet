@@ -116,9 +116,13 @@ object BatchCodec:
       Int32Column.of(rightValues, Validity.pack(n, row => rightPresent(row)), n),
     )
 
-  def decodeInts(batch: ColumnBatch): Seq[Int] =
+  def decodeInts(batch: ColumnBatch): Seq[Int] = decodeInts(batch, batch.length)
+
+  def decodeInts(batch: ColumnBatch, maxRows: Int): Seq[Int] =
     val column = int32(batch)
-    Seq.tabulate(column.length) { row =>
+    val rows = decodedLength(batch, maxRows)
+    ColumnMetrics.noteDecoded(rows)
+    Seq.tabulate(rows) { row =>
       require(column.isValid(row), s"null Int32 at row $row")
       column.values(row)
     }
@@ -142,9 +146,13 @@ object BatchCodec:
       if (column.isValid(row)) Some(column.values(row)) else None
     }
 
-  def decodeFloat64s(batch: ColumnBatch): Seq[Double] =
+  def decodeFloat64s(batch: ColumnBatch): Seq[Double] = decodeFloat64s(batch, batch.length)
+
+  def decodeFloat64s(batch: ColumnBatch, maxRows: Int): Seq[Double] =
     val column = float64(batch)
-    Seq.tabulate(column.length) { row =>
+    val rows = decodedLength(batch, maxRows)
+    ColumnMetrics.noteDecoded(rows)
+    Seq.tabulate(rows) { row =>
       require(column.isValid(row), s"null Float64 at row $row")
       column.values(row)
     }
@@ -173,9 +181,13 @@ object BatchCodec:
   @SuppressWarnings(Array("org.wartremover.warts.Null", "org.wartremover.warts.Equals"))
   def isAbsent(text: String): Boolean = text eq null
 
-  def decodeStrings(batch: ColumnBatch): Seq[String] =
+  def decodeStrings(batch: ColumnBatch): Seq[String] = decodeStrings(batch, batch.length)
+
+  def decodeStrings(batch: ColumnBatch, maxRows: Int): Seq[String] =
     val column = utf8(batch)
-    Seq.tabulate(column.length) { row =>
+    val rows = decodedLength(batch, maxRows)
+    ColumnMetrics.noteDecoded(rows)
+    Seq.tabulate(rows) { row =>
       if (column.isValid(row)) then column.dictionary(column.codes(row))
       else stringElement(None)
     }
@@ -192,29 +204,43 @@ object BatchCodec:
       if (column.isValid(row)) Some(column.values(row) != 0) else None
     }
 
-  def decodeIntPairs(batch: ColumnBatch): Seq[(Int, Int)] =
+  def decodeIntPairs(batch: ColumnBatch): Seq[(Int, Int)] = decodeIntPairs(batch, batch.length)
+
+  def decodeIntPairs(batch: ColumnBatch, maxRows: Int): Seq[(Int, Int)] =
     val (left, right) = intPair(batch)
-    Seq.tabulate(batch.length) { row =>
+    val rows = decodedLength(batch, maxRows)
+    ColumnMetrics.noteDecoded(rows)
+    Seq.tabulate(rows) { row =>
       require(left.isValid(row) && right.isValid(row), s"null Int32 pair at row $row")
       (left.values(row), right.values(row))
     }
 
   /**
    * Join rows are `(key, build value, probe value)`. A null stays an error: the decoded `Int`
-   * would otherwise be the stored zero. Live bits are checked by word, then values are read
-   * unchecked. Spare capacity past `length` is ignored.
+   * would otherwise be the stored zero. A full decode checks live bits by word; a prefix decode
+   * checks only the rows it returns. Spare capacity past `length` is ignored.
    */
   def decodeIntTriples(batch: ColumnBatch): Seq[(Int, (Int, Int))] =
+    decodeIntTriples(batch, batch.length)
+
+  def decodeIntTriples(batch: ColumnBatch, maxRows: Int): Seq[(Int, (Int, Int))] =
     batch.columns match
       case Seq(keys: Int32Column, build: Int32Column, probe: Int32Column) =>
         require(
           keys.length == batch.length && build.length == batch.length && probe.length == batch.length,
           "join columns disagree on length",
         )
-        requireLive(keys)
-        requireLive(build)
-        requireLive(probe)
-        Seq.tabulate(batch.length) { row =>
+        val rows = decodedLength(batch, maxRows)
+        if (rows == batch.length) then
+          requireLive(keys)
+          requireLive(build)
+          requireLive(probe)
+        else
+          requireLivePrefix(keys, rows)
+          requireLivePrefix(build, rows)
+          requireLivePrefix(probe, rows)
+        ColumnMetrics.noteDecoded(rows)
+        Seq.tabulate(rows) { row =>
           (keys.values(row), (build.values(row), probe.values(row)))
         }
       case _ =>
@@ -301,3 +327,16 @@ object BatchCodec:
       case Seq(left: Int32Column, right: Int32Column) => (left, right)
       case _ =>
         throw new IllegalArgumentException(s"expected two Int32 columns, got ${batch.schema}")
+
+  private def decodedLength(batch: ColumnBatch, maxRows: Int): Int =
+    require(maxRows >= 0, s"maximum decoded rows must be >= 0, got $maxRows")
+    math.min(batch.length, maxRows)
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def requireLivePrefix(column: Int32Column, rows: Int): Unit =
+    var row = 0
+    while (row < rows) {
+      if (!column.isValid(row)) then
+        throw new IllegalArgumentException(s"null join value at row $row")
+      row += 1
+    }

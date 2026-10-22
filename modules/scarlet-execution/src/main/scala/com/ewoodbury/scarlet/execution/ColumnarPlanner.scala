@@ -53,6 +53,11 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
  * records [[Layout.Utf8Dict]]: that dictionary plus codes, one dictionary per batch. The string
  * lambda stays scalar over the decoded string. Int, double, and int-pair plans stay
  * [[Layout.Columnar]].
+ *
+ * `take` has a separate bounded path for accepted partition-preserving shapes: it interprets one
+ * source partition at a time in order and decodes only the remaining requested values. Plans with
+ * an exchange or aggregate stay on the row path because their output cannot be produced with this
+ * narrow short-circuit.
  */
 @SuppressWarnings(
   Array(
@@ -92,6 +97,26 @@ object ColumnarPlanner:
       case Some(op) =>
         try Some(decode(interpret(plan, op)).asInstanceOf[Seq[Partition[A]]])
         catch case _: ClassCastException => None
+
+  /**
+   * Run a partition-preserving accepted plan only until its first `n` results are available. Plans
+   * containing an exchange or aggregate are refused because producing their first output requires
+   * the full upstream input.
+   */
+  def tryTake[A](plan: Plan[A], n: Int): Option[Seq[A]] =
+    if (n <= 0) then Some(Seq.empty[A])
+    else
+      accepted(plan).filter(isPartitionPreserving) match
+        case None => None
+        case Some(op) =>
+          try
+            val values = (0 until partitionCount(op)).foldLeft(Vector.empty[Any]) {
+              (result, index) =>
+                if (result.length >= n) then result
+                else result ++ decodePrefix(interpret(plan, op, Some(index)), n - result.length)
+            }
+            Some(values.asInstanceOf[Seq[A]])
+          catch case _: ClassCastException => None
 
   /**
    * Row count of a columnar plan. `None` means the row path. This reads batch lengths and does not
@@ -286,8 +311,13 @@ object ColumnarPlanner:
       ColumnReduce.sumInt32At(batch, ordinal)
     }
 
-  private def pairProjection(source: Plan[_], child: PhysicalOp, ordinal: Int): Columns =
-    val columns = pairsOf(interpret(source, child)).map { batch =>
+  private def pairProjection(
+      source: Plan[_],
+      child: PhysicalOp,
+      ordinal: Int,
+      selectedPartition: Option[Int] = None,
+  ): Columns =
+    val columns = pairsOf(interpret(source, child, selectedPartition)).map { batch =>
       ColumnBatches.takeColumn(batch, ordinal)
     }
     Columns.Ints(columns)
@@ -336,6 +366,43 @@ object ColumnarPlanner:
 
   private def accepted(plan: Plan[_]): Option[PhysicalOp] =
     lower(plan).filter(op => infoOf(op).invalidReason.isEmpty)
+
+  private def isPartitionPreserving(op: PhysicalOp): Boolean = op match
+    case PhysicalOp.Scan(_, _) => true
+    case PhysicalOp.Filter(child, _) => isPartitionPreserving(child)
+    case PhysicalOp.Project(child) => isPartitionPreserving(child)
+    case PhysicalOp.Pipeline(child, _) => isPartitionPreserving(child)
+    case PhysicalOp.Column(child, _) => isPartitionPreserving(child)
+    case PhysicalOp.MapValue(child) => isPartitionPreserving(child)
+    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.Exchange => false
+
+  private def partitionCount(op: PhysicalOp): Int = op match
+    case PhysicalOp.Scan(_, partitions) => partitions.length
+    case PhysicalOp.Filter(child, _) => partitionCount(child)
+    case PhysicalOp.Project(child) => partitionCount(child)
+    case PhysicalOp.Pipeline(child, _) => partitionCount(child)
+    case PhysicalOp.Column(child, _) => partitionCount(child)
+    case PhysicalOp.MapValue(child) => partitionCount(child)
+    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.Exchange => 0
+
+  private def selectPartition[A](
+      partitions: Seq[Partition[A]],
+      selectedPartition: Option[Int],
+  ): Seq[Partition[A]] = selectedPartition match
+    case None => partitions
+    case Some(index) => partitions.slice(index, index + 1)
+
+  private def decodePrefix(columns: Columns, limit: Int): Seq[Any] = columns match
+    case Columns.Ints(parts) =>
+      parts.headOption.toSeq.flatMap(batch => BatchCodec.decodeInts(batch, limit))
+    case Columns.Floats(parts) =>
+      parts.headOption.toSeq.flatMap(batch => BatchCodec.decodeFloat64s(batch, limit))
+    case Columns.Pairs(parts) =>
+      parts.headOption.toSeq.flatMap(batch => BatchCodec.decodeIntPairs(batch, limit))
+    case Columns.Triples(parts) =>
+      parts.headOption.toSeq.flatMap(batch => BatchCodec.decodeIntTriples(batch, limit))
+    case Columns.Strings(parts) =>
+      parts.headOption.toSeq.flatMap(batch => BatchCodec.decodeStrings(batch, limit))
 
   private def lowerPlan(plan: Plan[_]): Option[PhysicalOp] =
     val (base, steps) = elementSteps(plan, Int.MaxValue)
@@ -548,35 +615,39 @@ object ColumnarPlanner:
     case PhysicalOp.Scan(kind, partitions) =>
       narrow(Distribution.Unknown(partitions.length), layoutOf(kind))
 
-  private def interpret(plan: Plan[_], op: PhysicalOp): Columns = (plan, op) match
+  private def interpret(
+      plan: Plan[_],
+      op: PhysicalOp,
+      selectedPartition: Option[Int] = None,
+  ): Columns = (plan, op) match
     case (Plan.Source(partitions), PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) =>
-      Columns.Ints(encodeInts(partitions))
+      Columns.Ints(encodeInts(selectPartition(partitions, selectedPartition)))
     case (Plan.Source(partitions), PhysicalOp.Scan(PhysicalOp.Kind.Floats, _)) =>
-      Columns.Floats(encodeFloats(partitions))
+      Columns.Floats(encodeFloats(selectPartition(partitions, selectedPartition)))
     case (Plan.Source(partitions), PhysicalOp.Scan(PhysicalOp.Kind.Pairs, _)) =>
-      Columns.Pairs(encodePairs(partitions))
+      Columns.Pairs(encodePairs(selectPartition(partitions, selectedPartition)))
     case (Plan.Source(partitions), PhysicalOp.Scan(PhysicalOp.Kind.Strings, _)) =>
-      Columns.Strings(encodeStrings(partitions))
+      Columns.Strings(encodeStrings(selectPartition(partitions, selectedPartition)))
     case (Plan.FilterOp(source, predicate), PhysicalOp.Filter(child, slot)) =>
-      applyFilter(interpret(source, child), predicate, slot)
+      applyFilter(interpret(source, child, selectedPartition), predicate, slot)
     case (Plan.MapOp(source, mapper), PhysicalOp.Project(child)) =>
-      project(interpret(source, child), mapper)
+      project(interpret(source, child, selectedPartition), mapper)
     case (logical, PhysicalOp.Pipeline(child, length)) =>
-      interpretPipeline(logical, child, length)
+      interpretPipeline(logical, child, length, selectedPartition)
     case (Plan.FilterKeysOp(source, predicate), PhysicalOp.Filter(child, PhysicalOp.Slot.Key)) =>
-      applyFilter(interpret(source, child), predicate, PhysicalOp.Slot.Key)
+      applyFilter(interpret(source, child, selectedPartition), predicate, PhysicalOp.Slot.Key)
     case (
           Plan.FilterValuesOp(source, predicate),
           PhysicalOp.Filter(child, PhysicalOp.Slot.Value),
         ) =>
-      applyFilter(interpret(source, child), predicate, PhysicalOp.Slot.Value)
+      applyFilter(interpret(source, child, selectedPartition), predicate, PhysicalOp.Slot.Value)
     case (Plan.KeysOp(source), PhysicalOp.Column(child, 0)) =>
-      pairProjection(source, child, ordinal = 0)
+      pairProjection(source, child, ordinal = 0, selectedPartition = selectedPartition)
     case (Plan.ValuesOp(source), PhysicalOp.Column(child, 1)) =>
-      pairProjection(source, child, ordinal = 1)
+      pairProjection(source, child, ordinal = 1, selectedPartition = selectedPartition)
     case (Plan.MapValuesOp(source, mapper), PhysicalOp.MapValue(child)) =>
       val fn = mapper.asInstanceOf[Int => Int]
-      Columns.Pairs(onEach(pairsOf(interpret(source, child))) { batch =>
+      Columns.Pairs(onEach(pairsOf(interpret(source, child, selectedPartition))) { batch =>
         ColumnKernel.projectInt32(batch, 1, value => fn(value))
       })
     case (
@@ -586,7 +657,7 @@ object ColumnarPlanner:
       val op = reduceFunc.asInstanceOf[(Int, Int) => Int]
       Columns.Pairs(
         HashReduce.byKey(
-          pairsOf(interpret(source, child)),
+          pairsOf(interpret(source, child, selectedPartition)),
           shuffleWidth,
           parallelism,
           batchSize,
@@ -599,8 +670,8 @@ object ColumnarPlanner:
         ) =>
       Columns.Triples(
         ColumnPipeline.innerJoin(
-          pairsOf(interpret(left, leftOp)),
-          pairsOf(interpret(right, rightOp)),
+          pairsOf(interpret(left, leftOp, selectedPartition)),
+          pairsOf(interpret(right, rightOp, selectedPartition)),
           shuffleWidth,
           parallelism,
           batchSize,
@@ -611,12 +682,17 @@ object ColumnarPlanner:
         s"physical tree does not match ${plan.getClass.getSimpleName}",
       )
 
-  private def interpretPipeline(plan: Plan[_], child: PhysicalOp, length: Int): Columns =
+  private def interpretPipeline(
+      plan: Plan[_],
+      child: PhysicalOp,
+      length: Int,
+      selectedPartition: Option[Int],
+  ): Columns =
     val (source, steps) = elementSteps(plan, length)
     if (steps.length < length) then
       // Lowering uses this same collector, so this only guards a malformed physical tree.
       throw new IllegalStateException("pipeline does not match logical element steps")
-    pipeline(interpret(source, child), steps)
+    pipeline(interpret(source, child, selectedPartition), steps)
 
   private def pipeline(columns: Columns, steps: List[ElementStep]): Columns = columns match
     case Columns.Ints(parts) =>
