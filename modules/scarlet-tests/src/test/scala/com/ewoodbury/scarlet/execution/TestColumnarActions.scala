@@ -21,6 +21,73 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     ScarletConf.set(originalConf)
     ()
 
+  "take" should "take an int filter and map in partition order and decode only the requested rows" in {
+    val mapCalls = new AtomicInteger
+    def mapped = DistCollection(1 to 12, 4).filter(_ % 2 == 0).map { value =>
+      mapCalls.incrementAndGet()
+      value * 3
+    }
+
+    val expected = row(mapped.take(3))
+    mapCalls.set(0)
+    armColumnar()
+    ColumnMetrics.arm()
+
+    mapped.take(3) shouldBe expected
+    ColumnMetrics.decodedValueCount shouldBe 3L
+    mapCalls.get() shouldBe 3
+    assertNarrow(mapped, 4)
+    ColumnMetrics.disarm()
+    mapped.first() shouldBe mapped.take(1).headOption.getOrElse(fail("take(1) was empty"))
+  }
+
+  it should "return empty for zero and negative limits" in {
+    armColumnar()
+    val values = DistCollection(1 to 8, 3).map(_ * 2)
+
+    values.take(0) shouldBe empty
+    values.take(-2) shouldBe empty
+  }
+
+  it should "return all values when the limit exceeds the source" in {
+    def values = DistCollection(1 to 5, 3).filter(_ > 1).map(_ + 10)
+
+    val expected = row(values.take(20))
+    columnar(values.take(20)) shouldBe expected
+  }
+
+  it should "take accepted pair and string plans like the row path" in {
+    def pairs = DistCollection(Seq(1 -> 10, 2 -> 20, 3 -> 30, 4 -> 40), 2)
+      .filterValues[Int, Int](_ >= 20)
+    def strings = DistCollection(Seq("red", "blue", "red", "green"), 2)
+      .filterStringEquals("red")
+      .map(_.toUpperCase(java.util.Locale.ENGLISH))
+
+    val expectedPairs = row(pairs.take(2))
+    val expectedStrings = row(strings.take(1))
+
+    columnar(pairs.take(2)) shouldBe expectedPairs
+    columnar(strings.take(1)) shouldBe expectedStrings
+    columnar(ColumnarPlanner.partitioning(pairs.plan).map(_.layout)) shouldBe
+      Some(Layout.Columnar(ScarletConf.get.columnarBatchSize))
+    columnar(ColumnarPlanner.partitioning(strings.plan).map(_.layout)) shouldBe
+      Some(Layout.Utf8Dict(ScarletConf.get.columnarBatchSize))
+  }
+
+  it should "keep exchange plans on the row path" in {
+    def reduced = DistCollection(Seq(1 -> 2, 2 -> 4, 1 -> 8, 3 -> 6), 2)
+      .reduceByKey[Int, Int](_ + _)
+
+    val expected = row(reduced.take(2))
+    ScarletRuntime.get.shuffle.clear()
+    ScarletConf.set(originalConf.copy(columnarExecution = true))
+    ColumnMetrics.arm()
+
+    reduced.take(2) shouldBe expected
+    ColumnMetrics.batchCount shouldBe 0L
+    ColumnMetrics.decodedValueCount shouldBe 0L
+  }
+
   "count" should "match the row path on a filtered column" in {
     val ints = Seq(1, 2, 3, 4, 5)
     columnar(DistCollection(ints, 2).filter(_ > 2).count()) shouldBe 3L

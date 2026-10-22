@@ -38,9 +38,13 @@ executor (`StageExecutor`/`ShuffleHandler`/`ExecutionPlanner` dispatch only on `
 DistCollection action
   -> ExecutionService (SPI, registered by the execution module)
   -> DefaultExecutionService
-       bare Plan.Source: return its partitions
-        ColumnarPlanner.tryRun: lower and interpret an eligible plan
-       otherwise DAGScheduler.executePartitions
+       executePartitions:
+         bare Plan.Source: return its partitions
+         ColumnarPlanner.tryRun: lower and interpret an eligible plan
+         otherwise DAGScheduler.executePartitions
+       take:
+         ColumnarPlanner.tryTake: scan eligible partitions in order and decode its prefix
+         otherwise row path
             -> StageBuilder.buildStageGraph
             -> TopologicalSort
             -> ExecutionPlanner.runStages
@@ -54,6 +58,12 @@ The columnar planner accepts only supported typed plan shapes when
 `ScarletConf.columnarExecution` is enabled; every other shape runs wholly on the row path. The
 columnar implementation and action behavior are documented in `ColumnarPlanner`, `ColumnPipeline`,
 and `DistCollection` scaladoc. `columnarBatchSize` (default 8192) sets the morsel width.
+
+Bounded `take` applies to accepted partition-preserving plans: int, double, and string sources with
+their supported element filters/maps; int-pair sources with row/key/value filters, `keys`/`values`,
+and int `mapValues`. It visits those partitions in order and decodes only the remaining requested
+prefix. A reduce, join, or other exchange/aggregate shape stays on the row path because its output
+requires processing the complete upstream input before the first result is known.
 
 On the row path, narrow-only plans compile to a one-stage graph and flow through the same path
 as wide plans.
