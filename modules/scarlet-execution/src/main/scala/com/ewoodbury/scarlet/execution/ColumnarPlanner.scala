@@ -164,15 +164,15 @@ object ColumnarPlanner:
       }
     case (
           Plan.ValuesOp(Plan.MapValuesOp(source, mapper)),
-          PhysicalOp.Value(PhysicalOp.MapValue(child)),
+          PhysicalOp.Column(PhysicalOp.MapValue(child), 1),
         ) =>
       val fn = mapper.asInstanceOf[Int => Int]
       foldLong(pairsOf(interpret(source, child))) { batch =>
         ColumnReduce.sumMappedInt32(batch, ordinal = 1, value => fn(value))
       }
-    case (Plan.KeysOp(source), PhysicalOp.Key(child)) =>
+    case (Plan.KeysOp(source), PhysicalOp.Column(child, 0)) =>
       sumPairColumn(source, child, ordinal = 0)
-    case (Plan.ValuesOp(source), PhysicalOp.Value(child)) =>
+    case (Plan.ValuesOp(source), PhysicalOp.Column(child, 1)) =>
       sumPairColumn(source, child, ordinal = 1)
     case _ =>
       ColumnReduce.sumInt32(batchesOf(interpret(plan, op)))
@@ -234,32 +234,17 @@ object ColumnarPlanner:
     classify(source.partitions) match
       case Some(PhysicalOp.Kind.Pairs) =>
         val parts = encodePairs(source.partitions)
-        val grouped =
-          if (steps.isEmpty) then plainSum(parts)
-          else fusedSum(parts, steps.toVector)
+        val grouped = ColumnPipeline.sumByKey(
+          parts,
+          keyOrdinal = 0,
+          valueOrdinal = 1,
+          numPartitions = shuffleWidth,
+          parallelism = parallelism,
+          batchSize = batchSize,
+          steps = steps.toVector,
+        )
         Some(ColumnReduce.sumInt64(grouped, ordinal = 1))
       case _ => None
-
-  private def plainSum(parts: Vector[ColumnBatch]): Vector[ColumnBatch] =
-    ColumnPipeline.sumByKey(
-      parts,
-      keyOrdinal = 0,
-      valueOrdinal = 1,
-      numPartitions = shuffleWidth,
-      parallelism = parallelism,
-      batchSize = batchSize,
-    )
-
-  private def fusedSum(parts: Vector[ColumnBatch], steps: Vector[PairStep]): Vector[ColumnBatch] =
-    ColumnPipeline.sumByKey(
-      parts,
-      keyOrdinal = 0,
-      valueOrdinal = 1,
-      numPartitions = shuffleWidth,
-      parallelism = parallelism,
-      batchSize = batchSize,
-      steps = steps,
-    )
 
   /**
    * Columnar layout for a pair map (or a map mixed with pair filters) that [[tryGroupedSum]]
@@ -273,7 +258,12 @@ object ColumnarPlanner:
         case source: Plan.Source[_] if steps.exists(isPairMap) =>
           classify(source.partitions) match
             case Some(PhysicalOp.Kind.Pairs) =>
-              Some(narrow(Distribution.Unknown(source.partitions.length), primitiveLayout))
+              Some(
+                narrow(
+                  Distribution.Unknown(source.partitions.length),
+                  layoutOf(PhysicalOp.Kind.Pairs),
+                ),
+              )
             case _ => None
         case _ => None
 
@@ -294,6 +284,12 @@ object ColumnarPlanner:
     foldLong(pairsOf(interpret(source, child))) { batch =>
       ColumnReduce.sumInt32At(batch, ordinal)
     }
+
+  private def pairProjection(source: Plan[_], child: PhysicalOp, ordinal: Int): Columns =
+    val columns = pairsOf(interpret(source, child)).map { batch =>
+      ColumnBatches.takeColumn(batch, ordinal)
+    }
+    Columns.Ints(columns)
 
   private def foldLong(parts: Vector[ColumnBatch])(fn: ColumnBatch => Long): Long =
     if (parts.isEmpty) then 0L
@@ -353,9 +349,9 @@ object ColumnarPlanner:
     case Plan.FilterValuesOp(source, _) =>
       columnFilter(source, PhysicalOp.Slot.Value)
     case Plan.KeysOp(source) =>
-      pairColumn(source, key = true)
+      pairColumn(source, ordinal = 0)
     case Plan.ValuesOp(source) =>
-      pairColumn(source, key = false)
+      pairColumn(source, ordinal = 1)
     case Plan.MapValuesOp(source, mapper) =>
       if (returnsUnboxedInt(mapper)) then mapValue(source) else None
     case Plan.ReduceByKeyOp(source, _) =>
@@ -451,11 +447,11 @@ object ColumnarPlanner:
       )(literals)
     case _ => None
 
-  private def pairColumn(source: Plan[_], key: Boolean): Option[PhysicalOp] =
+  private def pairColumn(source: Plan[_], ordinal: Int): Option[PhysicalOp] =
     lowerPlan(source).flatMap { child =>
       child.kind match
         case PhysicalOp.Kind.Pairs =>
-          if (key) then Some(PhysicalOp.Key(child)) else Some(PhysicalOp.Value(child))
+          Some(PhysicalOp.Column(child, ordinal))
         case _ => None
     }
 
@@ -531,8 +527,7 @@ object ColumnarPlanner:
     case PhysicalOp.Filter(child, _) => infoOf(child)
     case PhysicalOp.Project(child) => infoOf(child)
     case PhysicalOp.Pipeline(child, _) => infoOf(child)
-    case PhysicalOp.Key(child) => infoOf(child).withoutPairDistribution
-    case PhysicalOp.Value(child) => infoOf(child).withoutPairDistribution
+    case PhysicalOp.Column(child, _) => infoOf(child).withoutPairDistribution
     case PhysicalOp.MapValue(child) => infoOf(child)
     case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin => hashed
     case PhysicalOp.Exchange(_) =>
@@ -562,16 +557,10 @@ object ColumnarPlanner:
           PhysicalOp.Filter(child, PhysicalOp.Slot.Value),
         ) =>
       applyFilter(interpret(source, child), predicate, PhysicalOp.Slot.Value)
-    case (Plan.KeysOp(source), PhysicalOp.Key(child)) =>
-      val columns = pairsOf(interpret(source, child)).map { batch =>
-        ColumnBatches.takeColumn(batch, 0)
-      }
-      Columns.Ints(columns)
-    case (Plan.ValuesOp(source), PhysicalOp.Value(child)) =>
-      val columns = pairsOf(interpret(source, child)).map { batch =>
-        ColumnBatches.takeColumn(batch, 1)
-      }
-      Columns.Ints(columns)
+    case (Plan.KeysOp(source), PhysicalOp.Column(child, 0)) =>
+      pairProjection(source, child, ordinal = 0)
+    case (Plan.ValuesOp(source), PhysicalOp.Column(child, 1)) =>
+      pairProjection(source, child, ordinal = 1)
     case (Plan.MapValuesOp(source, mapper), PhysicalOp.MapValue(child)) =>
       val fn = mapper.asInstanceOf[Int => Int]
       Columns.Pairs(onEach(pairsOf(interpret(source, child))) { batch =>
@@ -766,20 +755,15 @@ object ColumnarPlanner:
     PartitioningInfo(
       Distribution.Hash(shuffleWidth, PartitioningInfo.RowKeyOrdinals),
       OrderingTag.Unsorted,
-      primitiveLayout,
+      layoutOf(PhysicalOp.Kind.Pairs),
     )
 
   /** String plans name the dictionary layout. Int, double, and pair plans stay columnar. */
   private def layoutOf(kind: PhysicalOp.Kind): Layout = kind match
-    case PhysicalOp.Kind.Strings => stringLayout
+    case PhysicalOp.Kind.Strings => Layout.Utf8Dict(ScarletConf.get.columnarBatchSize)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs |
         PhysicalOp.Kind.Triples =>
-      primitiveLayout
-
-  private def primitiveLayout: Layout = Layout.Columnar(ScarletConf.get.columnarBatchSize)
-
-  /** Per-batch dictionary of JVM strings plus int codes. */
-  private def stringLayout: Layout = Layout.Utf8Dict(ScarletConf.get.columnarBatchSize)
+      Layout.Columnar(ScarletConf.get.columnarBatchSize)
 
   private def batchSize: Int =
     val size = ScarletConf.get.columnarBatchSize

@@ -41,6 +41,21 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(DistCollection(Seq("a", "bb", "c"), 2).filter(_.length > 1).count()) shouldBe 1L
   }
 
+  it should "filter dictionary codes without intermediate batches" in {
+    ScarletConf.set(
+      originalConf.copy(columnarExecution = true, columnarBatchSize = 16, threadPoolSize = 1),
+    )
+    ColumnMetrics.arm()
+    val filtered = DistCollection(Seq("US", "CA", "US"), 1).filterStringEquals("US").collect()
+    val batches = ColumnMetrics.batchCount
+    val visits = ColumnMetrics.visitCount
+    ColumnMetrics.disarm()
+
+    filtered shouldBe Seq("US", "US")
+    batches shouldBe 2L
+    visits shouldBe 1L
+  }
+
   it should "stay correct when morsels split a partition" in {
     ScarletConf.set(
       originalConf.copy(columnarExecution = true, columnarBatchSize = 2, threadPoolSize = 4),
