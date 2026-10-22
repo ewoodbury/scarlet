@@ -5,9 +5,11 @@ package com.ewoodbury.scarlet.columnar
  *
  * Each input batch is sliced into morsels. Sums run `sumInt32` on the morsel, `sumInt64` to merge
  * that batch's partials, and `sumInt64` again after the exchange, so a partial sum does not wrap
- * at `Int`. An empty input is `numPartitions` empty sum batches, the same convention as
- * [[HashReduce.byKey]]. The join reads key column 0 and value column 1 on both sides, exchanges
- * each side, and probes one partition at a time.
+ * at `Int`. Each output batch is an `Int32` key and an `Int64` sum. Fold the sum with
+ * [[ColumnReduce.sumInt64]] at ordinal 1; the batch has two columns. An empty input is
+ * `numPartitions` empty sum batches, the same convention as [[HashReduce.byKey]]. The join reads
+ * key column 0 and value column 1 on both sides, exchanges each side, and probes one partition at
+ * a time.
  */
 object ColumnPipeline:
 
