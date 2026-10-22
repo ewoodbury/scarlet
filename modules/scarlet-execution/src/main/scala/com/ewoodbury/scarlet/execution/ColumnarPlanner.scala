@@ -47,7 +47,10 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
  * on the calling thread. A boxed `Vector` or `List` is still read through its iterator.
  *
  * A null string is a value. Classification skips a leading null and keeps looking for a `String`.
- * An all-null source stays on the row path, because there is no witness.
+ * An all-null source stays on the row path, because there is no witness. An accepted string plan
+ * records [[Layout.Utf8Dict]]: that dictionary plus codes, one dictionary per batch. The string
+ * lambda stays scalar over the decoded string. Int, double, and int-pair plans stay
+ * [[Layout.Columnar]].
  */
 @SuppressWarnings(
   Array(
@@ -59,9 +62,11 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
 object ColumnarPlanner:
 
   /**
-   * Layout the planner would use, without running the plan. `None` means the row path. A pair map
-   * that [[tryGroupedSum]] can fuse reports columnar here and still lowers to `None`, because
-   * `collect` and `reduceByKey` do not run that map on the columnar path.
+   * Layout the planner would use, without running the plan. `None` means the row path. A string
+   * filter or map reports [[Layout.Utf8Dict]]. An int, double, or int-pair plan reports
+   * [[Layout.Columnar]]. A pair map that [[tryGroupedSum]] can fuse reports columnar here and
+   * still lowers to `None`, because `collect` and `reduceByKey` do not run that map on the
+   * columnar path.
    */
   def partitioning[A](plan: Plan[A]): Option[PartitioningInfo] =
     accepted(plan).map(infoOf).orElse(fusedPairLayout(plan))
@@ -267,7 +272,7 @@ object ColumnarPlanner:
         case source: Plan.Source[_] if steps.exists(isPairMap) =>
           classify(source.partitions) match
             case Some(PhysicalOp.Kind.Pairs) =>
-              Some(narrow(Distribution.Unknown(source.partitions.length)))
+              Some(narrow(Distribution.Unknown(source.partitions.length), primitiveLayout))
             case _ => None
         case _ => None
 
@@ -505,8 +510,8 @@ object ColumnarPlanner:
     case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin => hashed
     case PhysicalOp.Exchange(_) =>
       throw new IllegalStateException("exchange is only a child of aggregate or join")
-    case PhysicalOp.Scan(_, partitions) =>
-      narrow(Distribution.Unknown(partitions.length))
+    case PhysicalOp.Scan(kind, partitions) =>
+      narrow(Distribution.Unknown(partitions.length), layoutOf(kind))
 
   private def interpret(plan: Plan[_], op: PhysicalOp): Columns = (plan, op) match
     case (Plan.Source(partitions), PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) =>
@@ -721,17 +726,27 @@ object ColumnarPlanner:
     case Columns.Strings(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeStrings(batch)))
 
-  private def narrow(distribution: Distribution): PartitioningInfo =
-    PartitioningInfo(distribution, OrderingTag.Unsorted, layout)
+  private def narrow(distribution: Distribution, chosen: Layout): PartitioningInfo =
+    PartitioningInfo(distribution, OrderingTag.Unsorted, chosen)
 
   private def hashed: PartitioningInfo =
     PartitioningInfo(
       Distribution.Hash(shuffleWidth, PartitioningInfo.RowKeyOrdinals),
       OrderingTag.Unsorted,
-      layout,
+      primitiveLayout,
     )
 
-  private def layout: Layout = Layout.Columnar(ScarletConf.get.columnarBatchSize)
+  /** String plans name the dictionary layout. Int, double, and pair plans stay columnar. */
+  private def layoutOf(kind: PhysicalOp.Kind): Layout = kind match
+    case PhysicalOp.Kind.Strings => stringLayout
+    case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs |
+        PhysicalOp.Kind.Triples =>
+      primitiveLayout
+
+  private def primitiveLayout: Layout = Layout.Columnar(ScarletConf.get.columnarBatchSize)
+
+  /** Per-batch dictionary of JVM strings plus int codes. */
+  private def stringLayout: Layout = Layout.Utf8Dict(ScarletConf.get.columnarBatchSize)
 
   private def batchSize: Int =
     val size = ScarletConf.get.columnarBatchSize

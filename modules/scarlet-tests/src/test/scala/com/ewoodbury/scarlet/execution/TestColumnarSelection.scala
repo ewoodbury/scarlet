@@ -69,7 +69,14 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     DistCollection(Seq(1, 2, 3), 2).map(_.toString).collect() shouldBe Seq("1", "2", "3")
   }
 
-  "string keys" should "keep reduceByKey and join on the row path" in {
+  "string keys" should "keep groupByKey, reduceByKey, and join on the row path" in {
+    val grouped = DistCollection(Seq("a" -> 1, "a" -> 2, "b" -> 3), 2).groupByKey
+    infoOf(grouped) shouldBe Option.empty[PartitioningInfo]
+    grouped.collect().map { case (key, values) => key -> values.toSet }.toMap shouldBe Map(
+      "a" -> Set(1, 2),
+      "b" -> Set(3),
+    )
+
     val reduced = DistCollection(Seq("a" -> 1, "a" -> 2, "b" -> 3), 2).reduceByKey[String, Int](_ + _)
     reduced.collect().toMap shouldBe Map("a" -> 3, "b" -> 3)
     infoOf(reduced) shouldBe Option.empty[PartitioningInfo]
@@ -163,7 +170,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     assertHashed(build.join(probe))
   }
 
-  "string filter" should "keep input order, nulls, and a columnar layout" in {
+  "string filter" should "keep input order, nulls, and a dictionary layout" in {
     val filtered = DistCollection(texts(Some("a"), None, Some("bb"), Some("a"), Some("")), 2).filter {
       value =>
         Option(value) match
@@ -172,7 +179,8 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     }
 
     filtered.collect() shouldBe texts(Some("a"), None, Some("a"), Some(""))
-    assertNarrow(filtered, 2)
+    assertUtf8(filtered, 2)
+    columnar(filtered.collect()) shouldBe row(filtered.collect())
   }
 
   it should "keep order when map and filter run as morsels" in {
@@ -182,21 +190,21 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
       .filter(_.length > 1)
 
     mapped.collect() shouldBe Seq("BB", "CCC", "EE")
-    assertNarrow(mapped, 1)
+    assertUtf8(mapped, 1)
   }
 
   it should "select strings that start with null, and leave an all-null source on the row path" in {
     val witnessed =
       DistCollection(texts(None, Some("a"), Some("b")), 1).filter(value => Option(value).isDefined)
     witnessed.collect() shouldBe Seq("a", "b")
-    assertNarrow(witnessed, 1)
+    assertUtf8(witnessed, 1)
 
     val unseen = DistCollection(texts(None, None), 2).filter(_ => true)
     unseen.collect() shouldBe texts(None, None)
     infoOf(unseen) shouldBe Option.empty[PartitioningInfo]
   }
 
-  it should "match the row path when a map introduces and removes nulls" in {
+  it should "record a dictionary layout and match the row path when a map changes nulls" in {
     val plan = DistCollection(texts(Some("a"), None, Some("bb"), Some("a")), 2).map { value =>
       Option(value) match
         case None => "n"
@@ -204,7 +212,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
         case Some(present) => present.toUpperCase(java.util.Locale.ENGLISH)
     }
 
-    assertNarrow(plan, 2)
+    assertUtf8(plan, 2)
     columnar(plan.collect()) shouldBe row(plan.collect())
   }
 
@@ -265,6 +273,15 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
 
   private def infoOf[A](collection: DistCollection[A]): Option[PartitioningInfo] =
     ColumnarPlanner.partitioning(collection.plan)
+
+  private def assertUtf8[A](collection: DistCollection[A], width: Int): PartitioningInfo =
+    val info = PartitioningInfo(
+      Distribution.Unknown(width),
+      OrderingTag.Unsorted,
+      Layout.Utf8Dict(ScarletConf.get.columnarBatchSize),
+    )
+    infoOf(collection) shouldBe Some(info)
+    info
 
   private def assertNarrow[A](collection: DistCollection[A], width: Int): PartitioningInfo =
     val info = infoOf(collection).getOrElse(fail("expected a columnar plan"))
