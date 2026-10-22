@@ -170,6 +170,9 @@ final class DictUtf8Column private (
 ) extends Column:
   def logicalType: LogicalType = LogicalType.Utf8Dict
 
+  /** Returns the dictionary code for `value`, or `-1` when this batch does not contain it. */
+  private[columnar] def codeOf(value: String): Int = dictionary.indexOf(value)
+
 object DictUtf8Column:
 
   def apply(values: Seq[String]): DictUtf8Column = fromIterable(values)
