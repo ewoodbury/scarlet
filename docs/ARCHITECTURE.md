@@ -1,9 +1,7 @@
 # Architecture
 
-Scarlet is a data processing engine inspired by Spark, written in pure functional Scala 3. This
-document describes the system as it exists today: a row path and a columnar path for `Int`,
-`(Int, Int)`, and `String` filter and map, plus `keys`, `values`, and int `mapValues` on int
-pairs, a clean logical/physical split, and type erasure confined to named boundaries.
+Scarlet is a data processing engine inspired by Spark, written in Scala 3. It has a row execution
+path and a typed columnar path for selected plans, with type erasure confined to named boundaries.
 
 ## Module layout
 
@@ -28,15 +26,8 @@ Two vocabularies, separated at the module level:
   `DistCollection` transformations only prepend nodes; nothing runs until an action.
 - **Physical** (`scarlet-execution`): `StageGraph` — stages, dependencies, shuffle boundaries.
   Narrow operations are fused into stages; wide operations become shuffle stages carrying a
-  structured `WideOp` record. The columnar path has a second tree, `PhysicalOp`, with `Scan`,
-  `Filter`, `Project`, `Pipeline`, `Key`, `Value`, `MapValue`, `Exchange`, `HashAggregate`, and
-  `HashJoin` nodes.
-  `ColumnarPlanner.lower` builds it and does not run user functions. Straight int, double, and
-  string filter/project runs of two to four steps use one fused pipeline kernel; longer runs are
-  cut into chunks of four. Pair operations, aggregates, and joins remain separate nodes. `keys`
-  and `values` are one int column. `mapValues` is one node when the value stays an int.
-  `Exchange` is the boundary under an aggregate and on each side of a join; those kernels perform
-  the shuffle.
+  structured `WideOp` record. `ColumnarPlanner` builds and interprets a separate `PhysicalOp`
+  tree for eligible plans; its scaladoc documents selection and fusion.
 
 The rule: `Plan` is legal in the compiler (`StageBuilder` reads it to compile), illegal in the
 executor (`StageExecutor`/`ShuffleHandler`/`ExecutionPlanner` dispatch only on `WideOp`).
@@ -48,7 +39,7 @@ DistCollection action
   -> ExecutionService (SPI, registered by the execution module)
   -> DefaultExecutionService
        bare Plan.Source: return its partitions
-       ColumnarPlanner.tryRun: lower an encodable Int, Double, (Int, Int), or String plan to PhysicalOp, then interpret
+        ColumnarPlanner.tryRun: lower and interpret an eligible plan
        otherwise DAGScheduler.executePartitions
             -> StageBuilder.buildStageGraph
             -> TopologicalSort
@@ -59,33 +50,10 @@ DistCollection action
   -> final partitions, flattened only at the action boundary
 ```
 
-A bare `Plan.Source` short-circuits to its partitions. `ColumnarPlanner` runs filter, map,
-filterKeys, filterValues, reduceByKey, and inner join when the values it sees are `Int` or
-`(Int, Int)`, and filter and map when they are `Double` or `String`. `keys` and `values` of an
-int pair narrow to that int column. `mapValues` runs when the new value stays an unboxed `Int`.
-Any other node keeps the whole plan on the row path. This requires
-`ScarletConf.columnarExecution` (the default). `Double` is the float64 column. A 32-bit `Float`
-stays on the row path. Strings are a dictionary of JVM strings plus int codes (`Utf8Dict` /
-`DictUtf8Column`). An accepted string filter or map records that representation as
-`Layout.Utf8Dict`. A null string is a value, so filter and map see it. The string lambda stays
-scalar over the decoded string, and each batch has its own dictionary. Group-by and join stay on
-int keys. Narrow columnar ops keep input order and the input partition count. `reduceByKey` and
-`join` hash with `floorMod` into `defaultShufflePartitions`.
-`columnarBatchSize` (default 8192) is the morsel width. Set `columnarExecution` false to force
-the row path.
-
-`count` and `sum` on an eligible plan read the finished columns. `count` sums batch lengths.
-`sum` of `Int` returns a `Long` and does not wrap. `sum` of `Double` returns a `Double`. `sum` of
-`keys`, `values`, or the values after an int `mapValues` reads the pair column in the morsel loop
-and does not build another batch. The key or value column is a view: its arrays are shared.
-`groupedSum` on `(Int, Int)` runs the wide grouped sum and folds the `Int64` group sums into one
-`Long`. A non-empty source of int pairs stays on that kernel. A preceding `filter`, `filterKeys`,
-`filterValues`, or pair `map` is applied inside the partial aggregate scan, so that action does
-not build an intermediate pair batch. A completely empty source has no runtime type witness, so
-that sum returns zero on the row path. A pair `map` stays on the row path for `collect` and
-`reduceByKey`.
-Empty input for these sums is zero. `collect` is the action that decodes a `Seq`. `reduceByKey`
-still wraps at `Int`.
+The columnar planner accepts only supported typed plan shapes when
+`ScarletConf.columnarExecution` is enabled; every other shape runs wholly on the row path. The
+columnar implementation and action behavior are documented in `ColumnarPlanner`, `ColumnPipeline`,
+and `DistCollection` scaladoc. `columnarBatchSize` (default 8192) sets the morsel width.
 
 On the row path, narrow-only plans compile to a one-stage graph and flow through the same path
 as wide plans.
@@ -104,10 +72,8 @@ as wide plans.
   of creating a shuffle stage. Example: `partitionBy(4)` then `groupByKey` (default 4) is a local
   group. Bypass reads distribution, not layout: keyed ops require `Distribution.Hash` at the
   target width; `repartition` skips a shuffle for any other distribution with that width.
-- `PartitioningInfo` is distribution, ordering, and layout. The row path emits `Layout.BoxedRows`.
-  `ColumnarPlanner.partitioning` reports `Layout.Columnar` for an int, double, or int-pair plan it
-  can run, and `Layout.Utf8Dict` for a string filter or map. That layout is the per-batch
-  dictionary of JVM strings plus int codes. `None` means the row path.
+- `PartitioningInfo` is distribution, ordering, and layout. The row path emits `Layout.BoxedRows`;
+  columnar layouts are reported by `ColumnarPlanner.partitioning`. `None` means the row path.
   Sources are `Unknown(width)`. Keyed shuffles are `Hash`. `sortBy` is `Range` plus `Sorted`;
   `map`, `flatMap`, and `mapPartitions` drop both. A repartition or coalesce shuffle is also
   `Unknown`: the writer hashes the element, which is not pair-key hash and not round-robin. A
@@ -186,10 +152,7 @@ Roadmap and sequencing are tracked externally; the headline items:
 
 - No cross-branch dedup: reusing a `DistCollection` in two places recomputes it; at most one
   shuffle write per stage.
-- Fusion is limited to straight int, double, and string filter/project runs of up to four steps.
-  There is no cost model and no predicate pushdown. A fused loop tests a validity bit per row only
-  when a live slot is null. `sum` of a filter/project chain adds in that loop and does not write
-  the chain's output column. `collect` still writes it.
-- `collect` decodes every output row into a `Seq`.
+- Fusion has no cost model or general predicate pushdown. `collect` decodes every output row into a
+  `Seq`.
 - Sort-merge join is a hash grouping wearing a sort-merge name; a true typed sort-merge join is
   deferred.

@@ -30,10 +30,9 @@ object ColumnBatches:
     new ColumnBatch(Vector(column.logicalType), Vector(column), column.length)
 
   def concat(parts: Vector[ColumnBatch]): ColumnBatch =
-    require(parts.nonEmpty, "concat needs at least one batch")
-    val head = parts.headOption.getOrElse(
-      throw new IllegalArgumentException("concat needs at least one batch"),
-    )
+    val head = parts.headOption.getOrElse {
+      throw new IllegalArgumentException("concat needs at least one batch")
+    }
     if (parts.length == 1 || parts.forall(_.length == 0)) then head
     else
       parts.foreach { part =>
