@@ -31,7 +31,9 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
  * `Int`. `join` hash-partitions both sides and probes one bucket at a time. Output width for those
  * two is `defaultShufflePartitions`. [[tryCount]] reads finished column lengths. [[trySumInt]] and
  * [[trySumDouble]] add a filter/project chain in the fused loop and do not write that chain's
- * output column. `collect` still does.
+ * output column. [[tryGroupedSum]] runs [[ColumnPipeline.sumByKey]] on a witnessed pair source,
+ * `filterKeys`, or `filterValues`, then folds the `Int64` group sums. An empty source has no
+ * witness and is refused. It does not decode. `collect` still does.
  *
  * An `ArraySeq.ofInt`, `ArraySeq.ofDouble`, or [[IntPairArrays]] source is copied into the column
  * on the calling thread. A boxed `Vector` or `List` is still read through its iterator.
@@ -103,6 +105,27 @@ object ColumnarPlanner:
         try Some(sumDouble(plan, op))
         catch case _: ClassCastException => None
 
+  /**
+   * Folded wide sum of int pairs. `None` means the row path. A pair source, `filterKeys`, or
+   * `filterValues` runs [[ColumnPipeline.sumByKey]] and adds the `Int64` group sums when a pair
+   * value is present to witness the type. An empty source has no witness and is refused. Null keys
+   * stay dropped. This does not decode. Any other shape is refused.
+   */
+  def tryGroupedSum(plan: Plan[_]): Option[Long] =
+    if (!groupedSumShape(plan)) then None
+    else
+      consume(plan) { case Columns.Pairs(parts) =>
+        val grouped = ColumnPipeline.sumByKey(
+          parts,
+          keyOrdinal = 0,
+          valueOrdinal = 1,
+          numPartitions = shuffleWidth,
+          parallelism = parallelism,
+          batchSize = batchSize,
+        )
+        ColumnReduce.sumInt64(grouped, ordinal = 1)
+      }
+
   private def sumInt(plan: Plan[_], op: PhysicalOp): Long = (plan, op) match
     case (Plan.Source(partitions), PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) =>
       ColumnReduce.sumInt32(encodeInts(partitions))
@@ -152,6 +175,14 @@ object ColumnarPlanner:
       }
     case _ =>
       ColumnReduce.sumFloat64(batchesOf(interpret(plan, op)))
+
+  /** Pair plans whose grouped sum stays on the wide kernel: source, filterKeys, filterValues. */
+  @tailrec
+  private def groupedSumShape(plan: Plan[_]): Boolean = plan match
+    case Plan.Source(_) => true
+    case Plan.FilterKeysOp(source, _) => groupedSumShape(source)
+    case Plan.FilterValuesOp(source, _) => groupedSumShape(source)
+    case _ => false
 
   private def isInt(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Ints => true

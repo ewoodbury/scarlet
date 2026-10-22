@@ -135,6 +135,80 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(left.union(right).sum) shouldBe Int.MaxValue.toLong + 1L
   }
 
+  "groupedSum" should "sum one key of two max ints, and reduceByKey still wraps" in {
+    val rows = Seq(1 -> Int.MaxValue, 1 -> Int.MaxValue)
+    val wide = Int.MaxValue.toLong * 2L
+
+    def source = DistCollection(rows, 2)
+
+    columnar(source.groupedSum) shouldBe wide
+    row(source.groupedSum) shouldBe wide
+    columnar(source.reduceByKey[Int, Int](_ + _).collect().toMap) shouldBe Map(
+      1 -> (Int.MaxValue + Int.MaxValue),
+    )
+    columnar(assertNarrow(source, 2))
+  }
+
+  it should "sum the same rows after filterValues" in {
+    val rows = Seq(1 -> Int.MaxValue, 1 -> Int.MaxValue)
+    val wide = Int.MaxValue.toLong * 2L
+
+    def filtered = DistCollection(rows, 2).filterValues[Int, Int](_ == Int.MaxValue)
+
+    columnar(filtered.groupedSum) shouldBe wide
+    row(filtered.groupedSum) shouldBe wide
+    columnar(assertNarrow(filtered, 2))
+  }
+
+  it should "keep a columnar layout through filterKeys" in {
+    val rows = Seq(1 -> Int.MaxValue, 1 -> Int.MaxValue)
+    val wide = Int.MaxValue.toLong * 2L
+
+    def filtered = DistCollection(rows, 2).filterKeys[Int, Int](_ == 1)
+
+    columnar(filtered.groupedSum) shouldBe wide
+    columnar(assertNarrow(filtered, 2))
+  }
+
+  it should "return zero for an empty source through the row engine" in {
+    def empty = DistCollection(Seq.empty[(Int, Int)], 2)
+
+    columnar(empty.groupedSum) shouldBe 0L
+    row(empty.groupedSum) shouldBe 0L
+    columnar(ColumnarPlanner.partitioning(empty.plan) shouldBe None)
+  }
+
+  it should "return zero when filterValues keeps no rows" in {
+    val rows = Seq(1 -> 10, 2 -> 20)
+
+    def filtered = DistCollection(rows, 2).filterValues[Int, Int](_ < 0)
+
+    columnar(filtered.groupedSum) shouldBe 0L
+    row(filtered.groupedSum) shouldBe 0L
+    columnar(assertNarrow(filtered, 2))
+  }
+
+  it should "sum a mapped pair plan on the row path" in {
+    val rows = Seq(1 -> 10, 1 -> 20, 2 -> 5)
+    val valueSum = 11L + 21L + 6L
+
+    def mapped = DistCollection(rows, 2).map { case (key, value) => (key, value + 1) }
+
+    columnar(mapped.groupedSum) shouldBe valueSum
+    columnar(mapped.groupedSum) shouldBe row(mapped.groupedSum)
+    columnar(ColumnarPlanner.partitioning(mapped.plan).map(_.layout) shouldBe None)
+  }
+
+  it should "fold every group sum" in {
+    val rows = Seq(1 -> Int.MaxValue, 2 -> 3, 1 -> Int.MaxValue, 2 -> 4)
+    val wide = Int.MaxValue.toLong * 2L + 7L
+
+    def source = DistCollection(rows, 2)
+
+    columnar(source.groupedSum) shouldBe wide
+    row(source.groupedSum) shouldBe wide
+  }
+
   "primitive sources" should "sum an int array like a boxed vector" in {
     val values = Array(1, 2, 3, 4, 5)
 
@@ -189,6 +263,13 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(primitive) shouldBe columnar(boxed)
     row(primitive) shouldBe row(boxed)
   }
+
+  private def assertNarrow[A](collection: DistCollection[A], width: Int): Unit =
+    val info =
+      ColumnarPlanner.partitioning(collection.plan).getOrElse(fail("expected a columnar plan"))
+    info.distribution shouldBe Distribution.Unknown(width)
+    info.ordering shouldBe OrderingTag.Unsorted
+    info.layout shouldBe Layout.Columnar(ScarletConf.get.columnarBatchSize)
 
   private def columnar[A](body: => A): A =
     ScarletRuntime.get.shuffle.clear()

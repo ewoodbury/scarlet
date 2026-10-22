@@ -473,7 +473,7 @@ object ColumnKernel:
           s"column $ordinal is ${other.logicalType}, expected Int32",
         )
 
-  private def asInt64(column: Column, ordinal: Int): Int64Column =
+  private[columnar] def asInt64(column: Column, ordinal: Int): Int64Column =
     column match
       case int64: Int64Column => int64
       case other =>

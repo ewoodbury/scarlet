@@ -44,6 +44,13 @@ class DefaultExecutionService extends ExecutionService {
       }
     }
 
+  def groupedSum(plan: Plan[(Int, Int)]): Long =
+    ColumnarPlanner.tryGroupedSum(plan).getOrElse {
+      rowPartitions(plan).foldLeft(0L) { (total, partition) =>
+        partition.data.foldLeft(total)((acc, pair) => acc + pair._2.toLong)
+      }
+    }
+
   private def rowPartitions[A](plan: Plan[A]): Seq[Partition[A]] = plan match {
     case source: Plan.Source[A] => source.partitions
     case _ => runRow(plan)
