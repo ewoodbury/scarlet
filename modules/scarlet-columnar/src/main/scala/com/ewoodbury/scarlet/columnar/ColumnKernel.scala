@@ -96,6 +96,33 @@ object ColumnKernel:
       val scanned = scanUtf8(column, predicate, record = true, selection = selection)
       assemble(batch, ordinal, scanned.column, selection, scanned.count)
 
+  /**
+   * Resolves literals against this batch dictionary, then filters its codes with the int kernel.
+   */
+  def filterUtf8ByValues(
+      batch: ColumnBatch,
+      ordinal: Int,
+      values: Iterable[String],
+  ): ColumnBatch =
+    val column = asUtf8(columnAt(batch, ordinal), ordinal)
+    val codes = values.iterator.map(column.codeOf).filter(_ >= 0).toSet
+    filterUtf8ByCodes(batch, ordinal, codes)
+
+  private def filterUtf8ByCodes(
+      batch: ColumnBatch,
+      ordinal: Int,
+      codes: Set[Int],
+  ): ColumnBatch =
+    val column = asUtf8(columnAt(batch, ordinal), ordinal)
+    val codeColumn = Int32Column.of(column.codes, column.validity, column.length)
+    val withCodes = new ColumnBatch(
+      LogicalType.Int32 +: batch.schema,
+      codeColumn +: batch.columns,
+      batch.length,
+    )
+    val filtered = filterInt32(withCodes, 0, value => codes.contains(value))
+    new ColumnBatch(batch.schema, filtered.columns.drop(1), filtered.length)
+
   def filterBool(batch: ColumnBatch, ordinal: Int, predicate: BoolPredicate): ColumnBatch =
     val column = asBool(columnAt(batch, ordinal), ordinal)
     if (batch.columns.length == 1) then

@@ -50,6 +50,30 @@ final case class DistCollection[A](plan: Plan[A]):
     DistCollection(Plan.FilterOp(this.plan, p))
 
   /**
+   * Filters strings equal to `value`. This explicit form is recognized by the columnar planner,
+   * which compares dictionary codes. A regular `filter(_ == value)` remains a scalar predicate.
+   */
+  def filterStringEquals(value: String)(using ev: A =:= String): DistCollection[A] =
+    filterStringLiterals(Vector(value))
+
+  /**
+   * Filters strings contained in a literal list. Lists of one to eight non-null strings are
+   * recognized by the columnar planner and compared as dictionary codes. Other list sizes and
+   * lists containing null use the scalar predicate path.
+   */
+  def filterStringIn(values: String*)(using ev: A =:= String): DistCollection[A] =
+    filterStringLiterals(values.toVector)
+
+  private def filterStringLiterals(values: Vector[String])(using
+      ev: A =:= String,
+  ): DistCollection[A] =
+    val stringValue: A => String = value => ev(value)
+    val predicate = new DictionaryStringPredicate[A]:
+      val literals: Vector[String] = values
+      def apply(value: A): Boolean = literals.contains(stringValue(value))
+    DistCollection(Plan.FilterOp(this.plan, predicate))
+
+  /**
    * Transformation: Applies a flatMap function lazily. Returns a new DistCollection representing
    * the result of the flatMap. Does not trigger computation.
    */
@@ -322,6 +346,13 @@ final case class DistCollection[A](plan: Plan[A]):
   def foreach(f: A => Unit): Unit = collect().foreach(f)
 
 end DistCollection
+
+/**
+ * Internal contract for a string literal predicate that the planner may execute by dictionary
+ * code.
+ */
+private[scarlet] trait DictionaryStringPredicate[A] extends (A => Boolean):
+  def literals: Vector[String]
 
 // Companion object for creating a DistCollection from a source
 object DistCollection:
