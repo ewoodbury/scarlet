@@ -65,10 +65,12 @@ filterKeys, filterValues, reduceByKey, and inner join when the values it sees ar
 int pair narrow to that int column. `mapValues` runs when the new value stays an unboxed `Int`.
 Any other node keeps the whole plan on the row path. This requires
 `ScarletConf.columnarExecution` (the default). `Double` is the float64 column. A 32-bit `Float`
-stays on the row path. Strings are a dictionary of JVM strings plus int codes (`Utf8Dict`). A
-null string is a value, so filter and map see it. Group-by and join stay on int keys. Narrow columnar ops keep input order and the
-input partition count. `reduceByKey` and `join` hash with `floorMod` into
-`defaultShufflePartitions`.
+stays on the row path. Strings are a dictionary of JVM strings plus int codes (`Utf8Dict` /
+`DictUtf8Column`). An accepted string filter or map records that representation as
+`Layout.Utf8Dict`. A null string is a value, so filter and map see it. The string lambda stays
+scalar over the decoded string, and each batch has its own dictionary. Group-by and join stay on
+int keys. Narrow columnar ops keep input order and the input partition count. `reduceByKey` and
+`join` hash with `floorMod` into `defaultShufflePartitions`.
 `columnarBatchSize` (default 8192) is the morsel width. Set `columnarExecution` false to force
 the row path.
 
@@ -103,8 +105,9 @@ as wide plans.
   group. Bypass reads distribution, not layout: keyed ops require `Distribution.Hash` at the
   target width; `repartition` skips a shuffle for any other distribution with that width.
 - `PartitioningInfo` is distribution, ordering, and layout. The row path emits `Layout.BoxedRows`.
-  `ColumnarPlanner.partitioning` reports `Layout.Columnar` for a plan it can run, and `None`
-  otherwise.
+  `ColumnarPlanner.partitioning` reports `Layout.Columnar` for an int, double, or int-pair plan it
+  can run, and `Layout.Utf8Dict` for a string filter or map. That layout is the per-batch
+  dictionary of JVM strings plus int codes. `None` means the row path.
   Sources are `Unknown(width)`. Keyed shuffles are `Hash`. `sortBy` is `Range` plus `Sorted`;
   `map`, `flatMap`, and `mapPartitions` drop both. A repartition or coalesce shuffle is also
   `Unknown`: the writer hashes the element, which is not pair-key hash and not round-robin. A

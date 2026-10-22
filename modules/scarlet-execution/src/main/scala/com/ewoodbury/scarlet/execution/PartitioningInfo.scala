@@ -2,10 +2,11 @@ package com.ewoodbury.scarlet.execution
 
 /**
  * Physical description of a stage output: how rows are distributed, whether they are ordered, and
- * whether they are boxed rows or column batches.
+ * how the rows are batched.
  *
- * The row path always uses [[Layout.BoxedRows]]. `None` on a stage means the distribution was
- * dropped (union). A present value always names a width.
+ * The row path always uses [[Layout.BoxedRows]]. Primitive columnar plans use [[Layout.Columnar]].
+ * A string plan uses [[Layout.Utf8Dict]], the dictionary-plus-codes column. `None` on a stage
+ * means the distribution was dropped (union). A present value always names a width.
  *
  * Hash and range on this path use [[PartitioningInfo.RowKeyOrdinals]] (`Seq(0)`): the single
  * logical key (the pair key, or the sort key). That is not a schema column. Columnar execution
@@ -94,9 +95,9 @@ final case class PartitioningInfo(
       }
 
     val layoutReason = layout match {
-      case Layout.Columnar(batchSize) if batchSize <= 0 =>
-        Some(s"Columnar layout has batchSize=$batchSize <= 0")
-      case _ => None
+      case Layout.BoxedRows => None
+      case Layout.Columnar(batchSize) => batchReason("Columnar", batchSize)
+      case Layout.Utf8Dict(batchSize) => batchReason("Utf8Dict", batchSize)
     }
 
     val orderingReason = ordering match {
@@ -110,6 +111,9 @@ final case class PartitioningInfo(
 
     distributionReason.orElse(widthReason).orElse(layoutReason).orElse(orderingReason)
   }
+
+  private def batchReason(label: String, batchSize: Int): Option[String] =
+    if (batchSize <= 0) Some(s"$label layout has batchSize=$batchSize <= 0") else None
 
 /**
  * How rows are spread across the output partitions.
@@ -133,10 +137,18 @@ enum OrderingTag:
   case Unsorted
   case Sorted(keyOrdinals: Seq[Int], ascending: Seq[Boolean])
 
-/** Physical batching of the output. The row engine emits [[Layout.BoxedRows]] only. */
+/**
+ * Physical batching of the output. The row engine emits [[Layout.BoxedRows]] only.
+ *
+ * [[Layout.Columnar]] is an unboxed primitive column: int, double, or int pair.
+ * [[Layout.Utf8Dict]] is the string layout. It names the dictionary of JVM strings plus int codes
+ * (`LogicalType.Utf8Dict` / `DictUtf8Column`). Each batch has its own dictionary. A string lambda
+ * still sees the decoded string, and a null string is a value.
+ */
 enum Layout:
   case BoxedRows
   case Columnar(batchSize: Int)
+  case Utf8Dict(batchSize: Int)
 
 object PartitioningInfo:
 

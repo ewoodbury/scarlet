@@ -180,13 +180,22 @@ class TestPartitioningInfo extends AnyFlatSpec with Matchers:
     stage.outputPartitioning shouldBe Some(PartitioningInfo.unknown(4))
   }
 
-  "validation" should "accept singleton and a positive columnar batch" in {
+  "validation" should "accept singleton and a positive columnar or dictionary batch" in {
     StageBuilder.validateStageGraph(
       lone(
         PartitioningInfo(
           distribution = Distribution.Singleton,
           ordering = OrderingTag.Unsorted,
           layout = Layout.Columnar(batchSize = 1024),
+        ),
+      ),
+    )
+    StageBuilder.validateStageGraph(
+      lone(
+        PartitioningInfo(
+          distribution = Distribution.Unknown(1),
+          ordering = OrderingTag.Unsorted,
+          layout = Layout.Utf8Dict(batchSize = 1024),
         ),
       ),
     )
@@ -215,6 +224,11 @@ class TestPartitioningInfo extends AnyFlatSpec with Matchers:
         Distribution.Unknown(1),
         OrderingTag.Unsorted,
         Layout.Columnar(batchSize = 0),
+      ),
+      PartitioningInfo(
+        Distribution.Unknown(1),
+        OrderingTag.Unsorted,
+        Layout.Utf8Dict(batchSize = 0),
       ),
     )
 

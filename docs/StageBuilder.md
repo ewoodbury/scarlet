@@ -31,7 +31,8 @@ Input sources:
   disambiguates multi-input operations (join/cogroup).
 
 `PartitioningInfo` is distribution, ordering, and layout. The row path always uses
-`Layout.BoxedRows`.
+`Layout.BoxedRows`. `Layout.Columnar` is a primitive column batch. `Layout.Utf8Dict` is the
+string batch: a dictionary of JVM strings plus int codes.
 
 - `Hash(n, Seq(0))` — key hash (`groupByKey`, `reduceByKey`, `partitionBy`, join, cogroup), or a
   bypass chained after one. `Seq(0)` is the pair key, not a schema column.
