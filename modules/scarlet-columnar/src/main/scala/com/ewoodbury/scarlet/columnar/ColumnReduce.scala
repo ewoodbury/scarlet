@@ -19,6 +19,35 @@ object ColumnReduce:
     batches.foldLeft(0L)((total, batch) => total + sumInt32(int32(batch)))
 
   /**
+   * Sums the `Int32` column at `ordinal`. Other columns are left unread. Null slots are skipped.
+   */
+  def sumInt32At(batch: ColumnBatch, ordinal: Int): Long =
+    sumInt32(int32At(batch, ordinal))
+
+  /**
+   * Sums `mapper` applied to present slots of the `Int32` column at `ordinal`. Null slots are
+   * skipped and `mapper` is not called on them. The mapped `Int` may wrap; the total does not.
+   */
+  def sumMappedInt32(batch: ColumnBatch, ordinal: Int, mapper: ColumnKernel.Int32Map): Long =
+    val column = int32At(batch, ordinal)
+    val live = column.length
+    val values = column.values
+    var total = 0L
+    var row = 0
+    if (Validity.livePresent(column.validity, live)) then
+      while (row < live) {
+        total += mapper(values(row)).toLong
+        row += 1
+      }
+    else
+      val words = column.validity.words
+      while (row < live) {
+        if (Validity.isSet(words, row)) then total += mapper(values(row)).toLong
+        row += 1
+      }
+    total
+
+  /**
    * Sums the `Int64` column at `ordinal`. Other columns are left unread. Null slots are skipped.
    */
   def sumInt64(batches: Vector[ColumnBatch], ordinal: Int): Long =
@@ -83,7 +112,10 @@ object ColumnReduce:
 
   private def int32(batch: ColumnBatch): Int32Column =
     require(batch.columns.length == 1, s"int sum expects one column, got ${batch.columns.length}")
-    ColumnKernel.asInt32(ColumnKernel.columnAt(batch, 0), 0)
+    int32At(batch, 0)
+
+  private def int32At(batch: ColumnBatch, ordinal: Int): Int32Column =
+    ColumnKernel.asInt32(ColumnKernel.columnAt(batch, ordinal), ordinal)
 
   private def int64(batch: ColumnBatch, ordinal: Int): Int64Column =
     ColumnKernel.asInt64(ColumnKernel.columnAt(batch, ordinal), ordinal)

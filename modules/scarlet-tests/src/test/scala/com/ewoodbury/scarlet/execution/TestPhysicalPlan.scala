@@ -225,6 +225,19 @@ class TestPhysicalPlan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     shape(rows) shouldBe "FilterRow(Scan)"
   }
 
+  it should "narrow keys and values to an int column and project an int mapValues" in {
+    val pairs = DistCollection.ofIntPairs(Array(1, 2), Array(10, 20), 1)
+    shape(pairs.keys) shouldBe "Key(Scan)"
+    shape(pairs.values) shouldBe "Value(Scan)"
+    shape(pairs.mapValues[Int, Int, Int](_ * 2)) shouldBe "MapValue(Scan)"
+    shape(pairs.values.map(_ + 1)) shouldBe "Project(Value(Scan))"
+    ColumnarPlanner.lower(pairs.keys.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.Ints)
+    ColumnarPlanner.lower(pairs.mapValues[Int, Int, Int](_ * 2).plan).map(_.kind) shouldBe Some(
+      PhysicalOp.Kind.Pairs,
+    )
+    ColumnarPlanner.lower(pairs.mapValues[Int, Int, String](_.toString).plan) shouldBe rowPath
+  }
+
   it should "exchange each join input, including an aggregate input" in {
     val build = DistCollection(Seq(1 -> 1, 1 -> 2), 1).reduceByKey[Int, Int](_ + _)
     val probe = DistCollection(Seq(1 -> 10), 1)

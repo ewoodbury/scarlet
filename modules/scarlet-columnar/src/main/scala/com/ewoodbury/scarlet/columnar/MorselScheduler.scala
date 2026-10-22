@@ -10,7 +10,8 @@ import scala.annotation.tailrec
  * others, so one long morsel does not keep the rest of the queue behind it.
  *
  * Results line up with `morsels`. A worker failure, including an `Error`, fails the call with that
- * throwable. `parallelism` of `1` runs on the calling thread.
+ * throwable. `parallelism` of `1` runs on the calling thread. Each morsel handed to the worker
+ * counts as one visit when [[ColumnMetrics]] is armed.
  */
 object MorselScheduler:
 
@@ -20,7 +21,10 @@ object MorselScheduler:
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     if (morsels.isEmpty) then Vector.empty
     else if (parallelism == 1 || morsels.length == 1) then
-      morsels.iterator.zipWithIndex.map { (batch, index) => worker(index, batch) }.toVector
+      morsels.iterator.zipWithIndex.map { (batch, index) =>
+        ColumnMetrics.noteVisit()
+        worker(index, batch)
+      }.toVector
     else
       val workers = math.min(parallelism, morsels.length)
       val deques = Array.fill(workers)(new ConcurrentLinkedDeque[Int])
@@ -62,7 +66,9 @@ object MorselScheduler:
           val batch = morsels.lift(index).getOrElse {
             throw new IllegalArgumentException(s"missing morsel $index")
           }
-          try slots(index).set(Some(worker(index, batch)))
+          try
+            ColumnMetrics.noteVisit()
+            slots(index).set(Some(worker(index, batch)))
           catch case thrown: Throwable => failure.compareAndSet(None, Some(thrown))
           drain(id, deques, slots, failure, morsels, worker)
 

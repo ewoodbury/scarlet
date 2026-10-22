@@ -7,6 +7,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
+import com.ewoodbury.scarlet.columnar.ColumnMetrics
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -15,6 +16,7 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
   private val originalConf = ScarletConf.get
 
   override def afterEach(): Unit =
+    ColumnMetrics.disarm()
     ScarletRuntime.get.shuffle.clear()
     ScarletConf.set(originalConf)
     ()
@@ -263,6 +265,145 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(primitive) shouldBe columnar(boxed)
     row(primitive) shouldBe row(boxed)
   }
+
+  "int pair projections" should "sum values from the shared value column" in {
+    val keys = Array(1, -4, 3, Int.MaxValue)
+    val values = Array(Int.MaxValue, 5, -2, Int.MaxValue)
+
+    def rows = DistCollection.ofIntPairs(keys, values, 1)
+    def summed = rows.values.sum
+
+    val expected = row(summed)
+    armColumnar()
+    ColumnMetrics.arm()
+    summed shouldBe expected
+    assertColumnar(rows.values, width = 1)
+    assertOnePass()
+    columnar(DistCollection.ofIntPairs(keys, values, 2).values.collect()) shouldBe
+      row(DistCollection.ofIntPairs(keys, values, 2).values.collect())
+  }
+
+  it should "sum keys from the shared key column" in {
+    val keys = Array(1, -4, 3, Int.MaxValue)
+    val values = Array(Int.MaxValue, 5, -2, Int.MaxValue)
+
+    def rows = DistCollection.ofIntPairs(keys, values, 1)
+    def summed = rows.keys.sum
+
+    val expected = row(summed)
+    armColumnar()
+    ColumnMetrics.arm()
+    summed shouldBe expected
+    assertColumnar(rows.keys, width = 1)
+    assertOnePass()
+    columnar(DistCollection.ofIntPairs(keys, values, 2).keys.collect()) shouldBe
+      row(DistCollection.ofIntPairs(keys, values, 2).keys.collect())
+  }
+
+  it should "sum mapValues that stay ints without writing a value column" in {
+    val keys = Array(1, -4, 3, Int.MaxValue)
+    val values = Array(10, 20, 30, 40)
+    val calls = new AtomicInteger
+
+    // mapValues keeps the pair. The sum is the mapped value column.
+    def rows = DistCollection.ofIntPairs(keys, values, 1).mapValues { (value: Int) =>
+      calls.incrementAndGet()
+      value * 2
+    }
+    def summed = rows.values.sum
+
+    val expected = row(summed)
+    calls.getAndSet(0)
+    armColumnar()
+    ColumnarPlanner.partitioning(rows.plan)
+    calls.get() shouldBe 0
+    ColumnMetrics.arm()
+    summed shouldBe expected
+    calls.get() shouldBe values.length
+    assertColumnar(rows, width = 1)
+    assertOnePass()
+    val projected = DistCollection.ofIntPairs(keys, values, 2).mapValues[Int, Int, Int](_ * 2)
+    columnar(projected.collect()) shouldBe row(projected.collect())
+  }
+
+  it should "keep an anonymous int mapValues on the columnar path" in {
+    val keys = Array(1, 2)
+    val values = Array(3, 4)
+    val double: Int => Int = new Function1[Int, Int]:
+      def apply(value: Int): Int = value * 2
+
+    def summed = DistCollection.ofIntPairs(keys, values, 1).mapValues(double).values.sum
+
+    val expected = row(summed)
+    armColumnar()
+    summed shouldBe expected
+    assertColumnar(
+      DistCollection.ofIntPairs(keys, values, 1).mapValues(double),
+      width = 1,
+    )
+  }
+
+  it should "leave a mapValues that changes type on the row path" in {
+    val keys = Array(1, 2, 3)
+    val values = Array(4, 5, 6)
+
+    def strings = DistCollection.ofIntPairs(keys, values, 2).mapValues[Int, Int, String](_.toString)
+    def widened = DistCollection.ofIntPairs(keys, values, 2).mapValues[Int, Int, Long](_.toLong)
+
+    armColumnar()
+    ColumnarPlanner.partitioning(strings.plan) shouldBe None
+    ColumnarPlanner.partitioning(widened.plan) shouldBe None
+    ColumnMetrics.arm()
+    val collected = strings.collect()
+    ColumnMetrics.batchCount shouldBe 0L
+    ColumnMetrics.visitCount shouldBe 0L
+    ColumnMetrics.disarm()
+    collected shouldBe row(strings.collect())
+    columnar(widened.collect()) shouldBe row(widened.collect())
+  }
+
+  it should "sum values after filterValues and stay columnar" in {
+    val keys = Array(1, 2, 3)
+    val values = Array(-1, 4, 5)
+
+    def filtered = DistCollection.ofIntPairs(keys, values, 2).filterValues[Int, Int](_ > 0)
+
+    val expected = row(filtered.values.sum)
+    armColumnar()
+    filtered.values.sum shouldBe expected
+    assertColumnar(filtered.values, width = 2)
+  }
+
+  it should "return zero for an empty pair projection through the row engine" in {
+    def empty = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 1)
+
+    columnar(empty.values.sum) shouldBe 0L
+    columnar(empty.keys.sum) shouldBe 0L
+    columnar(ColumnarPlanner.partitioning(empty.values.plan) shouldBe None)
+  }
+
+  private def armColumnar(): Unit =
+    ScarletRuntime.get.shuffle.clear()
+    ScarletConf.set(
+      originalConf.copy(columnarExecution = true, columnarBatchSize = 1024, threadPoolSize = 4),
+    )
+
+  private def assertColumnar[A](collection: DistCollection[A], width: Int): Unit =
+    ColumnarPlanner.partitioning(collection.plan) shouldBe Some(
+      PartitioningInfo(
+        Distribution.Unknown(width),
+        OrderingTag.Unsorted,
+        Layout.Columnar(ScarletConf.get.columnarBatchSize),
+      ),
+    )
+
+  /** The source copy is the only batch, and the sum visits that one morsel. */
+  private def assertOnePass(): Unit =
+    val batches = ColumnMetrics.batchCount
+    val visits = ColumnMetrics.visitCount
+    ColumnMetrics.disarm()
+    batches shouldBe 1L
+    visits shouldBe 1L
 
   private def assertNarrow[A](collection: DistCollection[A], width: Int): Unit =
     val info =
