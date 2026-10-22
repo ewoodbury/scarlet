@@ -5,7 +5,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.{DictionaryStringPredicate, DistCollection}
-import com.ewoodbury.scarlet.columnar.BatchCodec
+import com.ewoodbury.scarlet.columnar.{BatchCodec, ColumnMetrics}
 import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -17,6 +17,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
   private val originalConf = ScarletConf.get
 
   override def afterEach(): Unit =
+    ColumnMetrics.disarm()
     ScarletRuntime.get.shuffle.clear()
     ScarletConf.set(originalConf)
     ()
@@ -161,13 +162,95 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     assertHashed(joined)
   }
 
-  it should "leave a later filter on the row path" in {
-    val build = DistCollection(Seq(1 -> 10, 2 -> 20), 1)
-    val probe = DistCollection(Seq(1 -> 7, 3 -> 8), 1)
-    val filtered = build.join(probe).filter { case (_, (left, _)) => left > 0 }
-    filtered.collect().toSeq should contain theSameElementsAs Seq(1 -> ((10, 7)))
-    infoOf(filtered) shouldBe Option.empty[PartitioningInfo]
-    assertHashed(build.join(probe))
+  it should "filter a later join result columnarly and preserve duplicate rows" in {
+    val build = DistCollection(Seq(1 -> 10, 2 -> 20, 1 -> 10, 1 -> 11), 1)
+    val probe = DistCollection(Seq(1 -> 7, 1 -> 8, 3 -> 9), 1)
+    val filtered = build.join(probe).filterJoinLeft(_ == 10)
+    val actual = columnar(filtered.collect()).toSeq
+
+    actual should contain theSameElementsAs row {
+      build.join(probe).filter { case (_, (left, _)) => left == 10 }.collect().toSeq
+    }
+    actual should contain theSameElementsAs Seq(
+      1 -> ((10, 7)),
+      1 -> ((10, 7)),
+      1 -> ((10, 8)),
+      1 -> ((10, 8)),
+    )
+    columnar {
+      val info = assertHashed(filtered)
+      info.layout shouldBe Layout.Columnar(ScarletConf.get.columnarBatchSize)
+    }
+  }
+
+  it should "filter each supported join column" in {
+    val build = DistCollection(Seq(1 -> 10, 2 -> 20, 1 -> 11), 1)
+    val probe = DistCollection(Seq(1 -> 7, 2 -> 8, 1 -> 9), 1)
+    val joined = build.join(probe)
+
+    columnar(joined.filterJoinKey(_ == 1).collect()).toSeq should contain theSameElementsAs row {
+      build.join(probe).filter { case (key, _) => key == 1 }.collect().toSeq
+    }
+    columnar(joined.filterJoinLeft(_ > 10).collect()).toSeq should contain theSameElementsAs row {
+      build.join(probe).filter { case (_, (left, _)) => left > 10 }.collect().toSeq
+    }
+    columnar(joined.filterJoinRight(_ == 8).collect()).toSeq should contain theSameElementsAs row {
+      build.join(probe).filter { case (_, (_, right)) => right == 8 }.collect().toSeq
+    }
+    columnar(assertHashed(joined.filterJoinKey(_ => true)))
+  }
+
+  it should "keep empty and all-surviving join filters columnar" in {
+    val joined = DistCollection(Seq(1 -> 10, 2 -> 20), 1).join(
+      DistCollection(Seq(1 -> 7, 2 -> 8), 1),
+    )
+    val emptyFilter = joined.filterJoinRight(_ < 0)
+    val all = joined.filterJoinKey(_ => true)
+
+    columnar(emptyFilter.collect()) shouldBe empty
+    assertHashed(emptyFilter)
+    columnar(all.collect()).toSeq should contain theSameElementsAs Seq(
+      1 -> ((10, 7)),
+      2 -> ((20, 8)),
+    )
+    assertHashed(all)
+  }
+
+  it should "leave a general later join predicate on the row path" in {
+    val build = DistCollection(Seq(1 -> 10, 2 -> 20, 1 -> 11), 1)
+    val probe = DistCollection(Seq(1 -> 7, 2 -> 8, 1 -> 9), 1)
+    val filtered = build.join(probe).filter { case (_, (left, right)) => left + right > 15 }
+    val actual = columnar(filtered.collect()).toSeq
+
+    actual should contain theSameElementsAs row {
+      build.join(probe).filter { case (_, (left, right)) => left + right > 15 }.collect().toSeq
+    }
+    columnar(infoOf(filtered)) shouldBe Option.empty[PartitioningInfo]
+  }
+
+  it should "scan a joined triple once and publish only the compacted partitions" in {
+    val conf = originalConf.copy(
+      columnarExecution = true,
+      columnarBatchSize = 1024,
+      defaultShufflePartitions = 4,
+      threadPoolSize = 2,
+    )
+    ScarletConf.set(conf)
+    val build = DistCollection(Seq.fill(4)(1 -> 10), 1)
+    val probe = DistCollection(Seq.fill(3)(1 -> 20), 1)
+    val baseline = measuredJoin(build.join(probe))
+    val predicateCalls = new java.util.concurrent.atomic.AtomicInteger(0)
+    val filtered = build.join(probe).filterJoinKey { key =>
+      predicateCalls.incrementAndGet()
+      key == 1
+    }
+    val compacted = measuredJoin(filtered)
+
+    baseline.count shouldBe 12L
+    compacted.count shouldBe baseline.count
+    predicateCalls.get() shouldBe baseline.count.toInt
+    compacted.batches - baseline.batches shouldBe conf.defaultShufflePartitions.toLong
+    compacted.visits - baseline.visits shouldBe conf.defaultShufflePartitions.toLong
   }
 
   "string filter" should "keep input order, nulls, and a dictionary layout" in {
@@ -348,6 +431,17 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     info.ordering shouldBe OrderingTag.Unsorted
     info.layout shouldBe Layout.Columnar(ScarletConf.get.columnarBatchSize)
     info
+
+  private final case class JoinFootprint(count: Long, batches: Long, visits: Long)
+
+  private def measuredJoin[A](collection: DistCollection[A]): JoinFootprint =
+    ScarletRuntime.get.shuffle.clear()
+    ColumnMetrics.arm()
+    val count = collection.count()
+    val batches = ColumnMetrics.batchCount
+    val visits = ColumnMetrics.visitCount
+    ColumnMetrics.disarm()
+    JoinFootprint(count, batches, visits)
 
   private def assertBuckets[V](parts: Seq[Partition[(Int, V)]]): Unit =
     val width = parts.length
