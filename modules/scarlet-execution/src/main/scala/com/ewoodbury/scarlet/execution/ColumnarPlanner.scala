@@ -37,9 +37,11 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
  * [[trySumDouble]] add a filter/project chain in the fused loop and do not write that chain's
  * output column. Sum of `keys`, `values`, or an int `mapValues` reads the pair column in that
  * morsel loop and does not build the projection. [[tryGroupedSum]] runs
- * [[ColumnPipeline.sumByKey]] on a witnessed pair source, `filterKeys`, or `filterValues`, then
- * folds the `Int64` group sums. An empty source has no witness and is refused. It does not decode.
- * `collect` still does.
+ * [[ColumnPipeline.sumByKey]] on a witnessed pair source and folds the `Int64` group sums. A
+ * preceding `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that
+ * partial scan, so the action does not build those pairs. An empty source has no witness and is
+ * refused. It does not decode. `collect` still does. A pair `MapOp` stays on the row path for
+ * `collect` and `reduceByKey`.
  *
  * An `ArraySeq.ofInt`, `ArraySeq.ofDouble`, or [[IntPairArrays]] source is copied into the column
  * on the calling thread. A boxed `Vector` or `List` is still read through its iterator.
@@ -56,9 +58,13 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
 )
 object ColumnarPlanner:
 
-  /** Layout the planner would use, without running the plan. `None` means the row path. */
+  /**
+   * Layout the planner would use, without running the plan. `None` means the row path. A pair map
+   * that [[tryGroupedSum]] can fuse reports columnar here and still lowers to `None`, because
+   * `collect` and `reduceByKey` do not run that map on the columnar path.
+   */
   def partitioning[A](plan: Plan[A]): Option[PartitioningInfo] =
-    accepted(plan).map(infoOf)
+    accepted(plan).map(infoOf).orElse(fusedPairLayout(plan))
 
   /**
    * The physical tree for `plan`, without running it. `None` means the row path. An invalid layout
@@ -112,25 +118,22 @@ object ColumnarPlanner:
         catch case _: ClassCastException => None
 
   /**
-   * Folded wide sum of int pairs. `None` means the row path. A pair source, `filterKeys`, or
-   * `filterValues` runs [[ColumnPipeline.sumByKey]] and adds the `Int64` group sums when a pair
-   * value is present to witness the type. An empty source has no witness and is refused. Null keys
-   * stay dropped. This does not decode. Any other shape is refused.
+   * Folded wide sum of int pairs. `None` means the row path. A witnessed pair source runs
+   * [[ColumnPipeline.sumByKey]]. A preceding row, key, or value filter, or a map that stays a
+   * pair, is compiled into `keep`/`map` or [[com.ewoodbury.scarlet.columnar.PairStep]]s and
+   * applied inside the partial `sumInt32`. An empty source has no witness and is refused. Null
+   * keys stay dropped. This does not decode. A mistyped function throws `ClassCastException` and
+   * is refused after any rows it already touched. Any other shape is refused.
    */
   def tryGroupedSum(plan: Plan[_]): Option[Long] =
-    if (!groupedSumShape(plan)) then None
+    if (!ScarletConf.get.columnarExecution) then None
     else
-      consume(plan) { case Columns.Pairs(parts) =>
-        val grouped = ColumnPipeline.sumByKey(
-          parts,
-          keyOrdinal = 0,
-          valueOrdinal = 1,
-          numPartitions = shuffleWidth,
-          parallelism = parallelism,
-          batchSize = batchSize,
-        )
-        ColumnReduce.sumInt64(grouped, ordinal = 1)
-      }
+      val (base, steps) = peelPairOps(plan)
+      base match
+        case source: Plan.Source[_] =>
+          try runGroupedSum(source, steps)
+          catch case _: ClassCastException => None
+        case _ => None
 
   private def sumInt(plan: Plan[_], op: PhysicalOp): Long = (plan, op) match
     case (Plan.Source(partitions), PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) =>
@@ -194,12 +197,82 @@ object ColumnarPlanner:
     case _ =>
       ColumnReduce.sumFloat64(batchesOf(interpret(plan, op)))
 
-  /** Pair plans whose grouped sum stays on the wide kernel: source, filterKeys, filterValues. */
-  @tailrec
-  private def groupedSumShape(plan: Plan[_]): Boolean = plan match
-    case Plan.Source(_) => true
-    case Plan.FilterKeysOp(source, _) => groupedSumShape(source)
-    case Plan.FilterValuesOp(source, _) => groupedSumShape(source)
+  /**
+   * Pair filters and pair maps above `base`, in source order. The functions are cast here and
+   * called later, during the aggregate scan. A function that is not the pair type throws
+   * `ClassCastException` then.
+   */
+  private def peelPairOps(plan: Plan[_]): (Plan[_], List[PairStep]) =
+    @tailrec
+    def collect(current: Plan[_], steps: List[PairStep]): (Plan[_], List[PairStep]) =
+      current match
+        case Plan.FilterOp(source, predicate) =>
+          val keep = predicate.asInstanceOf[((Int, Int)) => Boolean]
+          val step = PairStep.KeepRow((key, value) => keep((key, value)))
+          collect(source, step :: steps)
+        case Plan.FilterKeysOp(source, predicate) =>
+          val keep = predicate.asInstanceOf[Int => Boolean]
+          collect(source, PairStep.KeepKey(keep) :: steps)
+        case Plan.FilterValuesOp(source, predicate) =>
+          val keep = predicate.asInstanceOf[Int => Boolean]
+          collect(source, PairStep.KeepValue(keep) :: steps)
+        case Plan.MapOp(source, mapper) =>
+          val project = mapper.asInstanceOf[((Int, Int)) => (Int, Int)]
+          val step = PairStep.MapPair((key, value) => project((key, value)))
+          collect(source, step :: steps)
+        case _ => (current, steps)
+
+    collect(plan, Nil)
+
+  private def runGroupedSum(source: Plan.Source[_], steps: List[PairStep]): Option[Long] =
+    classify(source.partitions) match
+      case Some(PhysicalOp.Kind.Pairs) =>
+        val parts = encodePairs(source.partitions)
+        val grouped =
+          if (steps.isEmpty) then plainSum(parts)
+          else fusedSum(parts, steps.toVector)
+        Some(ColumnReduce.sumInt64(grouped, ordinal = 1))
+      case _ => None
+
+  private def plainSum(parts: Vector[ColumnBatch]): Vector[ColumnBatch] =
+    ColumnPipeline.sumByKey(
+      parts,
+      keyOrdinal = 0,
+      valueOrdinal = 1,
+      numPartitions = shuffleWidth,
+      parallelism = parallelism,
+      batchSize = batchSize,
+    )
+
+  private def fusedSum(parts: Vector[ColumnBatch], steps: Vector[PairStep]): Vector[ColumnBatch] =
+    ColumnPipeline.sumByKey(
+      parts,
+      keyOrdinal = 0,
+      valueOrdinal = 1,
+      numPartitions = shuffleWidth,
+      parallelism = parallelism,
+      batchSize = batchSize,
+      steps = steps,
+    )
+
+  /**
+   * Columnar layout for a pair map (or a map mixed with pair filters) that [[tryGroupedSum]]
+   * fuses. [[lower]] still refuses the map, so `collect` and `reduceByKey` stay on the row path.
+   */
+  private def fusedPairLayout(plan: Plan[_]): Option[PartitioningInfo] =
+    if (!ScarletConf.get.columnarExecution) then None
+    else
+      val (base, steps) = peelPairOps(plan)
+      base match
+        case source: Plan.Source[_] if steps.exists(isPairMap) =>
+          classify(source.partitions) match
+            case Some(PhysicalOp.Kind.Pairs) =>
+              Some(narrow(Distribution.Unknown(source.partitions.length)))
+            case _ => None
+        case _ => None
+
+  private def isPairMap(step: PairStep): Boolean = step match
+    case PairStep.MapPair(_) => true
     case _ => false
 
   private def isInt(op: PhysicalOp): Boolean = op.kind match

@@ -190,15 +190,138 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(assertNarrow(filtered, 2))
   }
 
-  it should "sum a mapped pair plan on the row path" in {
-    val rows = Seq(1 -> 10, 1 -> 20, 2 -> 5)
-    val valueSum = 11L + 21L + 6L
+  it should "sum a row filter inside the grouped scan" in {
+    val rows = Seq(1 -> 10, 2 -> 3, 4 -> 8, 5 -> 1)
+    val hits = new AtomicInteger
 
-    def mapped = DistCollection(rows, 2).map { case (key, value) => (key, value + 1) }
+    def filtered = DistCollection(rows, 2).filter { case (key, value) =>
+      hits.incrementAndGet()
+      key % 2 == 0 && value > 2
+    }
 
-    columnar(mapped.groupedSum) shouldBe valueSum
-    columnar(mapped.groupedSum) shouldBe row(mapped.groupedSum)
-    columnar(ColumnarPlanner.partitioning(mapped.plan).map(_.layout) shouldBe None)
+    val expected = row(filtered.groupedSum)
+    hits.set(0)
+    columnar(filtered.groupedSum) shouldBe expected
+    hits.get() shouldBe rows.length
+    columnar(assertNarrow(filtered, 2))
+    columnar(filtered.groupedSum) shouldBe 11L
+  }
+
+  it should "sum a pair map inside the grouped scan" in {
+    val rows = Seq(1 -> 10, 2 -> 20, 3 -> 5)
+    val hits = new AtomicInteger
+
+    def mapped = DistCollection(rows, 2).map { case (key, value) =>
+      hits.incrementAndGet()
+      (key + 1, value + key)
+    }
+
+    hits.set(0)
+    columnar(ColumnarPlanner.partitioning(mapped.plan))
+    hits.get() shouldBe 0
+    val expected = row(mapped.groupedSum)
+    hits.set(0)
+    columnar(mapped.groupedSum) shouldBe expected
+    hits.get() shouldBe rows.length
+    columnar(assertNarrow(mapped, 2))
+    columnar(mapped.groupedSum) shouldBe 41L
+  }
+
+  it should "apply a filter before a map that reads the rewritten pair" in {
+    val rows = Seq(1 -> 1, 2 -> 3, 3 -> 5)
+    val filters = new AtomicInteger
+    val maps = new AtomicInteger
+
+    def planned = DistCollection(rows, 1)
+      .filter { case (_, value) =>
+        filters.incrementAndGet()
+        value > 2
+      }
+      .map { case (key, value) =>
+        maps.incrementAndGet()
+        (value, key)
+      }
+
+    val expected = row(planned.groupedSum)
+    filters.set(0)
+    maps.set(0)
+    columnar(planned.groupedSum) shouldBe expected
+    filters.get() shouldBe rows.length
+    maps.get() shouldBe 2
+    columnar(assertNarrow(planned, 1))
+    columnar(planned.groupedSum) shouldBe 5L
+  }
+
+  it should "return zero when a row filter keeps nothing and stay columnar" in {
+    val rows = Seq(1 -> 4, 2 -> 5)
+    val hits = new AtomicInteger
+
+    def filtered = DistCollection(rows, 2).filter { case (_, value) =>
+      hits.incrementAndGet()
+      value < 0
+    }
+
+    hits.set(0)
+    val summed = columnar(filtered.groupedSum)
+    summed shouldBe 0L
+    hits.get() shouldBe rows.length
+    columnar(assertNarrow(filtered, 2))
+    row(filtered.groupedSum) shouldBe 0L
+  }
+
+  it should "drop a key the key predicate rejects" in {
+    def filtered = DistCollection(Seq(1 -> 5, 2 -> 9, 1 -> 1), 2).filterKeys[Int, Int](_ == 1)
+
+    columnar(filtered.groupedSum) shouldBe 6L
+    columnar(filtered.groupedSum) shouldBe row(filtered.groupedSum)
+    columnar(assertNarrow(filtered, 2))
+  }
+
+  it should "materialise only the grouped-sum batches when a filter or map precedes it" in {
+    val rows = Seq(1 -> 10, 1 -> 4, 2 -> 7, 3 -> 1, 2 -> 6)
+    val kept = new AtomicInteger
+    val rewritten = new AtomicInteger
+
+    def source = DistCollection(rows, 1)
+    def filtered = source.filter { case (key, value) =>
+      kept.incrementAndGet()
+      key > 0 && value > 3
+    }
+    def mapped = source.map { case (key, value) =>
+      rewritten.incrementAndGet()
+      (key + value, value - key)
+    }
+
+    val filteredExpected = groupedRow(filtered.groupedSum)
+    val mappedExpected = groupedRow(mapped.groupedSum)
+    kept.set(0)
+    rewritten.set(0)
+    val filteredFootprint = groupedFootprint(filtered.groupedSum)
+    val mappedFootprint = groupedFootprint(mapped.groupedSum)
+    val plainFootprint = groupedFootprint(source.groupedSum)
+
+    filteredFootprint.result shouldBe filteredExpected
+    mappedFootprint.result shouldBe mappedExpected
+    kept.get() shouldBe rows.length
+    rewritten.get() shouldBe rows.length
+    val width = groupedConf(columnarExecution = true).defaultShufflePartitions.toLong
+    val batches = 1L + 1L + width + width
+    val visits = 1L + 1L + 1L + width
+    filteredFootprint.batches shouldBe batches
+    filteredFootprint.visits shouldBe visits
+    mappedFootprint.batches shouldBe batches
+    mappedFootprint.visits shouldBe visits
+    plainFootprint.batches shouldBe batches
+    plainFootprint.visits shouldBe visits
+  }
+
+  it should "sum a flatMapped pair plan on the row path" in {
+    def expanded = DistCollection(Seq(1 -> 2, 3 -> 4), 1).flatMap { case (key, value) =>
+      Seq((key, value), (key, value + 1))
+    }
+
+    columnar(expanded.groupedSum) shouldBe row(expanded.groupedSum)
+    columnar(ColumnarPlanner.partitioning(expanded.plan) shouldBe None)
   }
 
   it should "fold every group sum" in {
@@ -404,6 +527,32 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     ColumnMetrics.disarm()
     batches shouldBe 1L
     visits shouldBe 1L
+
+  private final case class Footprint(result: Long, batches: Long, visits: Long)
+
+  /** One partition, so the scan is one morsel. Shuffle width is the exchange and the final sum. */
+  private def groupedConf(columnarExecution: Boolean): ScarletConf =
+    originalConf.copy(
+      columnarExecution = columnarExecution,
+      columnarBatchSize = 1024,
+      defaultShufflePartitions = 4,
+      threadPoolSize = 2,
+    )
+
+  private def groupedRow(body: => Long): Long =
+    ScarletRuntime.get.shuffle.clear()
+    ScarletConf.set(groupedConf(columnarExecution = false))
+    body
+
+  private def groupedFootprint(body: => Long): Footprint =
+    ScarletRuntime.get.shuffle.clear()
+    ScarletConf.set(groupedConf(columnarExecution = true))
+    ColumnMetrics.arm()
+    val result = body
+    val batches = ColumnMetrics.batchCount
+    val visits = ColumnMetrics.visitCount
+    ColumnMetrics.disarm()
+    Footprint(result, batches, visits)
 
   private def assertNarrow[A](collection: DistCollection[A], width: Int): Unit =
     val info =

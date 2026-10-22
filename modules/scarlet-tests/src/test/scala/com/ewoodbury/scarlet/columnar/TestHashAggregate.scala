@@ -68,6 +68,20 @@ class TestHashAggregate extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     sums(HashAggregate.sumInt32(batch, 0, 1)) shouldBe Map(1 -> Some(9L))
   }
 
+  it should "apply a row filter and a pair map in one sum scan" in {
+    val steps = Vector(
+      PairStep.KeepRow((key, value) => key != 0 && value > 0),
+      PairStep.MapPair((key, value) => (key + 1, value * 10)),
+    )
+    val dense = pairs(Seq((Some(1), Some(5)), (Some(1), Some(-1)), (Some(-2), Some(4))))
+    val sparse = pairs(
+      Seq((Some(1), Some(5)), (Some(1), Some(-1)), (Some(-2), Some(4)), (Some(3), None)),
+    )
+
+    sums(HashAggregate.sumInt32(dense, 0, 1, steps)) shouldBe Map(2 -> Some(50L), -1 -> Some(40L))
+    sums(HashAggregate.sumInt32(sparse, 0, 1, steps)) shouldBe Map(2 -> Some(50L), -1 -> Some(40L))
+  }
+
   it should "apply the predicate and the map in the aggregate scan" in {
     val rows = Seq((Some(1), Some(5)), (Some(1), Some(-1)), (Some(2), Some(3)), (Some(3), None))
     val fused = HashAggregate.sumInt32(pairs(rows), 0, 1, _ > 0, _ * 10)

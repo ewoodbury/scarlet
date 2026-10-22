@@ -77,8 +77,11 @@ the row path.
 `keys`, `values`, or the values after an int `mapValues` reads the pair column in the morsel loop
 and does not build another batch. The key or value column is a view: its arrays are shared.
 `groupedSum` on `(Int, Int)` runs the wide grouped sum and folds the `Int64` group sums into one
-`Long`. A non-empty source, `filterKeys`, or `filterValues` of int pairs stays on that kernel. A
-completely empty source has no runtime type witness, so that sum returns zero on the row path.
+`Long`. A non-empty source of int pairs stays on that kernel. A preceding `filter`, `filterKeys`,
+`filterValues`, or pair `map` is applied inside the partial aggregate scan, so that action does
+not build an intermediate pair batch. A completely empty source has no runtime type witness, so
+that sum returns zero on the row path. A pair `map` stays on the row path for `collect` and
+`reduceByKey`.
 Empty input for these sums is zero. `collect` is the action that decodes a `Seq`. `reduceByKey`
 still wraps at `Int`.
 
