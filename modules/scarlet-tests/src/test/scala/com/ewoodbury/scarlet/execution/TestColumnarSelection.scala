@@ -4,7 +4,7 @@ import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import com.ewoodbury.scarlet.api.DistCollection
+import com.ewoodbury.scarlet.api.{DictionaryStringPredicate, DistCollection}
 import com.ewoodbury.scarlet.columnar.BatchCodec
 import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
@@ -202,6 +202,55 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     val unseen = DistCollection(texts(None, None), 2).filter(_ => true)
     unseen.collect() shouldBe texts(None, None)
     infoOf(unseen) shouldBe Option.empty[PartitioningInfo]
+  }
+
+  it should "filter string equality by dictionary code and match the scalar result" in {
+    val values = texts(Some("US"), None, Some("CA"), Some("US"), Some("MX"))
+    val actual = columnar(DistCollection(values, 2).filterStringEquals("US"))
+
+    assertUtf8(actual, 2)
+    actual.collect() shouldBe row(DistCollection(values, 2).filter(_ == "US").collect())
+    actual.collect() shouldBe texts(Some("US"), Some("US"))
+
+    val missing = columnar(DistCollection(values, 2).filterStringEquals("GB"))
+    assertUtf8(missing, 2)
+    missing.collect() shouldBe row(DistCollection(values, 2).filter(_ == "GB").collect())
+    missing.collect() shouldBe empty
+  }
+
+  it should "filter a short string IN-list by dictionary code" in {
+    val values = texts(Some("US"), None, Some("CA"), Some("MX"), Some("US"))
+    val actual = columnar(DistCollection(values, 2).filterStringIn("CA", "US", "GB"))
+    assertUtf8(actual, 2)
+    val expected = row(DistCollection(values, 2).filter(value => Set("CA", "US", "GB").contains(value)))
+
+    actual.collect() shouldBe expected.collect()
+    actual.collect() shouldBe texts(Some("US"), Some("CA"), Some("US"))
+  }
+
+  it should "not invoke a recognized predicate and keep startsWith on the scalar path" in {
+    val recognizedCalls = new java.util.concurrent.atomic.AtomicInteger(0)
+    val equality = new DictionaryStringPredicate[String]:
+      val literals: Vector[String] = Vector("US")
+      def apply(value: String): Boolean =
+        recognizedCalls.incrementAndGet()
+        value == "US"
+    val recognized = columnar(DistCollection(Seq("US", "CA", "US"), 1).filter(equality))
+
+    recognized.collect() shouldBe Seq("US", "US")
+    recognizedCalls.get() shouldBe 0
+    assertUtf8(recognized, 1)
+
+    val scalarCalls = new java.util.concurrent.atomic.AtomicInteger(0)
+    val startsWith = columnar {
+      DistCollection(Seq("US", "CA", "USA"), 1).filter { value =>
+        scalarCalls.incrementAndGet()
+        value.startsWith("US")
+      }
+    }
+    startsWith.collect() shouldBe Seq("US", "USA")
+    scalarCalls.get() shouldBe 3
+    assertUtf8(startsWith, 1)
   }
 
   it should "record a dictionary layout and match the row path when a map changes nulls" in {

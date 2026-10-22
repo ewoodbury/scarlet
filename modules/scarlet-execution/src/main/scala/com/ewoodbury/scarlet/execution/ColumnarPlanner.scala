@@ -2,6 +2,7 @@ package com.ewoodbury.scarlet.execution
 
 import scala.annotation.tailrec
 
+import com.ewoodbury.scarlet.api.DictionaryStringPredicate
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
 
@@ -415,14 +416,40 @@ object ColumnarPlanner:
       case ElementStep.Project(_) => None
 
   private def lowerElementPipeline(child: PhysicalOp, steps: List[ElementStep]): PhysicalOp =
-    steps.grouped(4).foldLeft(child) { (current, group) =>
-      group match
-        case List(step) =>
-          step match
-            case ElementStep.Filter(_) => PhysicalOp.Filter(current, PhysicalOp.Slot.Element)
-            case ElementStep.Project(_) => PhysicalOp.Project(current)
-        case _ => PhysicalOp.Pipeline(current, group.length)
-    }
+    def lower(current: PhysicalOp, remaining: List[ElementStep]): PhysicalOp =
+      val (ordinary, rest) = remaining.span {
+        case ElementStep.Filter(predicate) =>
+          child.kind match
+            case PhysicalOp.Kind.Strings => dictionaryStringLiterals(predicate).isEmpty
+            case _ => true
+        case ElementStep.Project(_) => true
+      }
+      val chunked = ordinary.grouped(4).foldLeft(current) { (parent, group) =>
+        group match
+          case List(ElementStep.Filter(_)) => PhysicalOp.Filter(parent, PhysicalOp.Slot.Element)
+          case List(ElementStep.Project(_)) => PhysicalOp.Project(parent)
+          case _ => PhysicalOp.Pipeline(parent, group.length)
+      }
+      rest match
+        case ElementStep.Filter(_) :: tail =>
+          lower(PhysicalOp.Filter(chunked, PhysicalOp.Slot.Element), tail)
+        case Nil => chunked
+        case _ =>
+          throw new IllegalStateException("only a dictionary string filter splits a pipeline")
+
+    lower(child, steps)
+
+  private val MaxDictionaryStringLiterals = 8
+
+  private def dictionaryStringLiterals(predicate: Any): Option[Vector[String]] = predicate match
+    case recognized: DictionaryStringPredicate[?] =>
+      val literals = recognized.literals
+      Option.when(
+        literals.nonEmpty &&
+          literals.length <= MaxDictionaryStringLiterals &&
+          literals.forall(value => Option(value).isDefined),
+      )(literals)
+    case _ => None
 
   private def pairColumn(source: Plan[_], key: Boolean): Option[PhysicalOp] =
     lowerPlan(source).flatMap { child =>
@@ -613,10 +640,16 @@ object ColumnarPlanner:
               ColumnKernel.filterFloat64(batch, 0, value => keep(value))
             })
           case Columns.Strings(parts) =>
-            val keep = predicate.asInstanceOf[String => Boolean]
-            Columns.Strings(onEach(parts) { batch =>
-              ColumnKernel.filterUtf8(batch, 0, value => keep(value))
-            })
+            dictionaryStringLiterals(predicate) match
+              case Some(literals) =>
+                Columns.Strings(onEach(parts) { batch =>
+                  ColumnKernel.filterUtf8ByValues(batch, 0, literals)
+                })
+              case None =>
+                val keep = predicate.asInstanceOf[String => Boolean]
+                Columns.Strings(onEach(parts) { batch =>
+                  ColumnKernel.filterUtf8(batch, 0, value => keep(value))
+                })
           case _ =>
             throw new IllegalStateException(
               "columnar element filter expects ints, floats, or strings",
