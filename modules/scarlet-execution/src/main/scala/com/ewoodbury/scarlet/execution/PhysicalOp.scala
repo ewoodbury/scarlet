@@ -69,13 +69,16 @@ object PhysicalOp:
   /**
    * `Element` is the single column, an int, a double, or a string, and its shape label is
    * `Filter`. `Row` is a predicate on both columns of a pair. `Key` and `Value` name which pair
-   * column.
+   * column. The triple slots select one of the three int columns in a join result.
    */
   enum Slot:
-    case Element, Row, Key, Value
+    case Element, Row, Key, Value, TripleKey, TripleLeftValue, TripleRightValue
 
     def label: String = this match
       case Element => "Filter"
       case Row => "FilterRow"
       case Slot.Key => "FilterKey"
       case Slot.Value => "FilterValue"
+      case TripleKey => "FilterTripleKey"
+      case TripleLeftValue => "FilterTripleLeftValue"
+      case TripleRightValue => "FilterTripleRightValue"
