@@ -21,6 +21,14 @@ object ColumnBatches:
         copy(batch, start, length)
       }
 
+  /**
+   * One column of `batch` as its own batch. The column object is shared, including its values and
+   * validity. A published column is not mutated, so this is a view rather than a copy.
+   */
+  def takeColumn(batch: ColumnBatch, ordinal: Int): ColumnBatch =
+    val column = columnAt(batch, ordinal)
+    new ColumnBatch(Vector(column.logicalType), Vector(column), column.length)
+
   def concat(parts: Vector[ColumnBatch]): ColumnBatch =
     require(parts.nonEmpty, "concat needs at least one batch")
     val head = parts.headOption.getOrElse(
