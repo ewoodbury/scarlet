@@ -55,9 +55,66 @@ DistCollection action
 ```
 
 The columnar planner accepts only supported typed plan shapes when
-`ScarletConf.columnarExecution` is enabled; every other shape runs wholly on the row path. The
-columnar implementation and action behavior are documented in `ColumnarPlanner`, `ColumnPipeline`,
-and `DistCollection` scaladoc. `columnarBatchSize` (default 8192) sets the morsel width.
+`ScarletConf.columnarExecution` is enabled. `TestColumnarContract` is the executable inventory:
+its `Plan` match has no default case, so adding a logical node requires classifying it. The suite
+asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors that contract.
+`columnarBatchSize` (default 8192) sets the morsel width.
+
+### Columnar completion contract
+
+The following 121 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. All 28 filter/map orderings of lengths 2–4 are covered for each scalar type.
+`Unknown(2)` denotes the two source partitions in the small contract fixtures; aggregate and join
+outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are exact.
+
+| Accepted plan shape | Layout | `PhysicalOp.shape` |
+|---|---|---|
+| Int and double source | `Columnar` | `Scan` |
+| Int and double single filter / map | `Columnar` | `Filter(Scan)` / `Project(Scan)` |
+| Int, double, and string filter/map runs of 2, 3, or 4 steps | `Columnar` for int/double; `Utf8Dict` for string | `Pipeline2(Scan)`, `Pipeline3(Scan)`, `Pipeline4(Scan)` |
+| Five- and six-step int, double, and string runs | `Columnar` for int/double; `Utf8Dict` for string | `Project(Pipeline4(Scan))`, `Pipeline2(Pipeline4(Scan))` |
+| String source, scalar filter/map, filter-map run, dictionary equality filter and mapped dictionary result | `Utf8Dict` | `Scan`, `Filter(Scan)`, `Project(Scan)`, `Pipeline2(Scan)`, `Filter(Scan)`, `Project(Filter(Scan))` respectively |
+| Int-pair source and row/key/value filters | `Columnar` | `Scan`, `FilterRow(Scan)`, `FilterKey(Scan)`, `FilterValue(Scan)` |
+| Pair `keys`, `values`, int `mapValues`, mapped key/value columns, filtered int `mapValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `Project(Key(Scan))`, `Project(Value(Scan))`, `FilterValue(MapValue(Scan))` |
+| Int `reduceByKey`, after a value filter or int `mapValues`, and nested reduction | `Columnar` | `HashAggregate(Exchange(Scan))`, `HashAggregate(Exchange(FilterValue(Scan)))`, `HashAggregate(Exchange(MapValue(Scan)))`, `HashAggregate(Exchange(HashAggregate(Exchange(Scan))))` |
+| Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
+| Join after an int aggregate | `Columnar` | `HashJoin(Exchange(HashAggregate(Exchange(Scan))), Exchange(Scan))` |
+| Int join key/left-value/right-value filters | `Columnar` | `FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))`, `FilterTripleLeftValue(HashJoin(Exchange(Scan), Exchange(Scan)))`, `FilterTripleRightValue(HashJoin(Exchange(Scan), Exchange(Scan)))` |
+
+`take` uses these same physical shapes for partition-preserving plans; it scans in partition order
+and decodes only the requested prefix. The contract checks an int `Pipeline2(Scan)` and pair
+`FilterValue(Scan)` with `tryTake`.
+
+Fused `groupedSum` is action-level: a witnessed int-pair source with pair filters and/or a pair map
+is scanned by `ColumnPipeline.sumByKey`. `partitioning` reports `Columnar`, but `lower` returns
+`None` for a pair map and there is no `PhysicalOp.shape` for this fused action today. The contract
+checks the fused sum result and pins that absence rather than inventing a physical tree.
+
+These 37 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+`coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
+`sortBy`, map on join triples, a general tuple filter on join triples, non-Int `mapValues`,
+string/double pair projection or pair filters, string/double-key `groupByKey`, `reduceByKey`, and
+join, single-precision `Float` sources/maps, all-null strings, empty sources without a type witness,
+and an unsupported Boolean source. A map of a pair is also excluded from `lower` and `tryRun`; its
+action-specific `groupedSum` fusion is described above.
+
+The original completion request also classifies type-changing maps and sort-merge/broadcast joins
+as row-path exclusions. The current planner does not meet that classification, so the test pins
+and reports six discrepancies rather than changing execution behavior:
+
+- Int-to-string, double-to-int, and string-to-int maps currently have a `Some` partitioning and a
+  `Project(Scan)` lower shape, while `tryRun` rejects them and falls back to rows.
+- Join strategy is ignored by `ColumnarPlanner.lower`: explicit sort-merge and broadcast joins
+  currently report the same columnar `HashJoin(Exchange(Scan), Exchange(Scan))` as shuffle-hash.
+- The pair map fused by `groupedSum` reports a columnar layout but has no `PhysicalOp.shape`; the
+  action is covered separately and remains action-level.
+
+The grouped-sum pair-map layout is a separate action-level case, not one of the physical-tree
+fixtures: `partitioning` reports `Columnar`, `lower` returns `None`, and `tryGroupedSum` succeeds.
+
+`collect`, `foreach`, `reduce`, `fold`, and `aggregate` are deliberate boxed exits: they consume
+columnar results as ordinary Scala values at the action boundary. A collected `reduceByKey` also
+decodes its aggregate output to boxed rows. This does not change the columnar layout reported for
+the plan itself.
 
 Bounded `take` applies to accepted partition-preserving plans: int, double, and string sources with
 their supported element filters/maps; int-pair sources with row/key/value filters, `keys`/`values`,
