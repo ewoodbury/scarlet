@@ -170,9 +170,33 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(assertNarrow(filtered, 2))
   }
 
-  it should "return zero for an empty source" in {
-    columnar(DistCollection(Seq.empty[(Int, Int)], 2).groupedSum) shouldBe 0L
-    row(DistCollection(Seq.empty[(Int, Int)], 2).groupedSum) shouldBe 0L
+  it should "return zero for an empty source through the row engine" in {
+    def empty = DistCollection(Seq.empty[(Int, Int)], 2)
+
+    columnar(empty.groupedSum) shouldBe 0L
+    row(empty.groupedSum) shouldBe 0L
+    columnar(ColumnarPlanner.partitioning(empty.plan) shouldBe None)
+  }
+
+  it should "return zero when filterValues keeps no rows" in {
+    val rows = Seq(1 -> 10, 2 -> 20)
+
+    def filtered = DistCollection(rows, 2).filterValues[Int, Int](_ < 0)
+
+    columnar(filtered.groupedSum) shouldBe 0L
+    row(filtered.groupedSum) shouldBe 0L
+    columnar(assertNarrow(filtered, 2))
+  }
+
+  it should "sum a mapped pair plan on the row path" in {
+    val rows = Seq(1 -> 10, 1 -> 20, 2 -> 5)
+    val valueSum = 11L + 21L + 6L
+
+    def mapped = DistCollection(rows, 2).map { case (key, value) => (key, value + 1) }
+
+    columnar(mapped.groupedSum) shouldBe valueSum
+    columnar(mapped.groupedSum) shouldBe row(mapped.groupedSum)
+    columnar(ColumnarPlanner.partitioning(mapped.plan).map(_.layout) shouldBe None)
   }
 
   it should "fold every group sum" in {

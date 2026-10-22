@@ -31,9 +31,9 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
  * `Int`. `join` hash-partitions both sides and probes one bucket at a time. Output width for those
  * two is `defaultShufflePartitions`. [[tryCount]] reads finished column lengths. [[trySumInt]] and
  * [[trySumDouble]] add a filter/project chain in the fused loop and do not write that chain's
- * output column. [[tryGroupedSum]] runs [[ColumnPipeline.sumByKey]] on a pair source,
- * `filterKeys`, or `filterValues`, then folds the `Int64` group sums. It does not decode.
- * `collect` still does.
+ * output column. [[tryGroupedSum]] runs [[ColumnPipeline.sumByKey]] on a witnessed pair source,
+ * `filterKeys`, or `filterValues`, then folds the `Int64` group sums. An empty source has no
+ * witness and is refused. It does not decode. `collect` still does.
  *
  * An `ArraySeq.ofInt`, `ArraySeq.ofDouble`, or [[IntPairArrays]] source is copied into the column
  * on the calling thread. A boxed `Vector` or `List` is still read through its iterator.
@@ -107,7 +107,8 @@ object ColumnarPlanner:
 
   /**
    * Folded wide sum of int pairs. `None` means the row path. A pair source, `filterKeys`, or
-   * `filterValues` runs [[ColumnPipeline.sumByKey]] and adds the `Int64` group sums. Null keys
+   * `filterValues` runs [[ColumnPipeline.sumByKey]] and adds the `Int64` group sums when a pair
+   * value is present to witness the type. An empty source has no witness and is refused. Null keys
    * stay dropped. This does not decode. Any other shape is refused.
    */
   def tryGroupedSum(plan: Plan[_]): Option[Long] =
