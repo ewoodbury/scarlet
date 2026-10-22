@@ -64,13 +64,14 @@ class DefaultExecutionService extends ExecutionService {
 
   def take[A](plan: Plan[A], n: Int): Seq[A] =
     if (n <= 0) Seq.empty
-    else {
-      // Truncate each output partition of the final stage to n elements before executing. Each
-      // partition can then contribute at most n elements, so the first n elements of the
-      // partition-ordered result are unchanged.
-      val limited = Plan.MapPartitionsOp(plan, (it: Iterator[A]) => it.take(n))
-      executePartitions(limited).flatMap(_.data).take(n)
-    }
+    else
+      ColumnarPlanner.tryTake(plan, n).getOrElse {
+        // Truncate each output partition of the final stage to n elements before executing. Each
+        // partition can then contribute at most n elements, so the first n elements of the
+        // partition-ordered result are unchanged.
+        val limited = Plan.MapPartitionsOp(plan, (it: Iterator[A]) => it.take(n))
+        executePartitions(limited).flatMap(_.data).take(n)
+      }
 }
 
 /**
