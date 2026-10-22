@@ -63,6 +63,31 @@ object HashAggregate:
     sumColumns(keys, values, ColumnHash.tableSize(keys.length), filtered = true, keep, map)
 
   /**
+   * Runs `steps` on each present pair, then aggregates, in one scan. A null key or a null value is
+   * dropped before the steps, and a rejected row never creates a group. Value-only filters use the
+   * `keep` and `map` overload instead, because those functions do not read the key.
+   */
+  def sumInt32(
+      batch: ColumnBatch,
+      keyOrdinal: Int,
+      valueOrdinal: Int,
+      steps: Vector[PairStep],
+  ): ColumnBatch =
+    require(steps.nonEmpty, "pair sum needs a filter or a map")
+    val keys = ColumnHash.int32At(batch, keyOrdinal)
+    val values = ColumnHash.int32At(batch, valueOrdinal)
+    require(keys.length == values.length, "key and value columns differ in length")
+    if (keys.length == 0) then emptySum
+    else
+      val table = new GroupTable(ColumnHash.tableSize(keys.length), SumOnly)
+      val slot = new PairSlot
+      val planned = steps.toArray
+      if (ColumnHash.fullyPresent(keys) && ColumnHash.fullyPresent(values)) then
+        scanSumDenseSteps(table, keys, values, planned, slot)
+      else scanSumSparseSteps(table, keys, values, planned, slot)
+      table.compact()
+
+  /**
    * Sums an `Int64` column into an `Int64` sum. This is the merge for partial sums, and for
    * partial counts when `valueOrdinal` points at the count column. A null value does not update
    * the sum, and the group still exists.
@@ -245,6 +270,71 @@ object HashAggregate:
           if (valuePresent) then table.accumulate(slot, valueValues(row).toLong)
       row += 1
     }
+
+  /** One reused pair so a step scan does not allocate a tuple per row. */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private final class PairSlot:
+    var key: Int = 0
+    var value: Int = 0
+    var kept: Boolean = false
+
+  private def scanSumDenseSteps(
+      table: GroupTable,
+      keys: Int32Column,
+      values: Int32Column,
+      steps: Array[PairStep],
+      slot: PairSlot,
+  ): Unit =
+    val keyValues = keys.values
+    val valueValues = values.values
+    val rows = keys.length
+    var row = 0
+    while (row < rows) {
+      applySteps(keyValues(row), valueValues(row), steps, slot)
+      if (slot.kept) then table.addSum(slot.key, slot.value.toLong)
+      row += 1
+    }
+
+  private def scanSumSparseSteps(
+      table: GroupTable,
+      keys: Int32Column,
+      values: Int32Column,
+      steps: Array[PairStep],
+      slot: PairSlot,
+  ): Unit =
+    val keyValues = keys.values
+    val keyWords = keys.validity.words
+    val valueValues = values.values
+    val valueWords = values.validity.words
+    val rows = keys.length
+    var row = 0
+    while (row < rows) {
+      if (Validity.isSet(keyWords, row) && Validity.isSet(valueWords, row)) then
+        applySteps(keyValues(row), valueValues(row), steps, slot)
+        if (slot.kept) then table.addSum(slot.key, slot.value.toLong)
+      row += 1
+    }
+
+  private def applySteps(key0: Int, value0: Int, steps: Array[PairStep], slot: PairSlot): Unit =
+    val width = steps.length
+    var key = key0
+    var value = value0
+    var kept = true
+    var index = 0
+    while (kept && index < width) {
+      steps(index) match
+        case PairStep.KeepKey(predicate) => kept = predicate(key)
+        case PairStep.KeepValue(predicate) => kept = predicate(value)
+        case PairStep.KeepRow(predicate) => kept = predicate(key, value)
+        case PairStep.MapPair(mapper) =>
+          val projected = mapper(key, value)
+          key = projected._1
+          value = projected._2
+      index += 1
+    }
+    slot.key = key
+    slot.value = value
+    slot.kept = kept
 
   private def scanSumLongDense(table: GroupTable, keys: Int32Column, values: Int64Column): Unit =
     val keyValues = keys.values
