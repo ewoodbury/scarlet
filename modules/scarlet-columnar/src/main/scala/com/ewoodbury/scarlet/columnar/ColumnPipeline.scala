@@ -5,11 +5,12 @@ package com.ewoodbury.scarlet.columnar
  *
  * Each input batch is sliced into morsels. Sums run `sumInt32` on the morsel, `sumInt64` to merge
  * that batch's partials, and `sumInt64` again after the exchange, so a partial sum does not wrap
- * at `Int`. Each output batch is an `Int32` key and an `Int64` sum. Fold the sum with
- * [[ColumnReduce.sumInt64]] at ordinal 1; the batch has two columns. An empty input is
- * `numPartitions` empty sum batches, the same convention as [[HashReduce.byKey]]. The join reads
- * key column 0 and value column 1 on both sides, exchanges each side, and probes one partition at
- * a time.
+ * at `Int`. A `keep`/`map` or [[PairStep]] overload applies that work inside the partial
+ * `sumInt32`, so the exchange still sees one partial per input batch. Each output batch is an
+ * `Int32` key and an `Int64` sum. Fold the sum with [[ColumnReduce.sumInt64]] at ordinal 1; the
+ * batch has two columns. An empty input is `numPartitions` empty sum batches, the same convention
+ * as [[HashReduce.byKey]]. The join reads key column 0 and value column 1 on both sides, exchanges
+ * each side, and probes one partition at a time.
  */
 object ColumnPipeline:
 
@@ -21,6 +22,68 @@ object ColumnPipeline:
       parallelism: Int,
       batchSize: Int,
   ): Vector[ColumnBatch] =
+    runSum(batches, numPartitions, parallelism, batchSize) { morsel =>
+      HashAggregate.sumInt32(morsel, keyOrdinal, valueOrdinal)
+    }
+
+  /**
+   * Filters and projects the value inside the partial `sumInt32`. The merge and the final sum
+   * still read the `Int64` partials.
+   */
+  def sumByKey(
+      batches: Vector[ColumnBatch],
+      keyOrdinal: Int,
+      valueOrdinal: Int,
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+      keep: ColumnKernel.Int32Predicate,
+      map: ColumnKernel.Int32Map,
+  ): Vector[ColumnBatch] =
+    runSum(batches, numPartitions, parallelism, batchSize) { morsel =>
+      HashAggregate.sumInt32(morsel, keyOrdinal, valueOrdinal, keep, map)
+    }
+
+  /**
+   * Runs `steps` inside the partial `sumInt32`. A chain of value filters uses the `keep`/`map`
+   * overload. Any other chain, including a key filter, a row filter, or a pair map, uses the pair
+   * scan.
+   */
+  def sumByKey(
+      batches: Vector[ColumnBatch],
+      keyOrdinal: Int,
+      valueOrdinal: Int,
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+      steps: Vector[PairStep],
+  ): Vector[ColumnBatch] =
+    if (steps.isEmpty) then
+      sumByKey(batches, keyOrdinal, valueOrdinal, numPartitions, parallelism, batchSize)
+    else
+      valueKeeps(steps) match
+        case Some(predicates) =>
+          sumByKey(
+            batches,
+            keyOrdinal,
+            valueOrdinal,
+            numPartitions,
+            parallelism,
+            batchSize,
+            keepValues(predicates),
+            PassValue,
+          )
+        case None =>
+          runSum(batches, numPartitions, parallelism, batchSize) { morsel =>
+            HashAggregate.sumInt32(morsel, keyOrdinal, valueOrdinal, steps)
+          }
+
+  private def runSum(
+      batches: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  )(partial: ColumnBatch => ColumnBatch): Vector[ColumnBatch] =
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
@@ -30,13 +93,28 @@ object ColumnPipeline:
         batches,
         batchSize,
         parallelism,
-        morsel => HashAggregate.sumInt32(morsel, keyOrdinal, valueOrdinal),
+        partial,
         partials => HashAggregate.sumInt64(partials, keyOrdinal = 0, valueOrdinal = 1),
       )
       val buckets = HashExchange.partitionAll(combined, keyOrdinal = 0, numPartitions, parallelism)
       MorselScheduler.map(buckets, parallelism) { (_, bucket) =>
         HashAggregate.sumInt64(bucket, keyOrdinal = 0, valueOrdinal = 1)
       }
+
+  /** `Some` when every step is a value filter. The predicates stay in source order. */
+  private def valueKeeps(steps: Vector[PairStep]): Option[Vector[Int => Boolean]] =
+    val seed: Option[Vector[Int => Boolean]] = Some(Vector.empty[Int => Boolean])
+    steps.foldLeft(seed) { (acc, step) =>
+      (acc, step) match
+        case (Some(predicates), PairStep.KeepValue(predicate)) => Some(predicates :+ predicate)
+        case _ => None
+    }
+
+  private def keepValues(predicates: Vector[Int => Boolean]): ColumnKernel.Int32Predicate =
+    value => predicates.forall(predicate => predicate(value))
+
+  private object PassValue extends ColumnKernel.Int32Map:
+    def apply(value: Int): Int = value
 
   def innerJoin(
       build: Vector[ColumnBatch],
