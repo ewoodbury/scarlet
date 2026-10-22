@@ -161,6 +161,43 @@ final case class DistCollection[A](plan: Plan[A]):
     DistCollection(Plan.FilterValuesOp(kvPlan, p))
 
   /**
+   * Filters an int join result by its key. This explicit form can filter the three join columns
+   * without constructing a `(Int, (Int, Int))` tuple for each row. A general `filter` remains on
+   * the row path because its predicate accepts that tuple.
+   */
+  def filterJoinKey(p: Int => Boolean)(using
+      ev: A =:= (Int, (Int, Int)),
+  ): DistCollection[A] =
+    filterJoinColumn(p, IntJoinTriplePredicate.Slot.Key)
+
+  /** Filters an int join result by the left value without constructing a row tuple. */
+  def filterJoinLeft(p: Int => Boolean)(using
+      ev: A =:= (Int, (Int, Int)),
+  ): DistCollection[A] =
+    filterJoinColumn(p, IntJoinTriplePredicate.Slot.LeftValue)
+
+  /** Filters an int join result by the right value without constructing a row tuple. */
+  def filterJoinRight(p: Int => Boolean)(using
+      ev: A =:= (Int, (Int, Int)),
+  ): DistCollection[A] =
+    filterJoinColumn(p, IntJoinTriplePredicate.Slot.RightValue)
+
+  private def filterJoinColumn(
+      predicate: Int => Boolean,
+      slot: IntJoinTriplePredicate.Slot,
+  )(using ev: A =:= (Int, (Int, Int))): DistCollection[A] =
+    val triplePredicate = new IntJoinTriplePredicate[A]:
+      val selectedSlot: IntJoinTriplePredicate.Slot = slot
+      def keep(value: Int): Boolean = predicate(value)
+      def apply(value: A): Boolean =
+        val (key, (left, right)) = ev(value)
+        selectedSlot match
+          case IntJoinTriplePredicate.Slot.Key => keep(key)
+          case IntJoinTriplePredicate.Slot.LeftValue => keep(left)
+          case IntJoinTriplePredicate.Slot.RightValue => keep(right)
+    DistCollection(Plan.FilterOp(plan, triplePredicate))
+
+  /**
    * Transformation: Applies a function to the values of the elements in the collection. Returns a
    * new DistCollection representing the result of the flatMap. Does not trigger computation.
    */
@@ -353,6 +390,15 @@ end DistCollection
  */
 private[scarlet] trait DictionaryStringPredicate[A] extends (A => Boolean):
   def literals: Vector[String]
+
+/** Internal marker for a tuple-free predicate over one int join column. */
+private[scarlet] trait IntJoinTriplePredicate[A] extends (A => Boolean):
+  def selectedSlot: IntJoinTriplePredicate.Slot
+  def keep(value: Int): Boolean
+
+private[scarlet] object IntJoinTriplePredicate:
+  enum Slot:
+    case Key, LeftValue, RightValue
 
 // Companion object for creating a DistCollection from a source
 object DistCollection:

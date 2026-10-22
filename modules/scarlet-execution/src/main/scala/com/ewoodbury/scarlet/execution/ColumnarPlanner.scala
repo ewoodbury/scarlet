@@ -2,7 +2,7 @@ package com.ewoodbury.scarlet.execution
 
 import scala.annotation.tailrec
 
-import com.ewoodbury.scarlet.api.DictionaryStringPredicate
+import com.ewoodbury.scarlet.api.{DictionaryStringPredicate, IntJoinTriplePredicate}
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
 
@@ -28,16 +28,17 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
  * source order first. One step stays a [[PhysicalOp.Filter]] or [[PhysicalOp.Project]]. Pair
  * filters, aggregates, and joins stay one node per operator. Narrow map and filter keep input
  * order and the input partition count. `Double` and `String` select filter and map only. A filter
- * over a join result is not columnar. `keys` and `values` of an int pair are that column. The
- * arrays are shared: a published column is not mutated, so a view is cheaper than a copy and still
- * correct. `mapValues` lowers only when the function declares an unboxed `Int` result. A wider
- * primitive or a reference result stays on the row path. That check reads the method descriptor
- * and does not call the function. `reduceByKey` applies the user's function and wraps at `Int`.
- * `join` hash-partitions both sides and probes one bucket at a time. Output width for those two is
- * `defaultShufflePartitions`. [[tryCount]] reads finished column lengths. [[trySumInt]] and
- * [[trySumDouble]] add a filter/project chain in the fused loop and do not write that chain's
- * output column. Sum of `keys`, `values`, or an int `mapValues` reads the pair column in that
- * morsel loop and does not build the projection. [[tryGroupedSum]] runs
+ * over an int join result is columnar only for explicit key, left-value, and right-value filters;
+ * general tuple predicates stay on the row path. `keys` and `values` of an int pair are that
+ * column. The arrays are shared: a published column is not mutated, so a view is cheaper than a
+ * copy and still correct. `mapValues` lowers only when the function declares an unboxed `Int`
+ * result. A wider primitive or a reference result stays on the row path. That check reads the
+ * method descriptor and does not call the function. `reduceByKey` applies the user's function and
+ * wraps at `Int`. `join` hash-partitions both sides and probes one bucket at a time. Output width
+ * for those two is `defaultShufflePartitions`. [[tryCount]] reads finished column lengths.
+ * [[trySumInt]] and [[trySumDouble]] add a filter/project chain in the fused loop and do not write
+ * that chain's output column. Sum of `keys`, `values`, or an int `mapValues` reads the pair column
+ * in that morsel loop and does not build the projection. [[tryGroupedSum]] runs
  * [[ColumnPipeline.sumByKey]] on a witnessed pair source and folds the `Int64` group sums. A
  * preceding `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that
  * partial scan, so the action does not build those pairs. An empty source has no witness and is
@@ -405,11 +406,23 @@ object ColumnarPlanner:
 
   private def lowerElementStep(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
     step match
-      case ElementStep.Filter(_) =>
+      case ElementStep.Filter(predicate) =>
         child.kind match
           case PhysicalOp.Kind.Pairs => Some(PhysicalOp.Filter(child, PhysicalOp.Slot.Row))
+          case PhysicalOp.Kind.Triples =>
+            tripleFilterSlot(predicate).map { slot =>
+              PhysicalOp.Filter(child, slot)
+            }
           case _ => None
       case ElementStep.Project(_) => None
+
+  private def tripleFilterSlot(predicate: Any): Option[PhysicalOp.Slot] = predicate match
+    case recognized: IntJoinTriplePredicate[?] =>
+      recognized.selectedSlot match
+        case IntJoinTriplePredicate.Slot.Key => Some(PhysicalOp.Slot.TripleKey)
+        case IntJoinTriplePredicate.Slot.LeftValue => Some(PhysicalOp.Slot.TripleLeftValue)
+        case IntJoinTriplePredicate.Slot.RightValue => Some(PhysicalOp.Slot.TripleRightValue)
+    case _ => None
 
   private def lowerElementPipeline(child: PhysicalOp, steps: List[ElementStep]): PhysicalOp =
     def lower(current: PhysicalOp, remaining: List[ElementStep]): PhysicalOp =
@@ -659,6 +672,22 @@ object ColumnarPlanner:
         Columns.Pairs(onEach(pairsOf(columns)) { batch =>
           ColumnKernel.filterInt32(batch, 1, value => keep(value))
         })
+      case PhysicalOp.Slot.TripleKey | PhysicalOp.Slot.TripleLeftValue |
+          PhysicalOp.Slot.TripleRightValue =>
+        val keep = predicate match
+          case recognized: IntJoinTriplePredicate[?] => recognized
+          case _ => throw new IllegalStateException("triple filter lost its slot predicate")
+        Columns.Triples(onEach(triplesOf(columns)) { batch =>
+          PairKernel.filterTriple(
+            batch,
+            (key, left, right) =>
+              slot match
+                case PhysicalOp.Slot.TripleKey => keep.keep(key)
+                case PhysicalOp.Slot.TripleLeftValue => keep.keep(left)
+                case PhysicalOp.Slot.TripleRightValue => keep.keep(right)
+                case _ => throw new IllegalStateException("triple filter has a non-triple slot"),
+          )
+        })
 
   private def project(columns: Columns, mapper: Any): Columns = columns match
     case Columns.Ints(parts) =>
@@ -685,6 +714,13 @@ object ColumnarPlanner:
       throw new IllegalStateException("columnar pairs have no partitions")
     case _ =>
       throw new IllegalStateException("columnar op expected int pairs")
+
+  private def triplesOf(columns: Columns): Vector[ColumnBatch] = columns match
+    case Columns.Triples(parts) if parts.nonEmpty => parts
+    case Columns.Triples(_) =>
+      throw new IllegalStateException("columnar triples have no partitions")
+    case _ =>
+      throw new IllegalStateException("columnar op expected int triples")
 
   private def onEach(
       parts: Vector[ColumnBatch],
