@@ -70,8 +70,11 @@ input partition count. `reduceByKey` and `join` hash with `floorMod` into
 the row path.
 
 `count` and `sum` on an eligible plan read the finished columns. `count` sums batch lengths.
-`sum` of `Int` returns a `Long` and does not wrap. `sum` of `Double` returns a `Double`. Empty
-input sums to zero. `collect` is the action that decodes a `Seq`.
+`sum` of `Int` returns a `Long` and does not wrap. `sum` of `Double` returns a `Double`.
+`groupedSum` on `(Int, Int)` runs the wide grouped sum and folds the `Int64` group sums into one
+`Long`. A source, `filterKeys`, or `filterValues` of int pairs stays on that kernel. Empty input
+for these sums is zero. `collect` is the action that decodes a `Seq`. `reduceByKey` still wraps
+at `Int`.
 
 On the row path, narrow-only plans compile to a one-stage graph and flow through the same path
 as wide plans.

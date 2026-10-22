@@ -33,6 +33,12 @@ trait ExecutionService {
   def sumDouble(plan: Plan[Double]): Double
 
   /**
+   * Sums `(Int, Int)` values by key as a `Long` and folds the group sums. Empty input returns
+   * zero. Null keys are dropped. The total does not wrap at `Int`.
+   */
+  def groupedSum(plan: Plan[(Int, Int)]): Long
+
+  /**
    * Executes a plan and returns the first n results.
    */
   def take[A](plan: Plan[A], n: Int): Seq[A]
@@ -70,6 +76,12 @@ object ExecutionService {
     }
 
     def sumDouble(plan: Plan[Double]): Double = {
+      throw new UnsupportedOperationException(
+        "No execution service registered. Please ensure the execution module is properly initialized.",
+      )
+    }
+
+    def groupedSum(plan: Plan[(Int, Int)]): Long = {
       throw new UnsupportedOperationException(
         "No execution service registered. Please ensure the execution module is properly initialized.",
       )
