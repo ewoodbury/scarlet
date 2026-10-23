@@ -7,8 +7,8 @@ import com.ewoodbury.scarlet.columnar.{ColumnBatch, ColumnKernel, Float64Pipelin
 /**
  * Sum a filter/project chain without writing its output column. The match is outside the row loop.
  * A chain longer than four stays in that fold: five int maps call [[Int32Pipeline.sumPPPPP]], and
- * any other longer int chain walks its steps. [[countLonger]] and [[countMapped]] do the same for
- * `count`.
+ * any other longer int chain walks its steps. [[countLonger]] counts two or more steps the same
+ * way. [[countMapped]] counts one trailing int project. Survivors use [[Int32Pipeline.encoded]].
  */
 @SuppressWarnings(
   Array(
@@ -24,10 +24,6 @@ object ElementSum:
 
     def pred(fn: Any): ColumnKernel.Int32Predicate =
       val function = fn.asInstanceOf[Int => Boolean]
-      value => function(value)
-
-    def proj(fn: Any): ColumnKernel.Int32Map =
-      val function = fn.asInstanceOf[Int => Int]
       value => function(value)
 
     steps match
@@ -104,17 +100,28 @@ object ElementSum:
         val stages = compile(steps)
         Int32Pipeline.sumEncoded(batch, hasFilter(steps), value => runSteps(stages, value))
 
-  /** Count without writing the chain. A filter drops rows. A map-only chain keeps null slots. */
+  /**
+   * Count without writing the chain, including two to four steps. A filter drops rows. A map-only
+   * chain keeps null slots.
+   */
   def countLonger(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): Long =
     val stages = compile(steps)
     Int32Pipeline.countEncoded(batch, hasFilter(steps), value => runSteps(stages, value))
+
+  /** Sum one int projection. The mapped column is not written. */
+  def sumMapped(batch: ColumnBatch, mapper: Any): Long =
+    Int32Pipeline.sumProjected(batch, proj(mapper))
 
   /**
    * Count a single int projection. The mapped column is not written. Null slots stay in the count.
    */
   def countMapped(batch: ColumnBatch, mapper: Any): Long =
     val project = proj(mapper)
-    Int32Pipeline.countEncoded(batch, compact = false, value => accepted(project(value)))
+    Int32Pipeline.countEncoded(
+      batch,
+      compact = false,
+      value => Int32Pipeline.encoded(project(value)),
+    )
 
   private def proj(fn: Any): ColumnKernel.Int32Map =
     val function = fn.asInstanceOf[Int => Int]
@@ -130,19 +137,16 @@ object ElementSum:
     steps.map {
       case ColumnarPlanner.ElementStep.Filter(fn) =>
         val predicate = fn.asInstanceOf[Int => Boolean]
-        (value: Int) => if (predicate(value)) then accepted(value) else 0L
+        (value: Int) => if (predicate(value)) then Int32Pipeline.encoded(value) else 0L
       case ColumnarPlanner.ElementStep.Project(fn) =>
         val mapper = fn.asInstanceOf[Int => Int]
-        (value: Int) => accepted(mapper(value))
+        (value: Int) => Int32Pipeline.encoded(mapper(value))
     }
-
-  /** Low bit marks a survivor. The other bits are the signed int, matching `Int32Pipeline`. */
-  private def accepted(value: Int): Long = (value.toLong << 1) | 1L
 
   @tailrec
   private def runSteps(stages: List[Int => Long], value: Int): Long =
     stages match
-      case Nil => accepted(value)
+      case Nil => Int32Pipeline.encoded(value)
       case stage :: rest =>
         val encoded = stage(value)
         if ((encoded & 1L) == 0L) then 0L

@@ -47,16 +47,18 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * `join` with no hint, or with an explicit shuffle-hash hint, hash-partitions both sides and
  * probes one bucket at a time. Sort-merge and broadcast are not implemented: those hints make
  * `lower` return `None`, so the plan stays on the row path. Output width for an accepted join or
- * aggregate is `defaultShufflePartitions`. [[tryCount]] and [[trySumInt]] fold a long int chain,
- * or one trailing int project, and do not write it. [[trySumDouble]] folds at most four steps. Sum
- * of `keys`, `values`, or an int `mapValues` reads the pair column in that morsel loop and does
- * not build the projection. [[tryGroupedSum]] runs [[ColumnPipeline.sumByKey]] on a typed pair
- * source and folds the `Int64` group sums. A preceding `FilterOp`, `filterKeys`, `filterValues`,
- * or pair `MapOp` is applied inside that partial scan, so the action does not build those pairs.
- * [[groupedSumPeel]] labels those walked steps. It is not an action shape and not a physical node.
- * A source descriptor supplies the type when all partitions are empty. It does not decode.
- * `collect` still does. A pair `MapOp` stays on the row path for `collect` and `reduceByKey`, and
- * [[partitioning]] reports no layout for it.
+ * aggregate is `defaultShufflePartitions`. [[tryCount]] and [[trySumInt]] fold an int filter/map
+ * chain that starts at a scan or at `keys` or `values`, including an int `mapValues`, and do not
+ * write that chain. Sum folds one trailing project and chains longer than four. Count folds those
+ * and chains of two to four steps. [[trySumDouble]] folds at most four steps. Sum of `keys`,
+ * `values`, or an int `mapValues` with no further element chain reads the pair column in that
+ * morsel loop and does not build the projection. [[tryGroupedSum]] runs
+ * [[ColumnPipeline.sumByKey]] on a typed pair source and folds the `Int64` group sums. A preceding
+ * `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that partial scan,
+ * so the action does not build those pairs. [[groupedSumPeel]] labels those walked steps. It is
+ * not an action shape and not a physical node. A source descriptor supplies the type when all
+ * partitions are empty. It does not decode. `collect` still does. A pair `MapOp` stays on the row
+ * path for `collect` and `reduceByKey`, and [[partitioning]] reports no layout for it.
  *
  * An [[com.ewoodbury.scarlet.core.IntArrays]], [[com.ewoodbury.scarlet.core.DoubleArrays]], or
  * [[com.ewoodbury.scarlet.core.IntPairArrays]] source is copied into the column on the calling
@@ -231,11 +233,6 @@ object ColumnarPlanner:
       val keep = predicate.asInstanceOf[Int => Boolean]
       foldLong(batchesOf(interpret(source, child))) { batch =>
         Int32Pipeline.sumFiltered(batch, value => keep(value))
-      }
-    case (Plan.MapOp(source, mapper), PhysicalOp.Project(child)) if isInt(child) =>
-      val fn = mapper.asInstanceOf[Int => Int]
-      foldLong(batchesOf(interpret(source, child))) { batch =>
-        Int32Pipeline.sumProjected(batch, value => fn(value))
       }
     case (logical, PhysicalOp.Pipeline(child, length)) if isInt(child) =>
       val (source, steps) = elementSteps(logical, length)

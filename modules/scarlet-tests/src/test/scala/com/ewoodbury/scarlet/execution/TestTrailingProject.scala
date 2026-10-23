@@ -61,6 +61,20 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
     fiveFoot.encodes shouldBe encodes
   }
 
+  it should "fold five maps over an empty source to zero" in {
+    val empty = plus(DistCollection.ofInts(Array.empty[Int], sourcePartitions), 5)
+
+    armStudy()
+    shape(empty) shouldBe "Project(Pipeline4(Scan))"
+    val summed = measure(empty.sum)
+
+    summed.result shouldBe 0L
+    summed.result shouldBe row(empty.sum)
+    summed.batches shouldBe sourcePartitions.toLong
+    summed.visits shouldBe sourcePartitions.toLong
+    summed.encodes shouldBe sourcePartitions.toLong
+  }
+
   "count" should "fold five int maps without writing a column" in {
     val values = generate(elementRows)
     val five = plus(DistCollection.ofInts(values, sourcePartitions), 5)
@@ -92,6 +106,20 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
     DistCollection.ofInts(Array.empty[Int], 2).map(_ + 1).count() shouldBe 0L
   }
 
+  it should "fold two steps that end in a filter without writing a column" in {
+    val chained = DistCollection(Seq(1, 2, 3, 4), 1).map(_ + 1).filter(_ > 2)
+
+    armStudy()
+    shape(chained) shouldBe "Pipeline2(Scan)"
+    val counted = measure(chained.count())
+
+    counted.result shouldBe 3L
+    counted.result shouldBe row(chained.count())
+    counted.batches shouldBe 1L
+    counted.visits shouldBe 1L
+    counted.encodes shouldBe 0L
+  }
+
   "a filter followed by five maps" should "sum without writing a column" in {
     val values = generate(elementRows)
     val chained = plus(DistCollection.ofInts(values, sourcePartitions).filter(_ > 0), 5)
@@ -105,6 +133,29 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
     summed.result shouldBe filteredFiveMapSum
     summed.result shouldBe row(chained.sum)
     counted.result shouldBe filteredSurvivors
+    counted.result shouldBe row(chained.count())
+    summed.batches shouldBe sourcePartitions.toLong + partials
+    counted.batches shouldBe summed.batches
+    summed.visits shouldBe partials
+    counted.visits shouldBe partials
+    summed.encodes shouldBe sourcePartitions.toLong
+    counted.encodes shouldBe sourcePartitions.toLong
+  }
+
+  "a filter that rejects every row after five maps" should
+    "sum and count zero without an output column" in {
+    val values = generate(elementRows)
+    val chained = plus(DistCollection.ofInts(values, sourcePartitions), 5).filter(_ => false)
+    val partials = morselCount(elementRows, sourcePartitions, batchSize)
+
+    armStudy()
+    shape(chained) shouldBe "Pipeline2(Pipeline4(Scan))"
+    val summed = measure(chained.sum)
+    val counted = measure(chained.count())
+
+    summed.result shouldBe 0L
+    counted.result shouldBe 0L
+    summed.result shouldBe row(chained.sum)
     counted.result shouldBe row(chained.count())
     summed.batches shouldBe sourcePartitions.toLong + partials
     counted.batches shouldBe summed.batches
@@ -270,6 +321,33 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
     summed.result shouldBe row(chained.sum)
     summed.batches shouldBe 1L
     summed.visits shouldBe 1L
+  }
+
+  "five maps on a pair column" should "sum and count without writing the pipeline" in {
+    val pairs = DistCollection.ofIntPairs(Array(1, 2, 3), Array(10, 20, 30), 1)
+
+    def check(base: String, rows: DistCollection[Int]): Unit =
+      val four = plus(rows, 4)
+      val five = plus(rows, 5)
+      shape(four) shouldBe s"Pipeline4($base)"
+      shape(five) shouldBe s"Project(Pipeline4($base))"
+      val fourFoot = measure(four.sum)
+      val fiveFoot = measure(five.sum)
+      val counted = measure(five.count())
+
+      fiveFoot.result shouldBe row(five.sum)
+      counted.result shouldBe 3L
+      counted.result shouldBe row(five.count())
+      fiveFoot.batches shouldBe fourFoot.batches
+      fiveFoot.visits shouldBe fourFoot.visits
+      fiveFoot.encodes shouldBe fourFoot.encodes
+      counted.batches shouldBe fourFoot.batches
+      counted.visits shouldBe fourFoot.visits
+
+    armStudy()
+    check("Value(Scan)", pairs.values)
+    check("Key(Scan)", pairs.keys)
+    check("Value(MapValue(Scan))", pairs.mapValues[Int, Int, Int](_ + 1).values)
   }
 
   "collect" should "still write the column after five int maps" in {
