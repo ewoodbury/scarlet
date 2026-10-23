@@ -34,7 +34,8 @@ trait ExecutionService {
 
   /**
    * Sums `(Int, Int)` values by key as a `Long` and folds the group sums. Empty input returns
-   * zero. Null keys are dropped. The total does not wrap at `Int`.
+   * zero. A null component drops the row before a fused filter or map. Any other cell type fails.
+   * The total does not wrap at `Int`.
    */
   def groupedSum(plan: Plan[(Int, Int)]): Long
 

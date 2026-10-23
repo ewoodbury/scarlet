@@ -1,7 +1,5 @@
 package com.ewoodbury.scarlet.core
 
-import scala.collection.immutable.ArraySeq
-
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -88,9 +86,9 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
     sourceDescriptor(dc) shouldEqual Plan.SourceDescriptor.Ints
     dc.collect() shouldEqual Seq(1, 2, 3, 4, 5)
     sourceData(dc).foreach {
-      case primitive: ArraySeq.ofInt =>
-        primitive.unsafeArray should not be theSameInstanceAs(input)
-      case other => fail(s"expected ArraySeq.ofInt, got $other")
+      case stored: IntArrays =>
+        stored.values should not be theSameInstanceAs(input)
+      case other => fail(s"expected IntArrays, got $other")
     }
   }
 
@@ -100,10 +98,18 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
     partitionSizes(dc) shouldEqual Seq(0, 0, 0)
     dc.collect() shouldEqual Seq.empty[Int]
     dc.sum shouldEqual 0L
+    sourceData(dc).foreach {
+      case stored: IntArrays => stored.knownSize shouldEqual 0
+      case other => fail(s"expected IntArrays, got $other")
+    }
   }
 
   it should "reject a non-positive partition count" in {
-    an[IllegalArgumentException] should be thrownBy DistCollection.ofInts(Array(1), 0)
+    val caught = intercept[IllegalArgumentException] {
+      DistCollection.ofInts(Array(1), 0)
+    }
+    caught.getMessage shouldBe partitionCountMessage
+    an[IllegalArgumentException] should be thrownBy DistCollection.ofInts(Array(1), -2)
   }
 
   "DistCollection.ofDoubles" should "copy contiguous ranges into primitive partitions" in {
@@ -115,10 +121,54 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
     sourceDescriptor(dc) shouldEqual Plan.SourceDescriptor.Doubles
     dc.collect() shouldEqual Seq(1.5, -2.0, 3.25)
     sourceData(dc).foreach {
-      case primitive: ArraySeq.ofDouble =>
-        primitive.unsafeArray should not be theSameInstanceAs(input)
-      case other => fail(s"expected ArraySeq.ofDouble, got $other")
+      case stored: DoubleArrays =>
+        stored.values should not be theSameInstanceAs(input)
+      case other => fail(s"expected DoubleArrays, got $other")
     }
+  }
+
+  it should "produce exactly N empty primitive partitions" in {
+    val dc = DistCollection.ofDoubles(Array.empty[Double], 4)
+
+    partitionSizes(dc) shouldEqual Seq(0, 0, 0, 0)
+    dc.collect() shouldEqual Seq.empty[Double]
+    dc.sum shouldEqual 0.0
+    sourceData(dc).foreach {
+      case stored: DoubleArrays => stored.knownSize shouldEqual 0
+      case other => fail(s"expected DoubleArrays, got $other")
+    }
+  }
+
+  it should "reject a non-positive partition count" in {
+    val caught = intercept[IllegalArgumentException] {
+      DistCollection.ofDoubles(Array(1.0), 0)
+    }
+    caught.getMessage shouldBe partitionCountMessage
+    an[IllegalArgumentException] should be thrownBy DistCollection.ofDoubles(Array(1.0), -1)
+  }
+
+  "IntArrays" should "iterate copied ints, including an empty array" in {
+    val raw = Array(1, 2)
+    val owned = IntArrays(raw)
+    raw(0) = 9
+
+    owned.toList shouldEqual List(1, 2)
+    owned.knownSize shouldEqual 2
+    owned.values should not be theSameInstanceAs(raw)
+    IntArrays(Array.empty[Int]).toList shouldEqual Nil
+    IntArrays(Array.empty[Int]).knownSize shouldEqual 0
+  }
+
+  "DoubleArrays" should "iterate copied doubles, including an empty array" in {
+    val raw = Array(1.5, -2.0)
+    val owned = DoubleArrays(raw)
+    raw(0) = 9.0
+
+    owned.toList shouldEqual List(1.5, -2.0)
+    owned.knownSize shouldEqual 2
+    owned.values should not be theSameInstanceAs(raw)
+    DoubleArrays(Array.empty[Double]).toList shouldEqual Nil
+    DoubleArrays(Array.empty[Double]).knownSize shouldEqual 0
   }
 
   "IntPairArrays" should "iterate pairs in order and copy its arrays" in {
@@ -132,7 +182,15 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
     pairs.knownSize shouldEqual 2
     pairs.keys should not be theSameInstanceAs(keys)
     pairs.values should not be theSameInstanceAs(values)
-    an[IllegalArgumentException] should be thrownBy IntPairArrays(Array(1), Array.empty[Int])
+    IntPairArrays(Array.empty[Int], Array.empty[Int]).toList shouldEqual Nil
+    val caught = intercept[IllegalArgumentException] {
+      IntPairArrays(Array(1), Array.empty[Int])
+    }
+    caught.getMessage shouldBe lengthMismatchMessage
+    val owned = intercept[IllegalArgumentException] {
+      IntPairArrays.fromOwned(Array(1), Array(10, 20))
+    }
+    owned.getMessage shouldBe lengthMismatchMessage
   }
 
   "DistCollection.ofIntPairs" should "copy key and value ranges and still iterate" in {
@@ -153,11 +211,46 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
     }
   }
 
-  it should "reject unequal key and value arrays" in {
-    an[IllegalArgumentException] should be thrownBy {
-      DistCollection.ofIntPairs(Array(1, 2), Array(1), 1)
+  it should "produce exactly N empty pair partitions" in {
+    val dc = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 3)
+
+    partitionSizes(dc) shouldEqual Seq(0, 0, 0)
+    dc.collect() shouldEqual Seq.empty[(Int, Int)]
+    dc.count() shouldEqual 0L
+    sourceData(dc).foreach {
+      case stored: IntPairArrays => stored.knownSize shouldEqual 0
+      case other => fail(s"expected IntPairArrays, got $other")
     }
   }
+
+  it should "reject unequal key and value arrays" in {
+    val caught = intercept[IllegalArgumentException] {
+      DistCollection.ofIntPairs(Array(1, 2), Array(1), 1)
+    }
+    caught.getMessage shouldBe lengthMismatchMessage
+  }
+
+  it should "reject a longer value array before slicing hides it" in {
+    val caught = intercept[IllegalArgumentException] {
+      DistCollection.ofIntPairs(Array(1), Array(1, 2), 1)
+    }
+    caught.getMessage shouldBe lengthMismatchMessage
+  }
+
+  it should "reject a non-positive partition count" in {
+    val caught = intercept[IllegalArgumentException] {
+      DistCollection.ofIntPairs(Array(1), Array(2), 0)
+    }
+    caught.getMessage shouldBe partitionCountMessage
+    an[IllegalArgumentException] should be thrownBy {
+      DistCollection.ofIntPairs(Array(1), Array(2), -3)
+    }
+  }
+
+  private val partitionCountMessage = "requirement failed: Number of partitions must be positive."
+
+  private val lengthMismatchMessage =
+    s"requirement failed: ${IntPairArrays.LengthMismatch}"
 
   private def sourceData[A](dc: DistCollection[A]): Seq[Iterable[A]] = dc.plan match {
     case Plan.Source(partitions, _) => partitions.map(_.data)

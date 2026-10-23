@@ -4,7 +4,7 @@ import scala.annotation.tailrec
 
 import com.ewoodbury.scarlet.api.{DictionaryStringPredicate, IntJoinTriplePredicate}
 import com.ewoodbury.scarlet.columnar.*
-import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
+import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 
 /**
  * Lowers `Int`, `Double`, `(Int, Int)`, and `String` plans to [[PhysicalOp]] and runs that tree on
@@ -46,8 +46,11 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
  * partitions are empty. It does not decode. `collect` still does. A pair `MapOp` stays on the row
  * path for `collect` and `reduceByKey`.
  *
- * An `ArraySeq.ofInt`, `ArraySeq.ofDouble`, or [[IntPairArrays]] source is copied into the column
- * on the calling thread. A boxed `Vector` or `List` is still read through its iterator.
+ * An [[com.ewoodbury.scarlet.core.IntArrays]], [[com.ewoodbury.scarlet.core.DoubleArrays]], or
+ * [[com.ewoodbury.scarlet.core.IntPairArrays]] source is copied into the column on the calling
+ * thread. The partition stays readable, so the column does not adopt its array. A boxed `Vector`
+ * or `List` is still read through its iterator. An `ArraySeq` passed straight to the codec is
+ * copied the same way.
  *
  * A null string is a value. Classification skips a leading null and keeps looking for a `String`.
  * An all-null source stays on the row path, because there is no witness. An accepted string plan
@@ -155,9 +158,10 @@ object ColumnarPlanner:
    * [[ColumnPipeline.sumByKey]]. A preceding row, key, or value filter, or a map that stays a
    * pair, is compiled into `keep`/`map` or [[com.ewoodbury.scarlet.columnar.PairStep]]s and
    * applied inside the partial `sumInt32`. A source descriptor supplies the type for empty
-   * partitions. Null keys stay dropped. This does not decode. A mistyped function throws
-   * `ClassCastException` and is refused after any rows it already touched. Any other shape is
-   * refused.
+   * partitions. A null component drops the row before those steps. A 2-tuple of `Int` or null
+   * still witnesses a pair, so a leading null does not refuse the encode. Any other cell type
+   * fails. This does not decode. A mistyped function throws `ClassCastException` and is refused
+   * after any rows it already touched. Any other shape is refused.
    */
   def tryGroupedSum(plan: Plan[_]): Option[Long] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -194,6 +198,9 @@ object ColumnarPlanner:
           Plan.ValuesOp(Plan.MapValuesOp(source, mapper)),
           PhysicalOp.Column(PhysicalOp.MapValue(child), 1),
         ) =>
+      // Named erasure boundary. The descriptor check verified the declared `Int => Int` shape
+      // before lowering, so this cast is safe.
+      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Int => Int]
       foldLong(pairsOf(interpret(source, child))) { batch =>
         ColumnReduce.sumMappedInt32(batch, ordinal = 1, value => fn(value))
@@ -236,7 +243,7 @@ object ColumnarPlanner:
    * called later, during the aggregate scan. A function that is not the pair type throws
    * `ClassCastException` then.
    */
-  private def peelPairOps(plan: Plan[_]): (Plan[_], List[PairStep]) =
+  private[execution] def peelPairOps(plan: Plan[_]): (Plan[_], List[PairStep]) =
     @tailrec
     def collect(current: Plan[_], steps: List[PairStep]): (Plan[_], List[PairStep]) =
       current match
@@ -259,20 +266,58 @@ object ColumnarPlanner:
     collect(plan, Nil)
 
   private def runGroupedSum(source: Plan.Source[_], steps: List[PairStep]): Option[Long] =
-    classify(source) match
-      case Some(PhysicalOp.Kind.Pairs) =>
-        val parts = encodePairs(source.partitions)
-        val grouped = ColumnPipeline.sumByKey(
-          parts,
-          keyOrdinal = 0,
-          valueOrdinal = 1,
-          numPartitions = shuffleWidth,
-          parallelism = parallelism,
-          batchSize = batchSize,
-          steps = steps.toVector,
-        )
-        Some(ColumnReduce.sumInt64(grouped, ordinal = 1))
-      case _ => None
+    if (!groupedPairSource(source)) then None
+    else
+      val parts = encodeGroupedPairs(source.partitions)
+      val grouped = ColumnPipeline.sumByKey(
+        parts,
+        keyOrdinal = 0,
+        valueOrdinal = 1,
+        numPartitions = shuffleWidth,
+        parallelism = parallelism,
+        batchSize = batchSize,
+        steps = steps.toVector,
+      )
+      Some(ColumnReduce.sumInt64(grouped, ordinal = 1))
+
+  /**
+   * True when grouped sum can read `source` as int pairs. [[classify]] requires two `Int` cells,
+   * so a leading null is not a pair and the encode never runs. A 2-tuple whose cells are `Int` or
+   * null is still a pair: the null stays absent in the grouped-sum encode. Other actions keep the
+   * strict witness and do not unbox that null.
+   */
+  private[execution] def groupedPairSource(source: Plan.Source[_]): Boolean =
+    classify(source).contains(PhysicalOp.Kind.Pairs) || nullablePairWitness(source)
+
+  private def nullablePairWitness(source: Plan.Source[_]): Boolean =
+    val values = source.partitions.iterator.flatMap(_.data.iterator)
+    source.descriptor match
+      case Plan.SourceDescriptor.Unknown =>
+        values.nextOption().exists(isNullableIntPair)
+      case Plan.SourceDescriptor.Pairs =>
+        values.nextOption() match
+          case None => false
+          case Some(first) => isNullableIntPair(first) && values.forall(isNullableIntPair)
+      case Plan.SourceDescriptor.Ints | Plan.SourceDescriptor.Doubles |
+          Plan.SourceDescriptor.Strings =>
+        false
+
+  /**
+   * Named erasure boundary. A grouped-sum pair is a 2-tuple. `productElement` does not unbox, so a
+   * null component still witnesses a pair. A non-null cell is a reference, so the class test is
+   * safe.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def isNullableIntPair(value: Any): Boolean =
+    def isIntOrNull(cell: Any): Boolean = cell match
+      case null => true
+      case _: Int => true
+      case _ => false
+
+    value match
+      case pair: Tuple2[?, ?] =>
+        isIntOrNull(pair.productElement(0)) && isIntOrNull(pair.productElement(1))
+      case _ => false
 
   /**
    * Columnar layout for a pair map (or a map mixed with pair filters) that [[tryGroupedSum]]
@@ -283,16 +328,13 @@ object ColumnarPlanner:
     else
       val (base, steps) = peelPairOps(plan)
       base match
-        case source: Plan.Source[_] if steps.exists(isPairMap) =>
-          classify(source) match
-            case Some(PhysicalOp.Kind.Pairs) =>
-              Some(
-                narrow(
-                  Distribution.Unknown(source.partitions.length),
-                  layoutOf(PhysicalOp.Kind.Pairs),
-                ),
-              )
-            case _ => None
+        case source: Plan.Source[_] if steps.exists(isPairMap) && groupedPairSource(source) =>
+          Some(
+            narrow(
+              Distribution.Unknown(source.partitions.length),
+              layoutOf(PhysicalOp.Kind.Pairs),
+            ),
+          )
         case _ => None
 
   private def isPairMap(step: PairStep): Boolean = step match
@@ -621,7 +663,11 @@ object ColumnarPlanner:
       val values = partitions.iterator.flatMap(_.data.iterator)
       values.nextOption().flatMap(value => classifyValue(value, values))
 
-  /** The first present value selects the kind. A leading empty cell can only witness a string. */
+  /**
+   * The first present value selects the kind. A leading empty cell can only witness a string. A
+   * pair witness here is two `Int` cells, so other actions do not unbox a null. Grouped sum also
+   * accepts a null component; see [[groupedPairSource]].
+   */
   private def classifyValue(value: Any, rest: Iterator[Any]): Option[PhysicalOp.Kind] =
     Option(value) match
       case Some(_: Int) => Some(PhysicalOp.Kind.Ints)
@@ -684,6 +730,9 @@ object ColumnarPlanner:
     case (Plan.ValuesOp(source), PhysicalOp.Column(child, 1)) =>
       pairProjection(source, child, ordinal = 1, selectedPartition = selectedPartition)
     case (Plan.MapValuesOp(source, mapper), PhysicalOp.MapValue(child)) =>
+      // Named erasure boundary. The descriptor check verified the declared `Int => Int` shape
+      // before lowering, so this cast is safe.
+      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Int => Int]
       Columns.Pairs(onEach(pairsOf(interpret(source, child, selectedPartition))) { batch =>
         ColumnKernel.projectInt32(batch, 1, value => fn(value))
@@ -856,20 +905,56 @@ object ColumnarPlanner:
     grouped
 
   private def encodeFloats(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+    import com.ewoodbury.scarlet.core.DoubleArrays
+
     partitions.map { partition =>
-      BatchCodec.float64s(partition.data.asInstanceOf[Iterable[Double]])
+      partition.data match
+        case owned: DoubleArrays => BatchCodec.copiedFloat64s(owned.values)
+        case other =>
+          // Named erasure boundary. Classification already selected double elements.
+          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+          val rows = other.asInstanceOf[Iterable[Double]]
+          BatchCodec.float64s(rows)
     }.toVector
 
   private def encodeInts(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+    import com.ewoodbury.scarlet.core.IntArrays
+
     partitions.map { partition =>
-      BatchCodec.ints(partition.data.asInstanceOf[Iterable[Int]])
+      partition.data match
+        case owned: IntArrays => BatchCodec.copiedInts(owned.values)
+        case other =>
+          // Named erasure boundary. Classification already selected int elements.
+          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+          val rows = other.asInstanceOf[Iterable[Int]]
+          BatchCodec.ints(rows)
     }.toVector
 
   private def encodePairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+    encodePairPartitions(partitions, rows => BatchCodec.intPairs(rows))
+
+  /**
+   * Pair encode for grouped sum. [[BatchCodec.intPairsPreservingAbsence]] keeps a null component
+   * absent and rejects any other non-int cell. An owned pair array has no nulls and is copied like
+   * [[encodePairs]].
+   */
+  private def encodeGroupedPairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+    encodePairPartitions(partitions, rows => BatchCodec.intPairsPreservingAbsence(rows))
+
+  private def encodePairPartitions(
+      partitions: Seq[Partition[_]],
+      encodeBoxed: Iterable[(Int, Int)] => ColumnBatch,
+  ): Vector[ColumnBatch] =
+    import com.ewoodbury.scarlet.core.IntPairArrays
+
     partitions.map { partition =>
       partition.data match
-        case pairs: IntPairArrays => BatchCodec.intPairs(pairs.keys, pairs.values)
-        case other => BatchCodec.intPairs(other.asInstanceOf[Iterable[(Int, Int)]])
+        case pairs: IntPairArrays => BatchCodec.copiedIntPairs(pairs.keys, pairs.values)
+        case other =>
+          // Named erasure boundary. Classification already selected `(Int, Int)` elements.
+          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+          val rows = other.asInstanceOf[Iterable[(Int, Int)]]
+          encodeBoxed(rows)
     }.toVector
 
   private def encodeStrings(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =

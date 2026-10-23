@@ -1,8 +1,6 @@
 package com.ewoodbury.scarlet.api
 
-import scala.collection.immutable.ArraySeq
-
-import com.ewoodbury.scarlet.core.{ExecutionService, IntPairArrays, Partition, Plan}
+import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan}
 
 /**
  * A lazy, immutable representation of a "distributed" collection. Operations build up a Plan,
@@ -326,12 +324,13 @@ final case class DistCollection[A](plan: Plan[A]):
 
   /**
    * Action: Sums `(Int, Int)` values by key as a `Long` and folds those group sums into one
-   * `Long`. Empty input returns zero. Null keys are dropped. The total does not wrap at `Int`. A
-   * source of int pairs runs the wide kernel and does not build a `Seq`. A preceding `filter`,
-   * `filterKeys`, `filterValues`, or pair `map` runs inside that scan and does not build the
-   * filtered or projected pairs. Primitive source descriptors provide the type for empty sources.
-   * Any other shape sums through the row engine. `reduceByKey` still applies its
-   * `(Int, Int) => Int` operator.
+   * `Long`. Empty input returns zero. A null component drops the row before a preceding filter or
+   * pair map. Any other cell type fails. The total does not wrap at `Int`. A source of int pairs
+   * runs the wide kernel and does not build a `Seq`. A preceding `filter`, `filterKeys`,
+   * `filterValues`, or pair `map` runs inside that scan and does not build the filtered or
+   * projected pairs. Primitive source descriptors provide the type for empty sources. Any other
+   * shape sums through the row engine. `reduceByKey` still applies its `(Int, Int) => Int`
+   * operator.
    */
   def groupedSum(using ev: A =:= (Int, Int)): Long =
     ExecutionService.get.groupedSum(kvPlan)
@@ -455,48 +454,55 @@ object DistCollection:
    *   A new DistCollection.
    */
   def apply[A](data: Iterable[A], numPartitions: Int): DistCollection[A] =
-    require(numPartitions > 0, "Number of partitions must be positive.")
     val elements = data.toVector
     splitSource(elements.length, numPartitions, Plan.SourceDescriptor.Unknown)((start, end) =>
       elements.slice(start, end),
     )
 
   /**
-   * Partitions a primitive `Int` array. Each partition is an `ArraySeq.ofInt` copy of its range.
-   * The caller's array is not retained.
+   * Partitions a primitive `Int` array. Each partition is an
+   * [[com.ewoodbury.scarlet.core.IntArrays]] copy of its range. The caller's array is not
+   * retained, and the partition array is not publicly mutable.
    */
   def ofInts(values: Array[Int], numPartitions: Int): DistCollection[Int] =
+    import com.ewoodbury.scarlet.core.IntArrays
+
     splitSource(values.length, numPartitions, Plan.SourceDescriptor.Ints) { (start, end) =>
-      new ArraySeq.ofInt(values.slice(start, end))
+      IntArrays.fromOwned(values.slice(start, end))
     }
 
   /**
-   * Partitions a primitive `Double` array. Each partition is an `ArraySeq.ofDouble` copy of its
-   * range. The caller's array is not retained.
+   * Partitions a primitive `Double` array. Each partition is a
+   * [[com.ewoodbury.scarlet.core.DoubleArrays]] copy of its range. The caller's array is not
+   * retained, and the partition array is not publicly mutable.
    */
   def ofDoubles(values: Array[Double], numPartitions: Int): DistCollection[Double] =
+    import com.ewoodbury.scarlet.core.DoubleArrays
+
     splitSource(values.length, numPartitions, Plan.SourceDescriptor.Doubles) { (start, end) =>
-      new ArraySeq.ofDouble(values.slice(start, end))
+      DoubleArrays.fromOwned(values.slice(start, end))
     }
 
   /**
-   * Partitions primitive `(Int, Int)` keys and values. Each partition is an [[IntPairArrays]] copy
-   * of its range and does not expose those arrays.
+   * Partitions primitive `(Int, Int)` keys and values. Each partition is an
+   * [[com.ewoodbury.scarlet.core.IntPairArrays]] copy of its range and does not expose those
+   * arrays.
    */
   def ofIntPairs(
       keys: Array[Int],
       values: Array[Int],
       numPartitions: Int,
   ): DistCollection[(Int, Int)] =
-    require(numPartitions > 0, "Number of partitions must be positive.")
-    require(keys.length == values.length, "key and value arrays differ in length")
+    import com.ewoodbury.scarlet.core.IntPairArrays
+
+    IntPairArrays.requireSameLength(keys, values)
     splitSource(keys.length, numPartitions, Plan.SourceDescriptor.Pairs) { (start, end) =>
       IntPairArrays.fromOwned(keys.slice(start, end), values.slice(start, end))
     }
 
   /**
    * Splits `length` into exactly `numPartitions` contiguous ranges, preserving order. The first
-   * `length % numPartitions` ranges receive one extra index.
+   * `length % numPartitions` ranges receive one extra index. `numPartitions` must be positive.
    */
   private def splitSource[A](
       length: Int,
