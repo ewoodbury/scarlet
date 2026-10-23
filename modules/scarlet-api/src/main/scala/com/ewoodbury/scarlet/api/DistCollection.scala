@@ -324,12 +324,13 @@ final case class DistCollection[A](plan: Plan[A]):
 
   /**
    * Action: Sums `(Int, Int)` values by key as a `Long` and folds those group sums into one
-   * `Long`. Empty input returns zero. A null key drops the row. A null value contributes zero. Any
-   * other cell type fails. The total does not wrap at `Int`. A source of int pairs runs the wide
-   * kernel and does not build a `Seq`. A preceding `filter`, `filterKeys`, `filterValues`, or pair
-   * `map` runs inside that scan and does not build the filtered or projected pairs. Primitive
-   * source descriptors provide the type for empty sources. Any other shape sums through the row
-   * engine. `reduceByKey` still applies its `(Int, Int) => Int` operator.
+   * `Long`. Empty input returns zero. A null component drops the row before a preceding filter or
+   * pair map. Any other cell type fails. The total does not wrap at `Int`. A source of int pairs
+   * runs the wide kernel and does not build a `Seq`. A preceding `filter`, `filterKeys`,
+   * `filterValues`, or pair `map` runs inside that scan and does not build the filtered or
+   * projected pairs. Primitive source descriptors provide the type for empty sources. Any other
+   * shape sums through the row engine. `reduceByKey` still applies its `(Int, Int) => Int`
+   * operator.
    */
   def groupedSum(using ev: A =:= (Int, Int)): Long =
     ExecutionService.get.groupedSum(kvPlan)

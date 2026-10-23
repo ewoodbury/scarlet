@@ -453,6 +453,47 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     row(source.groupedSum) shouldBe 13L
   }
 
+  it should "drop a null component before a mapped grouped sum in either row order" in {
+    val present = erasedPair(Some(1), Some(10))
+    val nullKey = erasedPair(None, Some(99))
+    val nullValue = erasedPair(Some(4), None)
+    val hits = new AtomicInteger
+
+    def mapped(rows: Seq[(Int, Int)]) =
+      DistCollection(rows, 1).map { case (key, value) =>
+        hits.incrementAndGet()
+        (key + 1, value + key)
+      }
+
+    def agree(rows: Seq[(Int, Int)], expected: Long): Unit =
+      val planned = mapped(rows)
+      hits.set(0)
+      columnar(planned.groupedSum) shouldBe expected
+      hits.get() shouldBe 1
+      hits.set(0)
+      row(planned.groupedSum) shouldBe expected
+      hits.get() shouldBe 1
+      columnar(ColumnarPlanner.tryGroupedSum(planned.plan) shouldBe Some(expected))
+
+    agree(Seq(present, nullKey), 11L)
+    agree(Seq(nullKey, present), 11L)
+    agree(Seq(present, nullValue), 11L)
+    agree(Seq(nullValue, present), 11L)
+    agree(Seq(nullKey, nullValue, present), 11L)
+    agree(Seq(present, nullValue, nullKey), 11L)
+
+    def agreePlain(rows: Seq[(Int, Int)], expected: Long): Unit =
+      val planned = DistCollection(rows, 1)
+      columnar(planned.groupedSum) shouldBe expected
+      row(planned.groupedSum) shouldBe expected
+      columnar(ColumnarPlanner.tryGroupedSum(planned.plan) shouldBe Some(expected))
+
+    agreePlain(Seq(present, nullKey), 10L)
+    agreePlain(Seq(nullKey, present), 10L)
+    agreePlain(Seq(present, nullValue), 10L)
+    agreePlain(Seq(nullValue, present), 10L)
+  }
+
   it should "reject a non-int cell on both grouped-sum paths" in {
     def summed(rows: Seq[(Int, Int)]) = DistCollection(rows, 1).groupedSum
 

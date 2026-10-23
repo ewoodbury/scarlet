@@ -158,7 +158,8 @@ object ColumnarPlanner:
    * [[ColumnPipeline.sumByKey]]. A preceding row, key, or value filter, or a map that stays a
    * pair, is compiled into `keep`/`map` or [[com.ewoodbury.scarlet.columnar.PairStep]]s and
    * applied inside the partial `sumInt32`. A source descriptor supplies the type for empty
-   * partitions. A null key drops the row. A null value contributes zero. Any other cell type
+   * partitions. A null component drops the row before those steps. A 2-tuple of `Int` or null
+   * still witnesses a pair, so a leading null does not refuse the encode. Any other cell type
    * fails. This does not decode. A mistyped function throws `ClassCastException` and is refused
    * after any rows it already touched. Any other shape is refused.
    */
@@ -242,7 +243,7 @@ object ColumnarPlanner:
    * called later, during the aggregate scan. A function that is not the pair type throws
    * `ClassCastException` then.
    */
-  private def peelPairOps(plan: Plan[_]): (Plan[_], List[PairStep]) =
+  private[execution] def peelPairOps(plan: Plan[_]): (Plan[_], List[PairStep]) =
     @tailrec
     def collect(current: Plan[_], steps: List[PairStep]): (Plan[_], List[PairStep]) =
       current match
@@ -265,20 +266,58 @@ object ColumnarPlanner:
     collect(plan, Nil)
 
   private def runGroupedSum(source: Plan.Source[_], steps: List[PairStep]): Option[Long] =
-    classify(source) match
-      case Some(PhysicalOp.Kind.Pairs) =>
-        val parts = encodeGroupedPairs(source.partitions)
-        val grouped = ColumnPipeline.sumByKey(
-          parts,
-          keyOrdinal = 0,
-          valueOrdinal = 1,
-          numPartitions = shuffleWidth,
-          parallelism = parallelism,
-          batchSize = batchSize,
-          steps = steps.toVector,
-        )
-        Some(ColumnReduce.sumInt64(grouped, ordinal = 1))
-      case _ => None
+    if (!groupedPairSource(source)) then None
+    else
+      val parts = encodeGroupedPairs(source.partitions)
+      val grouped = ColumnPipeline.sumByKey(
+        parts,
+        keyOrdinal = 0,
+        valueOrdinal = 1,
+        numPartitions = shuffleWidth,
+        parallelism = parallelism,
+        batchSize = batchSize,
+        steps = steps.toVector,
+      )
+      Some(ColumnReduce.sumInt64(grouped, ordinal = 1))
+
+  /**
+   * True when grouped sum can read `source` as int pairs. [[classify]] requires two `Int` cells,
+   * so a leading null is not a pair and the encode never runs. A 2-tuple whose cells are `Int` or
+   * null is still a pair: the null stays absent in the grouped-sum encode. Other actions keep the
+   * strict witness and do not unbox that null.
+   */
+  private[execution] def groupedPairSource(source: Plan.Source[_]): Boolean =
+    classify(source).contains(PhysicalOp.Kind.Pairs) || nullablePairWitness(source)
+
+  private def nullablePairWitness(source: Plan.Source[_]): Boolean =
+    val values = source.partitions.iterator.flatMap(_.data.iterator)
+    source.descriptor match
+      case Plan.SourceDescriptor.Unknown =>
+        values.nextOption().exists(isNullableIntPair)
+      case Plan.SourceDescriptor.Pairs =>
+        values.nextOption() match
+          case None => false
+          case Some(first) => isNullableIntPair(first) && values.forall(isNullableIntPair)
+      case Plan.SourceDescriptor.Ints | Plan.SourceDescriptor.Doubles |
+          Plan.SourceDescriptor.Strings =>
+        false
+
+  /**
+   * Named erasure boundary. A grouped-sum pair is a 2-tuple. `productElement` does not unbox, so a
+   * null component still witnesses a pair. A non-null cell is a reference, so the class test is
+   * safe.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def isNullableIntPair(value: Any): Boolean =
+    def isIntOrNull(cell: Any): Boolean = cell match
+      case null => true
+      case _: Int => true
+      case _ => false
+
+    value match
+      case pair: Tuple2[?, ?] =>
+        isIntOrNull(pair.productElement(0)) && isIntOrNull(pair.productElement(1))
+      case _ => false
 
   /**
    * Columnar layout for a pair map (or a map mixed with pair filters) that [[tryGroupedSum]]
@@ -289,16 +328,13 @@ object ColumnarPlanner:
     else
       val (base, steps) = peelPairOps(plan)
       base match
-        case source: Plan.Source[_] if steps.exists(isPairMap) =>
-          classify(source) match
-            case Some(PhysicalOp.Kind.Pairs) =>
-              Some(
-                narrow(
-                  Distribution.Unknown(source.partitions.length),
-                  layoutOf(PhysicalOp.Kind.Pairs),
-                ),
-              )
-            case _ => None
+        case source: Plan.Source[_] if steps.exists(isPairMap) && groupedPairSource(source) =>
+          Some(
+            narrow(
+              Distribution.Unknown(source.partitions.length),
+              layoutOf(PhysicalOp.Kind.Pairs),
+            ),
+          )
         case _ => None
 
   private def isPairMap(step: PairStep): Boolean = step match
@@ -627,7 +663,11 @@ object ColumnarPlanner:
       val values = partitions.iterator.flatMap(_.data.iterator)
       values.nextOption().flatMap(value => classifyValue(value, values))
 
-  /** The first present value selects the kind. A leading empty cell can only witness a string. */
+  /**
+   * The first present value selects the kind. A leading empty cell can only witness a string. A
+   * pair witness here is two `Int` cells, so other actions do not unbox a null. Grouped sum also
+   * accepts a null component; see [[groupedPairSource]].
+   */
   private def classifyValue(value: Any, rest: Iterator[Any]): Option[PhysicalOp.Kind] =
     Option(value) match
       case Some(_: Int) => Some(PhysicalOp.Kind.Ints)

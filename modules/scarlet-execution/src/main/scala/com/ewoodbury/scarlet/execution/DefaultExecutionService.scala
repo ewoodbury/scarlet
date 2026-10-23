@@ -3,6 +3,7 @@ package com.ewoodbury.scarlet.execution
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 
+import com.ewoodbury.scarlet.columnar.PairStep
 import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -45,16 +46,27 @@ class DefaultExecutionService extends ExecutionService {
     }
 
   def groupedSum(plan: Plan[(Int, Int)]): Long =
-    ColumnarPlanner.tryGroupedSum(plan).getOrElse {
-      rowPartitions(plan).foldLeft(0L) { (total, partition) =>
-        partition.data.foldLeft(total)((acc, pair) => acc + presentValue(pair))
-      }
-    }
+    ColumnarPlanner.tryGroupedSum(plan).getOrElse(groupedSumOnRows(plan))
 
   /**
-   * Present key and present value, widened to `Long`. A null key drops the row. A null value
-   * contributes zero. Any other cell type fails. That is the folded total of `sumByKey`: an absent
-   * key never contributes, and an absent value does not change the sum.
+   * Row fallback. Pair filters and pair maps are peeled like the wide path and run on present
+   * cells, so a typed `(Int, Int)` pattern never unboxes a null to 0. Any other plan is executed
+   * first, and its pairs are folded the same way.
+   */
+  private def groupedSumOnRows(plan: Plan[(Int, Int)]): Long =
+    val (base, steps) = ColumnarPlanner.peelPairOps(plan)
+    base match
+      case source: Plan.Source[_] if ColumnarPlanner.groupedPairSource(source) =>
+        foldPartitions(source.partitions, steps)
+      case _ =>
+        foldPartitions(rowPartitions(plan), Nil)
+
+  private def foldPartitions(partitions: Seq[Partition[_]], steps: List[PairStep]): Long =
+    partitions.foldLeft(0L)((total, partition) => addRows(partition.data, steps, total))
+
+  /**
+   * Sum of present pairs. A null component drops the row before `steps`. Any other cell type
+   * fails.
    *
    * Named erasure boundary. `(Int, Int)` erases its fields. `productElement` keeps a null
    * component visible without unboxing, and the two cells are matched in place so the row does not
@@ -67,24 +79,32 @@ class DefaultExecutionService extends ExecutionService {
       "org.wartremover.warts.Null",
     ),
   )
-  private def presentValue(pair: (Int, Int)): Long =
+  private def addRows(rows: Iterable[_], steps: List[PairStep], total: Long): Long =
     def reject(role: String, cell: Any): Nothing =
-      val found = cell.asInstanceOf[AnyRef].getClass.getName
+      val found = cell match
+        case null => "null"
+        case other => other.asInstanceOf[AnyRef].getClass.getName
       throw new IllegalArgumentException(s"grouped sum expected an Int $role, found $found")
 
-    val key = pair.productElement(0)
-    val value = pair.productElement(1)
-    key match
-      case null =>
-        value match
-          case null | _: Int => 0L
-          case other => reject("value", other)
-      case _: Int =>
-        value match
-          case null => 0L
-          case present: Int => present.toLong
-          case other => reject("value", other)
+    def one(row: Any): Long = row match
+      case pair: Tuple2[?, ?] =>
+        val key = pair.productElement(0)
+        val value = pair.productElement(1)
+        key match
+          case null =>
+            value match
+              case null | _: Int => 0L
+              case other => reject("value", other)
+          case presentKey: Int =>
+            value match
+              case null => 0L
+              case present: Int =>
+                PairStep.valueAfter(presentKey, present, steps).fold(0L)(_.toLong)
+              case other => reject("value", other)
+          case other => reject("key", other)
       case other => reject("key", other)
+
+    rows.foldLeft(total)((acc, row) => acc + one(row))
 
   private def rowPartitions[A](plan: Plan[A]): Seq[Partition[A]] = plan match {
     case source: Plan.Source[A] => source.partitions
