@@ -16,9 +16,10 @@ import MaterialisationStudySupport.*
  * F4 is `trySumInt` on `Pipeline4(Scan)`: four maps inside `ElementSum`, no output column. B4 is
  * the same four maps with one forced boundary: encode, slice, `ElementPipeline`, concat, reslice,
  * then `ColumnReduce.sumInt32`. S5 keeps that prefix and replaces the plain sum with
- * `sumProjected` of one more `+1`. P5 is `trySumInt` on `Project(Pipeline4(Scan))`, which mixes
- * the boundary and that fifth map. The boundary cost is B4 minus F4. The fifth-map cost is S5
- * minus B4.
+ * `sumProjected` of one more `+1`. P5 is `trySumInt` on `Project(Pipeline4(Scan))`: the trailing
+ * map is folded into the sum, so the pipeline column is not written. The boundary cost is B4
+ * minus F4. The fifth-map cost on that forced boundary is S5 minus B4. P5 minus F4 is the folded
+ * fifth map.
  *
  * RAW is four dependent `+1` adds, a folded-loop floor. RAWD is four data-dependent updates.
  * Both create and join their workers inside the sample when the width is above one. GROUPED is
@@ -232,7 +233,7 @@ object MaterialisationStudy:
       action(
         "query",
         "P5",
-        "Project(Pipeline4(Scan))+sumProjected",
+        "Project(Pipeline4(Scan))+foldedSum",
         elementRows,
         setup.projectedSum,
       ) { _ =>

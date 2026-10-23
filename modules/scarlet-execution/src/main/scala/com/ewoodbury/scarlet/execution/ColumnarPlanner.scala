@@ -47,16 +47,16 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * `join` with no hint, or with an explicit shuffle-hash hint, hash-partitions both sides and
  * probes one bucket at a time. Sort-merge and broadcast are not implemented: those hints make
  * `lower` return `None`, so the plan stays on the row path. Output width for an accepted join or
- * aggregate is `defaultShufflePartitions`. [[tryCount]] reads finished column lengths.
- * [[trySumInt]] and [[trySumDouble]] add a filter/project chain in the fused loop and do not write
- * that chain's output column. Sum of `keys`, `values`, or an int `mapValues` reads the pair column
- * in that morsel loop and does not build the projection. [[tryGroupedSum]] runs
- * [[ColumnPipeline.sumByKey]] on a typed pair source and folds the `Int64` group sums. A preceding
- * `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that partial scan,
- * so the action does not build those pairs. [[groupedSumPeel]] labels those walked steps. It is
- * not an action shape and not a physical node. A source descriptor supplies the type when all
- * partitions are empty. It does not decode. `collect` still does. A pair `MapOp` stays on the row
- * path for `collect` and `reduceByKey`, and [[partitioning]] reports no layout for it.
+ * aggregate is `defaultShufflePartitions`. [[tryCount]] and [[trySumInt]] fold a long int chain,
+ * or one trailing int project, and do not write it. [[trySumDouble]] folds at most four steps. Sum
+ * of `keys`, `values`, or an int `mapValues` reads the pair column in that morsel loop and does
+ * not build the projection. [[tryGroupedSum]] runs [[ColumnPipeline.sumByKey]] on a typed pair
+ * source and folds the `Int64` group sums. A preceding `FilterOp`, `filterKeys`, `filterValues`,
+ * or pair `MapOp` is applied inside that partial scan, so the action does not build those pairs.
+ * [[groupedSumPeel]] labels those walked steps. It is not an action shape and not a physical node.
+ * A source descriptor supplies the type when all partitions are empty. It does not decode.
+ * `collect` still does. A pair `MapOp` stays on the row path for `collect` and `reduceByKey`, and
+ * [[partitioning]] reports no layout for it.
  *
  * An [[com.ewoodbury.scarlet.core.IntArrays]], [[com.ewoodbury.scarlet.core.DoubleArrays]], or
  * [[com.ewoodbury.scarlet.core.IntPairArrays]] source is copied into the column on the calling
@@ -165,9 +165,14 @@ object ColumnarPlanner:
    * decode.
    */
   def tryCount(plan: Plan[_]): Option[Long] =
-    consume(plan) { case columns =>
-      ColumnReduce.count(batchesOf(columns))
-    }
+    accepted(plan) match
+      case None => None
+      case Some(op) =>
+        try TrailingProject.count(plan, op).orElse(finishedCount(plan, op))
+        catch case _: ClassCastException => None
+
+  private def finishedCount(plan: Plan[_], op: PhysicalOp): Option[Long] =
+    Some(ColumnReduce.count(batchesOf(interpret(plan, op))))
 
   /**
    * Wide sum of a finished int column. `None` means the row path, including a plan whose result is
@@ -215,7 +220,10 @@ object ColumnarPlanner:
           catch case _: ClassCastException => None
         case _ => None
 
-  private def sumInt(plan: Plan[_], op: PhysicalOp): Long = (plan, op) match
+  private def sumInt(plan: Plan[_], op: PhysicalOp): Long =
+    TrailingProject.sum(plan, op).getOrElse(matchedSumInt(plan, op))
+
+  private def matchedSumInt(plan: Plan[_], op: PhysicalOp): Long = (plan, op) match
     case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) =>
       ColumnReduce.sumInt32(encodeInts(partitions))
     case (Plan.FilterOp(source, predicate), PhysicalOp.Filter(child, PhysicalOp.Slot.Element))
@@ -373,7 +381,7 @@ object ColumnarPlanner:
         isIntOrNull(pair.productElement(0)) && isIntOrNull(pair.productElement(1))
       case _ => false
 
-  private def isInt(op: PhysicalOp): Boolean = op.kind match
+  private[execution] def isInt(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Ints => true
     case _ => false
 
@@ -398,6 +406,11 @@ object ColumnarPlanner:
     }
     Columns.Ints(columns)
 
+  private[execution] def foldInterpreted(plan: Plan[_], op: PhysicalOp)(
+      fn: ColumnBatch => Long,
+  ): Long =
+    foldLong(batchesOf(interpret(plan, op)))(fn)
+
   private def foldLong(parts: Vector[ColumnBatch])(fn: ColumnBatch => Long): Long =
     if (parts.isEmpty) then 0L
     else
@@ -412,15 +425,6 @@ object ColumnarPlanner:
       // would not match a scan of the whole column.
       val partials = MorselScheduler.map(parts, parallelism)((_, part) => fn(part))
       partials.foldLeft(0.0)(_ + _)
-
-  private def consume[A](plan: Plan[_])(read: PartialFunction[Columns, A]): Option[A] =
-    accepted(plan) match
-      case None => None
-      case Some(op) =>
-        try
-          val columns = interpret(plan, op)
-          if (read.isDefinedAt(columns)) Some(read(columns)) else None
-        catch case _: ClassCastException => None
 
   private def batchesOf(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.Ints(parts) => parts
@@ -532,7 +536,7 @@ object ColumnarPlanner:
         case _ => None
     case _ => None
 
-  private def elementSteps(
+  private[execution] def elementSteps(
       plan: Plan[_],
       limit: Int,
   ): (Plan[_], List[ElementStep]) =

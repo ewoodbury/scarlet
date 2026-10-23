@@ -6,7 +6,7 @@ import MaterialisationStudySupport.*
 
 /**
  * Prints [[MaterialisationStudy]]. The controlled pair is B4 minus F4. S5 minus B4 is the fifth
- * map and `sumProjected`. P5 minus F4 mixes those two and is not the attribution.
+ * map and `sumProjected` on a forced boundary. P5 minus F4 is the folded fifth map.
  */
 private[execution] object MaterialisationStudyReport:
 
@@ -65,9 +65,10 @@ private[execution] object MaterialisationStudyReport:
       "B4 and F4 both apply four maps. F4 sums them with ElementSum and does not write the " +
         "column. B4 encodes, slices, writes the pipeline, concatenates, reslices, and sums that " +
         "column with sumInt32. B4-F4 is the boundary cost. S5 uses the same prefix as B4 and " +
-        "sums with sumProjected of one +1. S5-B4 is the fifth map plus that sum kernel. P5-F4 " +
-        "mixes the boundary and the fifth map. It is not the attribution. RAW is the folded-loop " +
-        "floor. Each width is reported on its own. Nothing here chooses fuse versus stream.",
+        "sums with sumProjected of one +1. S5-B4 is the fifth map plus that sum kernel. P5 folds " +
+        "the fifth map into the sum and does not write the pipeline column. P5-F4 is that folded " +
+        "map. RAW is the folded-loop floor. Each width is reported on its own. Nothing here " +
+        "chooses fuse versus stream.",
     )
     threadCounts.foreach { threads =>
       val fused = findRow(queries, "query", "F4", threads)
@@ -79,9 +80,9 @@ private[execution] object MaterialisationStudyReport:
       val grouped = findRow(queries, "query", "GROUPED", threads)
       val boundaryNs = boundary.p50Ns - fused.p50Ns
       val fifthNs = fifth.p50Ns - boundary.p50Ns
-      val mixedNs = projected.p50Ns - fused.p50Ns
+      val foldedNs = projected.p50Ns - fused.p50Ns
       println(
-        s"CONTROL threads=$threads boundary_ns=$boundaryNs fifth_ns=$fifthNs mixed_ns=$mixedNs " +
+        s"CONTROL threads=$threads boundary_ns=$boundaryNs fifth_ns=$fifthNs folded_ns=$foldedNs " +
           s"f4_ns=${fused.p50Ns} b4_ns=${boundary.p50Ns} s5_ns=${fifth.p50Ns} " +
           s"p5_ns=${projected.p50Ns} raw_ns=${raw.p50Ns} rawd_ns=${dependent.p50Ns} " +
           s"spread_f4_ns=${fused.spreadNs} spread_b4_ns=${boundary.spreadNs} " +
@@ -96,7 +97,7 @@ private[execution] object MaterialisationStudyReport:
       println(
         s"threads=$threads fifth map plus sumProjected is S5-B4 ${signedMs(fifthNs)} ms " +
           s"(${percent(fifthNs, fifth.p50Ns)} of S5). S5 ${ms(fifth.p50Ns)} ms. " +
-          s"P5-F4 is ${signedMs(mixedNs)} ms (P5 ${ms(projected.p50Ns)} ms) and is the mixed delta.",
+          s"P5-F4 is ${signedMs(foldedNs)} ms (P5 ${ms(projected.p50Ns)} ms), the folded fifth map.",
       )
       println(
         s"threads=$threads F4 is ${multiple(fused.p50Ns, raw.p50Ns)}× RAW and " +
@@ -188,8 +189,8 @@ private[execution] object MaterialisationStudyReport:
           s"$boundaryAccount (${relation(boundary.batches, boundaryAccount)}). Visits " +
           s"${boundary.visits}. S5 batches ${fifth.batches} " +
           s"(${relation(fifth.batches, boundary.batches)} B4). P5 batches ${projected.batches} " +
-          s"(${relation(projected.batches, boundary.batches)} B4). The sum kernels do not publish " +
-          "another column. S5 and P5 both end in sumProjected. B4 ends in sumInt32.",
+          s"(${relation(projected.batches, fused.batches)} F4). The folded sum does not publish " +
+          "the pipeline column. S5 ends in sumProjected. B4 ends in sumInt32.",
       )
     }
     println(
