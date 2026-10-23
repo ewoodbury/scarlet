@@ -52,20 +52,39 @@ class DefaultExecutionService extends ExecutionService {
     }
 
   /**
-   * Present key and present value, widened to `Long`. A null key is dropped. A null value does not
-   * update the total. That is the folded total of `sumByKey`: an absent key never contributes, and
-   * an absent value does not change the sum.
+   * Present key and present value, widened to `Long`. A null key drops the row. A null value
+   * contributes zero. Any other cell type fails. That is the folded total of `sumByKey`: an absent
+   * key never contributes, and an absent value does not change the sum.
    *
-   * Named erasure boundary. `(Int, Int)` erases its fields, and `productElement` is how a null
-   * component stays visible without unboxing.
+   * Named erasure boundary. `(Int, Int)` erases its fields. `productElement` keeps a null
+   * component visible without unboxing, and the two cells are matched in place so the row does not
+   * allocate a pair. A non-null cell is a reference, so the class-name cast is safe.
    */
-  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
   private def presentValue(pair: (Int, Int)): Long =
-    val key: Any = pair.productElement(0)
-    val value: Any = pair.productElement(1)
-    (key, value) match
-      case (_: Int, present: Int) => present.toLong
-      case _ => 0L
+    def reject(role: String, cell: Any): Nothing =
+      val found = cell.asInstanceOf[AnyRef].getClass.getName
+      throw new IllegalArgumentException(s"grouped sum expected an Int $role, found $found")
+
+    val key = pair.productElement(0)
+    val value = pair.productElement(1)
+    key match
+      case null =>
+        value match
+          case null | _: Int => 0L
+          case other => reject("value", other)
+      case _: Int =>
+        value match
+          case null => 0L
+          case present: Int => present.toLong
+          case other => reject("value", other)
+      case other => reject("key", other)
 
   private def rowPartitions[A](plan: Plan[A]): Seq[Partition[A]] = plan match {
     case source: Plan.Source[A] => source.partitions

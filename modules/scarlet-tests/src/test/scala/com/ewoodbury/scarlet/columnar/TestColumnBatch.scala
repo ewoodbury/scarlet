@@ -42,7 +42,6 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val batch = BatchCodec.ints(new ArraySeq.ofInt(raw))
     val boxed = BatchCodec.ints(Seq(1, -2, 0))
     ColumnMetrics.primitiveEncodeCount shouldBe 1L
-    ColumnMetrics.disarm()
     val column = int32(batch)
 
     column.values should not be theSameInstanceAs(raw)
@@ -57,7 +56,6 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     ColumnMetrics.arm()
     val batch = BatchCodec.copiedInts(owned.values)
     ColumnMetrics.primitiveEncodeCount shouldBe 1L
-    ColumnMetrics.disarm()
     val column = int32(batch)
 
     column.values should not be theSameInstanceAs(owned.values)
@@ -71,7 +69,6 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val batch = BatchCodec.float64s(new ArraySeq.ofDouble(raw))
     val boxed = BatchCodec.float64s(Seq(1.5, -0.25))
     ColumnMetrics.primitiveEncodeCount shouldBe 1L
-    ColumnMetrics.disarm()
     val column = float64(batch)
 
     column.values should not be theSameInstanceAs(raw)
@@ -86,7 +83,6 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     ColumnMetrics.arm()
     val batch = BatchCodec.copiedFloat64s(owned.values)
     ColumnMetrics.primitiveEncodeCount shouldBe 1L
-    ColumnMetrics.disarm()
     val column = float64(batch)
 
     column.values should not be theSameInstanceAs(owned.values)
@@ -103,14 +99,14 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val copied = BatchCodec.copiedIntPairs(owned.keys, owned.values)
     val boxed = BatchCodec.intPairs(Seq((1, 10), (2, 20)))
     ColumnMetrics.primitiveEncodeCount shouldBe 2L
-    ColumnMetrics.disarm()
     val (left, right) = intPair(checked)
+    val (copiedLeft, copiedRight) = intPair(copied)
 
     left.values should not be theSameInstanceAs(keys)
     right.values should not be theSameInstanceAs(values)
     left.values should not be theSameInstanceAs(owned.keys)
-    intPair(copied)._1.values should not be theSameInstanceAs(owned.keys)
-    intPair(copied)._2.values should not be theSameInstanceAs(owned.values)
+    copiedLeft.values should not be theSameInstanceAs(owned.keys)
+    copiedRight.values should not be theSameInstanceAs(owned.values)
     keys(0) = 7
     values(1) = 8
     owned.keys(0) = 7

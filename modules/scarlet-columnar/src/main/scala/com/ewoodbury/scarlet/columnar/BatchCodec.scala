@@ -1,7 +1,8 @@
 package com.ewoodbury.scarlet.columnar
 
+import java.util.Arrays
+
 import scala.collection.immutable.ArraySeq
-import scala.reflect.ClassTag
 
 /** Encode Scala sequences into batches, and read those batches back. */
 object BatchCodec:
@@ -16,10 +17,9 @@ object BatchCodec:
    * An `ArraySeq.ofInt` is copied from its primitive array. Any other iterable is filled from its
    * iterator. An owned partition array is [[copiedInts]]: this module does not see that holder.
    */
-  def ints(values: Iterable[Int]): ColumnBatch =
-    int32Batch(values match
-      case array: ArraySeq.ofInt => copyCounted(array.unsafeArray)
-      case other => fill(other))
+  def ints(values: Iterable[Int]): ColumnBatch = values match
+    case array: ArraySeq.ofInt => copiedInts(array.unsafeArray)
+    case other => int32Batch(fillInts(other))
 
   def nullableInts(values: Seq[Option[Int]]): ColumnBatch =
     batch(Int32Column.fromNullable(values))
@@ -39,17 +39,22 @@ object BatchCodec:
    * one encode copy.
    */
   private[scarlet] def copiedInts(values: Array[Int]): ColumnBatch =
-    int32Batch(copyCounted(values))
+    ColumnMetrics.notePrimitiveEncode()
+    int32Batch(Arrays.copyOf(values, values.length))
 
-  /** An `ArraySeq.ofDouble` is copied. Any other iterable is filled from its iterator. */
-  def float64s(values: Iterable[Double]): ColumnBatch =
-    float64Batch(values match
-      case array: ArraySeq.ofDouble => copyCounted(array.unsafeArray)
-      case other => fill(other))
+  /**
+   * An `ArraySeq.ofDouble` is copied from its primitive array. Any other iterable is filled from
+   * its iterator. An owned partition array is [[copiedFloat64s]]: this module does not see that
+   * holder.
+   */
+  def float64s(values: Iterable[Double]): ColumnBatch = values match
+    case array: ArraySeq.ofDouble => copiedFloat64s(array.unsafeArray)
+    case other => float64Batch(fillDoubles(other))
 
   /** Copies `values`. See [[copiedInts]] for why the column does not adopt the array. */
   private[scarlet] def copiedFloat64s(values: Array[Double]): ColumnBatch =
-    float64Batch(copyCounted(values))
+    ColumnMetrics.notePrimitiveEncode()
+    float64Batch(Arrays.copyOf(values, values.length))
 
   def nullableFloat64s(values: Seq[Option[Double]]): ColumnBatch =
     batch(Float64Column.fromNullable(values))
@@ -83,8 +88,8 @@ object BatchCodec:
     val rows = keys.length
     ColumnMetrics.notePrimitiveEncode()
     pairBatch(
-      Int32Column.of(copyPrimitive(keys), Validity.allValid(rows), rows),
-      Int32Column.of(copyPrimitive(values), Validity.allValid(rows), rows),
+      Int32Column.of(Arrays.copyOf(keys, rows), Validity.allValid(rows), rows),
+      Int32Column.of(Arrays.copyOf(values, rows), Validity.allValid(rows), rows),
     )
 
   /** One fill of each column. `size` then the iterator, so a `Seq` is not copied twice. */
@@ -107,9 +112,9 @@ object BatchCodec:
     )
 
   /**
-   * Same fill as [[intPairs]], except a null key or value is an absent slot. A column with no
-   * nulls stays all-valid. Grouped sum uses this so a null key is dropped instead of failing the
-   * encode. Other actions keep the unboxing fill.
+   * Boxed `(Int, Int)` pairs for grouped sum. [[fillPairs]] records a null component as absent and
+   * rejects any other non-int cell. A column with no nulls stays all-valid. Other actions use
+   * [[intPairs]], which unboxes.
    */
   private[scarlet] def intPairsPreservingAbsence(values: Iterable[(Int, Int)]): ColumnBatch =
     fillPairs(values)
@@ -303,80 +308,94 @@ object BatchCodec:
 
   /** Fills from the iterator. `size` then one pass, so a `Seq` is not copied twice. */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private def fill[A: ClassTag](values: Iterable[A]): Array[A] =
-    val n = values.size
-    val filled = new Array[A](n)
-    val iterator = values.iterator
+  private def fillInts(values: Iterable[Int]): Array[Int] =
+    val count = values.size
+    val filled = new Array[Int](count)
+    val rows = values.iterator
     var row = 0
-    while (row < n) {
-      val value: A = iterator.next()
-      filled(row) = value
+    while (row < count) {
+      filled(row) = rows.next()
+      row += 1
+    }
+    filled
+
+  /** Fills from the iterator. `size` then one pass, so a `Seq` is not copied twice. */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def fillDoubles(values: Iterable[Double]): Array[Double] =
+    val count = values.size
+    val filled = new Array[Double](count)
+    val rows = values.iterator
+    var row = 0
+    while (row < count) {
+      filled(row) = rows.next()
       row += 1
     }
     filled
 
   /**
-   * Fills both columns in one pass. A null component is absent. The absence bitmap is allocated
-   * only after the first null, so a fully present pair column stays all-valid.
+   * Fills both columns in one pass for [[intPairsPreservingAbsence]]. A null component is absent.
+   * Any other non-int cell fails. The absence bitmap is allocated only after the first null, so a
+   * fully present pair column stays all-valid.
    */
-  @SuppressWarnings(Array("org.wartremover.warts.Var", "org.wartremover.warts.Any"))
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def fillPairs(values: Iterable[(Int, Int)]): ColumnBatch =
-    val n = values.size
-    val leftValues = new Array[Int](n)
-    val rightValues = new Array[Int](n)
-    val iterator = values.iterator
+    val count = values.size
+    val leftValues = new Array[Int](count)
+    val rightValues = new Array[Int](count)
+    val rows = values.iterator
     var row = 0
     var leftAbsent = Option.empty[Array[Boolean]]
     var rightAbsent = Option.empty[Array[Boolean]]
-    while (row < n) {
-      val pair = iterator.next()
-      // Erased tuple. `productElement` does not unbox, so a null component stays absent.
-      leftAbsent = writeComponent(pair.productElement(0), leftValues, leftAbsent, n, row)
-      rightAbsent = writeComponent(pair.productElement(1), rightValues, rightAbsent, n, row)
+    while (row < count) {
+      val pair = rows.next()
+      leftAbsent = writeComponent(pair, 0, "key", leftValues, leftAbsent, count, row)
+      rightAbsent = writeComponent(pair, 1, "value", rightValues, rightAbsent, count, row)
       row += 1
     }
     pairBatch(
-      Int32Column.of(leftValues, componentValidity(leftAbsent, n), n),
-      Int32Column.of(rightValues, componentValidity(rightAbsent, n), n),
+      Int32Column.of(leftValues, componentValidity(leftAbsent, count), count),
+      Int32Column.of(rightValues, componentValidity(rightAbsent, count), count),
     )
 
   /**
-   * Writes a present `Int`. A null or non-int cell marks the row absent.
+   * Writes a present `Int`. A null cell marks the row absent. Any other non-int cell fails.
    *
-   * Named erasure boundary. The cell is the erased field of an `(Int, Int)`, so the static type is
-   * `Any` and a null stays absent instead of unboxing.
+   * Named erasure boundary. The cell is the erased field of an `(Int, Int)`. `productElement` does
+   * not unbox, so a null stays absent. A non-null cell is a reference, so the class-name cast is
+   * safe.
    */
-  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
   private def writeComponent(
-      cell: Any,
+      pair: (Int, Int),
+      ordinal: Int,
+      role: String,
       into: Array[Int],
       absent: Option[Array[Boolean]],
       width: Int,
       row: Int,
   ): Option[Array[Boolean]] =
-    cell match
-      case value: Int =>
-        into(row) = value
-        absent
-      case _ =>
+    pair.productElement(ordinal) match
+      case null =>
         val flags = absent.getOrElse(new Array[Boolean](width))
         flags(row) = true
         Some(flags)
+      case value: Int =>
+        into(row) = value
+        absent
+      case other =>
+        val found = other.asInstanceOf[AnyRef].getClass.getName
+        throw new IllegalArgumentException(s"grouped sum expected an Int $role, found $found")
 
   private def componentValidity(absent: Option[Array[Boolean]], width: Int): Validity =
     absent match
       case None => Validity.allValid(width)
       case Some(flags) => Validity.pack(width, row => !flags(row))
-
-  /** Copies `values` and counts one primitive encode. */
-  private def copyCounted[A: ClassTag](values: Array[A]): Array[A] =
-    ColumnMetrics.notePrimitiveEncode()
-    copyPrimitive(values)
-
-  private def copyPrimitive[A: ClassTag](values: Array[A]): Array[A] =
-    val copied = new Array[A](values.length)
-    System.arraycopy(values, 0, copied, 0, values.length)
-    copied
 
   private def int32Batch(buffer: Array[Int]): ColumnBatch =
     batch(Int32Column.of(buffer, Validity.allValid(buffer.length), buffer.length))

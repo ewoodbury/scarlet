@@ -2,10 +2,15 @@ package com.ewoodbury.scarlet.columnar
 
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 
+import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-class TestMorselScheduler extends AnyFlatSpec with Matchers:
+class TestMorselScheduler extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
+
+  override def afterEach(): Unit =
+    ColumnMetrics.disarm()
+    ()
 
   "scheduler" should "return results in morsel order on one thread" in {
     val morsels = (0 until 5).toVector.map(row => BatchCodec.ints(Seq(row)))
@@ -18,11 +23,9 @@ class TestMorselScheduler extends AnyFlatSpec with Matchers:
   it should "count one visit for every morsel when several workers run" in {
     val morsels = (0 until 8).toVector.map(row => BatchCodec.ints(Seq(row)))
     ColumnMetrics.arm()
-    try
-      val lengths = MorselScheduler.map(morsels, parallelism = 4)((_, batch) => batch.length)
-      lengths shouldBe morsels.map(_.length)
-      ColumnMetrics.visitCount shouldBe morsels.length.toLong
-    finally ColumnMetrics.disarm()
+    val lengths = MorselScheduler.map(morsels, parallelism = 4)((_, batch) => batch.length)
+    lengths shouldBe morsels.map(_.length)
+    ColumnMetrics.visitCount shouldBe morsels.length.toLong
   }
 
   it should "steal the tail of a worker blocked on its own head" in {

@@ -4,14 +4,7 @@ import scala.annotation.tailrec
 
 import com.ewoodbury.scarlet.api.{DictionaryStringPredicate, IntJoinTriplePredicate}
 import com.ewoodbury.scarlet.columnar.*
-import com.ewoodbury.scarlet.core.{
-  DoubleArrays,
-  IntArrays,
-  IntPairArrays,
-  Partition,
-  Plan,
-  ScarletConf,
-}
+import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 
 /**
  * Lowers `Int`, `Double`, `(Int, Int)`, and `String` plans to [[PhysicalOp]] and runs that tree on
@@ -53,10 +46,11 @@ import com.ewoodbury.scarlet.core.{
  * partitions are empty. It does not decode. `collect` still does. A pair `MapOp` stays on the row
  * path for `collect` and `reduceByKey`.
  *
- * An [[IntArrays]], [[DoubleArrays]], or [[IntPairArrays]] source is copied into the column on the
- * calling thread. The partition stays readable, so the column does not adopt its array. A boxed
- * `Vector` or `List` is still read through its iterator. An `ArraySeq` passed straight to the
- * codec is copied the same way.
+ * An [[com.ewoodbury.scarlet.core.IntArrays]], [[com.ewoodbury.scarlet.core.DoubleArrays]], or
+ * [[com.ewoodbury.scarlet.core.IntPairArrays]] source is copied into the column on the calling
+ * thread. The partition stays readable, so the column does not adopt its array. A boxed `Vector`
+ * or `List` is still read through its iterator. An `ArraySeq` passed straight to the codec is
+ * copied the same way.
  *
  * A null string is a value. Classification skips a leading null and keeps looking for a `String`.
  * An all-null source stays on the row path, because there is no witness. An accepted string plan
@@ -164,9 +158,9 @@ object ColumnarPlanner:
    * [[ColumnPipeline.sumByKey]]. A preceding row, key, or value filter, or a map that stays a
    * pair, is compiled into `keep`/`map` or [[com.ewoodbury.scarlet.columnar.PairStep]]s and
    * applied inside the partial `sumInt32`. A source descriptor supplies the type for empty
-   * partitions. Null keys stay dropped. This does not decode. A mistyped function throws
-   * `ClassCastException` and is refused after any rows it already touched. Any other shape is
-   * refused.
+   * partitions. A null key drops the row. A null value contributes zero. Any other cell type
+   * fails. This does not decode. A mistyped function throws `ClassCastException` and is refused
+   * after any rows it already touched. Any other shape is refused.
    */
   def tryGroupedSum(plan: Plan[_]): Option[Long] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -871,36 +865,56 @@ object ColumnarPlanner:
     grouped
 
   private def encodeFloats(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+    import com.ewoodbury.scarlet.core.DoubleArrays
+
     partitions.map { partition =>
       partition.data match
         case owned: DoubleArrays => BatchCodec.copiedFloat64s(owned.values)
-        case other => BatchCodec.float64s(other.asInstanceOf[Iterable[Double]])
+        case other =>
+          // Named erasure boundary. Classification already selected double elements.
+          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+          val rows = other.asInstanceOf[Iterable[Double]]
+          BatchCodec.float64s(rows)
     }.toVector
 
   private def encodeInts(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+    import com.ewoodbury.scarlet.core.IntArrays
+
     partitions.map { partition =>
       partition.data match
         case owned: IntArrays => BatchCodec.copiedInts(owned.values)
-        case other => BatchCodec.ints(other.asInstanceOf[Iterable[Int]])
+        case other =>
+          // Named erasure boundary. Classification already selected int elements.
+          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+          val rows = other.asInstanceOf[Iterable[Int]]
+          BatchCodec.ints(rows)
     }.toVector
 
   private def encodePairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
-    partitions.map { partition =>
-      partition.data match
-        case pairs: IntPairArrays => BatchCodec.copiedIntPairs(pairs.keys, pairs.values)
-        case other => BatchCodec.intPairs(other.asInstanceOf[Iterable[(Int, Int)]])
-    }.toVector
+    encodePairPartitions(partitions, rows => BatchCodec.intPairs(rows))
 
   /**
-   * Pair encode for grouped sum. A boxed null key or value stays absent so [[tryGroupedSum]] can
-   * drop it. An owned pair array has no nulls and is copied like [[encodePairs]].
+   * Pair encode for grouped sum. [[BatchCodec.intPairsPreservingAbsence]] keeps a null component
+   * absent and rejects any other non-int cell. An owned pair array has no nulls and is copied like
+   * [[encodePairs]].
    */
   private def encodeGroupedPairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+    encodePairPartitions(partitions, rows => BatchCodec.intPairsPreservingAbsence(rows))
+
+  private def encodePairPartitions(
+      partitions: Seq[Partition[_]],
+      encodeBoxed: Iterable[(Int, Int)] => ColumnBatch,
+  ): Vector[ColumnBatch] =
+    import com.ewoodbury.scarlet.core.IntPairArrays
+
     partitions.map { partition =>
       partition.data match
         case pairs: IntPairArrays => BatchCodec.copiedIntPairs(pairs.keys, pairs.values)
         case other =>
-          BatchCodec.intPairsPreservingAbsence(other.asInstanceOf[Iterable[(Int, Int)]])
+          // Named erasure boundary. Classification already selected `(Int, Int)` elements.
+          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+          val rows = other.asInstanceOf[Iterable[(Int, Int)]]
+          encodeBoxed(rows)
     }.toVector
 
   private def encodeStrings(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =

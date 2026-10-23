@@ -8,7 +8,8 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
  * disarms afterwards, including from `afterEach`.
  *
  * A primitive encode is one `ArraySeq.ofInt`, `ArraySeq.ofDouble`, owned primitive array, or raw
- * `intPairs(Array, Array)` copied into columns. A boxed iterable does not count.
+ * `intPairs(Array, Array)` copied into columns. One note may copy two arrays: a pair encode copies
+ * the keys and the values and still counts once. A boxed iterable does not count.
  */
 object ColumnMetrics:
 
@@ -36,7 +37,10 @@ object ColumnMetrics:
 
   def decodedValueCount: Long = decoded.get()
 
-  /** Owned, `ArraySeq`, or raw int-pair primitive encodes recorded since [[arm]]. */
+  /**
+   * Owned, `ArraySeq`, or raw int-pair primitive encodes recorded since [[arm]]. A pair counts
+   * once.
+   */
   def primitiveEncodeCount: Long = primitiveEncodes.get()
 
   private[columnar] def noteBatch(): Unit =
@@ -51,7 +55,10 @@ object ColumnMetrics:
     if (armed.get()) then decoded.addAndGet(count.toLong)
     ()
 
-  /** One primitive array copy into a column. The iterator fill does not call this. */
+  /**
+   * One primitive encode. A pair encode copies both arrays under this single note. The iterator
+   * fill does not call this.
+   */
   private[columnar] def notePrimitiveEncode(): Unit =
     if (armed.get()) then primitiveEncodes.incrementAndGet()
     ()

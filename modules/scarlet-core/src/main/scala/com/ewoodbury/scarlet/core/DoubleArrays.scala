@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.core
 
+import scala.collection.AbstractIterator
+
 /**
  * Primitive `Double` values for one partition.
  *
@@ -13,8 +15,23 @@ final class DoubleArrays private (private[scarlet] val values: Array[Double])
 
   override def knownSize: Int = values.length
 
-  override def iterator: Iterator[Double] =
-    Iterator.tabulate(values.length)(row => values(row))
+  /** Primitive index. Only the yielded `Double` is boxed, at the `Iterator` boundary. */
+  override def iterator: Iterator[Double] = new DoubleArrayIterator
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private final class DoubleArrayIterator extends AbstractIterator[Double]:
+
+    private var index: Int = 0
+
+    override def knownSize: Int = values.length - index
+
+    override def hasNext: Boolean = index < values.length
+
+    override def next(): Double =
+      if (index >= values.length) then throw new NoSuchElementException("next on empty iterator")
+      val current = values(index)
+      index += 1
+      current
 
 object DoubleArrays:
 

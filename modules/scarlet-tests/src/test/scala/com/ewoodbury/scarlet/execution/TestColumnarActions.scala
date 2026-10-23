@@ -451,7 +451,25 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
     columnar(source.groupedSum) shouldBe 13L
     row(source.groupedSum) shouldBe 13L
-    columnar(source.groupedSum) shouldBe row(source.groupedSum)
+  }
+
+  it should "reject a non-int cell on both grouped-sum paths" in {
+    def summed(rows: Seq[(Int, Int)]) = DistCollection(rows, 1).groupedSum
+
+    val badKey = Seq(erasedPair(Some(1), Some(2)), erasedCells("nope", Int.box(4)))
+    val badValue = Seq(erasedPair(Some(1), Some(2)), erasedCells(Int.box(1), "nope"))
+    val keyMessage = "grouped sum expected an Int key, found java.lang.String"
+    val valueMessage = "grouped sum expected an Int value, found java.lang.String"
+
+    val columnarKey = intercept[IllegalArgumentException](columnar(summed(badKey)))
+    val rowKey = intercept[IllegalArgumentException](row(summed(badKey)))
+    columnarKey.getMessage shouldBe keyMessage
+    rowKey.getMessage shouldBe keyMessage
+
+    val columnarValue = intercept[IllegalArgumentException](columnar(summed(badValue)))
+    val rowValue = intercept[IllegalArgumentException](row(summed(badValue)))
+    columnarValue.getMessage shouldBe valueMessage
+    rowValue.getMessage shouldBe valueMessage
   }
 
   "primitive sources" should "sum an int array like a boxed vector" in {
@@ -467,13 +485,11 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
       ColumnMetrics.arm()
       primitive shouldBe 30L
       ColumnMetrics.primitiveEncodeCount shouldBe 3L
-      ColumnMetrics.disarm()
     }
     columnar {
       ColumnMetrics.arm()
       boxed shouldBe 30L
       ColumnMetrics.primitiveEncodeCount shouldBe 0L
-      ColumnMetrics.disarm()
     }
   }
 
@@ -508,13 +524,11 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
       ColumnMetrics.arm()
       primitive shouldBe 4.75
       ColumnMetrics.primitiveEncodeCount shouldBe 2L
-      ColumnMetrics.disarm()
     }
     columnar {
       ColumnMetrics.arm()
       boxed shouldBe 4.75
       ColumnMetrics.primitiveEncodeCount shouldBe 0L
-      ColumnMetrics.disarm()
     }
   }
 
@@ -535,13 +549,11 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
       ColumnMetrics.arm()
       primitive shouldBe expected
       ColumnMetrics.primitiveEncodeCount shouldBe 2L
-      ColumnMetrics.disarm()
     }
     columnar {
       ColumnMetrics.arm()
       boxed shouldBe expected
       ColumnMetrics.primitiveEncodeCount shouldBe 0L
-      ColumnMetrics.disarm()
     }
   }
 
@@ -720,7 +732,7 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     info.ordering shouldBe OrderingTag.Unsorted
     info.layout shouldBe Layout.Columnar(ScarletConf.get.columnarBatchSize)
 
-  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def erasedPair(key: Option[Int], value: Option[Int]): (Int, Int) =
     val left: AnyRef = key match
       case Some(present) => Int.box(present)
@@ -728,7 +740,11 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     val right: AnyRef = value match
       case Some(present) => Int.box(present)
       case None => null
-    Tuple2(left, right).asInstanceOf[(Int, Int)]
+    erasedCells(left, right)
+
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+  private def erasedCells(key: AnyRef, value: AnyRef): (Int, Int) =
+    Tuple2(key, value).asInstanceOf[(Int, Int)]
 
   private def columnar[A](body: => A): A =
     ScarletRuntime.get.shuffle.clear()
