@@ -416,6 +416,103 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     row(source.groupedSum) shouldBe wide
   }
 
+  it should "select the wide kernel for each accepted pair shape" in {
+    val rows = Seq(1 -> 10, 2 -> 3, 1 -> 4)
+    val source = DistCollection(rows, 2)
+    val primitive = DistCollection.ofIntPairs(Array(1, 2, 1), Array(10, 3, 4), 2)
+    val empty = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 2)
+    val shapes = Seq(
+      source.plan,
+      source.filterValues[Int, Int](_ > 0).plan,
+      source.filterKeys[Int, Int](_ > 0).plan,
+      source.filter { case (key, value) => key > 0 && value > 1 }.plan,
+      source.map { case (key, value) => (key + 1, value + key) }.plan,
+      source.filter { case (_, value) => value > 0 }.map { case (key, value) => (value, key) }.plan,
+      primitive.plan,
+      empty.plan,
+    )
+
+    columnar {
+      shapes.foreach { plan =>
+        ColumnarPlanner.tryGroupedSum(plan) shouldBe defined
+      }
+    }
+  }
+
+  it should "drop null keys and null values on both grouped-sum paths" in {
+    val rows = Seq(
+      erasedPair(Some(1), Some(10)),
+      erasedPair(None, Some(99)),
+      erasedPair(Some(1), None),
+      erasedPair(None, None),
+      erasedPair(Some(2), Some(3)),
+    )
+    def source = DistCollection(rows, 2)
+
+    columnar(source.groupedSum) shouldBe 13L
+    row(source.groupedSum) shouldBe 13L
+  }
+
+  it should "drop a null component before a mapped grouped sum in either row order" in {
+    val present = erasedPair(Some(1), Some(10))
+    val nullKey = erasedPair(None, Some(99))
+    val nullValue = erasedPair(Some(4), None)
+    val hits = new AtomicInteger
+
+    def mapped(rows: Seq[(Int, Int)]) =
+      DistCollection(rows, 1).map { case (key, value) =>
+        hits.incrementAndGet()
+        (key + 1, value + key)
+      }
+
+    def agree(rows: Seq[(Int, Int)], expected: Long): Unit =
+      val planned = mapped(rows)
+      hits.set(0)
+      columnar(planned.groupedSum) shouldBe expected
+      hits.get() shouldBe 1
+      hits.set(0)
+      row(planned.groupedSum) shouldBe expected
+      hits.get() shouldBe 1
+      columnar(ColumnarPlanner.tryGroupedSum(planned.plan) shouldBe Some(expected))
+
+    agree(Seq(present, nullKey), 11L)
+    agree(Seq(nullKey, present), 11L)
+    agree(Seq(present, nullValue), 11L)
+    agree(Seq(nullValue, present), 11L)
+    agree(Seq(nullKey, nullValue, present), 11L)
+    agree(Seq(present, nullValue, nullKey), 11L)
+
+    def agreePlain(rows: Seq[(Int, Int)], expected: Long): Unit =
+      val planned = DistCollection(rows, 1)
+      columnar(planned.groupedSum) shouldBe expected
+      row(planned.groupedSum) shouldBe expected
+      columnar(ColumnarPlanner.tryGroupedSum(planned.plan) shouldBe Some(expected))
+
+    agreePlain(Seq(present, nullKey), 10L)
+    agreePlain(Seq(nullKey, present), 10L)
+    agreePlain(Seq(present, nullValue), 10L)
+    agreePlain(Seq(nullValue, present), 10L)
+  }
+
+  it should "reject a non-int cell on both grouped-sum paths" in {
+    def summed(rows: Seq[(Int, Int)]) = DistCollection(rows, 1).groupedSum
+
+    val badKey = Seq(erasedPair(Some(1), Some(2)), erasedCells("nope", Int.box(4)))
+    val badValue = Seq(erasedPair(Some(1), Some(2)), erasedCells(Int.box(1), "nope"))
+    val keyMessage = "grouped sum expected an Int key, found java.lang.String"
+    val valueMessage = "grouped sum expected an Int value, found java.lang.String"
+
+    val columnarKey = intercept[IllegalArgumentException](columnar(summed(badKey)))
+    val rowKey = intercept[IllegalArgumentException](row(summed(badKey)))
+    columnarKey.getMessage shouldBe keyMessage
+    rowKey.getMessage shouldBe keyMessage
+
+    val columnarValue = intercept[IllegalArgumentException](columnar(summed(badValue)))
+    val rowValue = intercept[IllegalArgumentException](row(summed(badValue)))
+    columnarValue.getMessage shouldBe valueMessage
+    rowValue.getMessage shouldBe valueMessage
+  }
+
   "primitive sources" should "sum an int array like a boxed vector" in {
     val values = Array(1, 2, 3, 4, 5)
 
@@ -425,6 +522,16 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(primitive) shouldBe 30L
     columnar(primitive) shouldBe columnar(boxed)
     row(primitive) shouldBe row(boxed)
+    columnar {
+      ColumnMetrics.arm()
+      primitive shouldBe 30L
+      ColumnMetrics.primitiveEncodeCount shouldBe 3L
+    }
+    columnar {
+      ColumnMetrics.arm()
+      boxed shouldBe 30L
+      ColumnMetrics.primitiveEncodeCount shouldBe 0L
+    }
   }
 
   it should "sum the copied ints after the caller mutates the array" in {
@@ -454,6 +561,16 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(primitive) shouldBe 4.75
     columnar(primitive) shouldBe columnar(boxed)
     row(primitive) shouldBe row(boxed)
+    columnar {
+      ColumnMetrics.arm()
+      primitive shouldBe 4.75
+      ColumnMetrics.primitiveEncodeCount shouldBe 2L
+    }
+    columnar {
+      ColumnMetrics.arm()
+      boxed shouldBe 4.75
+      ColumnMetrics.primitiveEncodeCount shouldBe 0L
+    }
   }
 
   it should "reduce an int-pair array like a boxed vector without wrapping" in {
@@ -469,6 +586,16 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(primitive) shouldBe expected
     columnar(primitive) shouldBe columnar(boxed)
     row(primitive) shouldBe row(boxed)
+    columnar {
+      ColumnMetrics.arm()
+      primitive shouldBe expected
+      ColumnMetrics.primitiveEncodeCount shouldBe 2L
+    }
+    columnar {
+      ColumnMetrics.arm()
+      boxed shouldBe expected
+      ColumnMetrics.primitiveEncodeCount shouldBe 0L
+    }
   }
 
   "int pair projections" should "sum values from the shared value column" in {
@@ -645,6 +772,20 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     info.distribution shouldBe Distribution.Unknown(width)
     info.ordering shouldBe OrderingTag.Unsorted
     info.layout shouldBe Layout.Columnar(ScarletConf.get.columnarBatchSize)
+
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def erasedPair(key: Option[Int], value: Option[Int]): (Int, Int) =
+    val left: AnyRef = key match
+      case Some(present) => Int.box(present)
+      case None => null
+    val right: AnyRef = value match
+      case Some(present) => Int.box(present)
+      case None => null
+    erasedCells(left, right)
+
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+  private def erasedCells(key: AnyRef, value: AnyRef): (Int, Int) =
+    Tuple2(key, value).asInstanceOf[(Int, Int)]
 
   private def columnar[A](body: => A): A =
     ScarletRuntime.get.shuffle.clear()

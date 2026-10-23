@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -40,6 +42,21 @@ class TestColumnReduce extends AnyFlatSpec with Matchers:
     ColumnReduce.sumFloat64(Vector(batch(sparse))) shouldBe 4.0
     ColumnReduce.sumFloat64(Vector(BatchCodec.float64s(Seq(1.5, 2.5)))) shouldBe 4.0
     ColumnReduce.count(Vector(batch(sparse))) shouldBe 3L
+  }
+
+  "sumMappedInt32" should "skip null values and not call the mapper on them" in {
+    val rows = Seq((Some(1), Some(3)), (Some(2), None), (Some(4), Some(-1)), (Some(5), None))
+    val batch = BatchCodec.nullableIntPairs(rows)
+    val calls = new AtomicInteger
+    val mapper = new ColumnKernel.Int32Map:
+      def apply(value: Int): Int =
+        calls.incrementAndGet()
+        value * 10
+    val summed = ColumnReduce.sumMappedInt32(batch, ordinal = 1, mapper)
+    val present = BatchCodec.decodeNullableIntPairs(batch).flatMap(_._2)
+
+    summed shouldBe present.map(value => (value * 10).toLong).sum
+    calls.get() shouldBe present.length
   }
 
   private def batch(column: Column): ColumnBatch =
