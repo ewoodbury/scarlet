@@ -7,7 +7,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.ColumnMetrics
+import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, NoOpSink}
 import com.ewoodbury.scarlet.core.{Partition, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -24,7 +24,7 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
   private val filteredSurvivors = 500068L
 
   override def afterEach(): Unit =
-    ColumnMetrics.disarm()
+    ColumnMetrics.restore(NoOpSink)
     ScarletRuntime.get.shuffle.clear()
     ScarletConf.set(originalConf)
     ()
@@ -269,27 +269,27 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
       }
 
     armStudy()
-    ColumnMetrics.arm()
-    ColumnarPlanner.lower(chained.plan) shouldBe Option.empty[PhysicalOp]
-    ColumnarPlanner.partitioning(chained.plan) shouldBe Option.empty[PartitioningInfo]
-    ColumnarPlanner.tryRun(chained.plan) shouldBe Option.empty[Seq[Partition[Long]]]
-    ColumnarPlanner.tryCount(chained.plan) shouldBe Option.empty[Long]
-    ColumnarPlanner.trySumInt(chained.plan) shouldBe Option.empty[Long]
-    calls.map(_.get()).toSeq shouldBe Seq(0, 0, 0, 0, 0)
-    ColumnMetrics.batchCount shouldBe 0L
-    ColumnMetrics.visitCount shouldBe 0L
-    ColumnMetrics.primitiveEncodeCount shouldBe 0L
-    ColumnMetrics.disarm()
+    ColumnMetrics.withSink(new CountingSink) {
+      ColumnarPlanner.lower(chained.plan) shouldBe Option.empty[PhysicalOp]
+      ColumnarPlanner.partitioning(chained.plan) shouldBe Option.empty[PartitioningInfo]
+      ColumnarPlanner.tryRun(chained.plan) shouldBe Option.empty[Seq[Partition[Long]]]
+      ColumnarPlanner.tryCount(chained.plan) shouldBe Option.empty[Long]
+      ColumnarPlanner.trySumInt(chained.plan) shouldBe Option.empty[Long]
+      calls.map(_.get()).toSeq shouldBe Seq(0, 0, 0, 0, 0)
+      ColumnMetrics.batchCount shouldBe 0L
+      ColumnMetrics.visitCount shouldBe 0L
+      ColumnMetrics.primitiveEncodeCount shouldBe 0L
+    }
 
     val collected = chained.collect().toList
     collected shouldBe List(5L, 6L, 7L)
     calls.map(_.get()).toSeq shouldBe Seq(3, 3, 3, 3, 3)
     collected shouldBe row(chained.collect().toList)
-    ColumnMetrics.arm()
-    chained.collect()
-    ColumnMetrics.batchCount shouldBe 0L
-    ColumnMetrics.visitCount shouldBe 0L
-    ColumnMetrics.disarm()
+    ColumnMetrics.withSink(new CountingSink) {
+      chained.collect()
+      ColumnMetrics.batchCount shouldBe 0L
+      ColumnMetrics.visitCount shouldBe 0L
+    }
   }
 
   "sum" should "keep a long total when five increments wrap" in {
@@ -394,8 +394,7 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
   private def measure[A](body: => A): Footprint[A] =
     ScarletRuntime.get.shuffle.clear()
-    ColumnMetrics.arm()
-    try
+    ColumnMetrics.withSink(new CountingSink) {
       val result = body
       Footprint(
         result,
@@ -403,7 +402,7 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
         ColumnMetrics.visitCount,
         ColumnMetrics.primitiveEncodeCount,
       )
-    finally ColumnMetrics.disarm()
+    }
 
   private def row[A](body: => A): A =
     val saved = ScarletConf.get
