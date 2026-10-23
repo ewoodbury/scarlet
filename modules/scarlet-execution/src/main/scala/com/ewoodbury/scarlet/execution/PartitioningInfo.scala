@@ -140,7 +140,7 @@ enum OrderingTag:
 /**
  * Physical batching of the output. The row engine emits [[Layout.BoxedRows]] only.
  *
- * [[Layout.Columnar]] is an unboxed primitive column: int, double, or int pair.
+ * [[Layout.Columnar]] is an unboxed primitive column: int, double, int pair, or int triple.
  * [[Layout.Utf8Dict]] is the string layout. It names the dictionary of JVM strings plus int codes
  * (`LogicalType.Utf8Dict` / `DictUtf8Column`). Each batch has its own dictionary. A string lambda
  * still sees the decoded string, and a null string is a value.

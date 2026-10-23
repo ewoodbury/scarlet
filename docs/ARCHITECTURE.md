@@ -43,7 +43,7 @@ DistCollection action
          ColumnarPlanner.tryRun: lower and interpret an eligible plan
          otherwise DAGScheduler.executePartitions
        take:
-         ColumnarPlanner.tryTake: scan eligible partitions in order and decode its prefix
+         ColumnarPlanner.tryTake: scan eligible partitions in order and decode their prefixes
          otherwise row path
             -> StageBuilder.buildStageGraph
             -> TopologicalSort

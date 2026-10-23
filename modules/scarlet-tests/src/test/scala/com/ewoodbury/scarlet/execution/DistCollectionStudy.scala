@@ -13,11 +13,14 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 /**
  * Times `sum` and `groupedSum` on primitive sources. Not a test, and not part of `make test`.
  *
- * The timed region is the action. The checksum is outside it. `alloc_bytes` is the mean of bytes
- * allocated during the action. A probe reads `ThreadMXBean` while the action runs, because morsel
- * workers have exited by the time the action returns. The probe's own bytes are left out. Columnar
- * and row run the same plans. Each thread count sets `ScarletConf.threadPoolSize` and installs a
- * `LocalTaskScheduler` of that width, because the process-wide scheduler is built once.
+ * The timed region is the action. The checksum is outside it. `alloc_bytes` is a sampled
+ * lower bound of process-wide allocation during the action, not an isolated query total. The probe
+ * reads live threads while the action runs, because morsel workers have exited by the time the
+ * action returns. A worker that starts and exits between samples, or that allocates after its last
+ * sample, is missing from the total. Unrelated JVM threads that are live during the action are
+ * included. The probe's own bytes are left out. Columnar and row run the same plans. Each thread
+ * count sets `ScarletConf.threadPoolSize` and installs a `LocalTaskScheduler` of that width,
+ * because the process-wide scheduler is built once.
  *
  * Narrow is `ofInts.filter(_ > 0).map(_ * 2).sum` at 1e6 rows. The chain is six `map(_ + 1)`
  * calls and then `sum`, on that same array. Grouped is `ofIntPairs.groupedSum` at 1e7 rows and
@@ -207,7 +210,7 @@ object DistCollectionStudy:
   ): String =
     val conf = ScarletConf.get
     val runtime = ManagementFactory.getRuntimeMXBean
-    val alloc = if (allocOn) "probe" else "unavailable"
+    val alloc = if (allocOn) "sampled-lower-bound" else "unavailable"
     s"distcollection study warmup=$warmup measure=$measure batch=${conf.columnarBatchSize} " +
       s"partitions=$partitions shuffle=${conf.defaultShufflePartitions} alloc_bytes=$alloc\n" +
       s"narrow rows=$narrowRows checksum=$narrowSum chain6 rows=$narrowRows checksum=$chainSum " +
@@ -215,7 +218,7 @@ object DistCollectionStudy:
       s"java=${runtime.getVmName} ${runtime.getVmVersion} args=${runtime.getInputArguments}"
 
   private def startProbe(): Option[AllocProbe] =
-    threadBean.flatMap { bean =>
+    threadBean.filter(_.isThreadAllocatedMemorySupported).flatMap { bean =>
       bean.setThreadAllocatedMemoryEnabled(true)
       if (bean.isThreadAllocatedMemoryEnabled) then Some(new AllocProbe(bean)) else None
     }

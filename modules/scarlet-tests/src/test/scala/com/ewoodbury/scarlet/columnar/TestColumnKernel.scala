@@ -610,3 +610,22 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
     an[IllegalArgumentException] should be thrownBy
       Utf8Pipeline.PP(pairs, (value: String) => value, (value: String) => value)
   }
+
+  "triple filter" should "name the null component and keep dense survivors in order" in {
+    val rows = 3
+    val keys = Int32Column.of(Array(1, 2, 3), Validity.allValid(rows), rows)
+    val left = Int32Column.of(Array(10, 20, 30), Validity.allValid(rows), rows)
+    val right = Int32Column.of(Array(7, 8, 9), Validity.allValid(rows), rows)
+    val schema = Vector(LogicalType.Int32, LogicalType.Int32, LogicalType.Int32)
+    val dense = new ColumnBatch(schema, Vector(keys, left, right), rows)
+    val kept = PairKernel.filterTriple(dense, (key, _, _) => key != 2)
+
+    BatchCodec.decodeIntTriples(kept) shouldBe Seq((1, (10, 7)), (3, (30, 9)))
+
+    val rightHole = Int32Column.of(Array(7, 0, 9), Validity.pack(rows, row => row != 1), rows)
+    val sparse = new ColumnBatch(schema, Vector(keys, left, rightHole), rows)
+    val caught = intercept[IllegalArgumentException] {
+      PairKernel.filterTriple(sparse, (_, _, _) => true)
+    }
+    caught.getMessage shouldBe "requirement failed: null Int32 join value at row 1"
+  }

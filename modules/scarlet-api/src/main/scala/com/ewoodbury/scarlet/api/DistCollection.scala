@@ -49,7 +49,8 @@ final case class DistCollection[A](plan: Plan[A]):
 
   /**
    * Filters strings equal to `value`. This explicit form is recognized by the columnar planner,
-   * which compares dictionary codes. A regular `filter(_ == value)` remains a scalar predicate.
+   * which compares dictionary codes. A null `value` is not recognized and stays on the scalar
+   * predicate. A regular `filter(_ == value)` remains a scalar predicate.
    */
   def filterStringEquals(value: String)(using ev: A =:= String): DistCollection[A] =
     filterStringLiterals(Vector(value))
@@ -65,10 +66,8 @@ final case class DistCollection[A](plan: Plan[A]):
   private def filterStringLiterals(values: Vector[String])(using
       ev: A =:= String,
   ): DistCollection[A] =
-    val stringValue: A => String = value => ev(value)
-    val predicate = new DictionaryStringPredicate[A]:
+    val predicate = new DictionaryStringPredicate[A](ev):
       val literals: Vector[String] = values
-      def apply(value: A): Boolean = literals.contains(stringValue(value))
     DistCollection(Plan.FilterOp(this.plan, predicate))
 
   /**
@@ -384,11 +383,18 @@ final case class DistCollection[A](plan: Plan[A]):
 end DistCollection
 
 /**
- * Internal contract for a string literal predicate that the planner may execute by dictionary
- * code.
+ * String literal predicate. [[literals]] is the only membership test: [[apply]] is final and uses
+ * that vector, so a columnar code comparison and the row path cannot disagree. The planner reads
+ * [[literals]] and does not call [[apply]].
  */
-private[scarlet] trait DictionaryStringPredicate[A] extends (A => Boolean):
+private[scarlet] abstract class DictionaryStringPredicate[A](ev: A =:= String)
+    extends (A => Boolean):
+
   def literals: Vector[String]
+
+  private lazy val membership: Set[String] = literals.toSet
+
+  final def apply(value: A): Boolean = membership.contains(ev(value))
 
 /** Internal marker for a tuple-free predicate over one int join column. */
 private[scarlet] trait IntJoinTriplePredicate[A] extends (A => Boolean):
@@ -454,6 +460,7 @@ object DistCollection:
    *   A new DistCollection.
    */
   def apply[A](data: Iterable[A], numPartitions: Int): DistCollection[A] =
+    require(numPartitions > 0, "Number of partitions must be positive.")
     val elements = data.toVector
     splitSource(elements.length, numPartitions, Plan.SourceDescriptor.Unknown)((start, end) =>
       elements.slice(start, end),

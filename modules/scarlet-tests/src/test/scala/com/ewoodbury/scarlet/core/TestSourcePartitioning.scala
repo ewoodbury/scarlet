@@ -55,9 +55,19 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
     }
   }
 
-  it should "reject non-positive partition counts" in {
+  it should "reject non-positive partition counts before reading the source" in {
+    val read = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val data = new Iterable[Int]:
+      def iterator: Iterator[Int] = new Iterator[Int]:
+        def hasNext: Boolean = true
+        def next(): Int =
+          read.set(true)
+          1
+
     an[IllegalArgumentException] should be thrownBy DistCollection(Seq(1, 2), 0)
-    an[IllegalArgumentException] should be thrownBy DistCollection(Seq(1, 2), -2)
+    an[IllegalArgumentException] should be thrownBy DistCollection(data, 0)
+    an[IllegalArgumentException] should be thrownBy DistCollection(data, -2)
+    read.get() shouldBe false
   }
 
   it should "support execution over empty partitions end to end" in {

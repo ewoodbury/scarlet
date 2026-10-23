@@ -41,6 +41,24 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     mapped.first() shouldBe mapped.take(1).headOption.getOrElse(fail("take(1) was empty"))
   }
 
+  it should "take a prefix that spans several morsels of one partition" in {
+    ScarletConf.set(
+      originalConf.copy(columnarExecution = true, columnarBatchSize = 4, threadPoolSize = 1),
+    )
+    val values = DistCollection(1 to 20, 1).filter(_ % 2 == 0).map(_ + 1)
+
+    values.take(7) shouldBe List(3, 5, 7, 9, 11, 13, 15)
+    values.take(12) shouldBe List(3, 5, 7, 9, 11, 13, 15, 17, 19, 21)
+  }
+
+  it should "stay on the row path when columnar execution is disabled" in {
+    ScarletConf.set(originalConf.copy(columnarExecution = false))
+    ColumnMetrics.arm()
+
+    DistCollection(1 to 8, 2).map(_ * 2).take(3) shouldBe List(2, 4, 6)
+    ColumnMetrics.decodedValueCount shouldBe 0L
+  }
+
   it should "return empty for zero and negative limits" in {
     armColumnar()
     val values = DistCollection(1 to 8, 3).map(_ * 2)
@@ -674,6 +692,23 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
       width = 1,
     )
   }
+
+  it should "keep an overloaded apply(Int) that is not the mapValues contract on the row path" in {
+    checkOverloadedMapValues()
+  }
+
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def checkOverloadedMapValues(): Unit =
+    val overloaded = new Function1[Any, Any]:
+      def apply(value: Any): Any = "nope"
+      def apply(value: Int): Int = value * 2
+    val mapped =
+      DistCollection.ofIntPairs(Array(1), Array(10), 1).mapValues[Int, Int, Any](overloaded)
+
+    armColumnar()
+    ColumnarPlanner.partitioning(mapped.plan) shouldBe None
+    mapped.collect().toList shouldBe List((1, "nope"))
+    columnar(mapped.collect().toList) shouldBe row(mapped.collect().toList)
 
   it should "leave a mapValues that changes type on the row path" in {
     val keys = Array(1, 2, 3)

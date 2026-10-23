@@ -33,13 +33,15 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * general tuple predicates stay on the row path. `keys` and `values` of an int pair are that
  * column. The arrays are shared: a published column is not mutated, so a view is cheaper than a
  * copy and still correct. `mapValues` lowers only when the function declares an unboxed `Int`
- * result. A wider primitive or a reference result stays on the row path. That check reads the
- * method descriptor and does not call the function. `reduceByKey` applies the user's function and
- * wraps at `Int`. `join` hash-partitions both sides and probes one bucket at a time. Output width
- * for those two is `defaultShufflePartitions`. [[tryCount]] reads finished column lengths.
- * [[trySumInt]] and [[trySumDouble]] add a filter/project chain in the fused loop and do not write
- * that chain's output column. Sum of `keys`, `values`, or an int `mapValues` reads the pair column
- * in that morsel loop and does not build the projection. [[tryGroupedSum]] runs
+ * result and every other `apply` is an erasure bridge. A wider primitive, a reference result, or
+ * an overloaded `apply` stays on the row path. That check reads the method descriptor and does not
+ * call the function. `getDeclaredMethods` does not see an inherited `apply`, so that function
+ * stays on the row path too. `reduceByKey` applies the user's function and wraps at `Int`. `join`
+ * hash-partitions both sides and probes one bucket at a time. Output width for those two is
+ * `defaultShufflePartitions`. [[tryCount]] reads finished column lengths. [[trySumInt]] and
+ * [[trySumDouble]] add a filter/project chain in the fused loop and do not write that chain's
+ * output column. Sum of `keys`, `values`, or an int `mapValues` reads the pair column in that
+ * morsel loop and does not build the projection. [[tryGroupedSum]] runs
  * [[ColumnPipeline.sumByKey]] on a typed pair source and folds the `Int64` group sums. A preceding
  * `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that partial scan,
  * so the action does not build those pairs. A source descriptor supplies the type when all
@@ -55,7 +57,7 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * A null string is a value. Classification skips a leading null and keeps looking for a `String`.
  * An all-null source stays on the row path, because there is no witness. An accepted string plan
  * records [[Layout.Utf8Dict]]: that dictionary plus codes, one dictionary per batch. The string
- * lambda stays scalar over the decoded string. Int, double, and int-pair plans stay
+ * lambda stays scalar over the decoded string. Int, double, int-pair, and int-triple plans stay
  * [[Layout.Columnar]].
  *
  * `take` has a separate bounded path for accepted partition-preserving shapes: it interprets one
@@ -110,17 +112,25 @@ object ColumnarPlanner:
   def tryTake[A](plan: Plan[A], n: Int): Option[Seq[A]] =
     if (n <= 0) then Some(Seq.empty[A])
     else
-      accepted(plan).filter(isPartitionPreserving) match
+      accepted(plan).flatMap(op => preservedPartitions(op).map(count => (op, count))) match
         case None => None
-        case Some(op) =>
-          try
-            val values = (0 until partitionCount(op)).foldLeft(Vector.empty[Any]) {
-              (result, index) =>
-                if (result.length >= n) then result
-                else result ++ decodePrefix(interpret(plan, op, Some(index)), n - result.length)
-            }
-            Some(values.asInstanceOf[Seq[A]])
+        case Some((op, count)) =>
+          try Some(prefixOf(plan, op, count, n).asInstanceOf[Seq[A]])
           catch case _: ClassCastException => None
+
+  /**
+   * First `n` values in partition order. Decoding stops once `n` values are in hand, and every
+   * batch of a partition contributes before the next partition is read.
+   */
+  private def prefixOf(plan: Plan[_], op: PhysicalOp, count: Int, n: Int): Seq[Any] =
+    @tailrec
+    def read(index: Int, taken: Int, acc: List[Any]): List[Any] =
+      if (index >= count || taken >= n) then acc
+      else
+        val chunk = decodePrefix(interpret(plan, op, Some(index)), n - taken).toList
+        read(index + 1, taken + chunk.length, chunk.reverse ::: acc)
+
+    read(0, 0, Nil).reverse
 
   /**
    * Row count of a columnar plan. `None` means the row path. This reads batch lengths and does not
@@ -411,23 +421,18 @@ object ColumnarPlanner:
   private def accepted(plan: Plan[_]): Option[PhysicalOp] =
     lower(plan).filter(op => infoOf(op).invalidReason.isEmpty)
 
-  private def isPartitionPreserving(op: PhysicalOp): Boolean = op match
-    case PhysicalOp.Scan(_, _) => true
-    case PhysicalOp.Filter(child, _) => isPartitionPreserving(child)
-    case PhysicalOp.Project(child) => isPartitionPreserving(child)
-    case PhysicalOp.Pipeline(child, _) => isPartitionPreserving(child)
-    case PhysicalOp.Column(child, _) => isPartitionPreserving(child)
-    case PhysicalOp.MapValue(child) => isPartitionPreserving(child)
-    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.Exchange => false
-
-  private def partitionCount(op: PhysicalOp): Int = op match
-    case PhysicalOp.Scan(_, partitions) => partitions.length
-    case PhysicalOp.Filter(child, _) => partitionCount(child)
-    case PhysicalOp.Project(child) => partitionCount(child)
-    case PhysicalOp.Pipeline(child, _) => partitionCount(child)
-    case PhysicalOp.Column(child, _) => partitionCount(child)
-    case PhysicalOp.MapValue(child) => partitionCount(child)
-    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.Exchange => 0
+  /**
+   * Partition count when `op` keeps input order and the input partition count. `None` is an
+   * exchange, aggregate, or join: `take` must not read one partition and present it as the result.
+   */
+  private def preservedPartitions(op: PhysicalOp): Option[Int] = op match
+    case PhysicalOp.Scan(_, partitions) => Some(partitions.length)
+    case PhysicalOp.Filter(child, _) => preservedPartitions(child)
+    case PhysicalOp.Project(child) => preservedPartitions(child)
+    case PhysicalOp.Pipeline(child, _) => preservedPartitions(child)
+    case PhysicalOp.Column(child, _) => preservedPartitions(child)
+    case PhysicalOp.MapValue(child) => preservedPartitions(child)
+    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.Exchange => None
 
   private def selectPartition[A](
       partitions: Seq[Partition[A]],
@@ -436,17 +441,38 @@ object ColumnarPlanner:
     case None => partitions
     case Some(index) => partitions.slice(index, index + 1)
 
-  private def decodePrefix(columns: Columns, limit: Int): Seq[Any] = columns match
-    case Columns.Ints(parts) =>
-      parts.headOption.toSeq.flatMap(batch => BatchCodec.decodeInts(batch, limit))
-    case Columns.Floats(parts) =>
-      parts.headOption.toSeq.flatMap(batch => BatchCodec.decodeFloat64s(batch, limit))
-    case Columns.Pairs(parts) =>
-      parts.headOption.toSeq.flatMap(batch => BatchCodec.decodeIntPairs(batch, limit))
-    case Columns.Triples(parts) =>
-      parts.headOption.toSeq.flatMap(batch => BatchCodec.decodeIntTriples(batch, limit))
-    case Columns.Strings(parts) =>
-      parts.headOption.toSeq.flatMap(batch => BatchCodec.decodeStrings(batch, limit))
+  private def decodePrefix(columns: Columns, limit: Int): Seq[Any] =
+    if (limit <= 0) then Seq.empty
+    else
+      columns match
+        case Columns.Ints(parts) =>
+          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeInts(batch, rows))
+        case Columns.Floats(parts) =>
+          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeFloat64s(batch, rows))
+        case Columns.Pairs(parts) =>
+          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeIntPairs(batch, rows))
+        case Columns.Triples(parts) =>
+          // Joins are not partition-preserving, so `take` does not reach this arm.
+          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeIntTriples(batch, rows))
+        case Columns.Strings(parts) =>
+          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeStrings(batch, rows))
+
+  private def prefixRows[A](
+      parts: Vector[ColumnBatch],
+      limit: Int,
+      decode: (ColumnBatch, Int) => Seq[A],
+  ): Seq[Any] =
+    @tailrec
+    def read(rest: List[ColumnBatch], taken: Int, acc: List[A]): List[A] =
+      if (taken >= limit) then acc
+      else
+        rest match
+          case Nil => acc
+          case batch :: tail =>
+            val chunk = decode(batch, limit - taken).toList
+            read(tail, taken + chunk.length, chunk.reverse ::: acc)
+
+    read(parts.toList, 0, Nil).reverse
 
   private def lowerPlan(plan: Plan[_]): Option[PhysicalOp] =
     val (base, steps) = elementSteps(plan, Int.MaxValue)
@@ -567,9 +593,14 @@ object ColumnarPlanner:
       Option.when(
         literals.nonEmpty &&
           literals.length <= MaxDictionaryStringLiterals &&
-          literals.forall(value => Option(value).isDefined),
+          literals.forall(presentLiteral),
       )(literals)
     case _ => None
+
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def presentLiteral(value: String): Boolean = value match
+    case null => false
+    case _ => true
 
   private def pairColumn(source: Plan[_], ordinal: Int): Option[PhysicalOp] =
     lowerPlan(source).flatMap { child =>
@@ -587,13 +618,14 @@ object ColumnarPlanner:
     }
 
   /**
-   * True when `function` declares an unboxed `Int => Int` apply. A declared `apply` that returns
-   * some other reference type is a change of type, including the bridge on an anonymous class, so
-   * the plan stays on the row path. This does not call `function`.
+   * True when `function` declares an unboxed `Int => Int` apply and every other `apply` is the
+   * erasure bridge. A hand-written `apply(Any): Any` beside `apply(Int): Int` is not a bridge, so
+   * the plan stays on the row path. `getDeclaredMethods` ignores an inherited `apply`, which also
+   * stays on the row path. This does not call `function`.
    */
   private def returnsUnboxedInt(function: Any): Boolean =
     val methods = function.getClass.getDeclaredMethods
-    methods.exists(isUnboxedIntApply) && !methods.exists(isOtherReferenceApply)
+    methods.exists(isUnboxedIntApply) && !methods.exists(isDisqualifyingApply)
 
   @SuppressWarnings(Array("org.wartremover.warts.Equals"))
   private def isUnboxedIntApply(method: java.lang.reflect.Method): Boolean =
@@ -601,18 +633,25 @@ object ColumnarPlanner:
       case "apply" | "apply$mcII$sp" => true
       case _ => false
     named &&
+    !method.isBridge &&
     method.getReturnType.eq(classOf[Int]) &&
     method.getParameterCount == 1 &&
     method.getParameterTypes()(0).eq(classOf[Int])
 
   @SuppressWarnings(Array("org.wartremover.warts.Equals"))
-  private def isOtherReferenceApply(method: java.lang.reflect.Method): Boolean =
-    val named = method.getName match
-      case "apply" => true
-      case _ => false
-    named &&
-    !method.getReturnType.eq(classOf[Int]) &&
-    !method.getReturnType.eq(classOf[AnyRef])
+  private def isDisqualifyingApply(method: java.lang.reflect.Method): Boolean =
+    method.getName == "apply" &&
+      method.getParameterCount == 1 &&
+      !isUnboxedIntApply(method) &&
+      !isErasureBridge(method)
+
+  /** Compiler bridge from a specialized `Int => Int` to `Function1.apply`. */
+  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+  private def isErasureBridge(method: java.lang.reflect.Method): Boolean =
+    val erased =
+      method.getReturnType.eq(classOf[AnyRef]) &&
+        method.getParameterTypes()(0).eq(classOf[Object])
+    erased && (method.isBridge || method.isSynthetic)
 
   private def columnFilter(source: Plan[_], slot: PhysicalOp.Slot): Option[PhysicalOp] =
     lowerPlan(source).flatMap { child =>
@@ -645,17 +684,49 @@ object ColumnarPlanner:
       source: Plan.Source[_],
       descriptor: Plan.SourceDescriptor,
   ): Boolean =
-    source.partitions.iterator
-      .flatMap(_.data.iterator)
-      .forall { value =>
-        (descriptor, Option(value)) match
-          case (Plan.SourceDescriptor.Ints, Some(_: Int)) => true
-          case (Plan.SourceDescriptor.Doubles, Some(_: Double)) => true
-          case (Plan.SourceDescriptor.Pairs, Some((_: Int, _: Int))) => true
-          case (Plan.SourceDescriptor.Strings, Some(_: String)) => true
-          case (Plan.SourceDescriptor.Strings, None) => true
-          case _ => false
-      }
+    if (ownedMatches(source, descriptor)) then true
+    else
+      val rows = source.partitions.iterator.flatMap(_.data.iterator)
+      descriptor match
+        case Plan.SourceDescriptor.Ints => rows.forall(isIntValue)
+        case Plan.SourceDescriptor.Doubles => rows.forall(isDoubleValue)
+        case Plan.SourceDescriptor.Pairs => rows.forall(isIntPairValue)
+        case Plan.SourceDescriptor.Strings => rows.forall(isStringValue)
+        case Plan.SourceDescriptor.Unknown => false
+
+  /**
+   * Engine-built primitive holders are type-safe by construction. Skipping them avoids a second
+   * scan that would box every element before encode.
+   */
+  private def ownedMatches(source: Plan.Source[_], descriptor: Plan.SourceDescriptor): Boolean =
+    import com.ewoodbury.scarlet.core.{DoubleArrays, IntArrays, IntPairArrays}
+
+    descriptor match
+      case Plan.SourceDescriptor.Ints =>
+        source.partitions.forall(partition => partition.data.isInstanceOf[IntArrays])
+      case Plan.SourceDescriptor.Doubles =>
+        source.partitions.forall(partition => partition.data.isInstanceOf[DoubleArrays])
+      case Plan.SourceDescriptor.Pairs =>
+        source.partitions.forall(partition => partition.data.isInstanceOf[IntPairArrays])
+      case Plan.SourceDescriptor.Strings | Plan.SourceDescriptor.Unknown => false
+
+  private def isIntValue(value: Any): Boolean = value match
+    case _: Int => true
+    case _ => false
+
+  private def isDoubleValue(value: Any): Boolean = value match
+    case _: Double => true
+    case _ => false
+
+  private def isIntPairValue(value: Any): Boolean = value match
+    case (_: Int, _: Int) => true
+    case _ => false
+
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def isStringValue(value: Any): Boolean = value match
+    case null => true
+    case _: String => true
+    case _ => false
 
   private def classifyData(partitions: Seq[Partition[_]]): Option[PhysicalOp.Kind] =
     if (partitions.isEmpty) then None
@@ -741,6 +812,7 @@ object ColumnarPlanner:
           Plan.ReduceByKeyOp(source, reduceFunc),
           PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)),
         ) =>
+      require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
       val op = reduceFunc.asInstanceOf[(Int, Int) => Int]
       Columns.Pairs(
         HashReduce.byKey(
@@ -755,6 +827,7 @@ object ColumnarPlanner:
           Plan.JoinOp(left, right, _),
           PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
         ) =>
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       Columns.Triples(
         ColumnPipeline.innerJoin(
           pairsOf(interpret(left, leftOp, selectedPartition)),
@@ -789,6 +862,15 @@ object ColumnarPlanner:
     case Columns.Strings(parts) =>
       Columns.Strings(onEach(parts)(batch => ElementPipeline.strings(batch, steps)))
     case _ => throw new IllegalStateException("pipeline expects an int, float, or string column")
+
+  private def triplePredicate(
+      slot: PhysicalOp.Slot,
+      keep: IntJoinTriplePredicate[?],
+  ): PairKernel.IntTriplePredicate = slot match
+    case PhysicalOp.Slot.TripleKey => (key, _, _) => keep.keep(key)
+    case PhysicalOp.Slot.TripleLeftValue => (_, left, _) => keep.keep(left)
+    case PhysicalOp.Slot.TripleRightValue => (_, _, right) => keep.keep(right)
+    case _ => throw new IllegalStateException("triple filter has a non-triple slot")
 
   private def applyFilter(columns: Columns, predicate: Any, slot: PhysicalOp.Slot): Columns =
     slot match
@@ -840,16 +922,9 @@ object ColumnarPlanner:
         val keep = predicate match
           case recognized: IntJoinTriplePredicate[?] => recognized
           case _ => throw new IllegalStateException("triple filter lost its slot predicate")
+        val select = triplePredicate(slot, keep)
         Columns.Triples(onEach(triplesOf(columns)) { batch =>
-          PairKernel.filterTriple(
-            batch,
-            (key, left, right) =>
-              slot match
-                case PhysicalOp.Slot.TripleKey => keep.keep(key)
-                case PhysicalOp.Slot.TripleLeftValue => keep.keep(left)
-                case PhysicalOp.Slot.TripleRightValue => keep.keep(right)
-                case _ => throw new IllegalStateException("triple filter has a non-triple slot"),
-          )
+          PairKernel.filterTriple(batch, select)
         })
 
   private def project(columns: Columns, mapper: Any): Columns = columns match
@@ -993,7 +1068,7 @@ object ColumnarPlanner:
       layoutOf(PhysicalOp.Kind.Pairs),
     )
 
-  /** String plans name the dictionary layout. Int, double, and pair plans stay columnar. */
+  /** String plans name the dictionary layout. Every other classified kind stays columnar. */
   private def layoutOf(kind: PhysicalOp.Kind): Layout = kind match
     case PhysicalOp.Kind.Strings => Layout.Utf8Dict(ScarletConf.get.columnarBatchSize)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs |
