@@ -90,12 +90,13 @@ is scanned by `ColumnPipeline.sumByKey`. `partitioning` reports `Columnar`, but 
 `None` for a pair map and there is no `PhysicalOp.shape` for this fused action today. The contract
 checks the fused sum result and pins that absence rather than inventing a physical tree.
 
-These 43 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+These 45 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
 `sortBy`, map on join triples, a general tuple filter on join triples, non-Int `mapValues`,
 string/double pair projection or pair filters, string/double-key `groupByKey`, `reduceByKey`, and
-join, single-precision `Float` sources/maps, all-null strings, empty generic sources without a type
-descriptor, an unsupported Boolean source, and element maps that do not preserve the column type.
+join, explicit sort-merge and broadcast joins, single-precision `Float` sources/maps, all-null
+strings, empty generic sources without a type descriptor, an unsupported Boolean source, and
+element maps that do not preserve the column type.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then
 `toString`, and a type-changing map inside a three-step chain), a `Double` mapped to `Int`, and a
 `String` mapped through `length`. A type-changing step refuses the whole element chain, so the plan
@@ -104,13 +105,13 @@ which supplies the type for empty partitions; when values are present, the plann
 data inference to agree with that descriptor. A map of a pair is also excluded from `lower` and
 `tryRun`; its action-specific `groupedSum` fusion is described above.
 
-Sort-merge and broadcast joins are still columnar hash joins. The contract pins those two shapes,
-plus the fused pair map, as the three remaining discrepancies:
+A non-default join strategy keeps the plan on the row path. Sort-merge and broadcast are not
+implemented on the columnar path: `lower` returns `None`, and `partitioning` reports no layout.
+A join with no hint, or with an explicit shuffle-hash hint, stays the columnar hash join above.
 
-- Join strategy is ignored by `ColumnarPlanner.lower`: explicit sort-merge and broadcast joins
-  currently report the same columnar `HashJoin(Exchange(Scan), Exchange(Scan))` as shuffle-hash.
-- The pair map fused by `groupedSum` reports a columnar layout but has no `PhysicalOp.shape`; the
-  action is covered separately and remains action-level.
+The contract pins one remaining discrepancy. The pair map fused by `groupedSum` reports a
+columnar layout but has no `PhysicalOp.shape`; the action is covered separately and remains
+action-level.
 
 The grouped-sum pair-map layout is a separate action-level case, not one of the physical-tree
 fixtures: `partitioning` reports `Columnar`, `lower` returns `None`, and `tryGroupedSum` succeeds.
@@ -225,5 +226,6 @@ Roadmap and sequencing are tracked externally; the headline items:
   shuffle write per stage.
 - Fusion has no cost model or general predicate pushdown. `collect` decodes every output row into a
   `Seq`.
-- Sort-merge join is a hash grouping wearing a sort-merge name; a true typed sort-merge join is
-  deferred.
+- The columnar path does not implement sort-merge or broadcast joins. A non-default join
+  strategy stays on the row path. The row-path sort-merge join is a hash grouping wearing a
+  sort-merge name; a true typed sort-merge join is deferred.

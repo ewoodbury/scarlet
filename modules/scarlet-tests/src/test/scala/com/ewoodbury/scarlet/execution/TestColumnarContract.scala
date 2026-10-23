@@ -30,8 +30,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val allPlans = accepted.map(_.plan) ++ excluded.map(_.plan) ++ mismatches.map(_.plan)
 
     accepted.size shouldBe 122
-    excluded.size shouldBe 43
-    mismatches.size shouldBe 3
+    excluded.size shouldBe 45
+    mismatches.size shouldBe 1
     allPlans.map(planNode).toSet shouldBe PlanNode.values.toSet
     accepted.foreach { expected =>
       withClue(s"${expected.label} (${planNode(expected.plan)}): ") {
@@ -128,6 +128,40 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     ColumnarPlanner.partitioning(preservedDouble) shouldBe Some(narrowInfo(2, columnarLayout))
     ColumnarPlanner.lower(preservedDouble).map(_.shape) shouldBe Some("Project(Scan)")
     DistCollection(preservedDouble).collect() shouldBe Seq(2.5, 3.5, 4.5)
+  }
+
+  it should "keep a non-default join strategy on the row path" in {
+    val left = DistCollection(Seq(1 -> 10, 1 -> 11, 2 -> 20), 2)
+    val right = DistCollection(Seq(1 -> 100, 1 -> 101, 3 -> 30), 2)
+    val sortMerge = left.sortMergeJoin(right).plan
+    val broadcast = left.broadcastJoin(right).plan
+    val plain = left.join(right).plan
+    val hashed = left.shuffleHashJoin(right).plan
+    val expected = Seq(
+      1 -> ((10, 100)),
+      1 -> ((10, 101)),
+      1 -> ((11, 100)),
+      1 -> ((11, 101)),
+    )
+
+    assertRowPath(sortMerge)
+    assertRowPath(broadcast)
+    collected(sortMerge) should contain theSameElementsAs expected
+    collected(broadcast) should contain theSameElementsAs expected
+
+    ColumnarPlanner.partitioning(plain).map(_.layout) shouldBe Some(columnarLayout)
+    ColumnarPlanner.lower(plain).map(_.shape) shouldBe Some(
+      "HashJoin(Exchange(Scan), Exchange(Scan))",
+    )
+    ColumnarPlanner.tryRun(plain) shouldBe defined
+    collected(plain) should contain theSameElementsAs rowResult(plain)
+    rowResult(plain) should contain theSameElementsAs expected
+
+    ColumnarPlanner.partitioning(hashed).map(_.layout) shouldBe Some(columnarLayout)
+    ColumnarPlanner.lower(hashed).map(_.shape) shouldBe Some(
+      "HashJoin(Exchange(Scan), Exchange(Scan))",
+    )
+    ColumnarPlanner.tryRun(hashed) shouldBe defined
   }
 
   it should "agree on lower and every action gate for every contract fixture" in {
@@ -419,6 +453,14 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ExcludedCase("groupByKey with double keys", groupDoubleKeys),
       ExcludedCase("join with string keys", stringKeyJoin),
       ExcludedCase("join with double keys", doubleKeyJoin),
+      ExcludedCase(
+        "explicit sort-merge join",
+        DistCollection(pairSource).sortMergeJoin(DistCollection(rightPairSource)).plan,
+      ),
+      ExcludedCase(
+        "explicit broadcast join",
+        DistCollection(pairSource).broadcastJoin(DistCollection(rightPairSource)).plan,
+      ),
       ExcludedCase("single-precision Float source", floatSource),
       ExcludedCase("single-precision Float map", floatMap),
       ExcludedCase("all-null string source", allNullStringSource),
@@ -452,9 +494,11 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     )
 
   /**
-   * `lower` and the action gates share one decision. A refused plan makes every gate return
-   * `None`. An accepted plan runs `tryRun` and `tryCount`. `tryTake` runs when the physical tree
-   * keeps input partitions. `trySumInt` and `trySumDouble` run only for that numeric kind.
+   * `lower` and the action gates share one decision. A refused plan, including a sort-merge or
+   * broadcast join, makes every gate return `None`. An accepted plan runs `tryRun` and
+   * `tryCount`. `tryTake` runs when the physical tree keeps input partitions. `trySumInt` and
+   * `trySumDouble` run only for that numeric kind. `tryGroupedSum` is not implied by acceptance;
+   * a refused plan still returns `None`.
    */
   private def assertGatesAgree(plan: Plan[_], accepted: Boolean): Unit =
     val lowered = ColumnarPlanner.lower(plan)
@@ -465,6 +509,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     ColumnarPlanner.trySumInt(plan).isDefined shouldBe lowered.exists(sumsInts)
     ColumnarPlanner.trySumDouble(plan).isDefined shouldBe lowered.exists(sumsFloats)
     ColumnarPlanner.tryTake(plan, 1).isDefined shouldBe lowered.exists(preservesPartitions)
+    if (!accepted) then ColumnarPlanner.tryGroupedSum(plan) shouldBe None
 
   private def sumsInts(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Ints => true
@@ -494,23 +539,23 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     ColumnarPlanner.tryRun(plan) shouldBe None
     ColumnarPlanner.tryCount(plan) shouldBe None
     ColumnarPlanner.trySumInt(plan) shouldBe None
+    ColumnarPlanner.trySumDouble(plan) shouldBe None
+    ColumnarPlanner.tryTake(plan, 1) shouldBe None
+    ColumnarPlanner.tryGroupedSum(plan) shouldBe None
+
+  private def collected[A](plan: Plan[A]): Seq[A] =
+    ScarletRuntime.get.shuffle.clear()
+    DistCollection(plan).collect().toSeq
+
+  private def rowResult[A](plan: Plan[A]): Seq[A] =
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(saved.copy(columnarExecution = false))
+      collected(plan)
+    finally ScarletConf.set(saved)
 
   private def plannerMismatchCases: Seq[PlannerMismatchCase] =
     Seq(
-      PlannerMismatchCase(
-        "explicit sort-merge join currently lowers as a hash join",
-        DistCollection(pairSource).sortMergeJoin(DistCollection(rightPairSource)).plan,
-        hashedInfo(columnarLayout),
-        Some("HashJoin(Exchange(Scan), Exchange(Scan))"),
-        false,
-      ),
-      PlannerMismatchCase(
-        "explicit broadcast join currently lowers as a hash join",
-        DistCollection(pairSource).broadcastJoin(DistCollection(rightPairSource)).plan,
-        hashedInfo(columnarLayout),
-        Some("HashJoin(Exchange(Scan), Exchange(Scan))"),
-        false,
-      ),
       PlannerMismatchCase(
         "pair map has a fused groupedSum layout but no physical shape",
         Plan.MapOp(pairSource, (pair: (Int, Int)) => (pair._1 + 1, pair._2 + pair._1)),
