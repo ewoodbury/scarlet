@@ -10,12 +10,13 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
  * Lowers `Int`, `Double`, `(Int, Int)`, and `String` plans to [[PhysicalOp]] and runs that tree on
  * the columnar kernels.
  *
- * Named erasure boundary. `Plan` is invariant and its element type is erased, so a source is
- * classified by reading one value, and user functions are then cast to that operation. A function
- * that does not return the selected type throws `ClassCastException`. [[tryRun]] catches that and
- * returns `None`, and the row path runs the whole plan. Any unsupported node (union, flatMap,
- * distinct, sort, a map that is not fed by `Int`, `Double`, or `String`, and the rest) makes the
- * whole plan ineligible, so a supported prefix is not executed on its own.
+ * Named erasure boundary. `Plan` is invariant and its element type is erased, so non-empty sources
+ * are classified by their values and checked against any descriptor, while empty sources use their
+ * descriptor. User functions are then cast to that operation. A function that does not return the
+ * selected type throws `ClassCastException`. [[tryRun]] catches that and returns `None`, and the
+ * row path runs the whole plan. Any unsupported node (union, flatMap, distinct, sort, a map that
+ * is not fed by `Int`, `Double`, or `String`, and the rest) makes the whole plan ineligible, so a
+ * supported prefix is not executed on its own.
  *
  * [[lower]] and interpretation walk the same logical plan. The physical node records the operator
  * and not the function, so each logical node is matched to the node [[lower]] built for it. A
@@ -39,11 +40,11 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
  * [[trySumInt]] and [[trySumDouble]] add a filter/project chain in the fused loop and do not write
  * that chain's output column. Sum of `keys`, `values`, or an int `mapValues` reads the pair column
  * in that morsel loop and does not build the projection. [[tryGroupedSum]] runs
- * [[ColumnPipeline.sumByKey]] on a witnessed pair source and folds the `Int64` group sums. A
- * preceding `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that
- * partial scan, so the action does not build those pairs. An empty source has no witness and is
- * refused. It does not decode. `collect` still does. A pair `MapOp` stays on the row path for
- * `collect` and `reduceByKey`.
+ * [[ColumnPipeline.sumByKey]] on a typed pair source and folds the `Int64` group sums. A preceding
+ * `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that partial scan,
+ * so the action does not build those pairs. A source descriptor supplies the type when all
+ * partitions are empty. It does not decode. `collect` still does. A pair `MapOp` stays on the row
+ * path for `collect` and `reduceByKey`.
  *
  * An `ArraySeq.ofInt`, `ArraySeq.ofDouble`, or [[IntPairArrays]] source is copied into the column
  * on the calling thread. A boxed `Vector` or `List` is still read through its iterator.
@@ -150,12 +151,13 @@ object ColumnarPlanner:
         catch case _: ClassCastException => None
 
   /**
-   * Folded wide sum of int pairs. `None` means the row path. A witnessed pair source runs
+   * Folded wide sum of int pairs. `None` means the row path. A typed pair source runs
    * [[ColumnPipeline.sumByKey]]. A preceding row, key, or value filter, or a map that stays a
    * pair, is compiled into `keep`/`map` or [[com.ewoodbury.scarlet.columnar.PairStep]]s and
-   * applied inside the partial `sumInt32`. An empty source has no witness and is refused. Null
-   * keys stay dropped. This does not decode. A mistyped function throws `ClassCastException` and
-   * is refused after any rows it already touched. Any other shape is refused.
+   * applied inside the partial `sumInt32`. A source descriptor supplies the type for empty
+   * partitions. Null keys stay dropped. This does not decode. A mistyped function throws
+   * `ClassCastException` and is refused after any rows it already touched. Any other shape is
+   * refused.
    */
   def tryGroupedSum(plan: Plan[_]): Option[Long] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -168,7 +170,7 @@ object ColumnarPlanner:
         case _ => None
 
   private def sumInt(plan: Plan[_], op: PhysicalOp): Long = (plan, op) match
-    case (Plan.Source(partitions), PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) =>
+    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) =>
       ColumnReduce.sumInt32(encodeInts(partitions))
     case (Plan.FilterOp(source, predicate), PhysicalOp.Filter(child, PhysicalOp.Slot.Element))
         if isInt(child) =>
@@ -204,7 +206,7 @@ object ColumnarPlanner:
       ColumnReduce.sumInt32(batchesOf(interpret(plan, op)))
 
   private def sumDouble(plan: Plan[_], op: PhysicalOp): Double = (plan, op) match
-    case (Plan.Source(partitions), PhysicalOp.Scan(PhysicalOp.Kind.Floats, _)) =>
+    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Floats, _)) =>
       ColumnReduce.sumFloat64(encodeFloats(partitions))
     case (
           Plan.FilterOp(source, predicate),
@@ -257,7 +259,7 @@ object ColumnarPlanner:
     collect(plan, Nil)
 
   private def runGroupedSum(source: Plan.Source[_], steps: List[PairStep]): Option[Long] =
-    classify(source.partitions) match
+    classify(source) match
       case Some(PhysicalOp.Kind.Pairs) =>
         val parts = encodePairs(source.partitions)
         val grouped = ColumnPipeline.sumByKey(
@@ -282,7 +284,7 @@ object ColumnarPlanner:
       val (base, steps) = peelPairOps(plan)
       base match
         case source: Plan.Source[_] if steps.exists(isPairMap) =>
-          classify(source.partitions) match
+          classify(source) match
             case Some(PhysicalOp.Kind.Pairs) =>
               Some(
                 narrow(
@@ -410,8 +412,8 @@ object ColumnarPlanner:
     else lowerPlan(base).flatMap(child => lowerElementSteps(child, steps))
 
   private def lowerPlanNode(plan: Plan[_]): Option[PhysicalOp] = plan match
-    case Plan.Source(partitions) =>
-      classify(partitions).map(kind => PhysicalOp.Scan(kind, partitions))
+    case source: Plan.Source[_] =>
+      classify(source).map(kind => PhysicalOp.Scan(kind, source.partitions))
     case Plan.FilterKeysOp(source, _) =>
       columnFilter(source, PhysicalOp.Slot.Key)
     case Plan.FilterValuesOp(source, _) =>
@@ -577,7 +579,43 @@ object ColumnarPlanner:
         case _ => None
     }
 
-  private def classify(partitions: Seq[Partition[_]]): Option[PhysicalOp.Kind] =
+  private def classify(source: Plan.Source[_]): Option[PhysicalOp.Kind] =
+    val inferred = classifyData(source.partitions)
+    source.descriptor match
+      case Plan.SourceDescriptor.Unknown => inferred
+      case descriptor =>
+        val describedKind = kindOf(descriptor)
+        inferred match
+          case Some(kind)
+              if describedKind.contains(kind) && dataMatchesDescriptor(source, descriptor) =>
+            Some(kind)
+          case None if source.partitions.forall(_.data.isEmpty) => describedKind
+          case _ => None
+
+  private def kindOf(descriptor: Plan.SourceDescriptor): Option[PhysicalOp.Kind] = descriptor match
+    case Plan.SourceDescriptor.Unknown => None
+    case Plan.SourceDescriptor.Ints => Some(PhysicalOp.Kind.Ints)
+    case Plan.SourceDescriptor.Doubles => Some(PhysicalOp.Kind.Floats)
+    case Plan.SourceDescriptor.Pairs => Some(PhysicalOp.Kind.Pairs)
+    case Plan.SourceDescriptor.Strings => Some(PhysicalOp.Kind.Strings)
+
+  private def dataMatchesDescriptor(
+      source: Plan.Source[_],
+      descriptor: Plan.SourceDescriptor,
+  ): Boolean =
+    source.partitions.iterator
+      .flatMap(_.data.iterator)
+      .forall { value =>
+        (descriptor, Option(value)) match
+          case (Plan.SourceDescriptor.Ints, Some(_: Int)) => true
+          case (Plan.SourceDescriptor.Doubles, Some(_: Double)) => true
+          case (Plan.SourceDescriptor.Pairs, Some((_: Int, _: Int))) => true
+          case (Plan.SourceDescriptor.Strings, Some(_: String)) => true
+          case (Plan.SourceDescriptor.Strings, None) => true
+          case _ => false
+      }
+
+  private def classifyData(partitions: Seq[Partition[_]]): Option[PhysicalOp.Kind] =
     if (partitions.isEmpty) then None
     else
       val values = partitions.iterator.flatMap(_.data.iterator)
@@ -620,13 +658,13 @@ object ColumnarPlanner:
       op: PhysicalOp,
       selectedPartition: Option[Int] = None,
   ): Columns = (plan, op) match
-    case (Plan.Source(partitions), PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) =>
+    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) =>
       Columns.Ints(encodeInts(selectPartition(partitions, selectedPartition)))
-    case (Plan.Source(partitions), PhysicalOp.Scan(PhysicalOp.Kind.Floats, _)) =>
+    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Floats, _)) =>
       Columns.Floats(encodeFloats(selectPartition(partitions, selectedPartition)))
-    case (Plan.Source(partitions), PhysicalOp.Scan(PhysicalOp.Kind.Pairs, _)) =>
+    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Pairs, _)) =>
       Columns.Pairs(encodePairs(selectPartition(partitions, selectedPartition)))
-    case (Plan.Source(partitions), PhysicalOp.Scan(PhysicalOp.Kind.Strings, _)) =>
+    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Strings, _)) =>
       Columns.Strings(encodeStrings(selectPartition(partitions, selectedPartition)))
     case (Plan.FilterOp(source, predicate), PhysicalOp.Filter(child, slot)) =>
       applyFilter(interpret(source, child, selectedPartition), predicate, slot)

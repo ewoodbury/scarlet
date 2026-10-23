@@ -579,12 +579,15 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     assertColumnar(filtered.values, width = 2)
   }
 
-  it should "return zero for an empty pair projection through the row engine" in {
+  it should "return zero for an empty pair projection on the columnar path" in {
     def empty = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 1)
 
-    columnar(empty.values.sum) shouldBe 0L
-    columnar(empty.keys.sum) shouldBe 0L
-    columnar(ColumnarPlanner.partitioning(empty.values.plan) shouldBe None)
+    columnar {
+      empty.values.sum shouldBe 0L
+      empty.keys.sum shouldBe 0L
+      assertColumnar(empty.values, width = 1)
+      assertColumnar(empty.keys, width = 1)
+    }
   }
 
   private def armColumnar(): Unit =

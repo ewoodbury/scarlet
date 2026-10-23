@@ -10,7 +10,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 class TestSourcePartitioning extends AnyFlatSpec with Matchers {
 
   private def partitionSizes[A](dc: DistCollection[A]): Seq[Int] = dc.plan match {
-    case Plan.Source(partitions) => partitions.map(partition => partition.data.size).toSeq
+    case Plan.Source(partitions, _) => partitions.map(partition => partition.data.size).toSeq
     case other => fail(s"Expected Plan.Source, got $other")
   }
 
@@ -18,6 +18,7 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
     val dc = DistCollection(Seq(1, 2, 3, 4, 5), 3)
 
     partitionSizes(dc) shouldEqual Seq(2, 2, 1)
+    sourceDescriptor(dc) shouldEqual Plan.SourceDescriptor.Unknown
   }
 
   it should "produce exactly N empty partitions for empty input" in {
@@ -49,7 +50,7 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
     val dc = DistCollection(Seq(1, 2, 3, 4, 5), 2)
 
     dc.plan match {
-      case Plan.Source(partitions) =>
+      case Plan.Source(partitions, _) =>
         partitions.head.data.toSeq shouldEqual Seq(1, 2, 3)
         partitions.drop(1).head.data.toSeq shouldEqual Seq(4, 5)
       case other => fail(s"Expected Plan.Source, got $other")
@@ -84,6 +85,7 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
     input(0) = 99
 
     partitionSizes(dc) shouldEqual Seq(2, 2, 1)
+    sourceDescriptor(dc) shouldEqual Plan.SourceDescriptor.Ints
     dc.collect() shouldEqual Seq(1, 2, 3, 4, 5)
     sourceData(dc).foreach {
       case primitive: ArraySeq.ofInt =>
@@ -110,6 +112,7 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
     input(0) = 9.0
 
     partitionSizes(dc) shouldEqual Seq(2, 1)
+    sourceDescriptor(dc) shouldEqual Plan.SourceDescriptor.Doubles
     dc.collect() shouldEqual Seq(1.5, -2.0, 3.25)
     sourceData(dc).foreach {
       case primitive: ArraySeq.ofDouble =>
@@ -140,6 +143,7 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
     values(4) = 0
 
     partitionSizes(dc) shouldEqual Seq(3, 2)
+    sourceDescriptor(dc) shouldEqual Plan.SourceDescriptor.Pairs
     dc.collect() shouldEqual Seq((1, 10), (2, 20), (1, 5), (3, 7), (2, 1))
     sourceData(dc).foreach {
       case stored: IntPairArrays =>
@@ -156,7 +160,12 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
   }
 
   private def sourceData[A](dc: DistCollection[A]): Seq[Iterable[A]] = dc.plan match {
-    case Plan.Source(partitions) => partitions.map(_.data)
+    case Plan.Source(partitions, _) => partitions.map(_.data)
+    case other => fail(s"Expected Plan.Source, got $other")
+  }
+
+  private def sourceDescriptor[A](dc: DistCollection[A]): Plan.SourceDescriptor = dc.plan match {
+    case Plan.Source(_, descriptor) => descriptor
     case other => fail(s"Expected Plan.Source, got $other")
   }
 }

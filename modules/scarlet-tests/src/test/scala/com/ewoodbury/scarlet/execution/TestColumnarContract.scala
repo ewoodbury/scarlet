@@ -29,8 +29,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val mismatches = plannerMismatchCases
     val allPlans = accepted.map(_.plan) ++ excluded.map(_.plan) ++ mismatches.map(_.plan)
 
-    accepted.size shouldBe 121
-    excluded.size shouldBe 37
+    accepted.size shouldBe 122
+    excluded.size shouldBe 36
     mismatches.size shouldBe 6
     allPlans.map(planNode).toSet shouldBe PlanNode.values.toSet
     accepted.foreach { expected =>
@@ -59,6 +59,11 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     ColumnarPlanner.lower(mappedPairs) shouldBe Option.empty[PhysicalOp]
     ColumnarPlanner.tryGroupedSum(mappedPairs) shouldBe Some(66L)
     ColumnarPlanner.tryGroupedSum(pairSource) shouldBe Some(60L)
+    ColumnarPlanner.partitioning(emptyPairSource).map(_.layout) shouldBe Some(columnarLayout)
+    ColumnarPlanner.lower(emptyPairSource).map(_.shape) shouldBe Some("Scan")
+    DistCollection(emptyPairSource).groupedSum shouldBe 0L
+    DistCollection(emptyPairSource).collect() shouldBe empty
+    DistCollection(emptyPairSource).take(3) shouldBe empty
     ColumnarPlanner.tryGroupedSum(Plan.FilterKeysOp(pairSource, (key: Int) => key > 1)) shouldBe
       Some(50L)
     ColumnarPlanner.tryGroupedSum(Plan.FilterValuesOp(pairSource, (value: Int) => value > 10)) shouldBe
@@ -83,6 +88,41 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       .plan
     ColumnarPlanner.lower(stringPipeline).map(_.shape) shouldBe Some("Project(Filter(Scan))")
     ColumnarPlanner.tryTake(stringPipeline, 1) shouldBe Some(Seq("RED"))
+  }
+
+  it should "use source descriptors for empty primitive sources without changing empty results" in {
+    val emptyInts = DistCollection.ofInts(Array.empty[Int], 2)
+    val emptyDoubles = DistCollection.ofDoubles(Array.empty[Double], 2)
+    val emptyStrings = Plan.Source(
+      Seq(Partition(Seq.empty[String]), Partition(Seq.empty[String])),
+      Plan.SourceDescriptor.Strings,
+    )
+    val emptyStringCollection = DistCollection(emptyStrings)
+
+    ColumnarPlanner.partitioning(emptyInts.plan).map(_.layout) shouldBe Some(columnarLayout)
+    emptyInts.sum shouldBe 0L
+    emptyInts.count() shouldBe 0L
+    ColumnarPlanner.partitioning(emptyDoubles.plan).map(_.layout) shouldBe Some(columnarLayout)
+    emptyDoubles.sum shouldBe 0.0
+    ColumnarPlanner.partitioning(emptyStringCollection.plan).map(_.layout) shouldBe Some(utf8Layout)
+
+    emptyInts.collect() shouldBe empty
+    emptyInts.take(3) shouldBe empty
+    emptyDoubles.collect() shouldBe empty
+    emptyDoubles.take(3) shouldBe empty
+    emptyStringCollection.collect() shouldBe empty
+    emptyStringCollection.take(3) shouldBe empty
+  }
+
+  it should "refuse a source descriptor that disagrees with non-empty data" in {
+    val wrongDescriptor = Plan.Source(
+      Seq(Partition(Seq(1, 2))),
+      Plan.SourceDescriptor.Pairs,
+    )
+
+    ColumnarPlanner.partitioning(wrongDescriptor) shouldBe Option.empty[PartitioningInfo]
+    ColumnarPlanner.lower(wrongDescriptor) shouldBe Option.empty[PhysicalOp]
+    DistCollection(wrongDescriptor).sum shouldBe 3L
   }
 
   private final case class AcceptedCase(
@@ -128,9 +168,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
   private val doubleKeySource: Plan[(Double, Int)] = Plan.Source(
     Seq(Partition(Seq(1.5 -> 1))),
   )
-  private val emptyPairSource: Plan[(Int, Int)] = Plan.Source(
-    Seq(Partition(Seq.empty[(Int, Int)])),
-  )
+  private val emptyPairSource: Plan[(Int, Int)] =
+    DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 2).plan
   private val emptyIntSource: Plan[Int] = Plan.Source(Seq(Partition(Seq.empty[Int])))
   private val nullText: String = BatchCodec.stringElement(None)
   private val allNullStringSource: Plan[String] = Plan.Source(
@@ -200,6 +239,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       AcceptedCase("dictionary string equality", dictionaryFilter, narrowInfo(2, stringLayout), Some("Filter(Scan)")),
       AcceptedCase("dictionary equality then string map", dictionaryMap, narrowInfo(2, stringLayout), Some("Project(Filter(Scan))")),
       AcceptedCase("int pair source", pairSource, narrowInfo(2, layout), Some("Scan")),
+      AcceptedCase("empty int pair source", emptyPairSource, narrowInfo(2, layout), Some("Scan")),
       AcceptedCase("int pair row filter", pairRowFilter, narrowInfo(2, layout), Some("FilterRow(Scan)")),
       AcceptedCase("int pair key filter", pairKeyFilter, narrowInfo(2, layout), Some("FilterKey(Scan)")),
       AcceptedCase("int pair value filter", pairValueFilter, narrowInfo(2, layout), Some("FilterValue(Scan)")),
@@ -330,7 +370,6 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ExcludedCase("single-precision Float map", floatMap),
       ExcludedCase("all-null string source", allNullStringSource),
       ExcludedCase("empty int source without a witness", emptyIntSource),
-      ExcludedCase("empty pair source without a witness", emptyPairSource),
       ExcludedCase("unsupported Boolean source", Plan.Source(Seq(Partition(Seq(true, false))))),
     )
 
@@ -430,7 +469,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case Plan.RepartitionOp(_, _) => PlanNode.Repartition
     case Plan.CoalesceOp(_, _) => PlanNode.Coalesce
     case Plan.PartitionByOp(_, _) => PlanNode.PartitionBy
-    case Plan.Source(_) => PlanNode.Source
+    case Plan.Source(_, _) => PlanNode.Source
     case Plan.MapOp(_, _) => PlanNode.Map
     case Plan.FilterOp(_, _) => PlanNode.Filter
     case Plan.FlatMapOp(_, _) => PlanNode.FlatMap
