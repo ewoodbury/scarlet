@@ -170,21 +170,22 @@ object ColumnarPlanner:
    */
   def trySumInt(plan: Plan[_]): Option[Long] =
     accepted(plan) match
-      case None => None
-      case Some(op) =>
+      case Some(op) if isInt(op) =>
         try Some(sumInt(plan, op))
         catch case _: ClassCastException => None
+      case _ => None
 
   /**
-   * Sum of a double plan. `None` means the row path. A filter/project chain adds in the fused loop
-   * and does not write that chain's output column. Null slots are skipped.
+   * Sum of a double plan. `None` means the row path, including a plan whose result is not a double
+   * column. A filter/project chain adds in the fused loop and does not write that chain's output
+   * column. Null slots are skipped.
    */
   def trySumDouble(plan: Plan[_]): Option[Double] =
     accepted(plan) match
-      case None => None
-      case Some(op) =>
+      case Some(op) if isFloat(op) =>
         try Some(sumDouble(plan, op))
         catch case _: ClassCastException => None
+      case _ => None
 
   /**
    * Folded wide sum of int pairs. `None` means the row path. A typed pair source runs
@@ -552,11 +553,9 @@ object ColumnarPlanner:
       child: PhysicalOp,
       steps: List[ElementStep],
   ): Option[PhysicalOp] = child.kind match
-    case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Strings
-        if elementProjectsMatch(child.kind, steps) =>
-      Some(lowerElementPipeline(child, steps))
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Strings =>
-      None
+      if (elementProjectsMatch(child.kind, steps)) then Some(lowerElementPipeline(child, steps))
+      else None
     case _ =>
       steps.foldLeft(Option(child)) { (current, step) =>
         current.flatMap(op => lowerElementStep(op, step))
@@ -638,12 +637,9 @@ object ColumnarPlanner:
         case _ => None
     }
 
-  /**
-   * True when `function` declares an unboxed `Int => Int` apply and every other `apply` is an
-   * erasure bridge. See [[declaredSignature]].
-   */
+  /** Unboxed `Int => Int`, the same witness as an int element project. */
   private def returnsUnboxedInt(function: Any): Boolean =
-    declaredSignature(function, "apply$mcII$sp", classOf[Int], classOf[Int], allowBridge = false)
+    declaredElement(PhysicalOp.Kind.Ints, function)
 
   /**
    * True when every project in `steps` declares the signature of `kind`. A filter does not change
@@ -676,9 +672,11 @@ object ColumnarPlanner:
    * method is not a bridge, so the plan stays on the row path. `getDeclaredMethods` ignores an
    * inherited `apply`, which also stays on the row path. This does not call `function`.
    *
-   * `allowBridge` is for `String => String`. A lambda's specialized apply is a bridge on some JDKs
-   * and the implementation on others; the erased `apply(Object): Object` is the other method and
-   * is accepted only as an erasure bridge.
+   * `allowBridge` is for `String => String`. A LambdaMetafactory spin is a hidden class whose
+   * `apply(String): String` and `apply(Object): Object` are both ordinary methods, not bridges.
+   * The erased method counts only as an erasure bridge. A bridge with the declared string
+   * signature still counts. A primitive specialized apply is the implementation, so a bridge does
+   * not satisfy it.
    */
   private def declaredSignature(
       function: Any,

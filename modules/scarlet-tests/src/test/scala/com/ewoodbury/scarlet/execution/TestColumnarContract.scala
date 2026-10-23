@@ -107,6 +107,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       (value: String) => value.nonEmpty,
     )
     val preserved = Plan.MapOp(intSource, (value: Int) => value + 1)
+    val preservedDouble = Plan.MapOp(doubleSource, (value: Double) => value + 1.0)
 
     assertRowPath(intToLong)
     assertRowPath(intToPair)
@@ -124,21 +125,20 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     ColumnarPlanner.partitioning(preserved) shouldBe Some(narrowInfo(2, columnarLayout))
     ColumnarPlanner.lower(preserved).map(_.shape) shouldBe Some("Project(Scan)")
     DistCollection(preserved).collect() shouldBe Seq(2, 3, 4, 5)
+    ColumnarPlanner.partitioning(preservedDouble) shouldBe Some(narrowInfo(2, columnarLayout))
+    ColumnarPlanner.lower(preservedDouble).map(_.shape) shouldBe Some("Project(Scan)")
+    DistCollection(preservedDouble).collect() shouldBe Seq(2.5, 3.5, 4.5)
   }
 
-  it should "agree on acceptance and interpretation for every contract fixture" in {
+  it should "agree on lower and every action gate for every contract fixture" in {
     acceptedCases.foreach { expected =>
       withClue(s"${expected.label}: ") {
-        val accepted = ColumnarPlanner.partitioning(expected.plan).isDefined
-        val interpreted = ColumnarPlanner.tryRun(expected.plan).isDefined
-        accepted shouldBe true
-        interpreted shouldBe accepted
+        assertGatesAgree(expected.plan, accepted = true)
       }
     }
     excludedCases.foreach { expected =>
       withClue(s"${expected.label}: ") {
-        ColumnarPlanner.partitioning(expected.plan).isDefined shouldBe false
-        ColumnarPlanner.tryRun(expected.plan).isDefined shouldBe false
+        assertGatesAgree(expected.plan, accepted = false)
       }
     }
   }
@@ -450,6 +450,43 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         ),
       ),
     )
+
+  /**
+   * `lower` and the action gates share one decision. A refused plan makes every gate return
+   * `None`. An accepted plan runs `tryRun` and `tryCount`. `tryTake` runs when the physical tree
+   * keeps input partitions. `trySumInt` and `trySumDouble` run only for that numeric kind.
+   */
+  private def assertGatesAgree(plan: Plan[_], accepted: Boolean): Unit =
+    val lowered = ColumnarPlanner.lower(plan)
+    lowered.isDefined shouldBe accepted
+    ColumnarPlanner.partitioning(plan).isDefined shouldBe accepted
+    ColumnarPlanner.tryRun(plan).isDefined shouldBe accepted
+    ColumnarPlanner.tryCount(plan).isDefined shouldBe accepted
+    ColumnarPlanner.trySumInt(plan).isDefined shouldBe lowered.exists(sumsInts)
+    ColumnarPlanner.trySumDouble(plan).isDefined shouldBe lowered.exists(sumsFloats)
+    ColumnarPlanner.tryTake(plan, 1).isDefined shouldBe lowered.exists(preservesPartitions)
+
+  private def sumsInts(op: PhysicalOp): Boolean = op.kind match
+    case PhysicalOp.Kind.Ints => true
+    case PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
+        PhysicalOp.Kind.Strings =>
+      false
+
+  private def sumsFloats(op: PhysicalOp): Boolean = op.kind match
+    case PhysicalOp.Kind.Floats => true
+    case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
+        PhysicalOp.Kind.Strings =>
+      false
+
+  private def preservesPartitions(op: PhysicalOp): Boolean = op match
+    case PhysicalOp.Scan(_, _) => true
+    case PhysicalOp.Filter(child, _) => preservesPartitions(child)
+    case PhysicalOp.Project(child) => preservesPartitions(child)
+    case PhysicalOp.Pipeline(child, _) => preservesPartitions(child)
+    case PhysicalOp.Column(child, _) => preservesPartitions(child)
+    case PhysicalOp.MapValue(child) => preservesPartitions(child)
+    case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.HashJoin(_, _) =>
+      false
 
   private def assertRowPath[A](plan: Plan[A]): Unit =
     ColumnarPlanner.partitioning(plan) shouldBe Option.empty[PartitioningInfo]

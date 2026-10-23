@@ -151,13 +151,19 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     values.sum shouldBe 14L
   }
 
-  it should "fall back from a mistyped map once" in {
+  it should "refuse a mistyped map before execution and run it once per row" in {
     ScarletConf.set(originalConf.copy(columnarExecution = true, threadPoolSize = 1))
     val hits = new AtomicInteger
     def mapped = DistCollection(Seq(1, 2, 3), 1).map { value =>
       hits.incrementAndGet()
       value.toString
     }
+
+    ColumnMetrics.arm()
+    ColumnarPlanner.tryCount(mapped.plan) shouldBe None
+    ColumnarPlanner.trySumInt(mapped.plan) shouldBe None
+    hits.get() shouldBe 0
+    assertNoColumnarWork()
 
     mapped.count() shouldBe 3L
     hits.get() shouldBe 3
@@ -166,13 +172,19 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     hits.get() shouldBe 3
   }
 
-  it should "fall back from a mistyped double map once" in {
+  it should "refuse a mistyped double map before execution and run it once per row" in {
     ScarletConf.set(originalConf.copy(columnarExecution = true, threadPoolSize = 1))
     val hits = new AtomicInteger
     def mapped = DistCollection(Seq(1.0, 2.0), 1).map { value =>
       hits.incrementAndGet()
       value.toInt
     }
+
+    ColumnMetrics.arm()
+    ColumnarPlanner.tryCount(mapped.plan) shouldBe None
+    ColumnarPlanner.trySumInt(mapped.plan) shouldBe None
+    hits.get() shouldBe 0
+    assertNoColumnarWork()
 
     mapped.sum shouldBe 3L
     hits.get() shouldBe 2
@@ -792,6 +804,13 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
       assertColumnar(empty.keys, width = 1)
     }
   }
+
+  private def assertNoColumnarWork(): Unit =
+    ColumnMetrics.batchCount shouldBe 0L
+    ColumnMetrics.visitCount shouldBe 0L
+    ColumnMetrics.decodedValueCount shouldBe 0L
+    ColumnMetrics.primitiveEncodeCount shouldBe 0L
+    ColumnMetrics.disarm()
 
   private def armColumnar(): Unit =
     ScarletRuntime.get.shuffle.clear()
