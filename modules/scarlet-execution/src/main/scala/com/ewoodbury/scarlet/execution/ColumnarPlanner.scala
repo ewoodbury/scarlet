@@ -4,7 +4,7 @@ import scala.annotation.tailrec
 
 import com.ewoodbury.scarlet.api.{DictionaryStringPredicate, IntJoinTriplePredicate}
 import com.ewoodbury.scarlet.columnar.*
-import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
+import com.ewoodbury.scarlet.core.*
 
 /**
  * Lowers `Int`, `Double`, `(Int, Int)`, and `String` plans to [[PhysicalOp]] and runs that tree on
@@ -46,8 +46,10 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
  * partitions are empty. It does not decode. `collect` still does. A pair `MapOp` stays on the row
  * path for `collect` and `reduceByKey`.
  *
- * An `ArraySeq.ofInt`, `ArraySeq.ofDouble`, or [[IntPairArrays]] source is copied into the column
- * on the calling thread. A boxed `Vector` or `List` is still read through its iterator.
+ * An [[IntArrays]], [[DoubleArrays]], or [[IntPairArrays]] source is copied into the column on the
+ * calling thread. The partition stays readable, so the column does not adopt its array. A boxed
+ * `Vector` or `List` is still read through its iterator. An `ArraySeq` passed straight to the
+ * codec is copied the same way.
  *
  * A null string is a value. Classification skips a leading null and keeps looking for a `String`.
  * An all-null source stays on the row path, because there is no witness. An accepted string plan
@@ -857,18 +859,22 @@ object ColumnarPlanner:
 
   private def encodeFloats(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
     partitions.map { partition =>
-      BatchCodec.float64s(partition.data.asInstanceOf[Iterable[Double]])
+      partition.data match
+        case owned: DoubleArrays => BatchCodec.copiedFloat64s(owned.values)
+        case other => BatchCodec.float64s(other.asInstanceOf[Iterable[Double]])
     }.toVector
 
   private def encodeInts(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
     partitions.map { partition =>
-      BatchCodec.ints(partition.data.asInstanceOf[Iterable[Int]])
+      partition.data match
+        case owned: IntArrays => BatchCodec.copiedInts(owned.values)
+        case other => BatchCodec.ints(other.asInstanceOf[Iterable[Int]])
     }.toVector
 
   private def encodePairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
     partitions.map { partition =>
       partition.data match
-        case pairs: IntPairArrays => BatchCodec.intPairs(pairs.keys, pairs.values)
+        case pairs: IntPairArrays => BatchCodec.copiedIntPairs(pairs.keys, pairs.values)
         case other => BatchCodec.intPairs(other.asInstanceOf[Iterable[(Int, Int)]])
     }.toVector
 

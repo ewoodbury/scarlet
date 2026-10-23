@@ -5,6 +5,8 @@ import scala.collection.immutable.ArraySeq
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import com.ewoodbury.scarlet.core.{DoubleArrays, IntArrays, IntPairArrays}
+
 class TestColumnBatch extends AnyFlatSpec with Matchers:
 
   "primitive batches" should "roundtrip ints, longs, floats, bools, and int pairs" in {
@@ -31,46 +33,90 @@ class TestColumnBatch extends AnyFlatSpec with Matchers:
 
   it should "copy a primitive int array into the column" in {
     val raw = Array(1, -2, 0)
+    ColumnMetrics.arm()
     val batch = BatchCodec.ints(new ArraySeq.ofInt(raw))
-    val column = batch.columns match {
-      case Seq(ints: Int32Column) => ints
-      case other => fail(s"expected an Int32 column, got $other")
-    }
+    val boxed = BatchCodec.ints(Seq(1, -2, 0))
+    ColumnMetrics.primitiveEncodeCount shouldBe 1L
+    ColumnMetrics.disarm()
+    val column = int32(batch)
 
     column.values should not be theSameInstanceAs(raw)
     raw(0) = 99
+    BatchCodec.decodeInts(batch) shouldBe Seq(1, -2, 0)
+    BatchCodec.decodeInts(boxed) shouldBe Seq(1, -2, 0)
+  }
+
+  it should "copy an owned int array on the primitive path" in {
+    val raw = Array(1, -2, 0)
+    val owned = IntArrays(raw)
+    ColumnMetrics.arm()
+    val batch = BatchCodec.copiedInts(owned.values)
+    ColumnMetrics.primitiveEncodeCount shouldBe 1L
+    ColumnMetrics.disarm()
+    val column = int32(batch)
+
+    column.values should not be theSameInstanceAs(owned.values)
+    owned.values(0) = 99
     BatchCodec.decodeInts(batch) shouldBe Seq(1, -2, 0)
   }
 
   it should "copy a primitive double array into the column" in {
     val raw = Array(1.5, -0.25)
+    ColumnMetrics.arm()
     val batch = BatchCodec.float64s(new ArraySeq.ofDouble(raw))
-    val column = batch.columns match {
-      case Seq(floats: Float64Column) => floats
-      case other => fail(s"expected a Float64 column, got $other")
-    }
+    val boxed = BatchCodec.float64s(Seq(1.5, -0.25))
+    ColumnMetrics.primitiveEncodeCount shouldBe 1L
+    ColumnMetrics.disarm()
+    val column = float64(batch)
 
     column.values should not be theSameInstanceAs(raw)
     raw(0) = 9.0
+    BatchCodec.decodeFloat64s(batch) shouldBe Seq(1.5, -0.25)
+    BatchCodec.decodeFloat64s(boxed) shouldBe Seq(1.5, -0.25)
+  }
+
+  it should "copy an owned double array on the primitive path" in {
+    val raw = Array(1.5, -0.25)
+    val owned = DoubleArrays(raw)
+    ColumnMetrics.arm()
+    val batch = BatchCodec.copiedFloat64s(owned.values)
+    ColumnMetrics.primitiveEncodeCount shouldBe 1L
+    ColumnMetrics.disarm()
+    val column = float64(batch)
+
+    column.values should not be theSameInstanceAs(owned.values)
+    owned.values(0) = 9.0
     BatchCodec.decodeFloat64s(batch) shouldBe Seq(1.5, -0.25)
   }
 
   it should "copy primitive int-pair arrays into the columns" in {
     val keys = Array(1, 2)
     val values = Array(10, 20)
-    val batch = BatchCodec.intPairs(keys, values)
-    val (left, right) = batch.columns match {
-      case Seq(keysColumn: Int32Column, valuesColumn: Int32Column) =>
-        (keysColumn, valuesColumn)
-      case other => fail(s"expected two Int32 columns, got $other")
-    }
+    val owned = IntPairArrays(keys, values)
+    ColumnMetrics.arm()
+    val checked = BatchCodec.intPairs(keys, values)
+    val copied = BatchCodec.copiedIntPairs(owned.keys, owned.values)
+    val boxed = BatchCodec.intPairs(Seq((1, 10), (2, 20)))
+    ColumnMetrics.primitiveEncodeCount shouldBe 2L
+    ColumnMetrics.disarm()
+    val (left, right) = intPair(checked)
 
     left.values should not be theSameInstanceAs(keys)
     right.values should not be theSameInstanceAs(values)
+    left.values should not be theSameInstanceAs(owned.keys)
+    intPair(copied)._1.values should not be theSameInstanceAs(owned.keys)
+    intPair(copied)._2.values should not be theSameInstanceAs(owned.values)
     keys(0) = 7
     values(1) = 8
-    BatchCodec.decodeIntPairs(batch) shouldBe Seq((1, 10), (2, 20))
-    an[IllegalArgumentException] should be thrownBy BatchCodec.intPairs(Array(1), Array.empty[Int])
+    owned.keys(0) = 7
+    owned.values(1) = 8
+    BatchCodec.decodeIntPairs(checked) shouldBe Seq((1, 10), (2, 20))
+    BatchCodec.decodeIntPairs(copied) shouldBe Seq((1, 10), (2, 20))
+    BatchCodec.decodeIntPairs(boxed) shouldBe Seq((1, 10), (2, 20))
+    val caught = intercept[IllegalArgumentException] {
+      BatchCodec.intPairs(Array(1), Array.empty[Int])
+    }
+    caught.getMessage shouldBe s"requirement failed: ${IntPairArrays.LengthMismatch}"
   }
 
   it should "share a pair column when narrowing to one column" in {
@@ -255,6 +301,18 @@ class TestColumnBatch extends AnyFlatSpec with Matchers:
       new ColumnBatch(Vector(LogicalType.Int32, LogicalType.Int32), Vector(one, two), length = 1)
     }
   }
+
+  private def int32(batch: ColumnBatch): Int32Column = batch.columns match
+    case Seq(column: Int32Column) => column
+    case other => fail(s"expected an Int32 column, got $other")
+
+  private def float64(batch: ColumnBatch): Float64Column = batch.columns match
+    case Seq(column: Float64Column) => column
+    case other => fail(s"expected a Float64 column, got $other")
+
+  private def intPair(batch: ColumnBatch): (Int32Column, Int32Column) = batch.columns match
+    case Seq(keys: Int32Column, values: Int32Column) => (keys, values)
+    case other => fail(s"expected two Int32 columns, got $other")
 
   private def utf8(batch: ColumnBatch): DictUtf8Column =
     batch.columns.lift(0) match

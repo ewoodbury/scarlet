@@ -425,6 +425,18 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(primitive) shouldBe 30L
     columnar(primitive) shouldBe columnar(boxed)
     row(primitive) shouldBe row(boxed)
+    columnar {
+      ColumnMetrics.arm()
+      primitive shouldBe 30L
+      ColumnMetrics.primitiveEncodeCount shouldBe 3L
+      ColumnMetrics.disarm()
+    }
+    columnar {
+      ColumnMetrics.arm()
+      boxed shouldBe 30L
+      ColumnMetrics.primitiveEncodeCount shouldBe 0L
+      ColumnMetrics.disarm()
+    }
   }
 
   it should "sum the copied ints after the caller mutates the array" in {
@@ -454,6 +466,18 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(primitive) shouldBe 4.75
     columnar(primitive) shouldBe columnar(boxed)
     row(primitive) shouldBe row(boxed)
+    columnar {
+      ColumnMetrics.arm()
+      primitive shouldBe 4.75
+      ColumnMetrics.primitiveEncodeCount shouldBe 2L
+      ColumnMetrics.disarm()
+    }
+    columnar {
+      ColumnMetrics.arm()
+      boxed shouldBe 4.75
+      ColumnMetrics.primitiveEncodeCount shouldBe 0L
+      ColumnMetrics.disarm()
+    }
   }
 
   it should "reduce an int-pair array like a boxed vector without wrapping" in {
@@ -469,6 +493,18 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(primitive) shouldBe expected
     columnar(primitive) shouldBe columnar(boxed)
     row(primitive) shouldBe row(boxed)
+    columnar {
+      ColumnMetrics.arm()
+      primitive shouldBe expected
+      ColumnMetrics.primitiveEncodeCount shouldBe 2L
+      ColumnMetrics.disarm()
+    }
+    columnar {
+      ColumnMetrics.arm()
+      boxed shouldBe expected
+      ColumnMetrics.primitiveEncodeCount shouldBe 0L
+      ColumnMetrics.disarm()
+    }
   }
 
   "int pair projections" should "sum values from the shared value column" in {
