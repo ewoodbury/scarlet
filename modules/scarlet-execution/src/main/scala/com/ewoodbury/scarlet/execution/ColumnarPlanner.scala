@@ -43,12 +43,14 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * result and every other `apply` is an erasure bridge. A wider primitive, a reference result, or
  * an overloaded `apply` stays on the row path. That check reads the method descriptor and does not
  * call the function. `getDeclaredMethods` does not see an inherited `apply`, so that function
- * stays on the row path too. `reduceByKey` applies the user's function and wraps at `Int`. `join`
- * hash-partitions both sides and probes one bucket at a time. Output width for those two is
- * `defaultShufflePartitions`. [[tryCount]] reads finished column lengths. [[trySumInt]] and
- * [[trySumDouble]] add a filter/project chain in the fused loop and do not write that chain's
- * output column. Sum of `keys`, `values`, or an int `mapValues` reads the pair column in that
- * morsel loop and does not build the projection. [[tryGroupedSum]] runs
+ * stays on the row path too. `reduceByKey` applies the user's function and wraps at `Int`. A
+ * `join` with no hint, or with an explicit shuffle-hash hint, hash-partitions both sides and
+ * probes one bucket at a time. Sort-merge and broadcast are not implemented: those hints make
+ * `lower` return `None`, so the plan stays on the row path. Output width for an accepted join or
+ * aggregate is `defaultShufflePartitions`. [[tryCount]] reads finished column lengths.
+ * [[trySumInt]] and [[trySumDouble]] add a filter/project chain in the fused loop and do not write
+ * that chain's output column. Sum of `keys`, `values`, or an int `mapValues` reads the pair column
+ * in that morsel loop and does not build the projection. [[tryGroupedSum]] runs
  * [[ColumnPipeline.sumByKey]] on a typed pair source and folds the `Int64` group sums. A preceding
  * `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that partial scan,
  * so the action does not build those pairs. A source descriptor supplies the type when all
@@ -93,8 +95,9 @@ object ColumnarPlanner:
 
   /**
    * The physical tree for `plan`, without running it. `None` means the row path, including an
-   * element chain whose project does not declare the column's type. [[partitioning]] and
-   * [[tryRun]] follow that refusal. They also drop a lowered tree whose layout is invalid.
+   * element chain whose project does not declare the column's type, and a join whose hint is not
+   * shuffle-hash. [[partitioning]] and [[tryRun]] follow that refusal. They also drop a lowered
+   * tree whose layout is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -498,6 +501,12 @@ object ColumnarPlanner:
     if (steps.isEmpty) then lowerPlanNode(base)
     else lowerPlan(base).flatMap(child => lowerElementSteps(child, steps))
 
+  /** Columnar joins are hash joins. No hint and an explicit shuffle-hash hint both qualify. */
+  private def acceptsHashJoin(strategy: Option[Plan.JoinStrategy]): Boolean =
+    strategy match
+      case None | Some(Plan.JoinStrategy.ShuffleHash) => true
+      case Some(_) => false
+
   private def lowerPlanNode(plan: Plan[_]): Option[PhysicalOp] = plan match
     case source: Plan.Source[_] =>
       classify(source).map(kind => PhysicalOp.Scan(kind, source.partitions))
@@ -518,7 +527,7 @@ object ColumnarPlanner:
             Some(PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)))
           case _ => None
       }
-    case Plan.JoinOp(left, right, _) =>
+    case Plan.JoinOp(left, right, strategy) if acceptsHashJoin(strategy) =>
       (lowerPlan(left), lowerPlan(right)) match
         case (Some(leftOp), Some(rightOp)) =>
           (leftOp.kind, rightOp.kind) match
@@ -912,9 +921,9 @@ object ColumnarPlanner:
         ),
       )
     case (
-          Plan.JoinOp(left, right, _),
+          Plan.JoinOp(left, right, strategy),
           PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
-        ) =>
+        ) if acceptsHashJoin(strategy) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       Columns.Triples(
