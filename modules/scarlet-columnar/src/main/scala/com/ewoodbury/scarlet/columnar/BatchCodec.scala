@@ -281,10 +281,18 @@ object BatchCodec:
     }
 
   /** Throws once, naming the first clear live bit. Bits at `length` and beyond are not live. */
-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def requireLive(column: Int32Column): Unit =
-    val live = column.length
-    val words = column.validity.words
+    requireLiveRows(column.validity.words, column.length)
+
+  /**
+   * Same word check as [[requireLive]], limited to the decoded prefix. The tail word is masked to
+   * `rows`, so the scan does not walk one bit at a time.
+   */
+  private def requireLivePrefix(column: Int32Column, rows: Int): Unit =
+    requireLiveRows(column.validity.words, rows)
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def requireLiveRows(words: Array[Long], live: Int): Unit =
     val fullWords = live >>> 6
     var index = 0
     while (index < fullWords) {
@@ -452,12 +460,3 @@ object BatchCodec:
   private def decodedLength(batch: ColumnBatch, maxRows: Int): Int =
     require(maxRows >= 0, s"maximum decoded rows must be >= 0, got $maxRows")
     math.min(batch.length, maxRows)
-
-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private def requireLivePrefix(column: Int32Column, rows: Int): Unit =
-    var row = 0
-    while (row < rows) {
-      if (!column.isValid(row)) then
-        throw new IllegalArgumentException(s"null join value at row $row")
-      row += 1
-    }

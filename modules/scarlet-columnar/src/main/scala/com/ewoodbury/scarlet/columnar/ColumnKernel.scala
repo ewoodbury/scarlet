@@ -97,7 +97,8 @@ object ColumnKernel:
       assemble(batch, ordinal, scanned.column, selection, scanned.count)
 
   /**
-   * Resolves literals against this batch dictionary, then filters its codes with the int kernel.
+   * Resolves literals against this batch dictionary once, then filters codes with an unboxed mask.
+   * A one-column batch publishes the filtered dictionary column directly.
    */
   def filterUtf8ByValues(
       batch: ColumnBatch,
@@ -105,23 +106,37 @@ object ColumnKernel:
       values: Iterable[String],
   ): ColumnBatch =
     val column = asUtf8(columnAt(batch, ordinal), ordinal)
-    val codes = values.iterator.map(column.codeOf).filter(_ >= 0).toSet
+    val mask = literalCodes(column, values)
+    val keep: Int32Predicate = code => code >= 0 && code < mask.length && mask(code)
     val codeColumn = Int32Column.of(column.codes, column.validity, column.length)
-    val selection = new Array[Int](batch.length)
-    val scanned = scanInt32(
-      codeColumn,
-      value => codes.contains(value),
-      record = true,
-      selection = selection,
-    )
+    if (batch.columns.length == 1) then
+      val scanned = scanInt32(codeColumn, keep, record = false, selection = noSelection)
+      publish(batch, filteredUtf8(column, scanned, ordinal), scanned.count)
+    else
+      val selection = new Array[Int](batch.length)
+      val scanned = scanInt32(codeColumn, keep, record = true, selection = selection)
+      assemble(batch, ordinal, filteredUtf8(column, scanned, ordinal), selection, scanned.count)
+
+  private def literalCodes(column: DictUtf8Column, values: Iterable[String]): Array[Boolean] =
+    val mask = new Array[Boolean](column.dictionary.length)
+    values.iterator.foreach { value =>
+      val code = column.codeOf(value)
+      if (code >= 0) then mask(code) = true
+    }
+    mask
+
+  private def filteredUtf8(
+      column: DictUtf8Column,
+      scanned: Scanned,
+      ordinal: Int,
+  ): DictUtf8Column =
     val filteredCodes = asInt32(scanned.column, ordinal)
-    val filtered = DictUtf8Column.of(
+    DictUtf8Column.of(
       column.dictionary,
       filteredCodes.values,
       filteredCodes.validity,
       scanned.count,
     )
-    assemble(batch, ordinal, filtered, selection, scanned.count)
 
   def filterBool(batch: ColumnBatch, ordinal: Int, predicate: BoolPredicate): ColumnBatch =
     val column = asBool(columnAt(batch, ordinal), ordinal)

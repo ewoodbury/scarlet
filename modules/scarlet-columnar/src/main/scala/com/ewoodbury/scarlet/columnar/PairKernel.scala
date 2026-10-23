@@ -66,25 +66,20 @@ object PairKernel:
     val rows = keys.length
     require(leftValues.length == rows, "key and left value columns differ in length")
     require(rightValues.length == rows, "key and right value columns differ in length")
+    if (!joinValuesPresent(keys, leftValues, rightValues, rows)) then
+      failNullTriple(keys, leftValues, rightValues, rows)
     val outKeys = new Array[Int](rows)
     val outLeft = new Array[Int](rows)
     val outRight = new Array[Int](rows)
-    val keyValues = keys.values
-    val leftValueValues = leftValues.values
-    val rightValueValues = rightValues.values
-    val keyWords = keys.validity.words
-    val leftValueWords = leftValues.validity.words
-    val rightValueWords = rightValues.validity.words
+    val keyArr = keys.values
+    val leftArr = leftValues.values
+    val rightArr = rightValues.values
     var written = 0
     var row = 0
     while (row < rows) {
-      val keyValid = Validity.isSet(keyWords, row)
-      val leftValueValid = Validity.isSet(leftValueWords, row)
-      val rightValueValid = Validity.isSet(rightValueWords, row)
-      require(keyValid && leftValueValid && rightValueValid, s"null Int32 join value at row $row")
-      val key = keyValues(row)
-      val left = leftValueValues(row)
-      val right = rightValueValues(row)
+      val key = keyArr(row)
+      val left = leftArr(row)
+      val right = rightArr(row)
       if (predicate(key, left, right)) then
         outKeys(written) = key
         outLeft(written) = left
@@ -102,6 +97,32 @@ object PairKernel:
       ),
       written,
     )
+
+  private def joinValuesPresent(
+      keys: Int32Column,
+      leftValues: Int32Column,
+      rightValues: Int32Column,
+      rows: Int,
+  ): Boolean =
+    Validity.livePresent(keys.validity, rows) &&
+      Validity.livePresent(leftValues.validity, rows) &&
+      Validity.livePresent(rightValues.validity, rows)
+
+  private def failNullTriple(
+      keys: Int32Column,
+      leftValues: Int32Column,
+      rightValues: Int32Column,
+      rows: Int,
+  ): Unit =
+    var row = 0
+    while (row < rows) {
+      val present =
+        Validity.isSet(keys.validity.words, row) &&
+          Validity.isSet(leftValues.validity.words, row) &&
+          Validity.isSet(rightValues.validity.words, row)
+      require(present, s"null Int32 join value at row $row")
+      row += 1
+    }
 
   private def int32At(batch: ColumnBatch, ordinal: Int): Int32Column =
     batch.columns.lift(ordinal) match
