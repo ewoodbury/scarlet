@@ -39,7 +39,7 @@ object BatchCodec:
    * one encode copy.
    */
   private[scarlet] def copiedInts(values: Array[Int]): ColumnBatch =
-    ColumnMetrics.notePrimitiveEncode()
+    ColumnMetrics.primitiveEncode()
     int32Batch(Arrays.copyOf(values, values.length))
 
   /**
@@ -53,7 +53,7 @@ object BatchCodec:
 
   /** Copies `values`. See [[copiedInts]] for why the column does not adopt the array. */
   private[scarlet] def copiedFloat64s(values: Array[Double]): ColumnBatch =
-    ColumnMetrics.notePrimitiveEncode()
+    ColumnMetrics.primitiveEncode()
     float64Batch(Arrays.copyOf(values, values.length))
 
   def nullableFloat64s(values: Seq[Option[Double]]): ColumnBatch =
@@ -86,7 +86,7 @@ object BatchCodec:
   private[scarlet] def copiedIntPairs(keys: Array[Int], values: Array[Int]): ColumnBatch =
     require(keys.length == values.length, LengthMismatch)
     val rows = keys.length
-    ColumnMetrics.notePrimitiveEncode()
+    ColumnMetrics.primitiveEncode()
     pairBatch(
       Int32Column.of(Arrays.copyOf(keys, rows), Validity.allValid(rows), rows),
       Int32Column.of(Arrays.copyOf(values, rows), Validity.allValid(rows), rows),
@@ -145,7 +145,7 @@ object BatchCodec:
   def decodeInts(batch: ColumnBatch, maxRows: Int): Seq[Int] =
     val column = int32(batch)
     val rows = decodedLength(batch, maxRows)
-    ColumnMetrics.noteDecoded(rows)
+    ColumnMetrics.decoded(rows)
     Seq.tabulate(rows) { row =>
       require(column.isValid(row), s"null Int32 at row $row")
       column.values(row)
@@ -175,7 +175,7 @@ object BatchCodec:
   def decodeFloat64s(batch: ColumnBatch, maxRows: Int): Seq[Double] =
     val column = float64(batch)
     val rows = decodedLength(batch, maxRows)
-    ColumnMetrics.noteDecoded(rows)
+    ColumnMetrics.decoded(rows)
     Seq.tabulate(rows) { row =>
       require(column.isValid(row), s"null Float64 at row $row")
       column.values(row)
@@ -210,7 +210,7 @@ object BatchCodec:
   def decodeStrings(batch: ColumnBatch, maxRows: Int): Seq[String] =
     val column = utf8(batch)
     val rows = decodedLength(batch, maxRows)
-    ColumnMetrics.noteDecoded(rows)
+    ColumnMetrics.decoded(rows)
     Seq.tabulate(rows) { row =>
       if (column.isValid(row)) then column.dictionary(column.codes(row))
       else stringElement(None)
@@ -233,7 +233,7 @@ object BatchCodec:
   def decodeIntPairs(batch: ColumnBatch, maxRows: Int): Seq[(Int, Int)] =
     val (left, right) = intPair(batch)
     val rows = decodedLength(batch, maxRows)
-    ColumnMetrics.noteDecoded(rows)
+    ColumnMetrics.decoded(rows)
     Seq.tabulate(rows) { row =>
       require(left.isValid(row) && right.isValid(row), s"null Int32 pair at row $row")
       (left.values(row), right.values(row))
@@ -263,7 +263,7 @@ object BatchCodec:
           requireLivePrefix(keys, rows)
           requireLivePrefix(build, rows)
           requireLivePrefix(probe, rows)
-        ColumnMetrics.noteDecoded(rows)
+        ColumnMetrics.decoded(rows)
         Seq.tabulate(rows) { row =>
           (keys.values(row), (build.values(row), probe.values(row)))
         }

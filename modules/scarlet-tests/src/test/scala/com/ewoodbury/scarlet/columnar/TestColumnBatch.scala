@@ -11,7 +11,7 @@ import com.ewoodbury.scarlet.core.{DoubleArrays, IntArrays, IntPairArrays}
 class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   override def afterEach(): Unit =
-    ColumnMetrics.disarm()
+    ColumnMetrics.restore(NoOpSink)
     ()
 
   "primitive batches" should "roundtrip ints, longs, floats, bools, and int pairs" in {
@@ -38,90 +38,147 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   it should "copy a primitive int array into the column" in {
     val raw = Array(1, -2, 0)
-    ColumnMetrics.arm()
-    val batch = BatchCodec.ints(new ArraySeq.ofInt(raw))
-    val boxed = BatchCodec.ints(Seq(1, -2, 0))
-    ColumnMetrics.primitiveEncodeCount shouldBe 1L
-    val column = int32(batch)
+    ColumnMetrics.withSink(new CountingSink) {
+      val batch = BatchCodec.ints(new ArraySeq.ofInt(raw))
+      val boxed = BatchCodec.ints(Seq(1, -2, 0))
+      ColumnMetrics.primitiveEncodeCount shouldBe 1L
+      val column = int32(batch)
 
-    column.values should not be theSameInstanceAs(raw)
-    raw(0) = 99
-    BatchCodec.decodeInts(batch) shouldBe Seq(1, -2, 0)
-    BatchCodec.decodeInts(boxed) shouldBe Seq(1, -2, 0)
+      column.values should not be theSameInstanceAs(raw)
+      raw(0) = 99
+      BatchCodec.decodeInts(batch) shouldBe Seq(1, -2, 0)
+      BatchCodec.decodeInts(boxed) shouldBe Seq(1, -2, 0)
+    }
   }
 
   it should "copy an owned int array on the primitive path" in {
     val raw = Array(1, -2, 0)
     val owned = IntArrays(raw)
-    ColumnMetrics.arm()
-    val batch = BatchCodec.copiedInts(owned.values)
-    ColumnMetrics.primitiveEncodeCount shouldBe 1L
-    val column = int32(batch)
+    ColumnMetrics.withSink(new CountingSink) {
+      val batch = BatchCodec.copiedInts(owned.values)
+      ColumnMetrics.primitiveEncodeCount shouldBe 1L
+      val column = int32(batch)
 
-    column.values should not be theSameInstanceAs(owned.values)
-    owned.values(0) = 99
-    BatchCodec.decodeInts(batch) shouldBe Seq(1, -2, 0)
+      column.values should not be theSameInstanceAs(owned.values)
+      owned.values(0) = 99
+      BatchCodec.decodeInts(batch) shouldBe Seq(1, -2, 0)
+    }
   }
 
   it should "copy a primitive double array into the column" in {
     val raw = Array(1.5, -0.25)
-    ColumnMetrics.arm()
-    val batch = BatchCodec.float64s(new ArraySeq.ofDouble(raw))
-    val boxed = BatchCodec.float64s(Seq(1.5, -0.25))
-    ColumnMetrics.primitiveEncodeCount shouldBe 1L
-    val column = float64(batch)
+    ColumnMetrics.withSink(new CountingSink) {
+      val batch = BatchCodec.float64s(new ArraySeq.ofDouble(raw))
+      val boxed = BatchCodec.float64s(Seq(1.5, -0.25))
+      ColumnMetrics.primitiveEncodeCount shouldBe 1L
+      val column = float64(batch)
 
-    column.values should not be theSameInstanceAs(raw)
-    raw(0) = 9.0
-    BatchCodec.decodeFloat64s(batch) shouldBe Seq(1.5, -0.25)
-    BatchCodec.decodeFloat64s(boxed) shouldBe Seq(1.5, -0.25)
+      column.values should not be theSameInstanceAs(raw)
+      raw(0) = 9.0
+      BatchCodec.decodeFloat64s(batch) shouldBe Seq(1.5, -0.25)
+      BatchCodec.decodeFloat64s(boxed) shouldBe Seq(1.5, -0.25)
+    }
   }
 
   it should "copy an owned double array on the primitive path" in {
     val raw = Array(1.5, -0.25)
     val owned = DoubleArrays(raw)
-    ColumnMetrics.arm()
-    val batch = BatchCodec.copiedFloat64s(owned.values)
-    ColumnMetrics.primitiveEncodeCount shouldBe 1L
-    val column = float64(batch)
+    ColumnMetrics.withSink(new CountingSink) {
+      val batch = BatchCodec.copiedFloat64s(owned.values)
+      ColumnMetrics.primitiveEncodeCount shouldBe 1L
+      val column = float64(batch)
 
-    column.values should not be theSameInstanceAs(owned.values)
-    owned.values(0) = 9.0
-    BatchCodec.decodeFloat64s(batch) shouldBe Seq(1.5, -0.25)
+      column.values should not be theSameInstanceAs(owned.values)
+      owned.values(0) = 9.0
+      BatchCodec.decodeFloat64s(batch) shouldBe Seq(1.5, -0.25)
+    }
   }
 
   it should "copy primitive int-pair arrays into the columns" in {
     val keys = Array(1, 2)
     val values = Array(10, 20)
     val owned = IntPairArrays(keys, values)
-    ColumnMetrics.arm()
-    val checked = BatchCodec.intPairs(keys, values)
-    val copied = BatchCodec.copiedIntPairs(owned.keys, owned.values)
-    val boxed = BatchCodec.intPairs(Seq((1, 10), (2, 20)))
-    ColumnMetrics.primitiveEncodeCount shouldBe 2L
-    val (left, right) = intPair(checked)
-    val (copiedLeft, copiedRight) = intPair(copied)
+    ColumnMetrics.withSink(new CountingSink) {
+      val checked = BatchCodec.intPairs(keys, values)
+      val copied = BatchCodec.copiedIntPairs(owned.keys, owned.values)
+      val boxed = BatchCodec.intPairs(Seq((1, 10), (2, 20)))
+      ColumnMetrics.primitiveEncodeCount shouldBe 2L
+      val (left, right) = intPair(checked)
+      val (copiedLeft, copiedRight) = intPair(copied)
 
-    left.values should not be theSameInstanceAs(keys)
-    right.values should not be theSameInstanceAs(values)
-    left.values should not be theSameInstanceAs(owned.keys)
-    copiedLeft.values should not be theSameInstanceAs(owned.keys)
-    copiedRight.values should not be theSameInstanceAs(owned.values)
-    keys(0) = 7
-    values(1) = 8
-    owned.keys(0) = 7
-    owned.values(1) = 8
-    BatchCodec.decodeIntPairs(checked) shouldBe Seq((1, 10), (2, 20))
-    BatchCodec.decodeIntPairs(copied) shouldBe Seq((1, 10), (2, 20))
-    BatchCodec.decodeIntPairs(boxed) shouldBe Seq((1, 10), (2, 20))
-    val caught = intercept[IllegalArgumentException] {
-      BatchCodec.intPairs(Array(1), Array.empty[Int])
+      left.values should not be theSameInstanceAs(keys)
+      right.values should not be theSameInstanceAs(values)
+      left.values should not be theSameInstanceAs(owned.keys)
+      copiedLeft.values should not be theSameInstanceAs(owned.keys)
+      copiedRight.values should not be theSameInstanceAs(owned.values)
+      keys(0) = 7
+      values(1) = 8
+      owned.keys(0) = 7
+      owned.values(1) = 8
+      BatchCodec.decodeIntPairs(checked) shouldBe Seq((1, 10), (2, 20))
+      BatchCodec.decodeIntPairs(copied) shouldBe Seq((1, 10), (2, 20))
+      BatchCodec.decodeIntPairs(boxed) shouldBe Seq((1, 10), (2, 20))
+      val caught = intercept[IllegalArgumentException] {
+        BatchCodec.intPairs(Array(1), Array.empty[Int])
+      }
+      caught.getMessage shouldBe s"requirement failed: ${IntPairArrays.LengthMismatch}"
+      val ownedUnequal = intercept[IllegalArgumentException] {
+        BatchCodec.copiedIntPairs(Array(1), Array(10, 20))
+      }
+      ownedUnequal.getMessage shouldBe s"requirement failed: ${IntPairArrays.LengthMismatch}"
     }
-    caught.getMessage shouldBe s"requirement failed: ${IntPairArrays.LengthMismatch}"
-    val ownedUnequal = intercept[IllegalArgumentException] {
-      BatchCodec.copiedIntPairs(Array(1), Array(10, 20))
-    }
-    ownedUnequal.getMessage shouldBe s"requirement failed: ${IntPairArrays.LengthMismatch}"
+  }
+
+  // Sequential nesting. Overlapping restores are last-writer-wins and are not what this checks.
+  // The identity assertion stays inside the try so a failure still restores `previous`.
+  it should "restore the previous sink when the body throws" in {
+    val outer = new CountingSink
+    val previous = ColumnMetrics.install(outer)
+    try
+      previous should be theSameInstanceAs NoOpSink
+      val inner = new CountingSink
+      val thrown = intercept[IllegalStateException] {
+        ColumnMetrics.withSink[Unit](inner) {
+          val recorded = BatchCodec.copiedInts(Array(1, 2))
+          recorded.length shouldBe 2
+          throw new IllegalStateException("metrics body failed")
+        }
+      }
+      thrown.getMessage shouldBe "metrics body failed"
+      inner.primitiveEncodeCount shouldBe 1L
+      inner.batchCount shouldBe 1L
+      ColumnMetrics.primitiveEncodeCount shouldBe 0L
+      val again = BatchCodec.copiedInts(Array(3))
+      again.length shouldBe 1
+      ColumnMetrics.primitiveEncodeCount shouldBe 1L
+      ColumnMetrics.batchCount shouldBe 1L
+      outer.primitiveEncodeCount shouldBe 1L
+      inner.primitiveEncodeCount shouldBe 1L
+    finally ColumnMetrics.restore(previous)
+  }
+
+  it should "restore the previous sink when the body returns" in {
+    val sentinel = new CountingSink
+    val previous = ColumnMetrics.install(sentinel)
+    try
+      val inner = new CountingSink
+      val recorded = ColumnMetrics.withSink(inner) {
+        BatchCodec.copiedInts(Array(1, 2))
+      }
+      recorded.length shouldBe 2
+      inner.primitiveEncodeCount shouldBe 1L
+      inner.batchCount shouldBe 1L
+      ColumnMetrics.primitiveEncodeCount shouldBe 0L
+      val again = BatchCodec.copiedInts(Array(3))
+      again.length shouldBe 1
+      ColumnMetrics.primitiveEncodeCount shouldBe 1L
+      ColumnMetrics.batchCount shouldBe 1L
+      sentinel.primitiveEncodeCount shouldBe 1L
+      sentinel.batchCount shouldBe 1L
+      inner.primitiveEncodeCount shouldBe 1L
+      val displaced = ColumnMetrics.install(new CountingSink)
+      displaced should be theSameInstanceAs sentinel
+    finally ColumnMetrics.restore(previous)
   }
 
   it should "share a pair column when narrowing to one column" in {

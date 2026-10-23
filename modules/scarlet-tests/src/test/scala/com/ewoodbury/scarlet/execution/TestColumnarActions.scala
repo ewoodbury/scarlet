@@ -7,7 +7,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.ColumnMetrics
+import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, NoOpSink}
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -16,7 +16,7 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
   private val originalConf = ScarletConf.get
 
   override def afterEach(): Unit =
-    ColumnMetrics.disarm()
+    ColumnMetrics.restore(NoOpSink)
     ScarletRuntime.get.shuffle.clear()
     ScarletConf.set(originalConf)
     ()
@@ -31,13 +31,12 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     val expected = row(mapped.take(3))
     mapCalls.set(0)
     armColumnar()
-    ColumnMetrics.arm()
-
-    mapped.take(3) shouldBe expected
-    ColumnMetrics.decodedValueCount shouldBe 3L
-    mapCalls.get() shouldBe 3
-    assertNarrow(mapped, 4)
-    ColumnMetrics.disarm()
+    ColumnMetrics.withSink(new CountingSink) {
+      mapped.take(3) shouldBe expected
+      ColumnMetrics.decodedValueCount shouldBe 3L
+      mapCalls.get() shouldBe 3
+      assertNarrow(mapped, 4)
+    }
     mapped.first() shouldBe mapped.take(1).headOption.getOrElse(fail("take(1) was empty"))
   }
 
@@ -53,10 +52,10 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
   it should "stay on the row path when columnar execution is disabled" in {
     ScarletConf.set(originalConf.copy(columnarExecution = false))
-    ColumnMetrics.arm()
-
-    DistCollection(1 to 8, 2).map(_ * 2).take(3) shouldBe List(2, 4, 6)
-    ColumnMetrics.decodedValueCount shouldBe 0L
+    ColumnMetrics.withSink(new CountingSink) {
+      DistCollection(1 to 8, 2).map(_ * 2).take(3) shouldBe List(2, 4, 6)
+      ColumnMetrics.decodedValueCount shouldBe 0L
+    }
   }
 
   it should "return empty for zero and negative limits" in {
@@ -99,11 +98,11 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     val expected = row(reduced.take(2))
     ScarletRuntime.get.shuffle.clear()
     ScarletConf.set(originalConf.copy(columnarExecution = true))
-    ColumnMetrics.arm()
-
-    reduced.take(2) shouldBe expected
-    ColumnMetrics.batchCount shouldBe 0L
-    ColumnMetrics.decodedValueCount shouldBe 0L
+    ColumnMetrics.withSink(new CountingSink) {
+      reduced.take(2) shouldBe expected
+      ColumnMetrics.batchCount shouldBe 0L
+      ColumnMetrics.decodedValueCount shouldBe 0L
+    }
   }
 
   "count" should "match the row path on a filtered column" in {
@@ -130,15 +129,12 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     ScarletConf.set(
       originalConf.copy(columnarExecution = true, columnarBatchSize = 16, threadPoolSize = 1),
     )
-    ColumnMetrics.arm()
-    val filtered = DistCollection(Seq("US", "CA", "US"), 1).filterStringEquals("US").collect()
-    val batches = ColumnMetrics.batchCount
-    val visits = ColumnMetrics.visitCount
-    ColumnMetrics.disarm()
-
-    filtered shouldBe Seq("US", "US")
-    batches shouldBe 2L
-    visits shouldBe 1L
+    ColumnMetrics.withSink(new CountingSink) {
+      val filtered = DistCollection(Seq("US", "CA", "US"), 1).filterStringEquals("US").collect()
+      filtered shouldBe Seq("US", "US")
+      ColumnMetrics.batchCount shouldBe 2L
+      ColumnMetrics.visitCount shouldBe 1L
+    }
   }
 
   it should "stay correct when morsels split a partition" in {
@@ -159,11 +155,12 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
       value.toString
     }
 
-    ColumnMetrics.arm()
-    ColumnarPlanner.tryCount(mapped.plan) shouldBe None
-    ColumnarPlanner.trySumInt(mapped.plan) shouldBe None
-    hits.get() shouldBe 0
-    assertNoColumnarWork()
+    ColumnMetrics.withSink(new CountingSink) {
+      ColumnarPlanner.tryCount(mapped.plan) shouldBe None
+      ColumnarPlanner.trySumInt(mapped.plan) shouldBe None
+      hits.get() shouldBe 0
+      assertNoColumnarWork()
+    }
 
     mapped.count() shouldBe 3L
     hits.get() shouldBe 3
@@ -180,11 +177,12 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
       value.toInt
     }
 
-    ColumnMetrics.arm()
-    ColumnarPlanner.tryCount(mapped.plan) shouldBe None
-    ColumnarPlanner.trySumInt(mapped.plan) shouldBe None
-    hits.get() shouldBe 0
-    assertNoColumnarWork()
+    ColumnMetrics.withSink(new CountingSink) {
+      ColumnarPlanner.tryCount(mapped.plan) shouldBe None
+      ColumnarPlanner.trySumInt(mapped.plan) shouldBe None
+      hits.get() shouldBe 0
+      assertNoColumnarWork()
+    }
 
     mapped.sum shouldBe 3L
     hits.get() shouldBe 2
@@ -602,14 +600,16 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(primitive) shouldBe columnar(boxed)
     row(primitive) shouldBe row(boxed)
     columnar {
-      ColumnMetrics.arm()
-      primitive shouldBe 30L
-      ColumnMetrics.primitiveEncodeCount shouldBe 3L
+      ColumnMetrics.withSink(new CountingSink) {
+        primitive shouldBe 30L
+        ColumnMetrics.primitiveEncodeCount shouldBe 3L
+      }
     }
     columnar {
-      ColumnMetrics.arm()
-      boxed shouldBe 30L
-      ColumnMetrics.primitiveEncodeCount shouldBe 0L
+      ColumnMetrics.withSink(new CountingSink) {
+        boxed shouldBe 30L
+        ColumnMetrics.primitiveEncodeCount shouldBe 0L
+      }
     }
   }
 
@@ -641,14 +641,16 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(primitive) shouldBe columnar(boxed)
     row(primitive) shouldBe row(boxed)
     columnar {
-      ColumnMetrics.arm()
-      primitive shouldBe 4.75
-      ColumnMetrics.primitiveEncodeCount shouldBe 2L
+      ColumnMetrics.withSink(new CountingSink) {
+        primitive shouldBe 4.75
+        ColumnMetrics.primitiveEncodeCount shouldBe 2L
+      }
     }
     columnar {
-      ColumnMetrics.arm()
-      boxed shouldBe 4.75
-      ColumnMetrics.primitiveEncodeCount shouldBe 0L
+      ColumnMetrics.withSink(new CountingSink) {
+        boxed shouldBe 4.75
+        ColumnMetrics.primitiveEncodeCount shouldBe 0L
+      }
     }
   }
 
@@ -666,14 +668,16 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(primitive) shouldBe columnar(boxed)
     row(primitive) shouldBe row(boxed)
     columnar {
-      ColumnMetrics.arm()
-      primitive shouldBe expected
-      ColumnMetrics.primitiveEncodeCount shouldBe 2L
+      ColumnMetrics.withSink(new CountingSink) {
+        primitive shouldBe expected
+        ColumnMetrics.primitiveEncodeCount shouldBe 2L
+      }
     }
     columnar {
-      ColumnMetrics.arm()
-      boxed shouldBe expected
-      ColumnMetrics.primitiveEncodeCount shouldBe 0L
+      ColumnMetrics.withSink(new CountingSink) {
+        boxed shouldBe expected
+        ColumnMetrics.primitiveEncodeCount shouldBe 0L
+      }
     }
   }
 
@@ -686,10 +690,11 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
     val expected = row(summed)
     armColumnar()
-    ColumnMetrics.arm()
-    summed shouldBe expected
-    assertColumnar(rows.values, width = 1)
-    assertOnePass()
+    ColumnMetrics.withSink(new CountingSink) {
+      summed shouldBe expected
+      assertColumnar(rows.values, width = 1)
+      assertOnePass()
+    }
     columnar(DistCollection.ofIntPairs(keys, values, 2).values.collect()) shouldBe
       row(DistCollection.ofIntPairs(keys, values, 2).values.collect())
   }
@@ -703,10 +708,11 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
     val expected = row(summed)
     armColumnar()
-    ColumnMetrics.arm()
-    summed shouldBe expected
-    assertColumnar(rows.keys, width = 1)
-    assertOnePass()
+    ColumnMetrics.withSink(new CountingSink) {
+      summed shouldBe expected
+      assertColumnar(rows.keys, width = 1)
+      assertOnePass()
+    }
     columnar(DistCollection.ofIntPairs(keys, values, 2).keys.collect()) shouldBe
       row(DistCollection.ofIntPairs(keys, values, 2).keys.collect())
   }
@@ -728,11 +734,12 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     armColumnar()
     ColumnarPlanner.partitioning(rows.plan)
     calls.get() shouldBe 0
-    ColumnMetrics.arm()
-    summed shouldBe expected
-    calls.get() shouldBe values.length
-    assertColumnar(rows, width = 1)
-    assertOnePass()
+    ColumnMetrics.withSink(new CountingSink) {
+      summed shouldBe expected
+      calls.get() shouldBe values.length
+      assertColumnar(rows, width = 1)
+      assertOnePass()
+    }
     val projected = DistCollection.ofIntPairs(keys, values, 2).mapValues[Int, Int, Int](_ * 2)
     columnar(projected.collect()) shouldBe row(projected.collect())
   }
@@ -781,11 +788,12 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     armColumnar()
     ColumnarPlanner.partitioning(strings.plan) shouldBe None
     ColumnarPlanner.partitioning(widened.plan) shouldBe None
-    ColumnMetrics.arm()
-    val collected = strings.collect()
-    ColumnMetrics.batchCount shouldBe 0L
-    ColumnMetrics.visitCount shouldBe 0L
-    ColumnMetrics.disarm()
+    val collected = ColumnMetrics.withSink(new CountingSink) {
+      val rows = strings.collect()
+      ColumnMetrics.batchCount shouldBe 0L
+      ColumnMetrics.visitCount shouldBe 0L
+      rows
+    }
     collected shouldBe row(strings.collect())
     columnar(widened.collect()) shouldBe row(widened.collect())
   }
@@ -818,7 +826,6 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     ColumnMetrics.visitCount shouldBe 0L
     ColumnMetrics.decodedValueCount shouldBe 0L
     ColumnMetrics.primitiveEncodeCount shouldBe 0L
-    ColumnMetrics.disarm()
 
   private def armColumnar(): Unit =
     ScarletRuntime.get.shuffle.clear()
@@ -837,11 +844,8 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
   /** The source copy is the only batch, and the sum visits that one morsel. */
   private def assertOnePass(): Unit =
-    val batches = ColumnMetrics.batchCount
-    val visits = ColumnMetrics.visitCount
-    ColumnMetrics.disarm()
-    batches shouldBe 1L
-    visits shouldBe 1L
+    ColumnMetrics.batchCount shouldBe 1L
+    ColumnMetrics.visitCount shouldBe 1L
 
   private final case class Footprint(result: Long, batches: Long, visits: Long)
 
@@ -862,12 +866,9 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
   private def groupedFootprint(body: => Long): Footprint =
     ScarletRuntime.get.shuffle.clear()
     ScarletConf.set(groupedConf(columnarExecution = true))
-    ColumnMetrics.arm()
-    val result = body
-    val batches = ColumnMetrics.batchCount
-    val visits = ColumnMetrics.visitCount
-    ColumnMetrics.disarm()
-    Footprint(result, batches, visits)
+    ColumnMetrics.withSink(new CountingSink) {
+      Footprint(body, ColumnMetrics.batchCount, ColumnMetrics.visitCount)
+    }
 
   private def assertNarrow[A](collection: DistCollection[A], width: Int): Unit =
     val info =

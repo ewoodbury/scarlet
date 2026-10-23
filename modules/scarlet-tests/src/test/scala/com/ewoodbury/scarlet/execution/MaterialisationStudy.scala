@@ -120,7 +120,7 @@ object MaterialisationStudy:
     val sampler = startSampler()
     try execute(sampler, savedConf)
     finally
-      ColumnMetrics.disarm()
+      ColumnMetrics.restore(NoOpSink)
       sampler.foreach(_.stop())
       ScarletConf.set(savedConf)
       ScarletRuntime.set(savedRuntime)

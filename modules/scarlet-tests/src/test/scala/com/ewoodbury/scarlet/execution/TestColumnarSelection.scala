@@ -5,7 +5,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.{DictionaryStringPredicate, DistCollection}
-import com.ewoodbury.scarlet.columnar.{BatchCodec, ColumnMetrics}
+import com.ewoodbury.scarlet.columnar.{BatchCodec, ColumnMetrics, CountingSink, NoOpSink}
 import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -17,7 +17,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
   private val originalConf = ScarletConf.get
 
   override def afterEach(): Unit =
-    ColumnMetrics.disarm()
+    ColumnMetrics.restore(NoOpSink)
     ScarletRuntime.get.shuffle.clear()
     ScarletConf.set(originalConf)
     ()
@@ -454,12 +454,9 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
 
   private def measuredJoin[A](collection: DistCollection[A]): JoinFootprint =
     ScarletRuntime.get.shuffle.clear()
-    ColumnMetrics.arm()
-    val count = collection.count()
-    val batches = ColumnMetrics.batchCount
-    val visits = ColumnMetrics.visitCount
-    ColumnMetrics.disarm()
-    JoinFootprint(count, batches, visits)
+    ColumnMetrics.withSink(new CountingSink) {
+      JoinFootprint(collection.count(), ColumnMetrics.batchCount, ColumnMetrics.visitCount)
+    }
 
   private def assertBuckets[V](parts: Seq[Partition[(Int, V)]]): Unit =
     val width = parts.length

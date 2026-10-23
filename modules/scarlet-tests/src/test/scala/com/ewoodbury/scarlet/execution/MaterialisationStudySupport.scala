@@ -6,7 +6,7 @@ import java.util.concurrent.locks.LockSupport
 
 import com.sun.management.ThreadMXBean
 
-import com.ewoodbury.scarlet.columnar.ColumnMetrics
+import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
 
 /**
  * Timing, percentile, allocation estimate, and raw floors for [[MaterialisationStudy]].
@@ -80,21 +80,24 @@ private[execution] object MaterialisationStudySupport:
   )
 
   def timeOnce[A](body: => A): (A, Timed) =
+    // Allocate and install before the GC read. Creating the sink inside that window biases
+    // every sample.
+    val sink = new CountingSink
+    val previous = ColumnMetrics.install(sink)
     val gcBefore = gcMillis
-    ColumnMetrics.arm()
     try
       val start = System.nanoTime()
       val value = body
       val elapsed = System.nanoTime() - start
       val timed = Timed(
         elapsed,
-        ColumnMetrics.batchCount,
-        ColumnMetrics.primitiveEncodeCount,
-        ColumnMetrics.visitCount,
+        sink.batchCount,
+        sink.primitiveEncodeCount,
+        sink.visitCount,
         gcDelta(gcBefore, gcMillis),
       )
       (value, timed)
-    finally ColumnMetrics.disarm()
+    finally ColumnMetrics.restore(previous)
 
   def summarise(samples: Array[Long]): (Long, Long, Long) =
     val sorted = samples.clone()
