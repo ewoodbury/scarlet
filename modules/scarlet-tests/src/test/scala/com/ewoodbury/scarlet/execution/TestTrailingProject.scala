@@ -53,10 +53,11 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
     partials shouldBe 124L
     fourFoot.batches shouldBe encodes + partials
+    fiveFoot.batches shouldBe 126L
     fiveFoot.batches shouldBe fourFoot.batches
     fiveFoot.batches shouldNot be(fourFoot.batches + partials)
     fourFoot.visits shouldBe partials
-    fiveFoot.visits shouldBe partials
+    fiveFoot.visits shouldBe 124L
     fourFoot.encodes shouldBe encodes
     fiveFoot.encodes shouldBe encodes
   }
@@ -86,9 +87,10 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
     counted.result shouldBe elementRows.toLong
     counted.result shouldBe row(five.count())
+    counted.batches shouldBe 126L
     counted.batches shouldBe sourcePartitions.toLong + partials
     counted.batches shouldNot be(sourcePartitions.toLong + partials + partials)
-    counted.visits shouldBe partials
+    counted.visits shouldBe 124L
     counted.encodes shouldBe sourcePartitions.toLong
   }
 
@@ -134,10 +136,12 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
     summed.result shouldBe row(chained.sum)
     counted.result shouldBe filteredSurvivors
     counted.result shouldBe row(chained.count())
+    summed.batches shouldBe 126L
     summed.batches shouldBe sourcePartitions.toLong + partials
+    counted.batches shouldBe 126L
     counted.batches shouldBe summed.batches
-    summed.visits shouldBe partials
-    counted.visits shouldBe partials
+    summed.visits shouldBe 124L
+    counted.visits shouldBe 124L
     summed.encodes shouldBe sourcePartitions.toLong
     counted.encodes shouldBe sourcePartitions.toLong
   }
@@ -157,10 +161,12 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
     counted.result shouldBe 0L
     summed.result shouldBe row(chained.sum)
     counted.result shouldBe row(chained.count())
+    summed.batches shouldBe 126L
     summed.batches shouldBe sourcePartitions.toLong + partials
+    counted.batches shouldBe 126L
     counted.batches shouldBe summed.batches
-    summed.visits shouldBe partials
-    counted.visits shouldBe partials
+    summed.visits shouldBe 124L
+    counted.visits shouldBe 124L
     summed.encodes shouldBe sourcePartitions.toLong
     counted.encodes shouldBe sourcePartitions.toLong
   }

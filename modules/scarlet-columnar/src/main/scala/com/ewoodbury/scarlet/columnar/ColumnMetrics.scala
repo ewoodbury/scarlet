@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.columnar
 
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
 
 import scala.annotation.unused
 
@@ -8,6 +8,10 @@ import scala.annotation.unused
  * Receives one note per published batch, morsel visit, decoded row group, or primitive encode.
  *
  * [[ColumnMetrics]] holds one sink for the process. A note reads that reference once and calls it.
+ * Morsel workers call [[visit]] and [[batch]] from several threads at once. [[decoded]] and
+ * [[primitiveEncode]] run on those workers or on the task thread, and those calls overlap. An
+ * implementation must be thread-safe. A plain field drops a note when two workers write it
+ * together. [[CountingSink]] uses an atomic counter for each note for that reason.
  */
 trait MetricsSink:
 
@@ -40,9 +44,8 @@ object NoOpSink extends MetricsSink:
 /**
  * Counts notes for one installed window.
  *
- * One thread installs the sink. Morsel workers and task threads then note into that same sink, so
- * each counter is an `AtomicLong`. A plain `Long` drops a visit or a batch when those threads
- * interleave. A later [[ColumnMetrics.install]] still replaces this sink for every thread.
+ * Counters are atomic because [[MetricsSink]] notes arrive from several threads. A later
+ * [[ColumnMetrics.install]] still replaces this sink for every thread.
  */
 final class CountingSink extends MetricsSink:
 
@@ -52,20 +55,16 @@ final class CountingSink extends MetricsSink:
   private val primitiveEncodes = new AtomicLong(0L)
 
   def batch(): Unit =
-    batches.incrementAndGet()
-    ()
+    val _ = batches.incrementAndGet()
 
   def visit(): Unit =
-    visits.incrementAndGet()
-    ()
+    val _ = visits.incrementAndGet()
 
   def decoded(rows: Int): Unit =
-    decodedRows.addAndGet(rows.toLong)
-    ()
+    val _ = decodedRows.addAndGet(rows.toLong)
 
   def primitiveEncode(): Unit =
-    primitiveEncodes.incrementAndGet()
-    ()
+    val _ = primitiveEncodes.incrementAndGet()
 
   def batchCount: Long = batches.get()
 
@@ -81,14 +80,13 @@ final class CountingSink extends MetricsSink:
  * Counts published batches, morsel visits, decoded rows, and primitive source encodes on the
  * installed [[MetricsSink]]. [[NoOpSink]] starts installed, so nothing is recorded until a caller
  * installs a sink. [[withSink]] installs for one body and restores the previous sink afterwards,
- * including when the body throws.
+ * when the body returns and when the body throws.
  *
- * The slot is one process-wide window. [[install]] reads the current sink and writes the new one,
- * with no lock. Two overlapping installs can observe the same previous sink, and the later write
- * is what every thread notes into until the matching [[restore]]. Nested or concurrent actions
- * therefore cross-contaminate. Tests run sequentially and restore in `afterEach`, which is why one
- * action's counts stay separate today. Giving each action its own sink means passing that sink
- * into the codec and the morsel workers, instead of reading it from this slot.
+ * The slot is one atomic reference. [[install]] is a single swap, so two overlapping installs
+ * cannot observe the same previous sink. [[restore]] writes its argument and the last writer wins.
+ * Only non-overlapping, properly nested use is supported. Overlapping restores can put back a sink
+ * that another caller has already replaced. Tests run sequentially and restore [[NoOpSink]] in
+ * `afterEach`.
  *
  * A primitive encode is one `ArraySeq.ofInt`, `ArraySeq.ofDouble`, owned primitive array, or raw
  * `intPairs(Array, Array)` copied into columns. One note may copy two arrays: a pair encode copies
@@ -97,22 +95,25 @@ final class CountingSink extends MetricsSink:
  */
 object ColumnMetrics:
 
-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  @volatile private var current: MetricsSink = NoOpSink
+  private val current: AtomicReference[MetricsSink] = new AtomicReference(NoOpSink)
 
-  /** Install `sink` and return the sink that was current. */
+  /**
+   * Install `sink` and return the sink it replaced.
+   *
+   * One `getAndSet`. [[restore]] is last-writer-wins, and only non-overlapping, properly nested
+   * use is supported.
+   */
   def install(sink: MetricsSink): MetricsSink =
-    val previous = current
-    current = sink
-    previous
+    current.getAndSet(sink)
 
-  /** Put `previous` back. `previous` is the value [[install]] returned. */
+  /** Put `previous` back. `previous` is the value [[install]] returned. The last restore wins. */
   def restore(previous: MetricsSink): Unit =
-    current = previous
+    current.set(previous)
 
   /**
    * Install `sink` for `body`, then restore the previous sink. The previous sink is restored when
-   * `body` throws.
+   * `body` returns and when `body` throws. [[restore]] is last-writer-wins, so only
+   * non-overlapping, properly nested use is supported.
    */
   def withSink[A](sink: MetricsSink)(body: => A): A =
     val previous = install(sink)
@@ -120,49 +121,35 @@ object ColumnMetrics:
     finally restore(previous)
 
   /** Batches on the installed [[CountingSink]], or zero when the sink is anything else. */
-  def batchCount: Long = current match
-    case sink: CountingSink => sink.batchCount
-    case _ => 0L
+  def batchCount: Long = counting.fold(0L)(_.batchCount)
 
   /** Morsel visits on the installed [[CountingSink]], or zero when the sink is anything else. */
-  def visitCount: Long = current match
-    case sink: CountingSink => sink.visitCount
-    case _ => 0L
+  def visitCount: Long = counting.fold(0L)(_.visitCount)
 
   /**
    * Rows decoded on the installed [[CountingSink]], or zero otherwise. A pair or triple row counts
    * once, not once per cell.
    */
-  def decodedValueCount: Long = current match
-    case sink: CountingSink => sink.decodedValueCount
-    case _ => 0L
+  def decodedValueCount: Long = counting.fold(0L)(_.decodedValueCount)
 
   /**
    * Owned, `ArraySeq`, or raw int-pair encodes on the installed [[CountingSink]], or zero
    * otherwise. A pair counts once.
    */
-  def primitiveEncodeCount: Long = current match
-    case sink: CountingSink => sink.primitiveEncodeCount
-    case _ => 0L
+  def primitiveEncodeCount: Long = counting.fold(0L)(_.primitiveEncodeCount)
+
+  private def counting: Option[CountingSink] = current.get() match
+    case sink: CountingSink => Some(sink)
+    case _: MetricsSink => None
 
   private[columnar] def batch(): Unit =
-    current.batch()
+    current.get().batch()
 
   private[columnar] def visit(): Unit =
-    current.visit()
+    current.get().visit()
 
   private[columnar] def decoded(rows: Int): Unit =
-    current.decoded(rows)
+    current.get().decoded(rows)
 
   private[columnar] def primitiveEncode(): Unit =
-    current.primitiveEncode()
-
-  /** Installs a fresh [[CountingSink]] and drops whatever was current. */
-  @deprecated("Install a CountingSink and restore the previous sink.", "0.1.0")
-  def arm(): Unit =
-    val _ = install(new CountingSink)
-
-  /** Restores [[NoOpSink]]. Counts stay on the removed sink and read back as zero. */
-  @deprecated("Restore the sink that was current before install.", "0.1.0")
-  def disarm(): Unit =
-    restore(NoOpSink)
+    current.get().primitiveEncode()

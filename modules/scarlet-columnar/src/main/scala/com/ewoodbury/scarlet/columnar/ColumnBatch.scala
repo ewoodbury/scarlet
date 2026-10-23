@@ -2,7 +2,7 @@ package com.ewoodbury.scarlet.columnar
 
 /**
  * A published batch. `length` is the row count every column shares. The batch does not copy column
- * buffers. Construction notes a batch on the installed [[ColumnMetrics]] sink.
+ * buffers. Construction notes a batch on the installed [[MetricsSink]].
  */
 final class ColumnBatch(
     val schema: IndexedSeq[LogicalType],

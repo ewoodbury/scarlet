@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.columnar
 
-import java.util.concurrent.{CountDownLatch, TimeUnit}
+import java.util.concurrent.{ConcurrentHashMap, CountDownLatch, CyclicBarrier, TimeUnit}
 
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
@@ -26,6 +26,30 @@ class TestMorselScheduler extends AnyFlatSpec with Matchers with BeforeAndAfterE
       val lengths = MorselScheduler.map(morsels, parallelism = 4)((_, batch) => batch.length)
       lengths shouldBe morsels.map(_.length)
       ColumnMetrics.visitCount shouldBe morsels.length.toLong
+    }
+  }
+
+  it should "count every visit when workers note together" in {
+    // Workers share one sink and note together after the barrier. The total is exact: a lost
+    // update must fail this, which eight visits on four workers does not.
+    val workers = 8
+    val rounds = 4
+    val perRound = 2048
+    val batch = BatchCodec.ints(Seq(1))
+    val morsels = Vector.fill(perRound)(batch)
+    val expected = rounds.toLong * perRound.toLong
+    ColumnMetrics.withSink(new CountingSink) {
+      (1 to rounds).foreach { _ =>
+        val gate = new CyclicBarrier(workers)
+        val seen = ConcurrentHashMap.newKeySet[Thread]()
+        val lengths = MorselScheduler.map(morsels, parallelism = workers) { (_, morsel) =>
+          if (seen.add(Thread.currentThread)) then
+            val _ = gate.await(5, TimeUnit.SECONDS)
+          morsel.length
+        }
+        lengths.sum shouldBe perRound
+      }
+      ColumnMetrics.visitCount shouldBe expected
     }
   }
 

@@ -129,13 +129,13 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     }
   }
 
-  // One process-wide slot. This checks that a thrown body puts the previous sink back.
-  // A second install from another thread would replace both sinks until restore.
+  // Sequential nesting. Overlapping restores are last-writer-wins and are not what this checks.
+  // The identity assertion stays inside the try so a failure still restores `previous`.
   it should "restore the previous sink when the body throws" in {
     val outer = new CountingSink
     val previous = ColumnMetrics.install(outer)
-    previous should be theSameInstanceAs NoOpSink
     try
+      previous should be theSameInstanceAs NoOpSink
       val inner = new CountingSink
       val thrown = intercept[IllegalStateException] {
         ColumnMetrics.withSink[Unit](inner) {
@@ -154,6 +154,30 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       ColumnMetrics.batchCount shouldBe 1L
       outer.primitiveEncodeCount shouldBe 1L
       inner.primitiveEncodeCount shouldBe 1L
+    finally ColumnMetrics.restore(previous)
+  }
+
+  it should "restore the previous sink when the body returns" in {
+    val sentinel = new CountingSink
+    val previous = ColumnMetrics.install(sentinel)
+    try
+      val inner = new CountingSink
+      val recorded = ColumnMetrics.withSink(inner) {
+        BatchCodec.copiedInts(Array(1, 2))
+      }
+      recorded.length shouldBe 2
+      inner.primitiveEncodeCount shouldBe 1L
+      inner.batchCount shouldBe 1L
+      ColumnMetrics.primitiveEncodeCount shouldBe 0L
+      val again = BatchCodec.copiedInts(Array(3))
+      again.length shouldBe 1
+      ColumnMetrics.primitiveEncodeCount shouldBe 1L
+      ColumnMetrics.batchCount shouldBe 1L
+      sentinel.primitiveEncodeCount shouldBe 1L
+      sentinel.batchCount shouldBe 1L
+      inner.primitiveEncodeCount shouldBe 1L
+      val displaced = ColumnMetrics.install(new CountingSink)
+      displaced should be theSameInstanceAs sentinel
     finally ColumnMetrics.restore(previous)
   }
 
