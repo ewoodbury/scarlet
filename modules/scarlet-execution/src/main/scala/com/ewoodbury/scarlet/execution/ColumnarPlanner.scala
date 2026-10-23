@@ -12,17 +12,24 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  *
  * Named erasure boundary. `Plan` is invariant and its element type is erased, so non-empty sources
  * are classified by their values and checked against any descriptor, while empty sources use their
- * descriptor. User functions are then cast to that operation. A function that does not return the
- * selected type throws `ClassCastException`. [[tryRun]] catches that and returns `None`, and the
- * row path runs the whole plan. Any unsupported node (union, flatMap, distinct, sort, a map that
- * is not fed by `Int`, `Double`, or `String`, and the rest) makes the whole plan ineligible, so a
- * supported prefix is not executed on its own.
+ * descriptor. An element map lowers only when it declares the column's signature and every other
+ * `apply` is an erasure bridge: `apply` or `apply$mcII$sp` for `Int => Int`, `apply` or
+ * `apply$mcDD$sp` for `Double => Double`, and `apply` for `String => String`. The check reads
+ * method descriptors and does not call the function. One failing project refuses the whole element
+ * chain, so a type-changing map stays on the row path and is not run before that fallback.
+ * `getDeclaredMethods` misses an inherited `apply`, so that function stays on the row path too.
+ * Other user functions are cast to the selected operation. A result that is not that type throws
+ * `ClassCastException`. [[tryRun]] catches it and returns `None`, and the row path runs the whole
+ * plan. Any unsupported node (union, flatMap, distinct, sort, a map that is not fed by `Int`,
+ * `Double`, or `String`, and the rest) makes the whole plan ineligible, so a supported prefix is
+ * not executed on its own.
  *
  * [[lower]] and interpretation walk the same logical plan. The physical node records the operator
  * and not the function, so each logical node is matched to the node [[lower]] built for it. A
  * mismatch is a planner bug: interpretation throws `IllegalStateException`, and [[tryRun]] does
- * not turn that into a row-path fallback. A `ClassCastException` from a function that is not the
- * selected type still is a fallback, and user side effects in that function may already have run.
+ * not turn that into a row-path fallback. A `ClassCastException` from a filter, or from a string
+ * map that declares `String` and returns another value, is still a fallback, and that function may
+ * already have run.
  *
  * [[lower]] does not call user functions. A straight `Int`, `Double`, or `String` filter/project
  * run of two to four steps is one [[PhysicalOp.Pipeline]]. A longer run is cut into those chunks,
@@ -85,8 +92,9 @@ object ColumnarPlanner:
     accepted(plan).map(infoOf).orElse(fusedPairLayout(plan))
 
   /**
-   * The physical tree for `plan`, without running it. `None` means the row path. An invalid layout
-   * still lowers; [[partitioning]] and [[tryRun]] refuse it.
+   * The physical tree for `plan`, without running it. `None` means the row path, including an
+   * element chain whose project does not declare the column's type. [[partitioning]] and
+   * [[tryRun]] follow that refusal. They also drop a lowered tree whose layout is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -162,21 +170,22 @@ object ColumnarPlanner:
    */
   def trySumInt(plan: Plan[_]): Option[Long] =
     accepted(plan) match
-      case None => None
-      case Some(op) =>
+      case Some(op) if isInt(op) =>
         try Some(sumInt(plan, op))
         catch case _: ClassCastException => None
+      case _ => None
 
   /**
-   * Sum of a double plan. `None` means the row path. A filter/project chain adds in the fused loop
-   * and does not write that chain's output column. Null slots are skipped.
+   * Sum of a double plan. `None` means the row path, including a plan whose result is not a double
+   * column. A filter/project chain adds in the fused loop and does not write that chain's output
+   * column. Null slots are skipped.
    */
   def trySumDouble(plan: Plan[_]): Option[Double] =
     accepted(plan) match
-      case None => None
-      case Some(op) =>
+      case Some(op) if isFloat(op) =>
         try Some(sumDouble(plan, op))
         catch case _: ClassCastException => None
+      case _ => None
 
   /**
    * Folded wide sum of int pairs. `None` means the row path. A typed pair source runs
@@ -545,7 +554,8 @@ object ColumnarPlanner:
       steps: List[ElementStep],
   ): Option[PhysicalOp] = child.kind match
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Strings =>
-      Some(lowerElementPipeline(child, steps))
+      if (elementProjectsMatch(child.kind, steps)) then Some(lowerElementPipeline(child, steps))
+      else None
     case _ =>
       steps.foldLeft(Option(child)) { (current, step) =>
         current.flatMap(op => lowerElementStep(op, step))
@@ -627,41 +637,106 @@ object ColumnarPlanner:
         case _ => None
     }
 
-  /**
-   * True when `function` declares an unboxed `Int => Int` apply and every other `apply` is the
-   * erasure bridge. A hand-written `apply(Any): Any` beside `apply(Int): Int` is not a bridge, so
-   * the plan stays on the row path. `getDeclaredMethods` ignores an inherited `apply`, which also
-   * stays on the row path. This does not call `function`.
-   */
+  /** Unboxed `Int => Int`, the same witness as an int element project. */
   private def returnsUnboxedInt(function: Any): Boolean =
+    declaredElement(PhysicalOp.Kind.Ints, function)
+
+  /**
+   * True when every project in `steps` declares the signature of `kind`. A filter does not change
+   * the element type. One failing project refuses the chain. This does not call the functions.
+   */
+  private def elementProjectsMatch(kind: PhysicalOp.Kind, steps: List[ElementStep]): Boolean =
+    steps.forall {
+      case ElementStep.Filter(_) => true
+      case ElementStep.Project(mapper) => declaredElement(kind, mapper)
+    }
+
+  private def declaredElement(kind: PhysicalOp.Kind, function: Any): Boolean = kind match
+    case PhysicalOp.Kind.Ints =>
+      declaredSignature(function, "apply$mcII$sp", classOf[Int], classOf[Int], allowBridge = false)
+    case PhysicalOp.Kind.Floats =>
+      declaredSignature(
+        function,
+        "apply$mcDD$sp",
+        classOf[Double],
+        classOf[Double],
+        allowBridge = false,
+      )
+    case PhysicalOp.Kind.Strings =>
+      declaredSignature(function, "apply", classOf[String], classOf[String], allowBridge = true)
+    case _ => false
+
+  /**
+   * True when `function` declares `apply` or `specialized` from `argument` to `result`, and every
+   * other one-argument `apply` is an erasure bridge. A hand-written `apply(Any): Any` beside that
+   * method is not a bridge, so the plan stays on the row path. `getDeclaredMethods` ignores an
+   * inherited `apply`, which also stays on the row path. This does not call `function`.
+   *
+   * `allowBridge` is for `String => String`. A LambdaMetafactory spin is a hidden class whose
+   * `apply(String): String` and `apply(Object): Object` are both ordinary methods, not bridges.
+   * The erased method counts only as an erasure bridge. A bridge with the declared string
+   * signature still counts. A primitive specialized apply is the implementation, so a bridge does
+   * not satisfy it.
+   */
+  private def declaredSignature(
+      function: Any,
+      specialized: String,
+      argument: Class[_],
+      result: Class[_],
+      allowBridge: Boolean,
+  ): Boolean =
     val methods = function.getClass.getDeclaredMethods
-    methods.exists(isUnboxedIntApply) && !methods.exists(isDisqualifyingApply)
+    def matches(method: java.lang.reflect.Method): Boolean =
+      isDeclaredApply(method, specialized, argument, result, allowBridge)
+
+    methods.exists(matches) &&
+    !methods.exists(method =>
+      isDisqualifyingApply(method, specialized, argument, result, allowBridge),
+    )
 
   @SuppressWarnings(Array("org.wartremover.warts.Equals"))
-  private def isUnboxedIntApply(method: java.lang.reflect.Method): Boolean =
-    val named = method.getName match
-      case "apply" | "apply$mcII$sp" => true
-      case _ => false
+  private def isDeclaredApply(
+      method: java.lang.reflect.Method,
+      specialized: String,
+      argument: Class[_],
+      result: Class[_],
+      allowBridge: Boolean,
+  ): Boolean =
+    val named = method.getName == "apply" || method.getName == specialized
+    val implemented = allowBridge || !method.isBridge
     named &&
-    !method.isBridge &&
-    method.getReturnType.eq(classOf[Int]) &&
+    implemented &&
     method.getParameterCount == 1 &&
-    method.getParameterTypes()(0).eq(classOf[Int])
+    method.getReturnType.eq(result) &&
+    method.getParameterTypes()(0).eq(argument)
 
   @SuppressWarnings(Array("org.wartremover.warts.Equals"))
-  private def isDisqualifyingApply(method: java.lang.reflect.Method): Boolean =
+  private def isDisqualifyingApply(
+      method: java.lang.reflect.Method,
+      specialized: String,
+      argument: Class[_],
+      result: Class[_],
+      allowBridge: Boolean,
+  ): Boolean =
     method.getName == "apply" &&
       method.getParameterCount == 1 &&
-      !isUnboxedIntApply(method) &&
+      !isDeclaredApply(method, specialized, argument, result, allowBridge) &&
       !isErasureBridge(method)
 
-  /** Compiler bridge from a specialized `Int => Int` to `Function1.apply`. */
+  /**
+   * Compiler bridge from a specialized apply to `Function1.apply`. A Scala 3 lambda's erased
+   * `apply(Object): Object` is not marked as a bridge; that class is hidden, and the method is the
+   * same erasure. A hand-written overload is neither.
+   */
   @SuppressWarnings(Array("org.wartremover.warts.Equals"))
   private def isErasureBridge(method: java.lang.reflect.Method): Boolean =
+    val parameters = method.getParameterTypes
     val erased =
-      method.getReturnType.eq(classOf[AnyRef]) &&
-        method.getParameterTypes()(0).eq(classOf[Object])
-    erased && (method.isBridge || method.isSynthetic)
+      method.getParameterCount == 1 &&
+        method.getReturnType.eq(classOf[AnyRef]) &&
+        parameters(0).eq(classOf[Object])
+    val lambdaErasure = method.getDeclaringClass.isHidden
+    erased && (method.isBridge || method.isSynthetic || lambdaErasure)
 
   private def columnFilter(source: Plan[_], slot: PhysicalOp.Slot): Option[PhysicalOp] =
     lowerPlan(source).flatMap { child =>

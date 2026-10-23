@@ -151,7 +151,7 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     values.sum shouldBe 14L
   }
 
-  it should "fall back from a mistyped map once" in {
+  it should "refuse a mistyped map before execution and run it once per row" in {
     ScarletConf.set(originalConf.copy(columnarExecution = true, threadPoolSize = 1))
     val hits = new AtomicInteger
     def mapped = DistCollection(Seq(1, 2, 3), 1).map { value =>
@@ -159,13 +159,20 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
       value.toString
     }
 
+    ColumnMetrics.arm()
+    ColumnarPlanner.tryCount(mapped.plan) shouldBe None
+    ColumnarPlanner.trySumInt(mapped.plan) shouldBe None
+    hits.get() shouldBe 0
+    assertNoColumnarWork()
+
     mapped.count() shouldBe 3L
-    val afterCount = hits.getAndSet(0)
+    hits.get() shouldBe 3
+    hits.set(0)
     mapped.collect() shouldBe Seq("1", "2", "3")
-    hits.get() shouldBe afterCount
+    hits.get() shouldBe 3
   }
 
-  it should "fall back from a mistyped double map once" in {
+  it should "refuse a mistyped double map before execution and run it once per row" in {
     ScarletConf.set(originalConf.copy(columnarExecution = true, threadPoolSize = 1))
     val hits = new AtomicInteger
     def mapped = DistCollection(Seq(1.0, 2.0), 1).map { value =>
@@ -173,10 +180,56 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
       value.toInt
     }
 
+    ColumnMetrics.arm()
+    ColumnarPlanner.tryCount(mapped.plan) shouldBe None
+    ColumnarPlanner.trySumInt(mapped.plan) shouldBe None
+    hits.get() shouldBe 0
+    assertNoColumnarWork()
+
     mapped.sum shouldBe 3L
-    val afterSum = hits.getAndSet(0)
+    hits.get() shouldBe 2
+    hits.set(0)
     mapped.collect() shouldBe Seq(1, 2)
-    hits.get() shouldBe afterSum
+    hits.get() shouldBe 2
+  }
+
+  it should "invoke a mistyped map once per row" in {
+    ScarletConf.set(originalConf.copy(columnarExecution = true, threadPoolSize = 1))
+    val rows = Seq(1, 2, 3, 4, 5)
+    val directHits = new AtomicInteger
+    val chainHits = new AtomicInteger
+    def direct = DistCollection(rows, 1).map { value =>
+      directHits.incrementAndGet()
+      value.toLong
+    }
+    def pairs = DistCollection(rows, 1).map(value => (value, value))
+    def filtered = DistCollection(rows, 1).filter(_ > 0).map(_.toString)
+    def lengths = DistCollection(Seq("red", "blue", "green"), 1).map(_.length)
+    def chain = DistCollection(rows, 1)
+      .filter(_ > 0)
+      .map(_ + 1)
+      .map { value =>
+        chainHits.incrementAndGet()
+        value.toString
+      }
+
+    ColumnarPlanner.partitioning(direct.plan) shouldBe None
+    ColumnarPlanner.partitioning(pairs.plan) shouldBe None
+    ColumnarPlanner.partitioning(filtered.plan) shouldBe None
+    ColumnarPlanner.partitioning(lengths.plan) shouldBe None
+    ColumnarPlanner.partitioning(chain.plan) shouldBe None
+    ColumnarPlanner.tryRun(direct.plan) shouldBe None
+    ColumnarPlanner.tryRun(chain.plan) shouldBe None
+    directHits.get() shouldBe 0
+    chainHits.get() shouldBe 0
+
+    direct.collect() shouldBe Seq(1L, 2L, 3L, 4L, 5L)
+    directHits.get() shouldBe rows.length
+    pairs.collect() shouldBe Seq((1, 1), (2, 2), (3, 3), (4, 4), (5, 5))
+    filtered.collect() shouldBe Seq("1", "2", "3", "4", "5")
+    lengths.collect() shouldBe Seq(3, 4, 5)
+    chain.collect() shouldBe Seq("2", "3", "4", "5", "6")
+    chainHits.get() shouldBe rows.length
   }
 
   "sum" should "add a filtered int column as a long" in {
@@ -751,6 +804,13 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
       assertColumnar(empty.keys, width = 1)
     }
   }
+
+  private def assertNoColumnarWork(): Unit =
+    ColumnMetrics.batchCount shouldBe 0L
+    ColumnMetrics.visitCount shouldBe 0L
+    ColumnMetrics.decodedValueCount shouldBe 0L
+    ColumnMetrics.primitiveEncodeCount shouldBe 0L
+    ColumnMetrics.disarm()
 
   private def armColumnar(): Unit =
     ScarletRuntime.get.shuffle.clear()

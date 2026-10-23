@@ -30,8 +30,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val allPlans = accepted.map(_.plan) ++ excluded.map(_.plan) ++ mismatches.map(_.plan)
 
     accepted.size shouldBe 122
-    excluded.size shouldBe 36
-    mismatches.size shouldBe 6
+    excluded.size shouldBe 43
+    mismatches.size shouldBe 3
     allPlans.map(planNode).toSet shouldBe PlanNode.values.toSet
     accepted.foreach { expected =>
       withClue(s"${expected.label} (${planNode(expected.plan)}): ") {
@@ -88,6 +88,59 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       .plan
     ColumnarPlanner.lower(stringPipeline).map(_.shape) shouldBe Some("Project(Filter(Scan))")
     ColumnarPlanner.tryTake(stringPipeline, 1) shouldBe Some(Seq("RED"))
+  }
+
+  it should "keep a type-changing element map on the row path" in {
+    val intToLong = Plan.MapOp(intSource, (value: Int) => value.toLong)
+    val intToPair = Plan.MapOp(intSource, (value: Int) => (value, value))
+    val filteredToString = Plan.MapOp(
+      Plan.FilterOp(intSource, (value: Int) => value > 0),
+      (value: Int) => value.toString,
+    )
+    val doubleToInt = Plan.MapOp(doubleSource, (value: Double) => value.toInt)
+    val stringLength = Plan.MapOp(stringSource, (value: String) => value.length)
+    val insidePipeline = Plan.FilterOp(
+      Plan.MapOp(
+        Plan.MapOp(intSource, (value: Int) => value + 1),
+        (value: Int) => value.toString,
+      ),
+      (value: String) => value.nonEmpty,
+    )
+    val preserved = Plan.MapOp(intSource, (value: Int) => value + 1)
+    val preservedDouble = Plan.MapOp(doubleSource, (value: Double) => value + 1.0)
+
+    assertRowPath(intToLong)
+    assertRowPath(intToPair)
+    assertRowPath(filteredToString)
+    assertRowPath(doubleToInt)
+    assertRowPath(stringLength)
+    assertRowPath(insidePipeline)
+    DistCollection(intToLong).collect() shouldBe Seq(1L, 2L, 3L, 4L)
+    DistCollection(intToPair).collect() shouldBe Seq((1, 1), (2, 2), (3, 3), (4, 4))
+    DistCollection(filteredToString).collect() shouldBe Seq("1", "2", "3", "4")
+    DistCollection(doubleToInt).collect() shouldBe Seq(1, 2, 3)
+    DistCollection(stringLength).collect() shouldBe Seq(3, 4, 5)
+    DistCollection(insidePipeline).collect() shouldBe Seq("2", "3", "4", "5")
+
+    ColumnarPlanner.partitioning(preserved) shouldBe Some(narrowInfo(2, columnarLayout))
+    ColumnarPlanner.lower(preserved).map(_.shape) shouldBe Some("Project(Scan)")
+    DistCollection(preserved).collect() shouldBe Seq(2, 3, 4, 5)
+    ColumnarPlanner.partitioning(preservedDouble) shouldBe Some(narrowInfo(2, columnarLayout))
+    ColumnarPlanner.lower(preservedDouble).map(_.shape) shouldBe Some("Project(Scan)")
+    DistCollection(preservedDouble).collect() shouldBe Seq(2.5, 3.5, 4.5)
+  }
+
+  it should "agree on lower and every action gate for every contract fixture" in {
+    acceptedCases.foreach { expected =>
+      withClue(s"${expected.label}: ") {
+        assertGatesAgree(expected.plan, accepted = true)
+      }
+    }
+    excludedCases.foreach { expected =>
+      withClue(s"${expected.label}: ") {
+        assertGatesAgree(expected.plan, accepted = false)
+      }
+    }
   }
 
   it should "use source descriptors for empty primitive sources without changing empty results" in {
@@ -371,31 +424,79 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ExcludedCase("all-null string source", allNullStringSource),
       ExcludedCase("empty int source without a witness", emptyIntSource),
       ExcludedCase("unsupported Boolean source", Plan.Source(Seq(Partition(Seq(true, false))))),
+      ExcludedCase("int map to long", Plan.MapOp(intSource, (value: Int) => value.toLong)),
+      ExcludedCase("int map to pair", Plan.MapOp(intSource, (value: Int) => (value, value))),
+      ExcludedCase(
+        "int filter then map to string",
+        Plan.MapOp(
+          Plan.FilterOp(intSource, (value: Int) => value > 0),
+          (value: Int) => value.toString,
+        ),
+      ),
+      ExcludedCase("double map to int", Plan.MapOp(doubleSource, (value: Double) => value.toInt)),
+      ExcludedCase(
+        "string map via length",
+        Plan.MapOp(stringSource, (value: String) => value.length),
+      ),
+      ExcludedCase("int map to string", Plan.MapOp(intSource, (value: Int) => value.toString)),
+      ExcludedCase(
+        "type-changing map inside a three-step chain",
+        Plan.FilterOp(
+          Plan.MapOp(
+            Plan.MapOp(intSource, (value: Int) => value + 1),
+            (value: Int) => value.toString,
+          ),
+          (value: String) => value.nonEmpty,
+        ),
+      ),
     )
+
+  /**
+   * `lower` and the action gates share one decision. A refused plan makes every gate return
+   * `None`. An accepted plan runs `tryRun` and `tryCount`. `tryTake` runs when the physical tree
+   * keeps input partitions. `trySumInt` and `trySumDouble` run only for that numeric kind.
+   */
+  private def assertGatesAgree(plan: Plan[_], accepted: Boolean): Unit =
+    val lowered = ColumnarPlanner.lower(plan)
+    lowered.isDefined shouldBe accepted
+    ColumnarPlanner.partitioning(plan).isDefined shouldBe accepted
+    ColumnarPlanner.tryRun(plan).isDefined shouldBe accepted
+    ColumnarPlanner.tryCount(plan).isDefined shouldBe accepted
+    ColumnarPlanner.trySumInt(plan).isDefined shouldBe lowered.exists(sumsInts)
+    ColumnarPlanner.trySumDouble(plan).isDefined shouldBe lowered.exists(sumsFloats)
+    ColumnarPlanner.tryTake(plan, 1).isDefined shouldBe lowered.exists(preservesPartitions)
+
+  private def sumsInts(op: PhysicalOp): Boolean = op.kind match
+    case PhysicalOp.Kind.Ints => true
+    case PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
+        PhysicalOp.Kind.Strings =>
+      false
+
+  private def sumsFloats(op: PhysicalOp): Boolean = op.kind match
+    case PhysicalOp.Kind.Floats => true
+    case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
+        PhysicalOp.Kind.Strings =>
+      false
+
+  private def preservesPartitions(op: PhysicalOp): Boolean = op match
+    case PhysicalOp.Scan(_, _) => true
+    case PhysicalOp.Filter(child, _) => preservesPartitions(child)
+    case PhysicalOp.Project(child) => preservesPartitions(child)
+    case PhysicalOp.Pipeline(child, _) => preservesPartitions(child)
+    case PhysicalOp.Column(child, _) => preservesPartitions(child)
+    case PhysicalOp.MapValue(child) => preservesPartitions(child)
+    case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.HashJoin(_, _) =>
+      false
+
+  private def assertRowPath[A](plan: Plan[A]): Unit =
+    ColumnarPlanner.partitioning(plan) shouldBe Option.empty[PartitioningInfo]
+    ColumnarPlanner.lower(plan) shouldBe Option.empty[PhysicalOp]
+    ColumnarPlanner.tryRun(plan) shouldBe None
+    ColumnarPlanner.tryCount(plan) shouldBe None
+    ColumnarPlanner.trySumInt(plan) shouldBe None
 
   private def plannerMismatchCases: Seq[PlannerMismatchCase] =
     Seq(
-      PlannerMismatchCase(
-        "int map changes type but planner still reports a columnar projection",
-        Plan.MapOp(intSource, (value: Int) => value.toString),
-        narrowInfo(2, columnarLayout),
-        Some("Project(Scan)"),
-        true,
-      ),
-      PlannerMismatchCase(
-        "double map changes type but planner still reports a columnar projection",
-        Plan.MapOp(doubleSource, (value: Double) => value.toInt),
-        narrowInfo(2, columnarLayout),
-        Some("Project(Scan)"),
-        true,
-      ),
-      PlannerMismatchCase(
-        "string map changes type but planner still reports a dictionary projection",
-        Plan.MapOp(stringSource, (value: String) => value.length),
-        narrowInfo(2, utf8Layout),
-        Some("Project(Scan)"),
-        true,
-      ),
       PlannerMismatchCase(
         "explicit sort-merge join currently lowers as a hash join",
         DistCollection(pairSource).sortMergeJoin(DistCollection(rightPairSource)).plan,
