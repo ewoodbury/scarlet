@@ -11,7 +11,7 @@ import scala.annotation.tailrec
  *
  * Results line up with `morsels`. A worker failure, including an `Error`, fails the call with that
  * throwable. `parallelism` of `1` runs on the calling thread. Each morsel handed to the worker
- * counts as one visit when [[ColumnMetrics]] is armed.
+ * counts as one visit on the installed [[ColumnMetrics]] sink.
  */
 object MorselScheduler:
 
@@ -22,7 +22,7 @@ object MorselScheduler:
     if (morsels.isEmpty) then Vector.empty
     else if (parallelism == 1 || morsels.length == 1) then
       morsels.iterator.zipWithIndex.map { (batch, index) =>
-        ColumnMetrics.noteVisit()
+        ColumnMetrics.visit()
         worker(index, batch)
       }.toVector
     else
@@ -67,7 +67,7 @@ object MorselScheduler:
             throw new IllegalArgumentException(s"missing morsel $index")
           }
           try
-            ColumnMetrics.noteVisit()
+            ColumnMetrics.visit()
             slots(index).set(Some(worker(index, batch)))
           catch case thrown: Throwable => failure.compareAndSet(None, Some(thrown))
           drain(id, deques, slots, failure, morsels, worker)
