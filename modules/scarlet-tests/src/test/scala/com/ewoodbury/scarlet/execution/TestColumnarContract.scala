@@ -26,13 +26,15 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
   "the columnar contract" should "cover every Plan case and pin accepted layouts and shapes" in {
     val accepted = acceptedCases
     val excluded = excludedCases
-    val mismatches = plannerMismatchCases
-    val allPlans = accepted.map(_.plan) ++ excluded.map(_.plan) ++ mismatches.map(_.plan)
+    val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
     accepted.size shouldBe 122
-    excluded.size shouldBe 45
-    mismatches.size shouldBe 1
-    allPlans.map(planNode).toSet shouldBe PlanNode.values.toSet
+    excluded.size shouldBe 46
+    covered.map(planNode).toSet shouldBe PlanNode.values.toSet
+    // A refused plan has no layout. Acceptance is lower plus a valid layout.
+    covered.count { plan =>
+      ColumnarPlanner.lower(plan).isEmpty && ColumnarPlanner.partitioning(plan).isDefined
+    } shouldBe 0
     accepted.foreach { expected =>
       withClue(s"${expected.label} (${planNode(expected.plan)}): ") {
         ColumnarPlanner.partitioning(expected.plan) shouldBe Some(expected.info)
@@ -44,32 +46,42 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         ColumnarPlanner.partitioning(expected.plan) shouldBe Option.empty[PartitioningInfo]
       }
     }
-    mismatches.foreach { expected =>
-      withClue(s"${expected.label} (${planNode(expected.plan)}): ") {
-        ColumnarPlanner.partitioning(expected.plan) shouldBe Some(expected.info)
-        ColumnarPlanner.lower(expected.plan).map(_.shape) shouldBe expected.physicalShape
-        ColumnarPlanner.tryRun(expected.plan).isEmpty shouldBe expected.rowFallback
-      }
-    }
   }
 
   it should "keep fused grouped sum action-level and bounded take on its accepted physical shape" in {
+    // A pair map that stays (Int, Int) is refused by lower, so partitioning and tryRun are the
+    // row path. tryGroupedSum still fuses that map. The peel label names the walked steps.
     val mappedPairs = Plan.MapOp(pairSource, (pair: (Int, Int)) => (pair._1 + 1, pair._2 + pair._1))
-    ColumnarPlanner.partitioning(mappedPairs).map(_.layout) shouldBe Some(columnarLayout)
+    ColumnarPlanner.partitioning(mappedPairs) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.lower(mappedPairs) shouldBe Option.empty[PhysicalOp]
+    ColumnarPlanner.tryRun(mappedPairs) shouldBe None
     ColumnarPlanner.tryGroupedSum(mappedPairs) shouldBe Some(66L)
+    ColumnarPlanner.groupedSumPeel(mappedPairs) shouldBe Some("GroupedSum(MapPair(Scan))")
+
+    // A type-changing pair map is excluded. lower refuses it, and tryGroupedSum does not fuse it.
+    // The peel label is the walked MapPair step, not an action shape.
+    val widenedPairs = Plan.MapOp(pairSource, (pair: (Int, Int)) => (pair._1.toLong, pair._2))
+    assertRowPath(widenedPairs)
+    ColumnarPlanner.tryGroupedSum(widenedPairs) shouldBe None
+    ColumnarPlanner.groupedSumPeel(widenedPairs) shouldBe Some("GroupedSum(MapPair(Scan))")
+
     ColumnarPlanner.tryGroupedSum(pairSource) shouldBe Some(60L)
+    ColumnarPlanner.groupedSumPeel(pairSource) shouldBe Some("GroupedSum(Scan)")
     ColumnarPlanner.partitioning(emptyPairSource).map(_.layout) shouldBe Some(columnarLayout)
     ColumnarPlanner.lower(emptyPairSource).map(_.shape) shouldBe Some("Scan")
+    ColumnarPlanner.groupedSumPeel(emptyPairSource) shouldBe Some("GroupedSum(Scan)")
     DistCollection(emptyPairSource).groupedSum shouldBe 0L
     DistCollection(emptyPairSource).collect() shouldBe empty
     DistCollection(emptyPairSource).take(3) shouldBe empty
-    ColumnarPlanner.tryGroupedSum(Plan.FilterKeysOp(pairSource, (key: Int) => key > 1)) shouldBe
-      Some(50L)
-    ColumnarPlanner.tryGroupedSum(Plan.FilterValuesOp(pairSource, (value: Int) => value > 10)) shouldBe
-      Some(50L)
-    ColumnarPlanner.tryGroupedSum(Plan.FilterOp(pairSource, (pair: (Int, Int)) => pair._1 > 1)) shouldBe
-      Some(50L)
+    val keyFilter = Plan.FilterKeysOp(pairSource, (key: Int) => key > 1)
+    ColumnarPlanner.tryGroupedSum(keyFilter) shouldBe Some(50L)
+    ColumnarPlanner.groupedSumPeel(keyFilter) shouldBe Some("GroupedSum(FilterKey(Scan))")
+    val valueFilter = Plan.FilterValuesOp(pairSource, (value: Int) => value > 10)
+    ColumnarPlanner.tryGroupedSum(valueFilter) shouldBe Some(50L)
+    ColumnarPlanner.groupedSumPeel(valueFilter) shouldBe Some("GroupedSum(FilterValue(Scan))")
+    val rowFilter = Plan.FilterOp(pairSource, (pair: (Int, Int)) => pair._1 > 1)
+    ColumnarPlanner.tryGroupedSum(rowFilter) shouldBe Some(50L)
+    ColumnarPlanner.groupedSumPeel(rowFilter) shouldBe Some("GroupedSum(FilterRow(Scan))")
 
     val intPipeline = Plan.MapOp(
       Plan.FilterOp(intSource, (value: Int) => value % 2 == 0),
@@ -167,12 +179,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
   it should "agree on lower and every action gate for every contract fixture" in {
     acceptedCases.foreach { expected =>
       withClue(s"${expected.label}: ") {
-        assertGatesAgree(expected.plan, accepted = true)
+        assertGatesAgree(expected.plan, accepted = true, groupedSum = expected.groupedSum)
       }
     }
     excludedCases.foreach { expected =>
       withClue(s"${expected.label}: ") {
-        assertGatesAgree(expected.plan, accepted = false)
+        assertGatesAgree(expected.plan, accepted = false, groupedSum = None)
       }
     }
   }
@@ -217,17 +229,10 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       plan: Plan[_],
       info: PartitioningInfo,
       physicalShape: Option[String],
+      groupedSum: Option[Long] = None,
   )
 
   private final case class ExcludedCase(label: String, plan: Plan[_])
-
-  private final case class PlannerMismatchCase(
-      label: String,
-      plan: Plan[_],
-      info: PartitioningInfo,
-      physicalShape: Option[String],
-      rowFallback: Boolean,
-  )
 
   private enum PlanNode:
     case MapPartitions, Repartition, Coalesce, PartitionBy, Source, Map, Filter, FlatMap, Distinct
@@ -325,11 +330,11 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       AcceptedCase("string map", stringMap, narrowInfo(2, stringLayout), Some("Project(Scan)")),
       AcceptedCase("dictionary string equality", dictionaryFilter, narrowInfo(2, stringLayout), Some("Filter(Scan)")),
       AcceptedCase("dictionary equality then string map", dictionaryMap, narrowInfo(2, stringLayout), Some("Project(Filter(Scan))")),
-      AcceptedCase("int pair source", pairSource, narrowInfo(2, layout), Some("Scan")),
-      AcceptedCase("empty int pair source", emptyPairSource, narrowInfo(2, layout), Some("Scan")),
-      AcceptedCase("int pair row filter", pairRowFilter, narrowInfo(2, layout), Some("FilterRow(Scan)")),
-      AcceptedCase("int pair key filter", pairKeyFilter, narrowInfo(2, layout), Some("FilterKey(Scan)")),
-      AcceptedCase("int pair value filter", pairValueFilter, narrowInfo(2, layout), Some("FilterValue(Scan)")),
+      AcceptedCase("int pair source", pairSource, narrowInfo(2, layout), Some("Scan"), Some(60L)),
+      AcceptedCase("empty int pair source", emptyPairSource, narrowInfo(2, layout), Some("Scan"), Some(0L)),
+      AcceptedCase("int pair row filter", pairRowFilter, narrowInfo(2, layout), Some("FilterRow(Scan)"), Some(50L)),
+      AcceptedCase("int pair key filter", pairKeyFilter, narrowInfo(2, layout), Some("FilterKey(Scan)"), Some(50L)),
+      AcceptedCase("int pair value filter", pairValueFilter, narrowInfo(2, layout), Some("FilterValue(Scan)"), Some(50L)),
       AcceptedCase("int pair keys", keys, narrowInfo(2, layout), Some("Key(Scan)")),
       AcceptedCase("int pair values", values, narrowInfo(2, layout), Some("Value(Scan)")),
       AcceptedCase("int mapValues", mapValues, narrowInfo(2, layout), Some("MapValue(Scan)")),
@@ -469,6 +474,10 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ExcludedCase("int map to long", Plan.MapOp(intSource, (value: Int) => value.toLong)),
       ExcludedCase("int map to pair", Plan.MapOp(intSource, (value: Int) => (value, value))),
       ExcludedCase(
+        "type-changing pair map",
+        Plan.MapOp(pairSource, (pair: (Int, Int)) => (pair._1.toLong, pair._2)),
+      ),
+      ExcludedCase(
         "int filter then map to string",
         Plan.MapOp(
           Plan.FilterOp(intSource, (value: Int) => value > 0),
@@ -495,12 +504,19 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
 
   /**
    * `lower` and the action gates share one decision. A refused plan, including a sort-merge or
-   * broadcast join, makes every gate return `None`. An accepted plan runs `tryRun` and
-   * `tryCount`. `tryTake` runs when the physical tree keeps input partitions. `trySumInt` and
-   * `trySumDouble` run only for that numeric kind. `tryGroupedSum` is not implied by acceptance;
-   * a refused plan still returns `None`.
+   * broadcast join and a type-changing pair map, makes every gate return `None`. An accepted plan
+   * runs `tryRun` and `tryCount`. `tryTake` runs when the physical tree keeps input partitions.
+   * `trySumInt` and `trySumDouble` run only for that numeric kind. `tryGroupedSum` equals
+   * `groupedSum` for an accepted grouped pair source and for an accepted row, key, or value
+   * filter of one, and is `None` for every other accepted plan. The peel label follows
+   * [[expectedGroupedPeel]]. A pair map that stays `(Int, Int)` is outside these lists:
+   * [[ColumnarPlanner.lower]] refuses it and [[ColumnarPlanner.tryGroupedSum]] still succeeds.
    */
-  private def assertGatesAgree(plan: Plan[_], accepted: Boolean): Unit =
+  private def assertGatesAgree(
+      plan: Plan[_],
+      accepted: Boolean,
+      groupedSum: Option[Long],
+  ): Unit =
     val lowered = ColumnarPlanner.lower(plan)
     lowered.isDefined shouldBe accepted
     ColumnarPlanner.partitioning(plan).isDefined shouldBe accepted
@@ -509,7 +525,14 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     ColumnarPlanner.trySumInt(plan).isDefined shouldBe lowered.exists(sumsInts)
     ColumnarPlanner.trySumDouble(plan).isDefined shouldBe lowered.exists(sumsFloats)
     ColumnarPlanner.tryTake(plan, 1).isDefined shouldBe lowered.exists(preservesPartitions)
-    if (!accepted) then ColumnarPlanner.tryGroupedSum(plan) shouldBe None
+    if (accepted) then
+      val peel = expectedGroupedPeel(plan)
+      ColumnarPlanner.tryGroupedSum(plan) shouldBe groupedSum
+      ColumnarPlanner.groupedSumPeel(plan) shouldBe peel
+      groupedSum.isDefined shouldBe peel.isDefined
+    else
+      groupedSum shouldBe None
+      ColumnarPlanner.tryGroupedSum(plan) shouldBe None
 
   private def sumsInts(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Ints => true
@@ -553,17 +576,6 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ScarletConf.set(saved.copy(columnarExecution = false))
       collected(plan)
     finally ScarletConf.set(saved)
-
-  private def plannerMismatchCases: Seq[PlannerMismatchCase] =
-    Seq(
-      PlannerMismatchCase(
-        "pair map has a fused groupedSum layout but no physical shape",
-        Plan.MapOp(pairSource, (pair: (Int, Int)) => (pair._1 + 1, pair._2 + pair._1)),
-        narrowInfo(2, columnarLayout),
-        Option.empty[String],
-        true,
-      ),
-    )
 
   private def elementPipelineCases[A](
       kind: String,
@@ -632,6 +644,22 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case Plan.SortByOp(_, _, _) => PlanNode.SortBy
     case Plan.JoinOp(_, _, _) => PlanNode.Join
     case Plan.CoGroupOp(_, _) => PlanNode.CoGroup
+
+  /**
+   * Structural peel label of an accepted grouped sum. A grouped int-pair source, including an
+   * empty typed source, is `GroupedSum(Scan)`. A row, key, or value filter wraps that scan. Any
+   * other accepted plan is `None`. Eligibility is [[ColumnarPlanner.groupedPairSource]], so any
+   * grouped int-pair source is included, not one particular source value.
+   */
+  private def expectedGroupedPeel(plan: Plan[_]): Option[String] =
+    def body(current: Plan[_]): Option[String] = current match
+      case Plan.FilterOp(source, _) => body(source).map(inner => s"FilterRow($inner)")
+      case Plan.FilterKeysOp(source, _) => body(source).map(inner => s"FilterKey($inner)")
+      case Plan.FilterValuesOp(source, _) => body(source).map(inner => s"FilterValue($inner)")
+      case source: Plan.Source[_] if ColumnarPlanner.groupedPairSource(source) => Some("Scan")
+      case _ => None
+
+    body(plan).map(inner => s"GroupedSum($inner)")
 
   private def narrowInfo(width: Int, layout: Layout): PartitioningInfo =
     PartitioningInfo(Distribution.Unknown(width), OrderingTag.Unsorted, layout)
