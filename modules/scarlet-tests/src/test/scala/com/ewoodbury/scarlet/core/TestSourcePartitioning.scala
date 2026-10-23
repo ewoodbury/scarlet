@@ -187,6 +187,10 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
       IntPairArrays(Array(1), Array.empty[Int])
     }
     caught.getMessage shouldBe lengthMismatchMessage
+    val owned = intercept[IllegalArgumentException] {
+      IntPairArrays.fromOwned(Array(1), Array(10, 20))
+    }
+    owned.getMessage shouldBe lengthMismatchMessage
   }
 
   "DistCollection.ofIntPairs" should "copy key and value ranges and still iterate" in {

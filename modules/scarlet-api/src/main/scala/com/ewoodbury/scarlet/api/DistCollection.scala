@@ -1,6 +1,13 @@
 package com.ewoodbury.scarlet.api
 
-import com.ewoodbury.scarlet.core.*
+import com.ewoodbury.scarlet.core.{
+  DoubleArrays,
+  ExecutionService,
+  IntArrays,
+  IntPairArrays,
+  Partition,
+  Plan,
+}
 
 /**
  * A lazy, immutable representation of a "distributed" collection. Operations build up a Plan,

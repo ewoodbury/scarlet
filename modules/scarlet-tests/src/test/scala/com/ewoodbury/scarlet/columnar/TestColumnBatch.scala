@@ -2,12 +2,17 @@ package com.ewoodbury.scarlet.columnar
 
 import scala.collection.immutable.ArraySeq
 
+import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.core.{DoubleArrays, IntArrays, IntPairArrays}
 
-class TestColumnBatch extends AnyFlatSpec with Matchers:
+class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
+
+  override def afterEach(): Unit =
+    ColumnMetrics.disarm()
+    ()
 
   "primitive batches" should "roundtrip ints, longs, floats, bools, and int pairs" in {
     BatchCodec.decodeInts(BatchCodec.ints(Seq(1, -2, 0))) shouldBe Seq(1, -2, 0)
@@ -117,6 +122,10 @@ class TestColumnBatch extends AnyFlatSpec with Matchers:
       BatchCodec.intPairs(Array(1), Array.empty[Int])
     }
     caught.getMessage shouldBe s"requirement failed: ${IntPairArrays.LengthMismatch}"
+    val ownedUnequal = intercept[IllegalArgumentException] {
+      BatchCodec.copiedIntPairs(Array(1), Array(10, 20))
+    }
+    ownedUnequal.getMessage shouldBe s"requirement failed: ${IntPairArrays.LengthMismatch}"
   }
 
   it should "share a pair column when narrowing to one column" in {

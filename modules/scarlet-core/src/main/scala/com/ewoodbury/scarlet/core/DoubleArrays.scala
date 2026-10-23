@@ -3,7 +3,7 @@ package com.ewoodbury.scarlet.core
 /**
  * Primitive `Double` values for one partition.
  *
- * The iterator yields values for the row path. The array is package-private so a caller who
+ * The iterator yields values for the row path. The array is `private[scarlet]`, so a caller who
  * pattern matches [[Partition.data]] on a public plan cannot mutate a constructed collection. The
  * columnar encoder copies it into a column. The partition stays readable for a later action, so
  * the column does not adopt the array.

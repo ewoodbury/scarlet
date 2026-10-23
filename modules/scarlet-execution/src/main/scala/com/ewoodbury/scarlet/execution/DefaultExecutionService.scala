@@ -47,9 +47,25 @@ class DefaultExecutionService extends ExecutionService {
   def groupedSum(plan: Plan[(Int, Int)]): Long =
     ColumnarPlanner.tryGroupedSum(plan).getOrElse {
       rowPartitions(plan).foldLeft(0L) { (total, partition) =>
-        partition.data.foldLeft(total)((acc, pair) => acc + pair._2.toLong)
+        partition.data.foldLeft(total)((acc, pair) => acc + presentValue(pair))
       }
     }
+
+  /**
+   * Present key and present value, widened to `Long`. A null key is dropped. A null value does not
+   * update the total. That is the folded total of `sumByKey`: an absent key never contributes, and
+   * an absent value does not change the sum.
+   *
+   * Named erasure boundary. `(Int, Int)` erases its fields, and `productElement` is how a null
+   * component stays visible without unboxing.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def presentValue(pair: (Int, Int)): Long =
+    val key: Any = pair.productElement(0)
+    val value: Any = pair.productElement(1)
+    (key, value) match
+      case (_: Int, present: Int) => present.toLong
+      case _ => 0L
 
   private def rowPartitions[A](plan: Plan[A]): Seq[Partition[A]] = plan match {
     case source: Plan.Source[A] => source.partitions

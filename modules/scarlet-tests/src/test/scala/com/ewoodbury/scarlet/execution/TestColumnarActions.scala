@@ -416,6 +416,44 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     row(source.groupedSum) shouldBe wide
   }
 
+  it should "select the wide kernel for each accepted pair shape" in {
+    val rows = Seq(1 -> 10, 2 -> 3, 1 -> 4)
+    val source = DistCollection(rows, 2)
+    val primitive = DistCollection.ofIntPairs(Array(1, 2, 1), Array(10, 3, 4), 2)
+    val empty = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 2)
+    val shapes = Seq(
+      source.plan,
+      source.filterValues[Int, Int](_ > 0).plan,
+      source.filterKeys[Int, Int](_ > 0).plan,
+      source.filter { case (key, value) => key > 0 && value > 1 }.plan,
+      source.map { case (key, value) => (key + 1, value + key) }.plan,
+      source.filter { case (_, value) => value > 0 }.map { case (key, value) => (value, key) }.plan,
+      primitive.plan,
+      empty.plan,
+    )
+
+    columnar {
+      shapes.foreach { plan =>
+        ColumnarPlanner.tryGroupedSum(plan) shouldBe defined
+      }
+    }
+  }
+
+  it should "drop null keys and null values on both grouped-sum paths" in {
+    val rows = Seq(
+      erasedPair(Some(1), Some(10)),
+      erasedPair(None, Some(99)),
+      erasedPair(Some(1), None),
+      erasedPair(None, None),
+      erasedPair(Some(2), Some(3)),
+    )
+    def source = DistCollection(rows, 2)
+
+    columnar(source.groupedSum) shouldBe 13L
+    row(source.groupedSum) shouldBe 13L
+    columnar(source.groupedSum) shouldBe row(source.groupedSum)
+  }
+
   "primitive sources" should "sum an int array like a boxed vector" in {
     val values = Array(1, 2, 3, 4, 5)
 
@@ -681,6 +719,16 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     info.distribution shouldBe Distribution.Unknown(width)
     info.ordering shouldBe OrderingTag.Unsorted
     info.layout shouldBe Layout.Columnar(ScarletConf.get.columnarBatchSize)
+
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
+  private def erasedPair(key: Option[Int], value: Option[Int]): (Int, Int) =
+    val left: AnyRef = key match
+      case Some(present) => Int.box(present)
+      case None => null
+    val right: AnyRef = value match
+      case Some(present) => Int.box(present)
+      case None => null
+    Tuple2(left, right).asInstanceOf[(Int, Int)]
 
   private def columnar[A](body: => A): A =
     ScarletRuntime.get.shuffle.clear()

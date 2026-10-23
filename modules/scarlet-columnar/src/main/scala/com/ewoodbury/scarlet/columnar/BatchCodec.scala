@@ -17,10 +17,9 @@ object BatchCodec:
    * iterator. An owned partition array is [[copiedInts]]: this module does not see that holder.
    */
   def ints(values: Iterable[Int]): ColumnBatch =
-    val primitive = values match
-      case array: ArraySeq.ofInt => Some(array.unsafeArray)
-      case _ => None
-    int32Batch(copyOrFill(values, primitive))
+    int32Batch(values match
+      case array: ArraySeq.ofInt => copyCounted(array.unsafeArray)
+      case other => fill(other))
 
   def nullableInts(values: Seq[Option[Int]]): ColumnBatch =
     batch(Int32Column.fromNullable(values))
@@ -44,10 +43,9 @@ object BatchCodec:
 
   /** An `ArraySeq.ofDouble` is copied. Any other iterable is filled from its iterator. */
   def float64s(values: Iterable[Double]): ColumnBatch =
-    val primitive = values match
-      case array: ArraySeq.ofDouble => Some(array.unsafeArray)
-      case _ => None
-    float64Batch(copyOrFill(values, primitive))
+    float64Batch(values match
+      case array: ArraySeq.ofDouble => copyCounted(array.unsafeArray)
+      case other => fill(other))
 
   /** Copies `values`. See [[copiedInts]] for why the column does not adopt the array. */
   private[scarlet] def copiedFloat64s(values: Array[Double]): ColumnBatch =
@@ -77,14 +75,16 @@ object BatchCodec:
     copiedIntPairs(keys, values)
 
   /**
-   * Copies arrays that already have the same length. The pair holder checked them, so this does
-   * not check again. See [[copiedInts]] for why the arrays are copied rather than adopted.
+   * Copies `keys` and `values`. Unequal lengths are rejected with the same sentence as
+   * [[intPairs]]. See [[copiedInts]] for why the arrays are copied rather than adopted.
    */
   private[scarlet] def copiedIntPairs(keys: Array[Int], values: Array[Int]): ColumnBatch =
+    require(keys.length == values.length, LengthMismatch)
+    val rows = keys.length
     ColumnMetrics.notePrimitiveEncode()
     pairBatch(
-      Int32Column.of(copyPrimitive(keys), Validity.allValid(keys.length), keys.length),
-      Int32Column.of(copyPrimitive(values), Validity.allValid(values.length), values.length),
+      Int32Column.of(copyPrimitive(keys), Validity.allValid(rows), rows),
+      Int32Column.of(copyPrimitive(values), Validity.allValid(rows), rows),
     )
 
   /** One fill of each column. `size` then the iterator, so a `Seq` is not copied twice. */
@@ -105,6 +105,14 @@ object BatchCodec:
       Int32Column.of(leftValues, Validity.allValid(n), n),
       Int32Column.of(rightValues, Validity.allValid(n), n),
     )
+
+  /**
+   * Same fill as [[intPairs]], except a null key or value is an absent slot. A column with no
+   * nulls stays all-valid. Grouped sum uses this so a null key is dropped instead of failing the
+   * encode. Other actions keep the unboxing fill.
+   */
+  private[scarlet] def intPairsPreservingAbsence(values: Iterable[(Int, Int)]): ColumnBatch =
+    fillPairs(values)
 
   def nullableIntPairs(values: Seq[(Option[Int], Option[Int])]): ColumnBatch =
     val n = values.size
@@ -293,28 +301,72 @@ object BatchCodec:
     }
     throw new IllegalArgumentException(s"null join value at row $from")
 
-  /**
-   * Copies `primitive` when it is present and counts that encode. Otherwise fills from the
-   * iterator. `size` then one pass, so a `Seq` is not copied twice.
-   */
+  /** Fills from the iterator. `size` then one pass, so a `Seq` is not copied twice. */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private def copyOrFill[A: ClassTag](
-      values: Iterable[A],
-      primitive: Option[Array[A]],
-  ): Array[A] =
-    primitive match
-      case Some(array) => copyCounted(array)
-      case None =>
-        val n = values.size
-        val filled = new Array[A](n)
-        val iterator = values.iterator
-        var row = 0
-        while (row < n) {
-          val value: A = iterator.next()
-          filled(row) = value
-          row += 1
-        }
-        filled
+  private def fill[A: ClassTag](values: Iterable[A]): Array[A] =
+    val n = values.size
+    val filled = new Array[A](n)
+    val iterator = values.iterator
+    var row = 0
+    while (row < n) {
+      val value: A = iterator.next()
+      filled(row) = value
+      row += 1
+    }
+    filled
+
+  /**
+   * Fills both columns in one pass. A null component is absent. The absence bitmap is allocated
+   * only after the first null, so a fully present pair column stays all-valid.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Var", "org.wartremover.warts.Any"))
+  private def fillPairs(values: Iterable[(Int, Int)]): ColumnBatch =
+    val n = values.size
+    val leftValues = new Array[Int](n)
+    val rightValues = new Array[Int](n)
+    val iterator = values.iterator
+    var row = 0
+    var leftAbsent = Option.empty[Array[Boolean]]
+    var rightAbsent = Option.empty[Array[Boolean]]
+    while (row < n) {
+      val pair = iterator.next()
+      // Erased tuple. `productElement` does not unbox, so a null component stays absent.
+      leftAbsent = writeComponent(pair.productElement(0), leftValues, leftAbsent, n, row)
+      rightAbsent = writeComponent(pair.productElement(1), rightValues, rightAbsent, n, row)
+      row += 1
+    }
+    pairBatch(
+      Int32Column.of(leftValues, componentValidity(leftAbsent, n), n),
+      Int32Column.of(rightValues, componentValidity(rightAbsent, n), n),
+    )
+
+  /**
+   * Writes a present `Int`. A null or non-int cell marks the row absent.
+   *
+   * Named erasure boundary. The cell is the erased field of an `(Int, Int)`, so the static type is
+   * `Any` and a null stays absent instead of unboxing.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def writeComponent(
+      cell: Any,
+      into: Array[Int],
+      absent: Option[Array[Boolean]],
+      width: Int,
+      row: Int,
+  ): Option[Array[Boolean]] =
+    cell match
+      case value: Int =>
+        into(row) = value
+        absent
+      case _ =>
+        val flags = absent.getOrElse(new Array[Boolean](width))
+        flags(row) = true
+        Some(flags)
+
+  private def componentValidity(absent: Option[Array[Boolean]], width: Int): Validity =
+    absent match
+      case None => Validity.allValid(width)
+      case Some(flags) => Validity.pack(width, row => !flags(row))
 
   /** Copies `values` and counts one primitive encode. */
   private def copyCounted[A: ClassTag](values: Array[A]): Array[A] =

@@ -15,6 +15,16 @@ class TestMorselScheduler extends AnyFlatSpec with Matchers:
     lengths shouldBe morsels.map(_.length)
   }
 
+  it should "count one visit for every morsel when several workers run" in {
+    val morsels = (0 until 8).toVector.map(row => BatchCodec.ints(Seq(row)))
+    ColumnMetrics.arm()
+    try
+      val lengths = MorselScheduler.map(morsels, parallelism = 4)((_, batch) => batch.length)
+      lengths shouldBe morsels.map(_.length)
+      ColumnMetrics.visitCount shouldBe morsels.length.toLong
+    finally ColumnMetrics.disarm()
+  }
+
   it should "steal the tail of a worker blocked on its own head" in {
     // Two workers, eight morsels. Worker 0's deque is 0, 2, 4, 6 and it takes 0 first.
     // 0 blocks until 2, 4, and 6 finish. Those sit behind 0, so they run only if the other

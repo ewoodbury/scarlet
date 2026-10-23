@@ -7,8 +7,8 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
  * armed. Disarmed by default, so a study does not record. A test arms around one action and
  * disarms afterwards, including from `afterEach`.
  *
- * A primitive encode is one `ArraySeq.ofInt`, `ArraySeq.ofDouble`, or owned primitive array copied
- * into a column. A boxed iterable does not count.
+ * A primitive encode is one `ArraySeq.ofInt`, `ArraySeq.ofDouble`, owned primitive array, or raw
+ * `intPairs(Array, Array)` copied into columns. A boxed iterable does not count.
  */
 object ColumnMetrics:
 
@@ -36,7 +36,7 @@ object ColumnMetrics:
 
   def decodedValueCount: Long = decoded.get()
 
-  /** Owned or `ArraySeq` primitive encodes recorded since [[arm]]. */
+  /** Owned, `ArraySeq`, or raw int-pair primitive encodes recorded since [[arm]]. */
   def primitiveEncodeCount: Long = primitiveEncodes.get()
 
   private[columnar] def noteBatch(): Unit =

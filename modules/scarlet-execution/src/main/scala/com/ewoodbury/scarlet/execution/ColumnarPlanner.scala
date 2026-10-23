@@ -4,7 +4,14 @@ import scala.annotation.tailrec
 
 import com.ewoodbury.scarlet.api.{DictionaryStringPredicate, IntJoinTriplePredicate}
 import com.ewoodbury.scarlet.columnar.*
-import com.ewoodbury.scarlet.core.*
+import com.ewoodbury.scarlet.core.{
+  DoubleArrays,
+  IntArrays,
+  IntPairArrays,
+  Partition,
+  Plan,
+  ScarletConf,
+}
 
 /**
  * Lowers `Int`, `Double`, `(Int, Int)`, and `String` plans to [[PhysicalOp]] and runs that tree on
@@ -196,6 +203,9 @@ object ColumnarPlanner:
           Plan.ValuesOp(Plan.MapValuesOp(source, mapper)),
           PhysicalOp.Column(PhysicalOp.MapValue(child), 1),
         ) =>
+      // Named erasure boundary. The descriptor check verified the declared `Int => Int` shape
+      // before lowering, so this cast is safe.
+      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Int => Int]
       foldLong(pairsOf(interpret(source, child))) { batch =>
         ColumnReduce.sumMappedInt32(batch, ordinal = 1, value => fn(value))
@@ -263,7 +273,7 @@ object ColumnarPlanner:
   private def runGroupedSum(source: Plan.Source[_], steps: List[PairStep]): Option[Long] =
     classify(source) match
       case Some(PhysicalOp.Kind.Pairs) =>
-        val parts = encodePairs(source.partitions)
+        val parts = encodeGroupedPairs(source.partitions)
         val grouped = ColumnPipeline.sumByKey(
           parts,
           keyOrdinal = 0,
@@ -686,6 +696,9 @@ object ColumnarPlanner:
     case (Plan.ValuesOp(source), PhysicalOp.Column(child, 1)) =>
       pairProjection(source, child, ordinal = 1, selectedPartition = selectedPartition)
     case (Plan.MapValuesOp(source, mapper), PhysicalOp.MapValue(child)) =>
+      // Named erasure boundary. The descriptor check verified the declared `Int => Int` shape
+      // before lowering, so this cast is safe.
+      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Int => Int]
       Columns.Pairs(onEach(pairsOf(interpret(source, child, selectedPartition))) { batch =>
         ColumnKernel.projectInt32(batch, 1, value => fn(value))
@@ -876,6 +889,18 @@ object ColumnarPlanner:
       partition.data match
         case pairs: IntPairArrays => BatchCodec.copiedIntPairs(pairs.keys, pairs.values)
         case other => BatchCodec.intPairs(other.asInstanceOf[Iterable[(Int, Int)]])
+    }.toVector
+
+  /**
+   * Pair encode for grouped sum. A boxed null key or value stays absent so [[tryGroupedSum]] can
+   * drop it. An owned pair array has no nulls and is copied like [[encodePairs]].
+   */
+  private def encodeGroupedPairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+    partitions.map { partition =>
+      partition.data match
+        case pairs: IntPairArrays => BatchCodec.copiedIntPairs(pairs.keys, pairs.values)
+        case other =>
+          BatchCodec.intPairsPreservingAbsence(other.asInstanceOf[Iterable[(Int, Int)]])
     }.toVector
 
   private def encodeStrings(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
