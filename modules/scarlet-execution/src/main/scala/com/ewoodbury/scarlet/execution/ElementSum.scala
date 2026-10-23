@@ -1,9 +1,14 @@
 package com.ewoodbury.scarlet.execution
 
+import scala.annotation.tailrec
+
 import com.ewoodbury.scarlet.columnar.{ColumnBatch, ColumnKernel, Float64Pipeline, Int32Pipeline}
 
 /**
  * Sum a filter/project chain without writing its output column. The match is outside the row loop.
+ * A chain longer than four stays in that fold: five int maps call [[Int32Pipeline.sumPPPPP]], and
+ * any other longer int chain walks its steps. [[countLonger]] counts two or more steps the same
+ * way. [[countMapped]] counts one trailing int project. Survivors use [[Int32Pipeline.encoded]].
  */
 @SuppressWarnings(
   Array(
@@ -19,10 +24,6 @@ object ElementSum:
 
     def pred(fn: Any): ColumnKernel.Int32Predicate =
       val function = fn.asInstanceOf[Int => Boolean]
-      value => function(value)
-
-    def proj(fn: Any): ColumnKernel.Int32Map =
-      val function = fn.asInstanceOf[Int => Int]
       value => function(value)
 
     steps match
@@ -84,6 +85,72 @@ object ElementSum:
         Int32Pipeline.sumPPPP(batch, proj(a), proj(b), proj(c), proj(d))
       case _ =>
         throw new IllegalStateException(s"unsupported ints pipeline of length ${steps.length}")
+
+  /**
+   * Sum an int chain that `lower` split after four steps. Five projects use the specialized loop.
+   * Any other chain, including a filter among the steps, walks the steps and does not write.
+   */
+  def sumLonger(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): Long =
+    import ColumnarPlanner.ElementStep.*
+
+    steps match
+      case List(Project(a), Project(b), Project(c), Project(d), Project(e)) =>
+        Int32Pipeline.sumPPPPP(batch, proj(a), proj(b), proj(c), proj(d), proj(e))
+      case _ =>
+        val stages = compile(steps)
+        Int32Pipeline.sumEncoded(batch, hasFilter(steps), value => runSteps(stages, value))
+
+  /**
+   * Count without writing the chain, including two to four steps. A filter drops rows. A map-only
+   * chain keeps null slots.
+   */
+  def countLonger(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): Long =
+    val stages = compile(steps)
+    Int32Pipeline.countEncoded(batch, hasFilter(steps), value => runSteps(stages, value))
+
+  /** Sum one int projection. The mapped column is not written. */
+  def sumMapped(batch: ColumnBatch, mapper: Any): Long =
+    Int32Pipeline.sumProjected(batch, proj(mapper))
+
+  /**
+   * Count a single int projection. The mapped column is not written. Null slots stay in the count.
+   */
+  def countMapped(batch: ColumnBatch, mapper: Any): Long =
+    val project = proj(mapper)
+    Int32Pipeline.countEncoded(
+      batch,
+      compact = false,
+      value => Int32Pipeline.encoded(project(value)),
+    )
+
+  private def proj(fn: Any): ColumnKernel.Int32Map =
+    val function = fn.asInstanceOf[Int => Int]
+    value => function(value)
+
+  private def hasFilter(steps: List[ColumnarPlanner.ElementStep]): Boolean =
+    steps.exists {
+      case ColumnarPlanner.ElementStep.Filter(_) => true
+      case ColumnarPlanner.ElementStep.Project(_) => false
+    }
+
+  private def compile(steps: List[ColumnarPlanner.ElementStep]): List[Int => Long] =
+    steps.map {
+      case ColumnarPlanner.ElementStep.Filter(fn) =>
+        val predicate = fn.asInstanceOf[Int => Boolean]
+        (value: Int) => if (predicate(value)) then Int32Pipeline.encoded(value) else 0L
+      case ColumnarPlanner.ElementStep.Project(fn) =>
+        val mapper = fn.asInstanceOf[Int => Int]
+        (value: Int) => Int32Pipeline.encoded(mapper(value))
+    }
+
+  @tailrec
+  private def runSteps(stages: List[Int => Long], value: Int): Long =
+    stages match
+      case Nil => Int32Pipeline.encoded(value)
+      case stage :: rest =>
+        val encoded = stage(value)
+        if ((encoded & 1L) == 0L) then 0L
+        else runSteps(rest, (encoded >> 1).toInt)
 
   def sumFloats(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): Double =
     import ColumnarPlanner.ElementStep.*
