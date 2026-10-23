@@ -3,14 +3,15 @@ package com.ewoodbury.scarlet.columnar
 /**
  * Multi-batch sum and inner join.
  *
- * Each input batch is sliced into morsels. Sums run `sumInt32` on the morsel, `sumInt64` to merge
- * that batch's partials, and `sumInt64` again after the exchange, so a partial sum does not wrap
- * at `Int`. A `keep`/`map` or [[PairStep]] overload applies that work inside the partial
- * `sumInt32`, so the exchange still sees one partial per input batch. Each output batch is an
- * `Int32` key and an `Int64` sum. Fold the sum with [[ColumnReduce.sumInt64]] at ordinal 1; the
- * batch has two columns. An empty input is `numPartitions` empty sum batches, the same convention
- * as [[HashReduce.byKey]]. The join reads key column 0 and value column 1 on both sides, exchanges
- * each side, and probes one partition at a time.
+ * Sums read each input batch in ranges of `batchSize` rows and leave those columns in place.
+ * `sumInt32` runs on the range, `sumInt64` merges that batch's partials, and `sumInt64` runs again
+ * after the exchange, so a partial sum does not wrap at `Int`. A `keep`/`map` or [[PairStep]]
+ * overload applies that work inside the partial `sumInt32`, so the exchange still sees one partial
+ * per input batch. Each output batch is an `Int32` key and an `Int64` sum. Fold the sum with
+ * [[ColumnReduce.sumInt64]] at ordinal 1; the batch has two columns. An empty input is
+ * `numPartitions` empty sum batches, the same convention as [[HashReduce.byKey]]. The join reads
+ * key column 0 and value column 1 on both sides, exchanges each side, and probes one partition at
+ * a time.
  */
 object ColumnPipeline:
 
@@ -22,8 +23,16 @@ object ColumnPipeline:
       parallelism: Int,
       batchSize: Int,
   ): Vector[ColumnBatch] =
-    runSum(batches, numPartitions, parallelism, batchSize) { morsel =>
-      HashAggregate.sumInt32(morsel, keyOrdinal, valueOrdinal)
+    runSum(batches, numPartitions, parallelism, batchSize) {
+      GroupedSumKernel.run(
+        batches,
+        keyOrdinal,
+        valueOrdinal,
+        numPartitions,
+        parallelism,
+        batchSize,
+        Vector.empty,
+      )
     }
 
   /**
@@ -40,8 +49,17 @@ object ColumnPipeline:
       keep: ColumnKernel.Int32Predicate,
       map: ColumnKernel.Int32Map,
   ): Vector[ColumnBatch] =
-    runSum(batches, numPartitions, parallelism, batchSize) { morsel =>
-      HashAggregate.sumInt32(morsel, keyOrdinal, valueOrdinal, keep, map)
+    runSum(batches, numPartitions, parallelism, batchSize) {
+      GroupedSumKernel.run(
+        batches,
+        keyOrdinal,
+        valueOrdinal,
+        numPartitions,
+        parallelism,
+        batchSize,
+        keep,
+        map,
+      )
     }
 
   /**
@@ -74,8 +92,16 @@ object ColumnPipeline:
             PassValue,
           )
         case None =>
-          runSum(batches, numPartitions, parallelism, batchSize) { morsel =>
-            HashAggregate.sumInt32(morsel, keyOrdinal, valueOrdinal, steps)
+          runSum(batches, numPartitions, parallelism, batchSize) {
+            GroupedSumKernel.run(
+              batches,
+              keyOrdinal,
+              valueOrdinal,
+              numPartitions,
+              parallelism,
+              batchSize,
+              steps,
+            )
           }
 
   private def runSum(
@@ -83,19 +109,13 @@ object ColumnPipeline:
       numPartitions: Int,
       parallelism: Int,
       batchSize: Int,
-  )(partial: ColumnBatch => ColumnBatch): Vector[ColumnBatch] =
+  )(combinedOf: => Vector[ColumnBatch]): Vector[ColumnBatch] =
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
     if (batches.isEmpty) then Vector.fill(numPartitions)(emptySum)
     else
-      val combined = PartialCombine.perBatch(
-        batches,
-        batchSize,
-        parallelism,
-        partial,
-        partials => HashAggregate.sumInt64(partials, keyOrdinal = 0, valueOrdinal = 1),
-      )
+      val combined = combinedOf
       val buckets = HashExchange.partitionAll(combined, keyOrdinal = 0, numPartitions, parallelism)
       MorselScheduler.map(buckets, parallelism) { (_, bucket) =>
         HashAggregate.sumInt64(bucket, keyOrdinal = 0, valueOrdinal = 1)

@@ -38,6 +38,32 @@ object Validity:
         val tail = live & 63
         tail == 0 || (words(fullWords) & ((1L << tail) - 1L)) == (1L << tail) - 1L
 
+  /**
+   * Every bit in `[start, start + length)` is set. An empty range is present. The caller keeps the
+   * range inside the bitmap.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private[columnar] def rangePresent(validity: Validity, start: Int, length: Int): Boolean =
+    if (length <= 0) then true
+    else
+      val words = validity.words
+      val end = start + length
+      var row = start
+      var dense = true
+      while (dense && row < end && (row & 63) != 0) {
+        dense = isSet(words, row)
+        row += 1
+      }
+      while (dense && end - row >= 64) {
+        if (words(row >>> 6) != -1L) then dense = false
+        row += 64
+      }
+      while (dense && row < end) {
+        dense = isSet(words, row)
+        row += 1
+      }
+      dense
+
   /** Row is in range and `words` covers it. Kernels use this on the hot path. */
   private[columnar] inline def isSet(words: Array[Long], row: Int): Boolean =
     ((words(row >>> 6) >>> (row & 63)) & 1L) != 0L

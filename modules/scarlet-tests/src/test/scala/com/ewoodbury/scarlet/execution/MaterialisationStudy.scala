@@ -53,14 +53,11 @@ object MaterialisationStudy:
   private val stagePlan: Vector[(String, String)] =
     Vector(
       ("encode", "copiedIntPairs"),
-      ("partial", "slice+sumInt32"),
+      ("partial", "range+sumInt32"),
       ("merge", "concat+sumInt64"),
       ("exchange", "partitionAll"),
       ("final", "sumInt64+ColumnReduce"),
     )
-
-  private val partialSum: ColumnBatch => ColumnBatch =
-    morsel => HashAggregate.sumInt32(morsel, keyOrdinal = 0, valueOrdinal = 1)
 
   private val mergeSum: ColumnBatch => ColumnBatch =
     batch => HashAggregate.sumInt64(batch, keyOrdinal = 0, valueOrdinal = 1)
@@ -383,7 +380,14 @@ object MaterialisationStudy:
     val (encoded, encodeMark) = meter(encodeOwnedPairs(grouped))
     require(lengthOf(encoded) == groupedRows, "grouped encode dropped rows")
     val (split, partialMark) = meter {
-      PartialCombine.partialMorsels(encoded, batchSize, threads, partialSum)
+      GroupedSumKernel.partialMorsels(
+        encoded,
+        keyOrdinal = 0,
+        valueOrdinal = 1,
+        parallelism = threads,
+        batchSize = batchSize,
+        steps = Vector.empty[PairStep],
+      )
     }
     val (merged, mergeMark) = meter {
       PartialCombine.mergeMorsels(split._1, split._2, threads, mergeSum)
@@ -405,7 +409,14 @@ object MaterialisationStudy:
 
   private def groupedOnce(source: DistCollection[(Int, Int)], threads: Int): Long =
     val encoded = encodeOwnedPairs(source)
-    val (sizes, partials) = PartialCombine.partialMorsels(encoded, batchSize, threads, partialSum)
+    val (sizes, partials) = GroupedSumKernel.partialMorsels(
+      encoded,
+      keyOrdinal = 0,
+      valueOrdinal = 1,
+      parallelism = threads,
+      batchSize = batchSize,
+      steps = Vector.empty[PairStep],
+    )
     val merged = PartialCombine.mergeMorsels(sizes, partials, threads, mergeSum)
     val buckets = HashExchange.partitionAll(
       merged,
