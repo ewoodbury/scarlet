@@ -66,8 +66,7 @@ final case class DistCollection[A](plan: Plan[A]):
   private def filterStringLiterals(values: Vector[String])(using
       ev: A =:= String,
   ): DistCollection[A] =
-    val predicate = new DictionaryStringPredicate[A](ev):
-      val literals: Vector[String] = values
+    val predicate = new DictionaryStringPredicate[A](values, ev)
     DistCollection(Plan.FilterOp(this.plan, predicate))
 
   /**
@@ -383,16 +382,16 @@ final case class DistCollection[A](plan: Plan[A]):
 end DistCollection
 
 /**
- * String literal predicate. [[literals]] is the only membership test: [[apply]] is final and uses
- * that vector, so a columnar code comparison and the row path cannot disagree. The planner reads
- * [[literals]] and does not call [[apply]].
+ * String literal predicate. [[literals]] is the membership source: [[apply]] is final and tests an
+ * immutable set built from that vector, so the planner and the row path cannot disagree. The
+ * planner reads [[literals]] and does not call [[apply]].
  */
-private[scarlet] abstract class DictionaryStringPredicate[A](ev: A =:= String)
-    extends (A => Boolean):
+private[scarlet] final class DictionaryStringPredicate[A](
+    val literals: Vector[String],
+    ev: A =:= String,
+) extends (A => Boolean):
 
-  def literals: Vector[String]
-
-  private lazy val membership: Set[String] = literals.toSet
+  private val membership: Set[String] = literals.toSet
 
   final def apply(value: A): Boolean = membership.contains(ev(value))
 

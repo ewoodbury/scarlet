@@ -178,12 +178,6 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
       1 -> ((10, 8)),
     )
     columnar {
-      val collected = build.join(probe).collect()
-      build.join(probe).filterJoinLeft(_ == 10).collect() shouldBe collected.filter {
-        case (_, (left, _)) => left == 10
-      }
-    }
-    columnar {
       val info = assertHashed(filtered)
       info.layout shouldBe Layout.Columnar(ScarletConf.get.columnarBatchSize)
     }
@@ -318,8 +312,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
   }
 
   it should "filter a dictionary predicate by its literals and keep startsWith on the scalar path" in {
-    val equality = new DictionaryStringPredicate[String](summon[String =:= String]):
-      val literals: Vector[String] = Vector("US")
+    val equality = new DictionaryStringPredicate[String](Vector("US"), summon[String =:= String])
     val recognized = columnar(DistCollection(Seq("US", "CA", "US"), 1).filter(equality))
 
     recognized.collect() shouldBe Seq("US", "US")

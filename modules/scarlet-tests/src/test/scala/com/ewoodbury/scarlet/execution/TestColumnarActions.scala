@@ -693,22 +693,22 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     )
   }
 
-  it should "keep an overloaded apply(Int) that is not the mapValues contract on the row path" in {
-    checkOverloadedMapValues()
+  it should "leave an overloaded apply(Any) beside apply(Int) on the row path" in {
+    @SuppressWarnings(Array("org.wartremover.warts.Any"))
+    val checked = locally {
+      val overloaded = new Function1[Any, Any]:
+        def apply(value: Any): Any = "nope"
+        def apply(value: Int): Int = value * 2
+      val mapped =
+        DistCollection.ofIntPairs(Array(1), Array(10), 1).mapValues[Int, Int, Any](overloaded)
+
+      armColumnar()
+      ColumnarPlanner.partitioning(mapped.plan) shouldBe None
+      mapped.collect().toList shouldBe List((1, "nope"))
+      columnar(mapped.collect().toList) shouldBe row(mapped.collect().toList)
+    }
+    checked
   }
-
-  @SuppressWarnings(Array("org.wartremover.warts.Any"))
-  private def checkOverloadedMapValues(): Unit =
-    val overloaded = new Function1[Any, Any]:
-      def apply(value: Any): Any = "nope"
-      def apply(value: Int): Int = value * 2
-    val mapped =
-      DistCollection.ofIntPairs(Array(1), Array(10), 1).mapValues[Int, Int, Any](overloaded)
-
-    armColumnar()
-    ColumnarPlanner.partitioning(mapped.plan) shouldBe None
-    mapped.collect().toList shouldBe List((1, "nope"))
-    columnar(mapped.collect().toList) shouldBe row(mapped.collect().toList)
 
   it should "leave a mapValues that changes type on the row path" in {
     val keys = Array(1, 2, 3)

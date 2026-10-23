@@ -61,8 +61,8 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
       def iterator: Iterator[Int] = new Iterator[Int]:
         def hasNext: Boolean = true
         def next(): Int =
-          read.set(true)
-          1
+          if (read.compareAndSet(false, true)) then 1
+          else throw new IllegalStateException("source iterator was read past the first element")
 
     an[IllegalArgumentException] should be thrownBy DistCollection(Seq(1, 2), 0)
     an[IllegalArgumentException] should be thrownBy DistCollection(data, 0)

@@ -120,13 +120,9 @@ object PairKernel:
         Validity.isSet(keys.validity.words, row) &&
           Validity.isSet(leftValues.validity.words, row) &&
           Validity.isSet(rightValues.validity.words, row)
-      if (!present) then
-        throw new IllegalArgumentException(
-          s"requirement failed: null Int32 join value at row $row",
-        )
+      require(present, s"null Int32 join value at row $row")
       row += 1
     }
-    throw new IllegalArgumentException("requirement failed: null Int32 join value")
 
   private def int32At(batch: ColumnBatch, ordinal: Int): Int32Column =
     batch.columns.lift(ordinal) match

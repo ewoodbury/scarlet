@@ -120,17 +120,32 @@ object ColumnarPlanner:
 
   /**
    * First `n` values in partition order. Decoding stops once `n` values are in hand, and every
-   * batch of a partition contributes before the next partition is read.
+   * batch of a partition contributes before the next partition is read. Each returned chunk is
+   * appended once, in order.
    */
   private def prefixOf(plan: Plan[_], op: PhysicalOp, count: Int, n: Int): Seq[Any] =
-    @tailrec
-    def read(index: Int, taken: Int, acc: List[Any]): List[Any] =
-      if (index >= count || taken >= n) then acc
-      else
-        val chunk = decodePrefix(interpret(plan, op, Some(index)), n - taken).toList
-        read(index + 1, taken + chunk.length, chunk.reverse ::: acc)
+    takeChunks(
+      n,
+      Iterator.range(0, count).map { index => (remaining: Int) =>
+        decodePrefix(interpret(plan, op, Some(index)), remaining)
+      },
+    )
 
-    read(0, 0, Nil).reverse
+  /** Append chunks in order and stop once `limit` elements are stored. */
+  @SuppressWarnings(Array("org.wartremover.warts.MutableDataStructures"))
+  private def takeChunks[A](limit: Int, producers: Iterator[Int => Seq[A]]): Seq[A] =
+    val acc = List.newBuilder[A]
+
+    @tailrec
+    def read(taken: Int): Unit =
+      if (taken < limit && producers.hasNext) then
+        val produce = producers.next()
+        val chunk = produce(limit - taken)
+        acc ++= chunk
+        read(taken + chunk.length)
+
+    read(0)
+    acc.result()
 
   /**
    * Row count of a columnar plan. `None` means the row path. This reads batch lengths and does not
@@ -462,17 +477,12 @@ object ColumnarPlanner:
       limit: Int,
       decode: (ColumnBatch, Int) => Seq[A],
   ): Seq[Any] =
-    @tailrec
-    def read(rest: List[ColumnBatch], taken: Int, acc: List[A]): List[A] =
-      if (taken >= limit) then acc
-      else
-        rest match
-          case Nil => acc
-          case batch :: tail =>
-            val chunk = decode(batch, limit - taken).toList
-            read(tail, taken + chunk.length, chunk.reverse ::: acc)
-
-    read(parts.toList, 0, Nil).reverse
+    takeChunks(
+      limit,
+      parts.iterator.map { batch => (remaining: Int) =>
+        decode(batch, remaining)
+      },
+    )
 
   private def lowerPlan(plan: Plan[_]): Option[PhysicalOp] =
     val (base, steps) = elementSteps(plan, Int.MaxValue)
@@ -674,6 +684,7 @@ object ColumnarPlanner:
           case _ => None
 
   private def kindOf(descriptor: Plan.SourceDescriptor): Option[PhysicalOp.Kind] = descriptor match
+    // Boundary guard: classify returns on Unknown before this match.
     case Plan.SourceDescriptor.Unknown => None
     case Plan.SourceDescriptor.Ints => Some(PhysicalOp.Kind.Ints)
     case Plan.SourceDescriptor.Doubles => Some(PhysicalOp.Kind.Floats)
@@ -692,6 +703,7 @@ object ColumnarPlanner:
         case Plan.SourceDescriptor.Doubles => rows.forall(isDoubleValue)
         case Plan.SourceDescriptor.Pairs => rows.forall(isIntPairValue)
         case Plan.SourceDescriptor.Strings => rows.forall(isStringValue)
+        // Boundary guard: classify does not call this with Unknown.
         case Plan.SourceDescriptor.Unknown => false
 
   /**
@@ -812,6 +824,7 @@ object ColumnarPlanner:
           Plan.ReduceByKeyOp(source, reduceFunc),
           PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)),
         ) =>
+      // Boundary guard: take refuses an aggregate, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
       val op = reduceFunc.asInstanceOf[(Int, Int) => Int]
       Columns.Pairs(
@@ -827,6 +840,7 @@ object ColumnarPlanner:
           Plan.JoinOp(left, right, _),
           PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
         ) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       Columns.Triples(
         ColumnPipeline.innerJoin(
