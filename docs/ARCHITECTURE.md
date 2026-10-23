@@ -62,7 +62,7 @@ asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors
 
 ### Columnar completion contract
 
-The following 121 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. All 28 filter/map orderings of lengths 2–4 are covered for each scalar type.
+The following 122 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. All 28 filter/map orderings of lengths 2–4 are covered for each scalar type.
 `Unknown(2)` denotes the two source partitions in the small contract fixtures; aggregate and join
 outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are exact.
 
@@ -74,6 +74,7 @@ outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are 
 | Five- and six-step int, double, and string runs | `Columnar` for int/double; `Utf8Dict` for string | `Project(Pipeline4(Scan))`, `Pipeline2(Pipeline4(Scan))` |
 | String source, scalar filter/map, filter-map run, dictionary equality filter and mapped dictionary result | `Utf8Dict` | `Scan`, `Filter(Scan)`, `Project(Scan)`, `Pipeline2(Scan)`, `Filter(Scan)`, `Project(Filter(Scan))` respectively |
 | Int-pair source and row/key/value filters | `Columnar` | `Scan`, `FilterRow(Scan)`, `FilterKey(Scan)`, `FilterValue(Scan)` |
+| Empty typed int-pair source | `Columnar` | `Scan` |
 | Pair `keys`, `values`, int `mapValues`, mapped key/value columns, filtered int `mapValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `Project(Key(Scan))`, `Project(Value(Scan))`, `FilterValue(MapValue(Scan))` |
 | Int `reduceByKey`, after a value filter or int `mapValues`, and nested reduction | `Columnar` | `HashAggregate(Exchange(Scan))`, `HashAggregate(Exchange(FilterValue(Scan)))`, `HashAggregate(Exchange(MapValue(Scan)))`, `HashAggregate(Exchange(HashAggregate(Exchange(Scan))))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
@@ -84,17 +85,19 @@ outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are 
 and decodes only the requested prefix. The contract checks an int `Pipeline2(Scan)` and pair
 `FilterValue(Scan)` with `tryTake`.
 
-Fused `groupedSum` is action-level: a witnessed int-pair source with pair filters and/or a pair map
+Fused `groupedSum` is action-level: a typed int-pair source with pair filters and/or a pair map
 is scanned by `ColumnPipeline.sumByKey`. `partitioning` reports `Columnar`, but `lower` returns
 `None` for a pair map and there is no `PhysicalOp.shape` for this fused action today. The contract
 checks the fused sum result and pins that absence rather than inventing a physical tree.
 
-These 37 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+These 36 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
 `sortBy`, map on join triples, a general tuple filter on join triples, non-Int `mapValues`,
 string/double pair projection or pair filters, string/double-key `groupByKey`, `reduceByKey`, and
-join, single-precision `Float` sources/maps, all-null strings, empty sources without a type witness,
-and an unsupported Boolean source. A map of a pair is also excluded from `lower` and `tryRun`; its
+join, single-precision `Float` sources/maps, all-null strings, empty generic sources without a type
+descriptor, and an unsupported Boolean source. Primitive source factories carry a descriptor, which
+supplies the type for empty partitions; when values are present, the planner still requires data
+inference to agree with that descriptor. A map of a pair is also excluded from `lower` and `tryRun`; its
 action-specific `groupedSum` fusion is described above.
 
 The original completion request also classifies type-changing maps and sort-merge/broadcast joins

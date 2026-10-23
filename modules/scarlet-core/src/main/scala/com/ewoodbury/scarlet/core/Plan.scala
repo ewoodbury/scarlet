@@ -12,6 +12,12 @@ sealed trait Plan[A]
 object Plan {
 
   /**
+   * Type information carried by a source for empty partitions and checked against non-empty data.
+   */
+  enum SourceDescriptor:
+    case Unknown, Ints, Doubles, Pairs, Strings
+
+  /**
    * Applies a user function over each input partition using iterators. The function receives an
    * iterator view of the partition elements and returns an iterator of output elements. This is a
    * narrow transformation that preserves partitioning metadata where applicable.
@@ -72,7 +78,10 @@ object Plan {
    * `() => Iterable[A]` makes it lazier, ensuring the source data isn't iterated until execution
    * starts.
    */
-  case class Source[A](partitions: Seq[Partition[A]]) extends Plan[A]
+  case class Source[A](
+      partitions: Seq[Partition[A]],
+      descriptor: SourceDescriptor = SourceDescriptor.Unknown,
+  ) extends Plan[A]
 
   /**
    * Represents a map transformation.
