@@ -3,9 +3,13 @@ package com.ewoodbury.scarlet.columnar
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 
 /**
- * Counts published batches, morsel visits, decoded values, and primitive source encodes while
- * armed. Disarmed by default, so a study does not record. A test arms around one action and
- * disarms afterwards, including from `afterEach`.
+ * Counts published batches, morsel visits, decoded rows, and primitive source encodes while armed.
+ * Disarmed by default, so a study does not record. A test arms around one action and disarms
+ * afterwards, including from `afterEach`.
+ *
+ * Recording is one process-wide window. Nested or concurrent actions share the counters. Tests run
+ * sequentially, so one armed action does not overlap another when each suite disarms in
+ * `afterEach`.
  *
  * A primitive encode is one `ArraySeq.ofInt`, `ArraySeq.ofDouble`, owned primitive array, or raw
  * `intPairs(Array, Array)` copied into columns. One note may copy two arrays: a pair encode copies
@@ -35,6 +39,7 @@ object ColumnMetrics:
 
   def visitCount: Long = visits.get()
 
+  /** Rows decoded since [[arm]]. A pair or triple row counts once, not once per cell. */
   def decodedValueCount: Long = decoded.get()
 
   /**

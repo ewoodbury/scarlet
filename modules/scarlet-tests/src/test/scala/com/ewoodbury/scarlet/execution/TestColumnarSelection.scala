@@ -311,17 +311,11 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     actual.collect() shouldBe texts(Some("US"), Some("CA"), Some("US"))
   }
 
-  it should "not invoke a recognized predicate and keep startsWith on the scalar path" in {
-    val recognizedCalls = new java.util.concurrent.atomic.AtomicInteger(0)
-    val equality = new DictionaryStringPredicate[String]:
-      val literals: Vector[String] = Vector("US")
-      def apply(value: String): Boolean =
-        recognizedCalls.incrementAndGet()
-        value == "US"
+  it should "filter a dictionary predicate by its literals and keep startsWith on the scalar path" in {
+    val equality = new DictionaryStringPredicate[String](Vector("US"), summon[String =:= String])
     val recognized = columnar(DistCollection(Seq("US", "CA", "US"), 1).filter(equality))
 
     recognized.collect() shouldBe Seq("US", "US")
-    recognizedCalls.get() shouldBe 0
     assertUtf8(recognized, 1)
 
     val scalarCalls = new java.util.concurrent.atomic.AtomicInteger(0)
@@ -334,6 +328,30 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     startsWith.collect() shouldBe Seq("US", "USA")
     scalarCalls.get() shouldBe 3
     assertUtf8(startsWith, 1)
+  }
+
+  it should "match the scalar path for an empty list, a null literal, and the eight-literal boundary" in {
+    val values = texts(Some("a"), None, Some("b"), Some("c"))
+    def source = DistCollection(values, 2)
+    val eight = Vector("a", "b", "c", "d", "e", "f", "g", "h")
+    val nine = eight :+ "i"
+
+    def same(actual: DistCollection[String], keep: String => Boolean): Unit =
+      columnar(actual.collect()) shouldBe row(source.filter(keep).collect())
+
+    // Layout is read with columnar execution enabled. `same` leaves the row path selected.
+    columnar(assertUtf8(source.filterStringIn(eight*), 2))
+    same(source.filterStringIn(), _ => false)
+    same(source.filterStringEquals(text(None)), BatchCodec.isAbsent)
+    same(source.filterStringIn(eight*), value => eight.contains(value))
+    same(source.filterStringIn(nine*), value => nine.contains(value))
+    same(
+      source.filterStringIn("a", text(None)),
+      value =>
+        value match
+          case "a" => true
+          case other => BatchCodec.isAbsent(other),
+    )
   }
 
   it should "record a dictionary layout and match the row path when a map changes nulls" in {
