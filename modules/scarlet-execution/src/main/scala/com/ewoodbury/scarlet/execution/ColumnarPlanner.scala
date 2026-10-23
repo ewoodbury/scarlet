@@ -53,9 +53,10 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * in that morsel loop and does not build the projection. [[tryGroupedSum]] runs
  * [[ColumnPipeline.sumByKey]] on a typed pair source and folds the `Int64` group sums. A preceding
  * `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that partial scan,
- * so the action does not build those pairs. A source descriptor supplies the type when all
- * partitions are empty. It does not decode. `collect` still does. A pair `MapOp` stays on the row
- * path for `collect` and `reduceByKey`.
+ * so the action does not build those pairs. [[groupedSumShape]] names that action and is not a
+ * physical node. A source descriptor supplies the type when all partitions are empty. It does not
+ * decode. `collect` still does. A pair `MapOp` stays on the row path for `collect` and
+ * `reduceByKey`, and [[partitioning]] reports no layout for it.
  *
  * An [[com.ewoodbury.scarlet.core.IntArrays]], [[com.ewoodbury.scarlet.core.DoubleArrays]], or
  * [[com.ewoodbury.scarlet.core.IntPairArrays]] source is copied into the column on the calling
@@ -84,20 +85,20 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 object ColumnarPlanner:
 
   /**
-   * Layout the planner would use, without running the plan. `None` means the row path. A string
-   * filter or map reports [[Layout.Utf8Dict]]. An int, double, or int-pair plan reports
-   * [[Layout.Columnar]]. A pair map that [[tryGroupedSum]] can fuse reports columnar here and
-   * still lowers to `None`, because `collect` and `reduceByKey` do not run that map on the
-   * columnar path.
+   * Layout the planner would use, without running the plan. `None` means the row path, and it is
+   * the same decision as [[lower]]. A string filter or map reports [[Layout.Utf8Dict]]. An int,
+   * double, or int-pair plan reports [[Layout.Columnar]]. A pair map that [[tryGroupedSum]] can
+   * fuse still lowers to `None`, so this reports `None` for that map too, including a map that
+   * changes `(Int, Int)` to another pair type.
    */
   def partitioning[A](plan: Plan[A]): Option[PartitioningInfo] =
     accepted(plan).map(infoOf).orElse(fusedPairLayout(plan))
 
   /**
    * The physical tree for `plan`, without running it. `None` means the row path, including an
-   * element chain whose project does not declare the column's type, and a join whose hint is not
-   * shuffle-hash. [[partitioning]] and [[tryRun]] follow that refusal. They also drop a lowered
-   * tree whose layout is invalid.
+   * element chain whose project does not declare the column's type. A join lowers when its hint is
+   * absent or shuffle-hash. Sort-merge and broadcast return `None`. [[partitioning]] and
+   * [[tryRun]] follow that refusal. They also drop a lowered tree whose layout is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -198,7 +199,10 @@ object ColumnarPlanner:
    * partitions. A null component drops the row before those steps. A 2-tuple of `Int` or null
    * still witnesses a pair, so a leading null does not refuse the encode. Any other cell type
    * fails. This does not decode. A mistyped function throws `ClassCastException` and is refused
-   * after any rows it already touched. Any other shape is refused.
+   * after any rows it already touched. Any other shape is refused. A pair map that stays
+   * `(Int, Int)` is the case [[lower]] refuses while this still succeeds. There is no layout for
+   * that map. [[groupedSumShape]] names it. A map to another pair type, such as `(Long, Int)`,
+   * throws `ClassCastException` and returns `None`.
    */
   def tryGroupedSum(plan: Plan[_]): Option[Long] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -318,6 +322,17 @@ object ColumnarPlanner:
       Some(ColumnReduce.sumInt64(grouped, ordinal = 1))
 
   /**
+   * Action shape of a fused grouped sum. Not a [[com.ewoodbury.scarlet.core.Plan]] node and not a
+   * [[PhysicalOp]]. `None` means the row path. An int-pair source is `GroupedSum(Scan)`. Pair
+   * filters and a pair map wrap it, in source order, as `FilterRow`, `FilterKey`, `FilterValue`,
+   * or `MapPair`. [[lower]] refuses the map, so [[partitioning]] is `None`, and [[tryGroupedSum]]
+   * still runs a map that stays `(Int, Int)`. A type-changing pair map keeps the peel shape and
+   * its run returns `None`.
+   */
+  def groupedSumShape(plan: Plan[_]): Option[String] =
+    GroupedSumShape.of(plan)
+
+  /**
    * True when grouped sum can read `source` as int pairs. [[classify]] requires two `Int` cells,
    * so a leading null is not a pair and the encode never runs. A 2-tuple whose cells are `Int` or
    * null is still a pair: the null stays absent in the grouped-sum encode. Other actions keep the
@@ -357,26 +372,13 @@ object ColumnarPlanner:
       case _ => false
 
   /**
-   * Columnar layout for a pair map (or a map mixed with pair filters) that [[tryGroupedSum]]
-   * fuses. [[lower]] still refuses the map, so `collect` and `reduceByKey` stay on the row path.
+   * [[lower]] decides acceptance. A refused plan, including a fused or type-changing pair map, has
+   * no layout. An accepted plan already reported its layout from [[infoOf]].
    */
   private def fusedPairLayout(plan: Plan[_]): Option[PartitioningInfo] =
-    if (!ScarletConf.get.columnarExecution) then None
-    else
-      val (base, steps) = peelPairOps(plan)
-      base match
-        case source: Plan.Source[_] if steps.exists(isPairMap) && groupedPairSource(source) =>
-          Some(
-            narrow(
-              Distribution.Unknown(source.partitions.length),
-              layoutOf(PhysicalOp.Kind.Pairs),
-            ),
-          )
-        case _ => None
-
-  private def isPairMap(step: PairStep): Boolean = step match
-    case PairStep.MapPair(_) => true
-    case _ => false
+    // A fused pair map is not an accepted plan. Reporting Columnar here disagreed with lower.
+    // An accepted plan already returned its layout, so neither arm adds one.
+    if (lower(plan).isEmpty) then None else None
 
   private def isInt(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Ints => true
