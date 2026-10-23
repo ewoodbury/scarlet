@@ -6,7 +6,9 @@ import ColumnKernel.{Int32Map, Int32Predicate}
  * One loop per int filter/project pattern of length 2–4.
  *
  * A filter drops a null without calling the predicate. A project skips a null and stores 0. When
- * every live row is present, the loop does not test the validity bit.
+ * every live row is present, the loop does not test the validity bit. [[sumPPPPP]] folds one more
+ * map into the sum. [[sumEncoded]] and [[countEncoded]] fold a chain that did not get its own
+ * pattern. None of those sums or counts allocate an output column.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object Int32Pipeline:
@@ -759,11 +761,96 @@ object Int32Pipeline:
   ): Long =
     sumInt32(batch, false, value => accepted(fourth(third(second(first(value))))))
 
+  /** Five maps in one sum. The fifth map is not written as a column. */
+  def sumPPPPP(
+      batch: ColumnBatch,
+      first: Int32Map,
+      second: Int32Map,
+      third: Int32Map,
+      fourth: Int32Map,
+      fifth: Int32Map,
+  ): Long =
+    sumInt32(batch, false, value => accepted(fifth(fourth(third(second(first(value)))))))
+
   def sumFiltered(batch: ColumnBatch, predicate: Int32Predicate): Long =
     sumInt32(batch, true, value => if (predicate(value)) then accepted(value) else 0L)
 
   def sumProjected(batch: ColumnBatch, mapper: Int32Map): Long =
     sumInt32(batch, false, value => accepted(mapper(value)))
+
+  /**
+   * Survivor encoding shared by the fused loops and by [[sumEncoded]] / [[countEncoded]]. The low
+   * bit is set. The other bits are the signed int. A dropped row is `0`, which is not a kept zero.
+   */
+  inline def encoded(value: Int): Long = (value.toLong << 1) | 1L
+
+  /**
+   * Sum the survivor encoding of `process`. A dropped row is `0`. A kept row is [[encoded]].
+   * `compact` is true when a filter can drop a row. Does not allocate.
+   *
+   * This is the [[sumInt32]] walk with a runtime `compact` flag. [[sumInt32]] inlines that flag,
+   * which a function value passed in from the planner cannot do.
+   */
+  def sumEncoded(batch: ColumnBatch, compact: Boolean, process: Int => Long): Long =
+    val column = singleInt(batch)
+    val live = column.length
+    val values = column.values
+    val words = column.validity.words
+    var total = 0L
+    var row = 0
+    if (Validity.livePresent(column.validity, live)) then
+      while (row < live) {
+        val result = process(values(row))
+        if (!compact || (result & 1L) != 0L) then total += result >> 1
+        row += 1
+      }
+    else
+      while (row < live) {
+        if (Validity.isSet(words, row)) then
+          val result = process(values(row))
+          if (!compact || (result & 1L) != 0L) then total += result >> 1
+        row += 1
+      }
+    total
+
+  /**
+   * Count rows of `process` without writing them. `compact` counts survivors and drops nulls. A
+   * map-only chain returns `batch.length`, which still includes null slots, after calling
+   * `process` on the present ones.
+   *
+   * When `compact` is false, `kept` is discarded and the low-bit test does not decide the count.
+   * `process` still has to run on every present row: a map-only count calls the mappers for their
+   * effects, and dropping that call would skip them.
+   */
+  def countEncoded(batch: ColumnBatch, compact: Boolean, process: Int => Long): Long =
+    val column = singleInt(batch)
+    val live = column.length
+    val values = column.values
+    val words = column.validity.words
+    var kept = 0L
+    var row = 0
+    if (Validity.livePresent(column.validity, live)) then
+      while (row < live) {
+        val result = process(values(row))
+        if ((result & 1L) != 0L) then kept += 1L
+        row += 1
+      }
+    else
+      while (row < live) {
+        if (Validity.isSet(words, row)) then
+          val result = process(values(row))
+          if ((result & 1L) != 0L) then kept += 1L
+        row += 1
+      }
+    // Map-only discards `kept`. The `process` call above is the mapper's only run.
+    if (compact) then kept else live.toLong
+
+  private def singleInt(batch: ColumnBatch): Int32Column =
+    require(
+      batch.columns.length == 1,
+      s"int pipeline expects a single-column batch, got ${batch.columns.length}",
+    )
+    ColumnKernel.asInt32(ColumnKernel.columnAt(batch, 0), 0)
 
   /** Add the fused values. Does not allocate an output column. */
   private inline def sumInt32(
@@ -846,5 +933,5 @@ object Int32Pipeline:
     val result = Int32Column.of(out, validity, length)
     new ColumnBatch(batch.schema, Vector(result), length)
 
-  // The low bit marks a surviving row; the remaining bits preserve the signed int payload.
-  private inline def accepted(value: Int): Long = (value.toLong << 1) | 1L
+  /** Inlined into [[sumInt32]]. The formula lives on [[encoded]]. */
+  private inline def accepted(value: Int): Long = encoded(value)

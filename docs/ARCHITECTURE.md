@@ -81,6 +81,18 @@ outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are 
 | Join after an int aggregate | `Columnar` | `HashJoin(Exchange(HashAggregate(Exchange(Scan))), Exchange(Scan))` |
 | Int join key/left-value/right-value filters | `Columnar` | `FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))`, `FilterTripleLeftValue(HashJoin(Exchange(Scan), Exchange(Scan)))`, `FilterTripleRightValue(HashJoin(Exchange(Scan), Exchange(Scan)))` |
 
+`sum` and `count` of an int column fold a trailing filter/map chain into the action when the
+chain starts at an int scan or at `keys` or `values`, including `mapValues(...).values`. A
+five-step int chain still lowers to a chunk such as `Project(Pipeline4(Scan))`. The action reads
+that base once and applies every step, so the pipeline column and the trailing projection are not
+written. `lower` splits a longer run into chunks of at most four steps, then another `Project`,
+`Filter`, or `Pipeline` on that chunk. The fold walks those chunks. Examples are
+`Project(Pipeline4(Scan))`, `Filter(Pipeline4(Scan))`, `Pipeline2(Pipeline4(Scan))`, and
+`Pipeline3(Pipeline4(Scan))`, and the same nesting over `Key` or `Value`. `count` uses the fold
+from two steps up, so a short chain that ends in a filter does not
+write its column. `collect` still writes the column. A type-changing trailing map is refused and
+runs on the row path. Double and string chains still write the pipeline column.
+
 `take` uses these same physical shapes for partition-preserving plans; it scans in partition order
 and decodes only the requested prefix. The contract checks an int `Pipeline2(Scan)` and pair
 `FilterValue(Scan)` with `tryTake`.
