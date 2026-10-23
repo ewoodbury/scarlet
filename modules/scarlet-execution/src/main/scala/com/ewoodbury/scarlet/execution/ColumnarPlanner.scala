@@ -53,10 +53,10 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * in that morsel loop and does not build the projection. [[tryGroupedSum]] runs
  * [[ColumnPipeline.sumByKey]] on a typed pair source and folds the `Int64` group sums. A preceding
  * `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that partial scan,
- * so the action does not build those pairs. [[groupedSumShape]] names that action and is not a
- * physical node. A source descriptor supplies the type when all partitions are empty. It does not
- * decode. `collect` still does. A pair `MapOp` stays on the row path for `collect` and
- * `reduceByKey`, and [[partitioning]] reports no layout for it.
+ * so the action does not build those pairs. [[groupedSumPeel]] labels those walked steps. It is
+ * not an action shape and not a physical node. A source descriptor supplies the type when all
+ * partitions are empty. It does not decode. `collect` still does. A pair `MapOp` stays on the row
+ * path for `collect` and `reduceByKey`, and [[partitioning]] reports no layout for it.
  *
  * An [[com.ewoodbury.scarlet.core.IntArrays]], [[com.ewoodbury.scarlet.core.DoubleArrays]], or
  * [[com.ewoodbury.scarlet.core.IntPairArrays]] source is copied into the column on the calling
@@ -85,14 +85,15 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 object ColumnarPlanner:
 
   /**
-   * Layout the planner would use, without running the plan. `None` means the row path, and it is
-   * the same decision as [[lower]]. A string filter or map reports [[Layout.Utf8Dict]]. An int,
-   * double, or int-pair plan reports [[Layout.Columnar]]. A pair map that [[tryGroupedSum]] can
-   * fuse still lowers to `None`, so this reports `None` for that map too, including a map that
-   * changes `(Int, Int)` to another pair type.
+   * Layout of an accepted plan, without running it. A plan is accepted when [[lower]] returns a
+   * physical tree and that tree's layout is valid. `None` means the plan is not accepted, which is
+   * the row path. There is no second layout source. A string filter or map reports
+   * [[Layout.Utf8Dict]]. An int, double, or int-pair plan reports [[Layout.Columnar]]. A pair map,
+   * including one that [[tryGroupedSum]] fuses and one that changes `(Int, Int)` to another pair
+   * type, is not accepted, so this is `None`.
    */
   def partitioning[A](plan: Plan[A]): Option[PartitioningInfo] =
-    accepted(plan).map(infoOf).orElse(fusedPairLayout(plan))
+    accepted(plan).map(infoOf)
 
   /**
    * The physical tree for `plan`, without running it. `None` means the row path, including an
@@ -201,8 +202,8 @@ object ColumnarPlanner:
    * fails. This does not decode. A mistyped function throws `ClassCastException` and is refused
    * after any rows it already touched. Any other shape is refused. A pair map that stays
    * `(Int, Int)` is the case [[lower]] refuses while this still succeeds. There is no layout for
-   * that map. [[groupedSumShape]] names it. A map to another pair type, such as `(Long, Int)`,
-   * throws `ClassCastException` and returns `None`.
+   * that map. [[groupedSumPeel]] labels the walked steps and is not this action. A map to another
+   * pair type, such as `(Long, Int)`, throws `ClassCastException` and returns `None`.
    */
   def tryGroupedSum(plan: Plan[_]): Option[Long] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -322,15 +323,16 @@ object ColumnarPlanner:
       Some(ColumnReduce.sumInt64(grouped, ordinal = 1))
 
   /**
-   * Action shape of a fused grouped sum. Not a [[com.ewoodbury.scarlet.core.Plan]] node and not a
-   * [[PhysicalOp]]. `None` means the row path. An int-pair source is `GroupedSum(Scan)`. Pair
-   * filters and a pair map wrap it, in source order, as `FilterRow`, `FilterKey`, `FilterValue`,
-   * or `MapPair`. [[lower]] refuses the map, so [[partitioning]] is `None`, and [[tryGroupedSum]]
-   * still runs a map that stays `(Int, Int)`. A type-changing pair map keeps the peel shape and
-   * its run returns `None`.
+   * Structural peel label of the pair steps above a grouped int-pair source. Not an action shape,
+   * not a [[com.ewoodbury.scarlet.core.Plan]] node, and not a [[PhysicalOp]]. `None` means the
+   * plan is not that peel: columnar execution is off, or the base is not a grouped pair source. An
+   * int-pair source is `GroupedSum(Scan)`. Pair filters and a pair map wrap it, in source order,
+   * as `FilterRow`, `FilterKey`, `FilterValue`, or `MapPair`. [[lower]] refuses the map, so
+   * [[partitioning]] is `None`. [[tryGroupedSum]] still runs a map that stays `(Int, Int)`. A
+   * type-changing pair map keeps this peel label, and its run returns `None`.
    */
-  def groupedSumShape(plan: Plan[_]): Option[String] =
-    GroupedSumShape.of(plan)
+  def groupedSumPeel(plan: Plan[_]): Option[String] =
+    GroupedSumPeel.of(plan)
 
   /**
    * True when grouped sum can read `source` as int pairs. [[classify]] requires two `Int` cells,
@@ -370,15 +372,6 @@ object ColumnarPlanner:
       case pair: Tuple2[?, ?] =>
         isIntOrNull(pair.productElement(0)) && isIntOrNull(pair.productElement(1))
       case _ => false
-
-  /**
-   * [[lower]] decides acceptance. A refused plan, including a fused or type-changing pair map, has
-   * no layout. An accepted plan already reported its layout from [[infoOf]].
-   */
-  private def fusedPairLayout(plan: Plan[_]): Option[PartitioningInfo] =
-    // A fused pair map is not an accepted plan. Reporting Columnar here disagreed with lower.
-    // An accepted plan already returned its layout, so neither arm adds one.
-    if (lower(plan).isEmpty) then None else None
 
   private def isInt(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Ints => true

@@ -86,15 +86,17 @@ and decodes only the requested prefix. The contract checks an int `Pipeline2(Sca
 `FilterValue(Scan)` with `tryTake`.
 
 Fused `groupedSum` is action-level. It is not a `Plan` node and not a `PhysicalOp`.
-`ColumnarPlanner.groupedSumShape` names it. A typed int-pair source is `GroupedSum(Scan)`. A
-preceding row, key, or value filter, or a pair map that stays `(Int, Int)`, wraps that scan in
-source order with `FilterRow`, `FilterKey`, `FilterValue`, or `MapPair`. Examples are
-`GroupedSum(FilterValue(Scan))`, `GroupedSum(MapPair(Scan))`, and
-`GroupedSum(MapPair(FilterRow(Scan)))`. `ColumnPipeline.sumByKey` runs the scan. `lower` returns
-`None` for the pair map, and `partitioning` follows that refusal, so the map has no columnar
-layout. `tryGroupedSum` still returns the fused sum. A map that changes the pair type, such as
-`(Int, Int) => (Long, Int)`, is excluded: `partitioning`, `tryRun`, and `tryGroupedSum` stay on
-the row path. The peel still has the shape `GroupedSum(MapPair(Scan))`.
+`ColumnarPlanner.groupedSumPeel` is the structural peel label of the pair steps that scan walks.
+It is not an action shape. A typed int-pair source's label is `GroupedSum(Scan)`. A preceding
+row, key, or value filter, or a pair map, wraps that scan in source order with `FilterRow`,
+`FilterKey`, `FilterValue`, or `MapPair`. Examples are `GroupedSum(FilterValue(Scan))`,
+`GroupedSum(MapPair(Scan))`, and `GroupedSum(MapPair(FilterRow(Scan)))`.
+`ColumnPipeline.sumByKey` runs the scan when the fused action can. `lower` returns `None` for
+the pair map, and `partitioning` follows that refusal, so the map has no columnar layout.
+`tryGroupedSum` still returns the fused sum when the map stays `(Int, Int)`. A map that changes
+the pair type, such as `(Int, Int) => (Long, Int)`, is excluded: `partitioning`, `tryRun`, and
+`tryGroupedSum` stay on the row path. The structural peel label is still
+`GroupedSum(MapPair(Scan))`.
 
 These 46 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
@@ -110,9 +112,10 @@ type-changing step refuses the whole element chain, so the plan stays on the row
 no columnar layout. Primitive source factories carry a descriptor, which supplies the type for
 empty partitions; when values are present, the planner still requires data inference to agree with
 that descriptor. A map of a pair that stays `(Int, Int)` is also excluded from `lower` and
-`tryRun`. Its grouped-sum fusion is the action shape above: `lower` refuses it and `tryGroupedSum`
-succeeds. The contract records no planner mismatches. `partitioning` is defined exactly when
-`lower` accepts the plan.
+`tryRun`. `lower` refuses it and `tryGroupedSum` succeeds. The peel label for that map is
+`GroupedSum(MapPair(Scan))`, which names the walked steps and is not an action shape. No covered
+fixture reports a layout when `lower` refuses the plan. `partitioning` is defined exactly when
+the plan is accepted: `lower` returns a physical tree and that tree's layout is valid.
 
 A join lowers when its hint is absent or is an explicit shuffle-hash hint. Sort-merge and
 broadcast are not implemented on the columnar path: those hints make `lower` return `None`, and

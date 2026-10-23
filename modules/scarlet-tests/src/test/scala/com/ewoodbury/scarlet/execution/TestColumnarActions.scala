@@ -378,7 +378,7 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     hits.get() shouldBe rows.length
     columnar(ColumnarPlanner.partitioning(mapped.plan) shouldBe None)
     columnar(
-      ColumnarPlanner.groupedSumShape(mapped.plan) shouldBe Some("GroupedSum(MapPair(Scan))"),
+      ColumnarPlanner.groupedSumPeel(mapped.plan) shouldBe Some("GroupedSum(MapPair(Scan))"),
     )
     columnar(mapped.groupedSum) shouldBe 41L
   }
@@ -406,7 +406,7 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     maps.get() shouldBe 2
     columnar(ColumnarPlanner.partitioning(planned.plan) shouldBe None)
     columnar(
-      ColumnarPlanner.groupedSumShape(planned.plan) shouldBe Some(
+      ColumnarPlanner.groupedSumPeel(planned.plan) shouldBe Some(
         "GroupedSum(MapPair(FilterRow(Scan)))",
       ),
     )
