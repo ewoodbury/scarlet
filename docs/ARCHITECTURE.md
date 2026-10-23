@@ -90,22 +90,23 @@ is scanned by `ColumnPipeline.sumByKey`. `partitioning` reports `Columnar`, but 
 `None` for a pair map and there is no `PhysicalOp.shape` for this fused action today. The contract
 checks the fused sum result and pins that absence rather than inventing a physical tree.
 
-These 36 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+These 43 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
 `sortBy`, map on join triples, a general tuple filter on join triples, non-Int `mapValues`,
 string/double pair projection or pair filters, string/double-key `groupByKey`, `reduceByKey`, and
 join, single-precision `Float` sources/maps, all-null strings, empty generic sources without a type
-descriptor, and an unsupported Boolean source. Primitive source factories carry a descriptor, which
-supplies the type for empty partitions; when values are present, the planner still requires data
-inference to agree with that descriptor. A map of a pair is also excluded from `lower` and `tryRun`; its
-action-specific `groupedSum` fusion is described above.
+descriptor, an unsupported Boolean source, and element maps that do not preserve the column type.
+That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then
+`toString`, and a type-changing map inside a three-step chain), a `Double` mapped to `Int`, and a
+`String` mapped through `length`. A type-changing step refuses the whole element chain, so the plan
+stays on the row path and reports no columnar layout. Primitive source factories carry a descriptor,
+which supplies the type for empty partitions; when values are present, the planner still requires
+data inference to agree with that descriptor. A map of a pair is also excluded from `lower` and
+`tryRun`; its action-specific `groupedSum` fusion is described above.
 
-The original completion request also classifies type-changing maps and sort-merge/broadcast joins
-as row-path exclusions. The current planner does not meet that classification, so the test pins
-and reports six discrepancies rather than changing execution behavior:
+Sort-merge and broadcast joins are still columnar hash joins. The contract pins those two shapes,
+plus the fused pair map, as the three remaining discrepancies:
 
-- Int-to-string, double-to-int, and string-to-int maps currently have a `Some` partitioning and a
-  `Project(Scan)` lower shape, while `tryRun` rejects them and falls back to rows.
 - Join strategy is ignored by `ColumnarPlanner.lower`: explicit sort-merge and broadcast joins
   currently report the same columnar `HashJoin(Exchange(Scan), Exchange(Scan))` as shuffle-hash.
 - The pair map fused by `groupedSum` reports a columnar layout but has no `PhysicalOp.shape`; the
