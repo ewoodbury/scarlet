@@ -1,0 +1,822 @@
+diff --git a/modules/scarlet-api/src/main/scala/com/ewoodbury/scarlet/api/DistCollection.scala b/modules/scarlet-api/src/main/scala/com/ewoodbury/scarlet/api/DistCollection.scala
+index 7a0df7a..713fbbe 100644
+--- a/modules/scarlet-api/src/main/scala/com/ewoodbury/scarlet/api/DistCollection.scala
++++ b/modules/scarlet-api/src/main/scala/com/ewoodbury/scarlet/api/DistCollection.scala
+@@ -1,8 +1,6 @@
+ package com.ewoodbury.scarlet.api
+ 
+-import scala.collection.immutable.ArraySeq
+-
+-import com.ewoodbury.scarlet.core.{ExecutionService, IntPairArrays, Partition, Plan}
++import com.ewoodbury.scarlet.core.*
+ 
+ /**
+  * A lazy, immutable representation of a "distributed" collection. Operations build up a Plan,
+@@ -455,28 +453,27 @@ object DistCollection:
+    *   A new DistCollection.
+    */
+   def apply[A](data: Iterable[A], numPartitions: Int): DistCollection[A] =
+-    require(numPartitions > 0, "Number of partitions must be positive.")
+     val elements = data.toVector
+     splitSource(elements.length, numPartitions, Plan.SourceDescriptor.Unknown)((start, end) =>
+       elements.slice(start, end),
+     )
+ 
+   /**
+-   * Partitions a primitive `Int` array. Each partition is an `ArraySeq.ofInt` copy of its range.
+-   * The caller's array is not retained.
++   * Partitions a primitive `Int` array. Each partition is an [[IntArrays]] copy of its range. The
++   * caller's array is not retained, and the partition array is not publicly mutable.
+    */
+   def ofInts(values: Array[Int], numPartitions: Int): DistCollection[Int] =
+     splitSource(values.length, numPartitions, Plan.SourceDescriptor.Ints) { (start, end) =>
+-      new ArraySeq.ofInt(values.slice(start, end))
++      IntArrays.fromOwned(values.slice(start, end))
+     }
+ 
+   /**
+-   * Partitions a primitive `Double` array. Each partition is an `ArraySeq.ofDouble` copy of its
+-   * range. The caller's array is not retained.
++   * Partitions a primitive `Double` array. Each partition is a [[DoubleArrays]] copy of its range.
++   * The caller's array is not retained, and the partition array is not publicly mutable.
+    */
+   def ofDoubles(values: Array[Double], numPartitions: Int): DistCollection[Double] =
+     splitSource(values.length, numPartitions, Plan.SourceDescriptor.Doubles) { (start, end) =>
+-      new ArraySeq.ofDouble(values.slice(start, end))
++      DoubleArrays.fromOwned(values.slice(start, end))
+     }
+ 
+   /**
+@@ -488,15 +485,14 @@ object DistCollection:
+       values: Array[Int],
+       numPartitions: Int,
+   ): DistCollection[(Int, Int)] =
+-    require(numPartitions > 0, "Number of partitions must be positive.")
+-    require(keys.length == values.length, "key and value arrays differ in length")
++    IntPairArrays.requireSameLength(keys, values)
+     splitSource(keys.length, numPartitions, Plan.SourceDescriptor.Pairs) { (start, end) =>
+       IntPairArrays.fromOwned(keys.slice(start, end), values.slice(start, end))
+     }
+ 
+   /**
+    * Splits `length` into exactly `numPartitions` contiguous ranges, preserving order. The first
+-   * `length % numPartitions` ranges receive one extra index.
++   * `length % numPartitions` ranges receive one extra index. `numPartitions` must be positive.
+    */
+   private def splitSource[A](
+       length: Int,
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/BatchCodec.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/BatchCodec.scala
+index 56b8637..1f22cbb 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/BatchCodec.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/BatchCodec.scala
+@@ -1,29 +1,26 @@
+ package com.ewoodbury.scarlet.columnar
+ 
+-import java.util.Arrays
+-
+ import scala.collection.immutable.ArraySeq
++import scala.reflect.ClassTag
+ 
+ /** Encode Scala sequences into batches, and read those batches back. */
+ object BatchCodec:
+ 
+-  /** An `ArraySeq.ofInt` is copied. Any other iterable is filled from its iterator. */
+-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
++  /**
++   * Same sentence as `IntPairArrays.LengthMismatch`. Columnar does not depend on core, so this
++   * literal cannot reference that constant. A test locks the two copies together.
++   */
++  private val LengthMismatch: String = "key and value arrays differ in length"
++
++  /**
++   * An `ArraySeq.ofInt` is copied from its primitive array. Any other iterable is filled from its
++   * iterator. An owned partition array is [[copiedInts]]: this module does not see that holder.
++   */
+   def ints(values: Iterable[Int]): ColumnBatch =
+-    val buffer = values match
+-      case primitive: ArraySeq.ofInt => Arrays.copyOf(primitive.unsafeArray, primitive.length)
+-      case _ =>
+-        // `size` then the iterator, so a `Seq` is not copied twice.
+-        val n = values.size
+-        val filled = new Array[Int](n)
+-        val iterator = values.iterator
+-        var row = 0
+-        while (row < n) {
+-          filled(row) = iterator.next()
+-          row += 1
+-        }
+-        filled
+-    batch(Int32Column.of(buffer, Validity.allValid(buffer.length), buffer.length))
++    val primitive = values match
++      case array: ArraySeq.ofInt => Some(array.unsafeArray)
++      case _ => None
++    int32Batch(copyOrFill(values, primitive))
+ 
+   def nullableInts(values: Seq[Option[Int]]): ColumnBatch =
+     batch(Int32Column.fromNullable(values))
+@@ -34,23 +31,27 @@ object BatchCodec:
+   def nullableLongs(values: Seq[Option[Long]]): ColumnBatch =
+     batch(Int64Column.fromNullable(values))
+ 
++  /**
++   * Copies `values` into an int column. The column does not retain `values`.
++   *
++   * The partition that produced `values` stays readable for the row path and for a later action,
++   * so it is not single-use. A column buffer is writable. Sharing the array would let a column
++   * write change that partition. Construction already copied the caller's range, so this is the
++   * one encode copy.
++   */
++  private[scarlet] def copiedInts(values: Array[Int]): ColumnBatch =
++    int32Batch(copyCounted(values))
++
+   /** An `ArraySeq.ofDouble` is copied. Any other iterable is filled from its iterator. */
+-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+   def float64s(values: Iterable[Double]): ColumnBatch =
+-    val buffer = values match
+-      case primitive: ArraySeq.ofDouble => Arrays.copyOf(primitive.unsafeArray, primitive.length)
+-      case _ =>
+-        // `size` then the iterator, so a `Seq` is not copied twice.
+-        val n = values.size
+-        val filled = new Array[Double](n)
+-        val iterator = values.iterator
+-        var row = 0
+-        while (row < n) {
+-          filled(row) = iterator.next()
+-          row += 1
+-        }
+-        filled
+-    batch(Float64Column.of(buffer, Validity.allValid(buffer.length), buffer.length))
++    val primitive = values match
++      case array: ArraySeq.ofDouble => Some(array.unsafeArray)
++      case _ => None
++    float64Batch(copyOrFill(values, primitive))
++
++  /** Copies `values`. See [[copiedInts]] for why the column does not adopt the array. */
++  private[scarlet] def copiedFloat64s(values: Array[Double]): ColumnBatch =
++    float64Batch(copyCounted(values))
+ 
+   def nullableFloat64s(values: Seq[Option[Double]]): ColumnBatch =
+     batch(Float64Column.fromNullable(values))
+@@ -67,13 +68,23 @@ object BatchCodec:
+   def nullableStrings(values: Seq[Option[String]]): ColumnBatch =
+     batch(DictUtf8Column.fromNullable(values))
+ 
+-  /** Copies `keys` and `values`. The column does not retain either array. */
++  /**
++   * Copies `keys` and `values`. The column does not retain either array. Unequal lengths are
++   * rejected. See [[copiedInts]] for why the arrays are copied rather than adopted.
++   */
+   def intPairs(keys: Array[Int], values: Array[Int]): ColumnBatch =
+-    require(keys.length == values.length, "key and value arrays differ in length")
+-    val n = keys.length
++    require(keys.length == values.length, LengthMismatch)
++    copiedIntPairs(keys, values)
++
++  /**
++   * Copies arrays that already have the same length. The pair holder checked them, so this does
++   * not check again. See [[copiedInts]] for why the arrays are copied rather than adopted.
++   */
++  private[scarlet] def copiedIntPairs(keys: Array[Int], values: Array[Int]): ColumnBatch =
++    ColumnMetrics.notePrimitiveEncode()
+     pairBatch(
+-      Int32Column.of(Arrays.copyOf(keys, n), Validity.allValid(n), n),
+-      Int32Column.of(Arrays.copyOf(values, n), Validity.allValid(n), n),
++      Int32Column.of(copyPrimitive(keys), Validity.allValid(keys.length), keys.length),
++      Int32Column.of(copyPrimitive(values), Validity.allValid(values.length), values.length),
+     )
+ 
+   /** One fill of each column. `size` then the iterator, so a `Seq` is not copied twice. */
+@@ -282,6 +293,45 @@ object BatchCodec:
+     }
+     throw new IllegalArgumentException(s"null join value at row $from")
+ 
++  /**
++   * Copies `primitive` when it is present and counts that encode. Otherwise fills from the
++   * iterator. `size` then one pass, so a `Seq` is not copied twice.
++   */
++  @SuppressWarnings(Array("org.wartremover.warts.Var"))
++  private def copyOrFill[A: ClassTag](
++      values: Iterable[A],
++      primitive: Option[Array[A]],
++  ): Array[A] =
++    primitive match
++      case Some(array) => copyCounted(array)
++      case None =>
++        val n = values.size
++        val filled = new Array[A](n)
++        val iterator = values.iterator
++        var row = 0
++        while (row < n) {
++          val value: A = iterator.next()
++          filled(row) = value
++          row += 1
++        }
++        filled
++
++  /** Copies `values` and counts one primitive encode. */
++  private def copyCounted[A: ClassTag](values: Array[A]): Array[A] =
++    ColumnMetrics.notePrimitiveEncode()
++    copyPrimitive(values)
++
++  private def copyPrimitive[A: ClassTag](values: Array[A]): Array[A] =
++    val copied = new Array[A](values.length)
++    System.arraycopy(values, 0, copied, 0, values.length)
++    copied
++
++  private def int32Batch(buffer: Array[Int]): ColumnBatch =
++    batch(Int32Column.of(buffer, Validity.allValid(buffer.length), buffer.length))
++
++  private def float64Batch(buffer: Array[Double]): ColumnBatch =
++    batch(Float64Column.of(buffer, Validity.allValid(buffer.length), buffer.length))
++
+   private def batch(column: Column): ColumnBatch =
+     new ColumnBatch(Vector(column.logicalType), Vector(column), column.length)
+ 
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnMetrics.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnMetrics.scala
+index 8a6658b..7884039 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnMetrics.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnMetrics.scala
+@@ -3,9 +3,12 @@ package com.ewoodbury.scarlet.columnar
+ import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
+ 
+ /**
+- * Counts published batches, morsel visits, and decoded values while armed. Disarmed by default, so
+- * a study does not record. A test arms around one action and disarms afterwards, including from
+- * `afterEach`.
++ * Counts published batches, morsel visits, decoded values, and primitive source encodes while
++ * armed. Disarmed by default, so a study does not record. A test arms around one action and
++ * disarms afterwards, including from `afterEach`.
++ *
++ * A primitive encode is one `ArraySeq.ofInt`, `ArraySeq.ofDouble`, or owned primitive array copied
++ * into a column. A boxed iterable does not count.
+  */
+ object ColumnMetrics:
+ 
+@@ -13,12 +16,14 @@ object ColumnMetrics:
+   private val batches = new AtomicLong(0L)
+   private val visits = new AtomicLong(0L)
+   private val decoded = new AtomicLong(0L)
++  private val primitiveEncodes = new AtomicLong(0L)
+ 
+   /** Start from zero and record until [[disarm]]. */
+   def arm(): Unit =
+     batches.set(0L)
+     visits.set(0L)
+     decoded.set(0L)
++    primitiveEncodes.set(0L)
+     armed.set(true)
+ 
+   /** Stop recording. The last counts stay readable. */
+@@ -31,6 +36,9 @@ object ColumnMetrics:
+ 
+   def decodedValueCount: Long = decoded.get()
+ 
++  /** Owned or `ArraySeq` primitive encodes recorded since [[arm]]. */
++  def primitiveEncodeCount: Long = primitiveEncodes.get()
++
+   private[columnar] def noteBatch(): Unit =
+     if (armed.get()) then batches.incrementAndGet()
+     ()
+@@ -42,3 +50,8 @@ object ColumnMetrics:
+   private[columnar] def noteDecoded(count: Int): Unit =
+     if (armed.get()) then decoded.addAndGet(count.toLong)
+     ()
++
++  /** One primitive array copy into a column. The iterator fill does not call this. */
++  private[columnar] def notePrimitiveEncode(): Unit =
++    if (armed.get()) then primitiveEncodes.incrementAndGet()
++    ()
+diff --git a/modules/scarlet-core/src/main/scala/com/ewoodbury/scarlet/core/DoubleArrays.scala b/modules/scarlet-core/src/main/scala/com/ewoodbury/scarlet/core/DoubleArrays.scala
+new file mode 100644
+index 0000000..2fe537b
+--- /dev/null
++++ b/modules/scarlet-core/src/main/scala/com/ewoodbury/scarlet/core/DoubleArrays.scala
+@@ -0,0 +1,27 @@
++package com.ewoodbury.scarlet.core
++
++/**
++ * Primitive `Double` values for one partition.
++ *
++ * The iterator yields values for the row path. The array is package-private so a caller who
++ * pattern matches [[Partition.data]] on a public plan cannot mutate a constructed collection. The
++ * columnar encoder copies it into a column. The partition stays readable for a later action, so
++ * the column does not adopt the array.
++ */
++final class DoubleArrays private (private[scarlet] val values: Array[Double])
++    extends Iterable[Double]:
++
++  override def knownSize: Int = values.length
++
++  override def iterator: Iterator[Double] =
++    Iterator.tabulate(values.length)(row => values(row))
++
++object DoubleArrays:
++
++  /** Copies `values`. Later writes to that array do not change this partition. */
++  def apply(values: Array[Double]): DoubleArrays =
++    fromOwned(values.clone())
++
++  /** Owns an array that is already a private copy. The caller must not mutate it. */
++  private[scarlet] def fromOwned(values: Array[Double]): DoubleArrays =
++    new DoubleArrays(values)
+diff --git a/modules/scarlet-core/src/main/scala/com/ewoodbury/scarlet/core/IntArrays.scala b/modules/scarlet-core/src/main/scala/com/ewoodbury/scarlet/core/IntArrays.scala
+new file mode 100644
+index 0000000..446a299
+--- /dev/null
++++ b/modules/scarlet-core/src/main/scala/com/ewoodbury/scarlet/core/IntArrays.scala
+@@ -0,0 +1,26 @@
++package com.ewoodbury.scarlet.core
++
++/**
++ * Primitive `Int` values for one partition.
++ *
++ * The iterator yields values for the row path. The array is package-private so a caller who
++ * pattern matches [[Partition.data]] on a public plan cannot mutate a constructed collection. The
++ * columnar encoder copies it into a column. The partition stays readable for a later action, so
++ * the column does not adopt the array.
++ */
++final class IntArrays private (private[scarlet] val values: Array[Int]) extends Iterable[Int]:
++
++  override def knownSize: Int = values.length
++
++  override def iterator: Iterator[Int] =
++    Iterator.tabulate(values.length)(row => values(row))
++
++object IntArrays:
++
++  /** Copies `values`. Later writes to that array do not change this partition. */
++  def apply(values: Array[Int]): IntArrays =
++    fromOwned(values.clone())
++
++  /** Owns an array that is already a private copy. The caller must not mutate it. */
++  private[scarlet] def fromOwned(values: Array[Int]): IntArrays =
++    new IntArrays(values)
+diff --git a/modules/scarlet-core/src/main/scala/com/ewoodbury/scarlet/core/IntPairArrays.scala b/modules/scarlet-core/src/main/scala/com/ewoodbury/scarlet/core/IntPairArrays.scala
+index 5c6bfda..daae2f7 100644
+--- a/modules/scarlet-core/src/main/scala/com/ewoodbury/scarlet/core/IntPairArrays.scala
++++ b/modules/scarlet-core/src/main/scala/com/ewoodbury/scarlet/core/IntPairArrays.scala
+@@ -5,15 +5,14 @@ package com.ewoodbury.scarlet.core
+  *
+  * The iterator yields pairs for the row path. The arrays are package-private so a caller who
+  * pattern matches [[Partition.data]] on a public plan cannot mutate a constructed collection. The
+- * columnar encoder copies them into columns.
++ * columnar encoder copies them into columns. The partition stays readable for a later action, so
++ * the columns do not adopt the arrays.
+  */
+ final class IntPairArrays private (
+     private[scarlet] val keys: Array[Int],
+     private[scarlet] val values: Array[Int],
+ ) extends Iterable[(Int, Int)]:
+ 
+-  require(keys.length == values.length, "key and value arrays differ in length")
+-
+   override def knownSize: Int = keys.length
+ 
+   override def iterator: Iterator[(Int, Int)] =
+@@ -21,10 +20,26 @@ final class IntPairArrays private (
+ 
+ object IntPairArrays:
+ 
++  /**
++   * Wording for a key/value length mismatch. [[requireSameLength]] is the check.
++   *
++   * `BatchCodec.intPairs` repeats this sentence. The columnar module does not depend on core, so
++   * it cannot reference this constant. A test locks the two copies together.
++   */
++  private[scarlet] val LengthMismatch: String = "key and value arrays differ in length"
++
+   /** Copies `keys` and `values`. Later writes to those arrays do not change this partition. */
+   def apply(keys: Array[Int], values: Array[Int]): IntPairArrays =
++    requireSameLength(keys, values)
+     fromOwned(keys.clone(), values.clone())
+ 
+-  /** Owns arrays that are already a private copy. The caller must not mutate them. */
++  /**
++   * Owns arrays that are already a private copy of the same length. The caller must not mutate
++   * them. This does not copy or check again.
++   */
+   private[scarlet] def fromOwned(keys: Array[Int], values: Array[Int]): IntPairArrays =
+     new IntPairArrays(keys, values)
++
++  /** Rejects key and value arrays whose lengths differ. */
++  private[scarlet] def requireSameLength(keys: Array[Int], values: Array[Int]): Unit =
++    require(keys.length == values.length, LengthMismatch)
+diff --git a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
+index 592db1c..b7f722e 100644
+--- a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
++++ b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
+@@ -4,7 +4,7 @@ import scala.annotation.tailrec
+ 
+ import com.ewoodbury.scarlet.api.{DictionaryStringPredicate, IntJoinTriplePredicate}
+ import com.ewoodbury.scarlet.columnar.*
+-import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
++import com.ewoodbury.scarlet.core.*
+ 
+ /**
+  * Lowers `Int`, `Double`, `(Int, Int)`, and `String` plans to [[PhysicalOp]] and runs that tree on
+@@ -46,8 +46,10 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
+  * partitions are empty. It does not decode. `collect` still does. A pair `MapOp` stays on the row
+  * path for `collect` and `reduceByKey`.
+  *
+- * An `ArraySeq.ofInt`, `ArraySeq.ofDouble`, or [[IntPairArrays]] source is copied into the column
+- * on the calling thread. A boxed `Vector` or `List` is still read through its iterator.
++ * An [[IntArrays]], [[DoubleArrays]], or [[IntPairArrays]] source is copied into the column on the
++ * calling thread. The partition stays readable, so the column does not adopt its array. A boxed
++ * `Vector` or `List` is still read through its iterator. An `ArraySeq` passed straight to the
++ * codec is copied the same way.
+  *
+  * A null string is a value. Classification skips a leading null and keeps looking for a `String`.
+  * An all-null source stays on the row path, because there is no witness. An accepted string plan
+@@ -857,18 +859,22 @@ object ColumnarPlanner:
+ 
+   private def encodeFloats(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+     partitions.map { partition =>
+-      BatchCodec.float64s(partition.data.asInstanceOf[Iterable[Double]])
++      partition.data match
++        case owned: DoubleArrays => BatchCodec.copiedFloat64s(owned.values)
++        case other => BatchCodec.float64s(other.asInstanceOf[Iterable[Double]])
+     }.toVector
+ 
+   private def encodeInts(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+     partitions.map { partition =>
+-      BatchCodec.ints(partition.data.asInstanceOf[Iterable[Int]])
++      partition.data match
++        case owned: IntArrays => BatchCodec.copiedInts(owned.values)
++        case other => BatchCodec.ints(other.asInstanceOf[Iterable[Int]])
+     }.toVector
+ 
+   private def encodePairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+     partitions.map { partition =>
+       partition.data match
+-        case pairs: IntPairArrays => BatchCodec.intPairs(pairs.keys, pairs.values)
++        case pairs: IntPairArrays => BatchCodec.copiedIntPairs(pairs.keys, pairs.values)
+         case other => BatchCodec.intPairs(other.asInstanceOf[Iterable[(Int, Int)]])
+     }.toVector
+ 
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestColumnBatch.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestColumnBatch.scala
+index b8bf1fc..6462567 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestColumnBatch.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestColumnBatch.scala
+@@ -5,6 +5,8 @@ import scala.collection.immutable.ArraySeq
+ import org.scalatest.flatspec.AnyFlatSpec
+ import org.scalatest.matchers.should.Matchers
+ 
++import com.ewoodbury.scarlet.core.{DoubleArrays, IntArrays, IntPairArrays}
++
+ class TestColumnBatch extends AnyFlatSpec with Matchers:
+ 
+   "primitive batches" should "roundtrip ints, longs, floats, bools, and int pairs" in {
+@@ -31,46 +33,90 @@ class TestColumnBatch extends AnyFlatSpec with Matchers:
+ 
+   it should "copy a primitive int array into the column" in {
+     val raw = Array(1, -2, 0)
++    ColumnMetrics.arm()
+     val batch = BatchCodec.ints(new ArraySeq.ofInt(raw))
+-    val column = batch.columns match {
+-      case Seq(ints: Int32Column) => ints
+-      case other => fail(s"expected an Int32 column, got $other")
+-    }
++    val boxed = BatchCodec.ints(Seq(1, -2, 0))
++    ColumnMetrics.primitiveEncodeCount shouldBe 1L
++    ColumnMetrics.disarm()
++    val column = int32(batch)
+ 
+     column.values should not be theSameInstanceAs(raw)
+     raw(0) = 99
+     BatchCodec.decodeInts(batch) shouldBe Seq(1, -2, 0)
++    BatchCodec.decodeInts(boxed) shouldBe Seq(1, -2, 0)
++  }
++
++  it should "copy an owned int array on the primitive path" in {
++    val raw = Array(1, -2, 0)
++    val owned = IntArrays(raw)
++    ColumnMetrics.arm()
++    val batch = BatchCodec.copiedInts(owned.values)
++    ColumnMetrics.primitiveEncodeCount shouldBe 1L
++    ColumnMetrics.disarm()
++    val column = int32(batch)
++
++    column.values should not be theSameInstanceAs(owned.values)
++    owned.values(0) = 99
++    BatchCodec.decodeInts(batch) shouldBe Seq(1, -2, 0)
+   }
+ 
+   it should "copy a primitive double array into the column" in {
+     val raw = Array(1.5, -0.25)
++    ColumnMetrics.arm()
+     val batch = BatchCodec.float64s(new ArraySeq.ofDouble(raw))
+-    val column = batch.columns match {
+-      case Seq(floats: Float64Column) => floats
+-      case other => fail(s"expected a Float64 column, got $other")
+-    }
++    val boxed = BatchCodec.float64s(Seq(1.5, -0.25))
++    ColumnMetrics.primitiveEncodeCount shouldBe 1L
++    ColumnMetrics.disarm()
++    val column = float64(batch)
+ 
+     column.values should not be theSameInstanceAs(raw)
+     raw(0) = 9.0
+     BatchCodec.decodeFloat64s(batch) shouldBe Seq(1.5, -0.25)
++    BatchCodec.decodeFloat64s(boxed) shouldBe Seq(1.5, -0.25)
++  }
++
++  it should "copy an owned double array on the primitive path" in {
++    val raw = Array(1.5, -0.25)
++    val owned = DoubleArrays(raw)
++    ColumnMetrics.arm()
++    val batch = BatchCodec.copiedFloat64s(owned.values)
++    ColumnMetrics.primitiveEncodeCount shouldBe 1L
++    ColumnMetrics.disarm()
++    val column = float64(batch)
++
++    column.values should not be theSameInstanceAs(owned.values)
++    owned.values(0) = 9.0
++    BatchCodec.decodeFloat64s(batch) shouldBe Seq(1.5, -0.25)
+   }
+ 
+   it should "copy primitive int-pair arrays into the columns" in {
+     val keys = Array(1, 2)
+     val values = Array(10, 20)
+-    val batch = BatchCodec.intPairs(keys, values)
+-    val (left, right) = batch.columns match {
+-      case Seq(keysColumn: Int32Column, valuesColumn: Int32Column) =>
+-        (keysColumn, valuesColumn)
+-      case other => fail(s"expected two Int32 columns, got $other")
+-    }
++    val owned = IntPairArrays(keys, values)
++    ColumnMetrics.arm()
++    val checked = BatchCodec.intPairs(keys, values)
++    val copied = BatchCodec.copiedIntPairs(owned.keys, owned.values)
++    val boxed = BatchCodec.intPairs(Seq((1, 10), (2, 20)))
++    ColumnMetrics.primitiveEncodeCount shouldBe 2L
++    ColumnMetrics.disarm()
++    val (left, right) = intPair(checked)
+ 
+     left.values should not be theSameInstanceAs(keys)
+     right.values should not be theSameInstanceAs(values)
++    left.values should not be theSameInstanceAs(owned.keys)
++    intPair(copied)._1.values should not be theSameInstanceAs(owned.keys)
++    intPair(copied)._2.values should not be theSameInstanceAs(owned.values)
+     keys(0) = 7
+     values(1) = 8
+-    BatchCodec.decodeIntPairs(batch) shouldBe Seq((1, 10), (2, 20))
+-    an[IllegalArgumentException] should be thrownBy BatchCodec.intPairs(Array(1), Array.empty[Int])
++    owned.keys(0) = 7
++    owned.values(1) = 8
++    BatchCodec.decodeIntPairs(checked) shouldBe Seq((1, 10), (2, 20))
++    BatchCodec.decodeIntPairs(copied) shouldBe Seq((1, 10), (2, 20))
++    BatchCodec.decodeIntPairs(boxed) shouldBe Seq((1, 10), (2, 20))
++    val caught = intercept[IllegalArgumentException] {
++      BatchCodec.intPairs(Array(1), Array.empty[Int])
++    }
++    caught.getMessage shouldBe s"requirement failed: ${IntPairArrays.LengthMismatch}"
+   }
+ 
+   it should "share a pair column when narrowing to one column" in {
+@@ -256,6 +302,18 @@ class TestColumnBatch extends AnyFlatSpec with Matchers:
+     }
+   }
+ 
++  private def int32(batch: ColumnBatch): Int32Column = batch.columns match
++    case Seq(column: Int32Column) => column
++    case other => fail(s"expected an Int32 column, got $other")
++
++  private def float64(batch: ColumnBatch): Float64Column = batch.columns match
++    case Seq(column: Float64Column) => column
++    case other => fail(s"expected a Float64 column, got $other")
++
++  private def intPair(batch: ColumnBatch): (Int32Column, Int32Column) = batch.columns match
++    case Seq(keys: Int32Column, values: Int32Column) => (keys, values)
++    case other => fail(s"expected two Int32 columns, got $other")
++
+   private def utf8(batch: ColumnBatch): DictUtf8Column =
+     batch.columns.lift(0) match
+       case Some(column: DictUtf8Column) => column
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/core/TestSourcePartitioning.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/core/TestSourcePartitioning.scala
+index 9b2269a..895c76b 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/core/TestSourcePartitioning.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/core/TestSourcePartitioning.scala
+@@ -1,7 +1,5 @@
+ package com.ewoodbury.scarlet.core
+ 
+-import scala.collection.immutable.ArraySeq
+-
+ import org.scalatest.flatspec.AnyFlatSpec
+ import org.scalatest.matchers.should.Matchers
+ 
+@@ -88,9 +86,9 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
+     sourceDescriptor(dc) shouldEqual Plan.SourceDescriptor.Ints
+     dc.collect() shouldEqual Seq(1, 2, 3, 4, 5)
+     sourceData(dc).foreach {
+-      case primitive: ArraySeq.ofInt =>
+-        primitive.unsafeArray should not be theSameInstanceAs(input)
+-      case other => fail(s"expected ArraySeq.ofInt, got $other")
++      case stored: IntArrays =>
++        stored.values should not be theSameInstanceAs(input)
++      case other => fail(s"expected IntArrays, got $other")
+     }
+   }
+ 
+@@ -100,10 +98,18 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
+     partitionSizes(dc) shouldEqual Seq(0, 0, 0)
+     dc.collect() shouldEqual Seq.empty[Int]
+     dc.sum shouldEqual 0L
++    sourceData(dc).foreach {
++      case stored: IntArrays => stored.knownSize shouldEqual 0
++      case other => fail(s"expected IntArrays, got $other")
++    }
+   }
+ 
+   it should "reject a non-positive partition count" in {
+-    an[IllegalArgumentException] should be thrownBy DistCollection.ofInts(Array(1), 0)
++    val caught = intercept[IllegalArgumentException] {
++      DistCollection.ofInts(Array(1), 0)
++    }
++    caught.getMessage shouldBe partitionCountMessage
++    an[IllegalArgumentException] should be thrownBy DistCollection.ofInts(Array(1), -2)
+   }
+ 
+   "DistCollection.ofDoubles" should "copy contiguous ranges into primitive partitions" in {
+@@ -115,12 +121,56 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
+     sourceDescriptor(dc) shouldEqual Plan.SourceDescriptor.Doubles
+     dc.collect() shouldEqual Seq(1.5, -2.0, 3.25)
+     sourceData(dc).foreach {
+-      case primitive: ArraySeq.ofDouble =>
+-        primitive.unsafeArray should not be theSameInstanceAs(input)
+-      case other => fail(s"expected ArraySeq.ofDouble, got $other")
++      case stored: DoubleArrays =>
++        stored.values should not be theSameInstanceAs(input)
++      case other => fail(s"expected DoubleArrays, got $other")
+     }
+   }
+ 
++  it should "produce exactly N empty primitive partitions" in {
++    val dc = DistCollection.ofDoubles(Array.empty[Double], 4)
++
++    partitionSizes(dc) shouldEqual Seq(0, 0, 0, 0)
++    dc.collect() shouldEqual Seq.empty[Double]
++    dc.sum shouldEqual 0.0
++    sourceData(dc).foreach {
++      case stored: DoubleArrays => stored.knownSize shouldEqual 0
++      case other => fail(s"expected DoubleArrays, got $other")
++    }
++  }
++
++  it should "reject a non-positive partition count" in {
++    val caught = intercept[IllegalArgumentException] {
++      DistCollection.ofDoubles(Array(1.0), 0)
++    }
++    caught.getMessage shouldBe partitionCountMessage
++    an[IllegalArgumentException] should be thrownBy DistCollection.ofDoubles(Array(1.0), -1)
++  }
++
++  "IntArrays" should "iterate copied ints, including an empty array" in {
++    val raw = Array(1, 2)
++    val owned = IntArrays(raw)
++    raw(0) = 9
++
++    owned.toList shouldEqual List(1, 2)
++    owned.knownSize shouldEqual 2
++    owned.values should not be theSameInstanceAs(raw)
++    IntArrays(Array.empty[Int]).toList shouldEqual Nil
++    IntArrays(Array.empty[Int]).knownSize shouldEqual 0
++  }
++
++  "DoubleArrays" should "iterate copied doubles, including an empty array" in {
++    val raw = Array(1.5, -2.0)
++    val owned = DoubleArrays(raw)
++    raw(0) = 9.0
++
++    owned.toList shouldEqual List(1.5, -2.0)
++    owned.knownSize shouldEqual 2
++    owned.values should not be theSameInstanceAs(raw)
++    DoubleArrays(Array.empty[Double]).toList shouldEqual Nil
++    DoubleArrays(Array.empty[Double]).knownSize shouldEqual 0
++  }
++
+   "IntPairArrays" should "iterate pairs in order and copy its arrays" in {
+     val keys = Array(1, 2)
+     val values = Array(10, 20)
+@@ -132,7 +182,11 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
+     pairs.knownSize shouldEqual 2
+     pairs.keys should not be theSameInstanceAs(keys)
+     pairs.values should not be theSameInstanceAs(values)
+-    an[IllegalArgumentException] should be thrownBy IntPairArrays(Array(1), Array.empty[Int])
++    IntPairArrays(Array.empty[Int], Array.empty[Int]).toList shouldEqual Nil
++    val caught = intercept[IllegalArgumentException] {
++      IntPairArrays(Array(1), Array.empty[Int])
++    }
++    caught.getMessage shouldBe lengthMismatchMessage
+   }
+ 
+   "DistCollection.ofIntPairs" should "copy key and value ranges and still iterate" in {
+@@ -153,12 +207,47 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
+     }
+   }
+ 
++  it should "produce exactly N empty pair partitions" in {
++    val dc = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 3)
++
++    partitionSizes(dc) shouldEqual Seq(0, 0, 0)
++    dc.collect() shouldEqual Seq.empty[(Int, Int)]
++    dc.count() shouldEqual 0L
++    sourceData(dc).foreach {
++      case stored: IntPairArrays => stored.knownSize shouldEqual 0
++      case other => fail(s"expected IntPairArrays, got $other")
++    }
++  }
++
+   it should "reject unequal key and value arrays" in {
+-    an[IllegalArgumentException] should be thrownBy {
++    val caught = intercept[IllegalArgumentException] {
+       DistCollection.ofIntPairs(Array(1, 2), Array(1), 1)
+     }
++    caught.getMessage shouldBe lengthMismatchMessage
++  }
++
++  it should "reject a longer value array before slicing hides it" in {
++    val caught = intercept[IllegalArgumentException] {
++      DistCollection.ofIntPairs(Array(1), Array(1, 2), 1)
++    }
++    caught.getMessage shouldBe lengthMismatchMessage
++  }
++
++  it should "reject a non-positive partition count" in {
++    val caught = intercept[IllegalArgumentException] {
++      DistCollection.ofIntPairs(Array(1), Array(2), 0)
++    }
++    caught.getMessage shouldBe partitionCountMessage
++    an[IllegalArgumentException] should be thrownBy {
++      DistCollection.ofIntPairs(Array(1), Array(2), -3)
++    }
+   }
+ 
++  private val partitionCountMessage = "requirement failed: Number of partitions must be positive."
++
++  private val lengthMismatchMessage =
++    s"requirement failed: ${IntPairArrays.LengthMismatch}"
++
+   private def sourceData[A](dc: DistCollection[A]): Seq[Iterable[A]] = dc.plan match {
+     case Plan.Source(partitions, _) => partitions.map(_.data)
+     case other => fail(s"Expected Plan.Source, got $other")
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarActions.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarActions.scala
+index 2a6223d..b8ced7b 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarActions.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarActions.scala
+@@ -425,6 +425,18 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
+     columnar(primitive) shouldBe 30L
+     columnar(primitive) shouldBe columnar(boxed)
+     row(primitive) shouldBe row(boxed)
++    columnar {
++      ColumnMetrics.arm()
++      primitive shouldBe 30L
++      ColumnMetrics.primitiveEncodeCount shouldBe 3L
++      ColumnMetrics.disarm()
++    }
++    columnar {
++      ColumnMetrics.arm()
++      boxed shouldBe 30L
++      ColumnMetrics.primitiveEncodeCount shouldBe 0L
++      ColumnMetrics.disarm()
++    }
+   }
+ 
+   it should "sum the copied ints after the caller mutates the array" in {
+@@ -454,6 +466,18 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
+     columnar(primitive) shouldBe 4.75
+     columnar(primitive) shouldBe columnar(boxed)
+     row(primitive) shouldBe row(boxed)
++    columnar {
++      ColumnMetrics.arm()
++      primitive shouldBe 4.75
++      ColumnMetrics.primitiveEncodeCount shouldBe 2L
++      ColumnMetrics.disarm()
++    }
++    columnar {
++      ColumnMetrics.arm()
++      boxed shouldBe 4.75
++      ColumnMetrics.primitiveEncodeCount shouldBe 0L
++      ColumnMetrics.disarm()
++    }
+   }
+ 
+   it should "reduce an int-pair array like a boxed vector without wrapping" in {
+@@ -469,6 +493,18 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
+     columnar(primitive) shouldBe expected
+     columnar(primitive) shouldBe columnar(boxed)
+     row(primitive) shouldBe row(boxed)
++    columnar {
++      ColumnMetrics.arm()
++      primitive shouldBe expected
++      ColumnMetrics.primitiveEncodeCount shouldBe 2L
++      ColumnMetrics.disarm()
++    }
++    columnar {
++      ColumnMetrics.arm()
++      boxed shouldBe expected
++      ColumnMetrics.primitiveEncodeCount shouldBe 0L
++      ColumnMetrics.disarm()
++    }
+   }
+ 
+   "int pair projections" should "sum values from the shared value column" in {

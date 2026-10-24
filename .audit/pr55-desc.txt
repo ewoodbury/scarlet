@@ -1,0 +1,26 @@
+Replace the global column counters with an installable sink
+
+## Summary
+
+`ColumnMetrics` no longer keeps an armed flag and four process-wide counters. Each note reads one volatile `MetricsSink` and calls it. `NoOpSink` is installed at startup, so a study records nothing until it installs a sink. `install` returns the previous sink, `restore` puts that sink back, and `withSink` restores it when the body throws.
+
+`arm` and `disarm` stay as deprecated shims. `arm` installs a fresh `CountingSink` and drops whatever was current. `disarm` restores `NoOpSink`, so a later read is zero. Keeping the shims is the smaller change: `TestColumnarActions`, `TestColumnarSelection`, and the materialisation study still call them. `TestMorselScheduler`, `TestColumnBatch`, and `TestTrailingProject` use `install` / `withSink`.
+
+This is still one window. `install` reads the current sink and writes the new one, with no lock. Two overlapping installs can observe the same previous sink, and the later write is what every thread notes into until `restore`. A test that two concurrent sinks stay apart would not pass, so this PR does not claim that. The new test checks the sequential case: a thrown body restores the previous sink, and the two sinks keep their own counts.
+
+`CountingSink` uses atomic counters. One thread installs the sink, but morsel workers and task threads then increment it together. A plain `Long` loses visits under that schedule and would move the 124-visit footprint. Forwarding is still one volatile read and a call, with no lock and no allocation on that path.
+
+Checksums and the batch footprint are unchanged: `236777139`, `237777139`, `250179896646`, 500068 survivors, and 126 batches (2 encodes + 124 morsels) with 124 visits. Empty and fully filtered cases stay at 0.
+
+## Options
+
+1. This PR. One volatile slot, installed around an action. The cost is the metrics file, the note call sites, and three suites. Workers see the sink the caller installed, which a parallel action needs. Overlapping actions still collide.
+
+2. Pass a `MetricsSink` into the codec, batch construction, and `MorselScheduler`, and capture it in the planner's worker closures. The cost is a parameter on every columnar entry point and every kernel that publishes a batch, including paths that never record. That is what separates two concurrent actions. A thread-local does not: the workers are other threads and would not see the caller's sink. This PR does not start that threading.
+
+## Tests
+
+- `make lint`, `make test-lint`, and `make test` (530 tests).
+- Five maps then `sum` stays at 126 batches and 124 visits. The same footprint holds for `count`, for a filter followed by five maps, and for a filter that rejects every row.
+- `withSink` restores the previous sink when the body throws.
+

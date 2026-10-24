@@ -1,0 +1,45 @@
+Fold grouped-sum partials without concatenating them
+
+## Summary
+
+Grouped sum folds each input batch's partials into one table instead of concatenating them and summing the copy. `HashAggregate.mergeSumPartials` owns that table, scans each partial in order, and compacts once. The table starts at `tableSize(2 * widest partial)`. `grow` still covers a later partial that introduces more groups. `ensure` grows only when the key is absent, so a table full of existing groups does not rehash on a duplicate.
+
+Each partial chooses its own scan. Dense is used only when that partial's key and value columns are fully present. A null sum is not read as zero. A group that is null and then valued becomes valued; the reverse stays valued; a group that is only ever null stays present with a null sum.
+
+A dense partial whose keys repeat an earlier partial's sequence adds through the slots the first probe found. `grow` and `release` drop that sequence. `PartialCombine.groupPartials` splits the partials without concatenating them. `PartialCombine.gather` and `mergeMorsels` are unchanged, and `HashReduce.byKey` still uses them. A batch that is already one morsel keeps that partial.
+
+## Study
+
+Same machine, before on `main` (`concat+sumInt64`) and after this branch (`mergeSumPartials`). Harness: 1e7 rows, 1024 groups, 2 input batches, batch size 8192. Checksum `49999995000000`. Element footprint stays 126 batches and 124 visits.
+
+The merge stage publishes 2 batches and 2 visits. Concatenation published one extra batch per input batch, so the old count was 4 batches and 2 visits. GROUPED and REPLAY batch totals move from 1244 to 1242 with that change. Visits stay 1230.
+
+| | 1 thread before | 1 thread after | 4 threads before | 4 threads after |
+| --- | ---: | ---: | ---: | ---: |
+| merge p50 | 7.535 ms | 0.964 ms | 4.934 ms | 0.696 ms |
+| merge allocation | 74.40 MB | 0.18 MB | 74.40 MB | 0.18 MB |
+| merge batches / visits | 4 / 2 | 2 / 2 | 4 / 2 | 2 / 2 |
+| REPLAY p50 | 48.041 ms | 43.647 ms | 19.014 ms | 15.368 ms |
+| REPLAY allocation | 174.03 MB | 99.76 MB | 184.76 MB | 108.84 MB |
+
+REPLAY is one measurement of encode, partial, merge, exchange, and final. It is not the sum of the stage p50 values.
+
+## Tests
+
+`make lint`, `make test-lint`, and `make test` (560 tests) are green.
+
+`TestMergeSumPartials`:
+
+- match concat plus sumInt64 on a mixed fixture
+- keep input batches apart when their keys are disjoint
+- group partials without concatenating them
+- round-trip a null sum across partials, including a dense neighbour
+- not grow when 1024 groups fill the table and a duplicate partial follows
+- seed 1024-row partials from the widest partial and not from the concatenated rows
+- grow when later partials add groups the first partial did not have
+- not grow the worker table when a duplicate arrives at its load limit
+- keep both keys of a two-row batch in first-seen order
+- keep a null key beside a valued key when each row is its own morsel
+- fold one partial, no partials, and a single group
+- repeat the same partial at one thread and at four
+

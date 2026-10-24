@@ -6,9 +6,9 @@ package com.ewoodbury.scarlet.execution
  * [[ColumnarPlanner]] uses [[declaredElement]] when a project or `mapValues` must declare the
  * column's signature. The check reads method descriptors and does not call the function.
  */
-@SuppressWarnings(Array("org.wartremover.warts.Any"))
 private[execution] object FunctionWitness:
 
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
   def declaredElement(kind: PhysicalOp.Kind, function: Any): Boolean = kind match
     case PhysicalOp.Kind.Ints =>
       declaredSignature(function, "apply$mcII$sp", classOf[Int], classOf[Int], allowBridge = false)
@@ -36,7 +36,8 @@ private[execution] object FunctionWitness:
    * signature still counts. A primitive specialized apply is the implementation, so a bridge does
    * not satisfy it.
    */
-  def declaredSignature(
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def declaredSignature(
       function: Any,
       specialized: String,
       argument: Class[_],
@@ -53,7 +54,7 @@ private[execution] object FunctionWitness:
     )
 
   @SuppressWarnings(Array("org.wartremover.warts.Equals"))
-  def isDeclaredApply(
+  private def isDeclaredApply(
       method: java.lang.reflect.Method,
       specialized: String,
       argument: Class[_],
@@ -87,7 +88,7 @@ private[execution] object FunctionWitness:
    * same erasure. A hand-written overload is neither.
    */
   @SuppressWarnings(Array("org.wartremover.warts.Equals"))
-  def isErasureBridge(method: java.lang.reflect.Method): Boolean =
+  private def isErasureBridge(method: java.lang.reflect.Method): Boolean =
     val parameters = method.getParameterTypes
     val erased =
       method.getParameterCount == 1 &&

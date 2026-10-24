@@ -1,0 +1,661 @@
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 943f668..4b83c1f 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -77,8 +77,11 @@ the row path.
+ `keys`, `values`, or the values after an int `mapValues` reads the pair column in the morsel loop
+ and does not build another batch. The key or value column is a view: its arrays are shared.
+ `groupedSum` on `(Int, Int)` runs the wide grouped sum and folds the `Int64` group sums into one
+-`Long`. A non-empty source, `filterKeys`, or `filterValues` of int pairs stays on that kernel. A
+-completely empty source has no runtime type witness, so that sum returns zero on the row path.
++`Long`. A non-empty source of int pairs stays on that kernel. A preceding `filter`, `filterKeys`,
++`filterValues`, or pair `map` is applied inside the partial aggregate scan, so that action does
++not build an intermediate pair batch. A completely empty source has no runtime type witness, so
++that sum returns zero on the row path. A pair `map` stays on the row path for `collect` and
++`reduceByKey`.
+ Empty input for these sums is zero. `collect` is the action that decodes a `Seq`. `reduceByKey`
+ still wraps at `Int`.
+ 
+diff --git a/modules/scarlet-api/src/main/scala/com/ewoodbury/scarlet/api/DistCollection.scala b/modules/scarlet-api/src/main/scala/com/ewoodbury/scarlet/api/DistCollection.scala
+index c9de00b..86239dc 100644
+--- a/modules/scarlet-api/src/main/scala/com/ewoodbury/scarlet/api/DistCollection.scala
++++ b/modules/scarlet-api/src/main/scala/com/ewoodbury/scarlet/api/DistCollection.scala
+@@ -266,10 +266,11 @@ final case class DistCollection[A](plan: Plan[A]):
+   /**
+    * Action: Sums `(Int, Int)` values by key as a `Long` and folds those group sums into one
+    * `Long`. Empty input returns zero. Null keys are dropped. The total does not wrap at `Int`. A
+-   * non-empty source, `filterKeys`, or `filterValues` of int pairs runs the wide kernel and does
+-   * not build a `Seq`. A completely empty source has no runtime type witness, so it returns zero
+-   * through the row engine. Any other shape sums through the row engine. `reduceByKey` still
+-   * applies its `(Int, Int) => Int` operator.
++   * non-empty source of int pairs runs the wide kernel and does not build a `Seq`. A preceding
++   * `filter`, `filterKeys`, `filterValues`, or pair `map` runs inside that scan and does not build
++   * the filtered or projected pairs. A completely empty source has no runtime type witness, so it
++   * returns zero through the row engine. Any other shape sums through the row engine.
++   * `reduceByKey` still applies its `(Int, Int) => Int` operator.
+    */
+   def groupedSum(using ev: A =:= (Int, Int)): Long =
+     ExecutionService.get.groupedSum(kvPlan)
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnPipeline.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnPipeline.scala
+index fa345db..a918caa 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnPipeline.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnPipeline.scala
+@@ -5,11 +5,12 @@ package com.ewoodbury.scarlet.columnar
+  *
+  * Each input batch is sliced into morsels. Sums run `sumInt32` on the morsel, `sumInt64` to merge
+  * that batch's partials, and `sumInt64` again after the exchange, so a partial sum does not wrap
+- * at `Int`. Each output batch is an `Int32` key and an `Int64` sum. Fold the sum with
+- * [[ColumnReduce.sumInt64]] at ordinal 1; the batch has two columns. An empty input is
+- * `numPartitions` empty sum batches, the same convention as [[HashReduce.byKey]]. The join reads
+- * key column 0 and value column 1 on both sides, exchanges each side, and probes one partition at
+- * a time.
++ * at `Int`. A `keep`/`map` or [[PairStep]] overload applies that work inside the partial
++ * `sumInt32`, so the exchange still sees one partial per input batch. Each output batch is an
++ * `Int32` key and an `Int64` sum. Fold the sum with [[ColumnReduce.sumInt64]] at ordinal 1; the
++ * batch has two columns. An empty input is `numPartitions` empty sum batches, the same convention
++ * as [[HashReduce.byKey]]. The join reads key column 0 and value column 1 on both sides, exchanges
++ * each side, and probes one partition at a time.
+  */
+ object ColumnPipeline:
+ 
+@@ -21,6 +22,68 @@ object ColumnPipeline:
+       parallelism: Int,
+       batchSize: Int,
+   ): Vector[ColumnBatch] =
++    runSum(batches, numPartitions, parallelism, batchSize) { morsel =>
++      HashAggregate.sumInt32(morsel, keyOrdinal, valueOrdinal)
++    }
++
++  /**
++   * Filters and projects the value inside the partial `sumInt32`. The merge and the final sum
++   * still read the `Int64` partials.
++   */
++  def sumByKey(
++      batches: Vector[ColumnBatch],
++      keyOrdinal: Int,
++      valueOrdinal: Int,
++      numPartitions: Int,
++      parallelism: Int,
++      batchSize: Int,
++      keep: ColumnKernel.Int32Predicate,
++      map: ColumnKernel.Int32Map,
++  ): Vector[ColumnBatch] =
++    runSum(batches, numPartitions, parallelism, batchSize) { morsel =>
++      HashAggregate.sumInt32(morsel, keyOrdinal, valueOrdinal, keep, map)
++    }
++
++  /**
++   * Runs `steps` inside the partial `sumInt32`. A chain of value filters uses the `keep`/`map`
++   * overload. Any other chain, including a key filter, a row filter, or a pair map, uses the pair
++   * scan.
++   */
++  def sumByKey(
++      batches: Vector[ColumnBatch],
++      keyOrdinal: Int,
++      valueOrdinal: Int,
++      numPartitions: Int,
++      parallelism: Int,
++      batchSize: Int,
++      steps: Vector[PairStep],
++  ): Vector[ColumnBatch] =
++    if (steps.isEmpty) then
++      sumByKey(batches, keyOrdinal, valueOrdinal, numPartitions, parallelism, batchSize)
++    else
++      valueKeeps(steps) match
++        case Some(predicates) =>
++          sumByKey(
++            batches,
++            keyOrdinal,
++            valueOrdinal,
++            numPartitions,
++            parallelism,
++            batchSize,
++            keepValues(predicates),
++            PassValue,
++          )
++        case None =>
++          runSum(batches, numPartitions, parallelism, batchSize) { morsel =>
++            HashAggregate.sumInt32(morsel, keyOrdinal, valueOrdinal, steps)
++          }
++
++  private def runSum(
++      batches: Vector[ColumnBatch],
++      numPartitions: Int,
++      parallelism: Int,
++      batchSize: Int,
++  )(partial: ColumnBatch => ColumnBatch): Vector[ColumnBatch] =
+     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+     require(batchSize > 0, s"batch size must be positive, got $batchSize")
+@@ -30,7 +93,7 @@ object ColumnPipeline:
+         batches,
+         batchSize,
+         parallelism,
+-        morsel => HashAggregate.sumInt32(morsel, keyOrdinal, valueOrdinal),
++        partial,
+         partials => HashAggregate.sumInt64(partials, keyOrdinal = 0, valueOrdinal = 1),
+       )
+       val buckets = HashExchange.partitionAll(combined, keyOrdinal = 0, numPartitions, parallelism)
+@@ -38,6 +101,21 @@ object ColumnPipeline:
+         HashAggregate.sumInt64(bucket, keyOrdinal = 0, valueOrdinal = 1)
+       }
+ 
++  /** `Some` when every step is a value filter. The predicates stay in source order. */
++  private def valueKeeps(steps: Vector[PairStep]): Option[Vector[Int => Boolean]] =
++    val seed: Option[Vector[Int => Boolean]] = Some(Vector.empty[Int => Boolean])
++    steps.foldLeft(seed) { (acc, step) =>
++      (acc, step) match
++        case (Some(predicates), PairStep.KeepValue(predicate)) => Some(predicates :+ predicate)
++        case _ => None
++    }
++
++  private def keepValues(predicates: Vector[Int => Boolean]): ColumnKernel.Int32Predicate =
++    value => predicates.forall(predicate => predicate(value))
++
++  private object PassValue extends ColumnKernel.Int32Map:
++    def apply(value: Int): Int = value
++
+   def innerJoin(
+       build: Vector[ColumnBatch],
+       probe: Vector[ColumnBatch],
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/HashAggregate.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/HashAggregate.scala
+index 599473a..4a94661 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/HashAggregate.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/HashAggregate.scala
+@@ -62,6 +62,31 @@ object HashAggregate:
+     val values = ColumnHash.int32At(batch, valueOrdinal)
+     sumColumns(keys, values, ColumnHash.tableSize(keys.length), filtered = true, keep, map)
+ 
++  /**
++   * Runs `steps` on each present pair, then aggregates, in one scan. A null key or a null value is
++   * dropped before the steps, and a rejected row never creates a group. Value-only filters use the
++   * `keep` and `map` overload instead, because those functions do not read the key.
++   */
++  def sumInt32(
++      batch: ColumnBatch,
++      keyOrdinal: Int,
++      valueOrdinal: Int,
++      steps: Vector[PairStep],
++  ): ColumnBatch =
++    require(steps.nonEmpty, "pair sum needs a filter or a map")
++    val keys = ColumnHash.int32At(batch, keyOrdinal)
++    val values = ColumnHash.int32At(batch, valueOrdinal)
++    require(keys.length == values.length, "key and value columns differ in length")
++    if (keys.length == 0) then emptySum
++    else
++      val table = new GroupTable(ColumnHash.tableSize(keys.length), SumOnly)
++      val slot = new PairSlot
++      val planned = steps.toArray
++      if (ColumnHash.fullyPresent(keys) && ColumnHash.fullyPresent(values)) then
++        scanSumDenseSteps(table, keys, values, planned, slot)
++      else scanSumSparseSteps(table, keys, values, planned, slot)
++      table.compact()
++
+   /**
+    * Sums an `Int64` column into an `Int64` sum. This is the merge for partial sums, and for
+    * partial counts when `valueOrdinal` points at the count column. A null value does not update
+@@ -246,6 +271,71 @@ object HashAggregate:
+       row += 1
+     }
+ 
++  /** One reused pair so a step scan does not allocate a tuple per row. */
++  @SuppressWarnings(Array("org.wartremover.warts.Var"))
++  private final class PairSlot:
++    var key: Int = 0
++    var value: Int = 0
++    var kept: Boolean = false
++
++  private def scanSumDenseSteps(
++      table: GroupTable,
++      keys: Int32Column,
++      values: Int32Column,
++      steps: Array[PairStep],
++      slot: PairSlot,
++  ): Unit =
++    val keyValues = keys.values
++    val valueValues = values.values
++    val rows = keys.length
++    var row = 0
++    while (row < rows) {
++      applySteps(keyValues(row), valueValues(row), steps, slot)
++      if (slot.kept) then table.addSum(slot.key, slot.value.toLong)
++      row += 1
++    }
++
++  private def scanSumSparseSteps(
++      table: GroupTable,
++      keys: Int32Column,
++      values: Int32Column,
++      steps: Array[PairStep],
++      slot: PairSlot,
++  ): Unit =
++    val keyValues = keys.values
++    val keyWords = keys.validity.words
++    val valueValues = values.values
++    val valueWords = values.validity.words
++    val rows = keys.length
++    var row = 0
++    while (row < rows) {
++      if (Validity.isSet(keyWords, row) && Validity.isSet(valueWords, row)) then
++        applySteps(keyValues(row), valueValues(row), steps, slot)
++        if (slot.kept) then table.addSum(slot.key, slot.value.toLong)
++      row += 1
++    }
++
++  private def applySteps(key0: Int, value0: Int, steps: Array[PairStep], slot: PairSlot): Unit =
++    val width = steps.length
++    var key = key0
++    var value = value0
++    var kept = true
++    var index = 0
++    while (kept && index < width) {
++      steps(index) match
++        case PairStep.KeepKey(predicate) => kept = predicate(key)
++        case PairStep.KeepValue(predicate) => kept = predicate(value)
++        case PairStep.KeepRow(predicate) => kept = predicate(key, value)
++        case PairStep.MapPair(mapper) =>
++          val projected = mapper(key, value)
++          key = projected._1
++          value = projected._2
++      index += 1
++    }
++    slot.key = key
++    slot.value = value
++    slot.kept = kept
++
+   private def scanSumLongDense(table: GroupTable, keys: Int32Column, values: Int64Column): Unit =
+     val keyValues = keys.values
+     val valueValues = values.values
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/PairStep.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/PairStep.scala
+new file mode 100644
+index 0000000..4e3459f
+--- /dev/null
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/PairStep.scala
+@@ -0,0 +1,16 @@
++package com.ewoodbury.scarlet.columnar
++
++/**
++ * One filter or pair rewrite applied while summing an int pair.
++ *
++ * Steps run in source order on each present pair. A keep that rejects the row drops it. A map
++ * replaces the pair, and later steps see that pair. The sum then groups by the resulting key.
++ */
++sealed trait PairStep
++
++object PairStep:
++
++  final case class KeepKey(predicate: Int => Boolean) extends PairStep
++  final case class KeepValue(predicate: Int => Boolean) extends PairStep
++  final case class KeepRow(predicate: (Int, Int) => Boolean) extends PairStep
++  final case class MapPair(mapper: (Int, Int) => (Int, Int)) extends PairStep
+diff --git a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
+index 1889005..91f99b8 100644
+--- a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
++++ b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
+@@ -37,9 +37,11 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
+  * [[trySumDouble]] add a filter/project chain in the fused loop and do not write that chain's
+  * output column. Sum of `keys`, `values`, or an int `mapValues` reads the pair column in that
+  * morsel loop and does not build the projection. [[tryGroupedSum]] runs
+- * [[ColumnPipeline.sumByKey]] on a witnessed pair source, `filterKeys`, or `filterValues`, then
+- * folds the `Int64` group sums. An empty source has no witness and is refused. It does not decode.
+- * `collect` still does.
++ * [[ColumnPipeline.sumByKey]] on a witnessed pair source and folds the `Int64` group sums. A
++ * preceding `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that
++ * partial scan, so the action does not build those pairs. An empty source has no witness and is
++ * refused. It does not decode. `collect` still does. A pair `MapOp` stays on the row path for
++ * `collect` and `reduceByKey`.
+  *
+  * An `ArraySeq.ofInt`, `ArraySeq.ofDouble`, or [[IntPairArrays]] source is copied into the column
+  * on the calling thread. A boxed `Vector` or `List` is still read through its iterator.
+@@ -56,9 +58,13 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
+ )
+ object ColumnarPlanner:
+ 
+-  /** Layout the planner would use, without running the plan. `None` means the row path. */
++  /**
++   * Layout the planner would use, without running the plan. `None` means the row path. A pair map
++   * that [[tryGroupedSum]] can fuse reports columnar here and still lowers to `None`, because
++   * `collect` and `reduceByKey` do not run that map on the columnar path.
++   */
+   def partitioning[A](plan: Plan[A]): Option[PartitioningInfo] =
+-    accepted(plan).map(infoOf)
++    accepted(plan).map(infoOf).orElse(fusedPairLayout(plan))
+ 
+   /**
+    * The physical tree for `plan`, without running it. `None` means the row path. An invalid layout
+@@ -112,25 +118,22 @@ object ColumnarPlanner:
+         catch case _: ClassCastException => None
+ 
+   /**
+-   * Folded wide sum of int pairs. `None` means the row path. A pair source, `filterKeys`, or
+-   * `filterValues` runs [[ColumnPipeline.sumByKey]] and adds the `Int64` group sums when a pair
+-   * value is present to witness the type. An empty source has no witness and is refused. Null keys
+-   * stay dropped. This does not decode. Any other shape is refused.
++   * Folded wide sum of int pairs. `None` means the row path. A witnessed pair source runs
++   * [[ColumnPipeline.sumByKey]]. A preceding row, key, or value filter, or a map that stays a
++   * pair, is compiled into `keep`/`map` or [[com.ewoodbury.scarlet.columnar.PairStep]]s and
++   * applied inside the partial `sumInt32`. An empty source has no witness and is refused. Null
++   * keys stay dropped. This does not decode. A mistyped function throws `ClassCastException` and
++   * is refused after any rows it already touched. Any other shape is refused.
+    */
+   def tryGroupedSum(plan: Plan[_]): Option[Long] =
+-    if (!groupedSumShape(plan)) then None
++    if (!ScarletConf.get.columnarExecution) then None
+     else
+-      consume(plan) { case Columns.Pairs(parts) =>
+-        val grouped = ColumnPipeline.sumByKey(
+-          parts,
+-          keyOrdinal = 0,
+-          valueOrdinal = 1,
+-          numPartitions = shuffleWidth,
+-          parallelism = parallelism,
+-          batchSize = batchSize,
+-        )
+-        ColumnReduce.sumInt64(grouped, ordinal = 1)
+-      }
++      val (base, steps) = peelPairOps(plan)
++      base match
++        case source: Plan.Source[_] =>
++          try runGroupedSum(source, steps)
++          catch case _: ClassCastException => None
++        case _ => None
+ 
+   private def sumInt(plan: Plan[_], op: PhysicalOp): Long = (plan, op) match
+     case (Plan.Source(partitions), PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) =>
+@@ -194,12 +197,82 @@ object ColumnarPlanner:
+     case _ =>
+       ColumnReduce.sumFloat64(batchesOf(interpret(plan, op)))
+ 
+-  /** Pair plans whose grouped sum stays on the wide kernel: source, filterKeys, filterValues. */
+-  @tailrec
+-  private def groupedSumShape(plan: Plan[_]): Boolean = plan match
+-    case Plan.Source(_) => true
+-    case Plan.FilterKeysOp(source, _) => groupedSumShape(source)
+-    case Plan.FilterValuesOp(source, _) => groupedSumShape(source)
++  /**
++   * Pair filters and pair maps above `base`, in source order. The functions are cast here and
++   * called later, during the aggregate scan. A function that is not the pair type throws
++   * `ClassCastException` then.
++   */
++  private def peelPairOps(plan: Plan[_]): (Plan[_], List[PairStep]) =
++    @tailrec
++    def collect(current: Plan[_], steps: List[PairStep]): (Plan[_], List[PairStep]) =
++      current match
++        case Plan.FilterOp(source, predicate) =>
++          val keep = predicate.asInstanceOf[((Int, Int)) => Boolean]
++          val step = PairStep.KeepRow((key, value) => keep((key, value)))
++          collect(source, step :: steps)
++        case Plan.FilterKeysOp(source, predicate) =>
++          val keep = predicate.asInstanceOf[Int => Boolean]
++          collect(source, PairStep.KeepKey(keep) :: steps)
++        case Plan.FilterValuesOp(source, predicate) =>
++          val keep = predicate.asInstanceOf[Int => Boolean]
++          collect(source, PairStep.KeepValue(keep) :: steps)
++        case Plan.MapOp(source, mapper) =>
++          val project = mapper.asInstanceOf[((Int, Int)) => (Int, Int)]
++          val step = PairStep.MapPair((key, value) => project((key, value)))
++          collect(source, step :: steps)
++        case _ => (current, steps)
++
++    collect(plan, Nil)
++
++  private def runGroupedSum(source: Plan.Source[_], steps: List[PairStep]): Option[Long] =
++    classify(source.partitions) match
++      case Some(PhysicalOp.Kind.Pairs) =>
++        val parts = encodePairs(source.partitions)
++        val grouped =
++          if (steps.isEmpty) then plainSum(parts)
++          else fusedSum(parts, steps.toVector)
++        Some(ColumnReduce.sumInt64(grouped, ordinal = 1))
++      case _ => None
++
++  private def plainSum(parts: Vector[ColumnBatch]): Vector[ColumnBatch] =
++    ColumnPipeline.sumByKey(
++      parts,
++      keyOrdinal = 0,
++      valueOrdinal = 1,
++      numPartitions = shuffleWidth,
++      parallelism = parallelism,
++      batchSize = batchSize,
++    )
++
++  private def fusedSum(parts: Vector[ColumnBatch], steps: Vector[PairStep]): Vector[ColumnBatch] =
++    ColumnPipeline.sumByKey(
++      parts,
++      keyOrdinal = 0,
++      valueOrdinal = 1,
++      numPartitions = shuffleWidth,
++      parallelism = parallelism,
++      batchSize = batchSize,
++      steps = steps,
++    )
++
++  /**
++   * Columnar layout for a pair map (or a map mixed with pair filters) that [[tryGroupedSum]]
++   * fuses. [[lower]] still refuses the map, so `collect` and `reduceByKey` stay on the row path.
++   */
++  private def fusedPairLayout(plan: Plan[_]): Option[PartitioningInfo] =
++    if (!ScarletConf.get.columnarExecution) then None
++    else
++      val (base, steps) = peelPairOps(plan)
++      base match
++        case source: Plan.Source[_] if steps.exists(isPairMap) =>
++          classify(source.partitions) match
++            case Some(PhysicalOp.Kind.Pairs) =>
++              Some(narrow(Distribution.Unknown(source.partitions.length)))
++            case _ => None
++        case _ => None
++
++  private def isPairMap(step: PairStep): Boolean = step match
++    case PairStep.MapPair(_) => true
+     case _ => false
+ 
+   private def isInt(op: PhysicalOp): Boolean = op.kind match
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestHashAggregate.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestHashAggregate.scala
+index ee1a899..c1cc6d8 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestHashAggregate.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestHashAggregate.scala
+@@ -68,6 +68,20 @@ class TestHashAggregate extends AnyFlatSpec with Matchers with BeforeAndAfterEac
+     sums(HashAggregate.sumInt32(batch, 0, 1)) shouldBe Map(1 -> Some(9L))
+   }
+ 
++  it should "apply a row filter and a pair map in one sum scan" in {
++    val steps = Vector(
++      PairStep.KeepRow((key, value) => key != 0 && value > 0),
++      PairStep.MapPair((key, value) => (key + 1, value * 10)),
++    )
++    val dense = pairs(Seq((Some(1), Some(5)), (Some(1), Some(-1)), (Some(-2), Some(4))))
++    val sparse = pairs(
++      Seq((Some(1), Some(5)), (Some(1), Some(-1)), (Some(-2), Some(4)), (Some(3), None)),
++    )
++
++    sums(HashAggregate.sumInt32(dense, 0, 1, steps)) shouldBe Map(2 -> Some(50L), -1 -> Some(40L))
++    sums(HashAggregate.sumInt32(sparse, 0, 1, steps)) shouldBe Map(2 -> Some(50L), -1 -> Some(40L))
++  }
++
+   it should "apply the predicate and the map in the aggregate scan" in {
+     val rows = Seq((Some(1), Some(5)), (Some(1), Some(-1)), (Some(2), Some(3)), (Some(3), None))
+     val fused = HashAggregate.sumInt32(pairs(rows), 0, 1, _ > 0, _ * 10)
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarActions.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarActions.scala
+index ea7d079..b4acba9 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarActions.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarActions.scala
+@@ -190,15 +190,138 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
+     columnar(assertNarrow(filtered, 2))
+   }
+ 
+-  it should "sum a mapped pair plan on the row path" in {
+-    val rows = Seq(1 -> 10, 1 -> 20, 2 -> 5)
+-    val valueSum = 11L + 21L + 6L
++  it should "sum a row filter inside the grouped scan" in {
++    val rows = Seq(1 -> 10, 2 -> 3, 4 -> 8, 5 -> 1)
++    val hits = new AtomicInteger
++
++    def filtered = DistCollection(rows, 2).filter { case (key, value) =>
++      hits.incrementAndGet()
++      key % 2 == 0 && value > 2
++    }
++
++    val expected = row(filtered.groupedSum)
++    hits.set(0)
++    columnar(filtered.groupedSum) shouldBe expected
++    hits.get() shouldBe rows.length
++    columnar(assertNarrow(filtered, 2))
++    columnar(filtered.groupedSum) shouldBe 11L
++  }
++
++  it should "sum a pair map inside the grouped scan" in {
++    val rows = Seq(1 -> 10, 2 -> 20, 3 -> 5)
++    val hits = new AtomicInteger
++
++    def mapped = DistCollection(rows, 2).map { case (key, value) =>
++      hits.incrementAndGet()
++      (key + 1, value + key)
++    }
++
++    hits.set(0)
++    columnar(ColumnarPlanner.partitioning(mapped.plan))
++    hits.get() shouldBe 0
++    val expected = row(mapped.groupedSum)
++    hits.set(0)
++    columnar(mapped.groupedSum) shouldBe expected
++    hits.get() shouldBe rows.length
++    columnar(assertNarrow(mapped, 2))
++    columnar(mapped.groupedSum) shouldBe 41L
++  }
++
++  it should "apply a filter before a map that reads the rewritten pair" in {
++    val rows = Seq(1 -> 1, 2 -> 3, 3 -> 5)
++    val filters = new AtomicInteger
++    val maps = new AtomicInteger
++
++    def planned = DistCollection(rows, 1)
++      .filter { case (_, value) =>
++        filters.incrementAndGet()
++        value > 2
++      }
++      .map { case (key, value) =>
++        maps.incrementAndGet()
++        (value, key)
++      }
++
++    val expected = row(planned.groupedSum)
++    filters.set(0)
++    maps.set(0)
++    columnar(planned.groupedSum) shouldBe expected
++    filters.get() shouldBe rows.length
++    maps.get() shouldBe 2
++    columnar(assertNarrow(planned, 1))
++    columnar(planned.groupedSum) shouldBe 5L
++  }
++
++  it should "return zero when a row filter keeps nothing and stay columnar" in {
++    val rows = Seq(1 -> 4, 2 -> 5)
++    val hits = new AtomicInteger
++
++    def filtered = DistCollection(rows, 2).filter { case (_, value) =>
++      hits.incrementAndGet()
++      value < 0
++    }
++
++    hits.set(0)
++    val summed = columnar(filtered.groupedSum)
++    summed shouldBe 0L
++    hits.get() shouldBe rows.length
++    columnar(assertNarrow(filtered, 2))
++    row(filtered.groupedSum) shouldBe 0L
++  }
+ 
+-    def mapped = DistCollection(rows, 2).map { case (key, value) => (key, value + 1) }
++  it should "drop a key the key predicate rejects" in {
++    def filtered = DistCollection(Seq(1 -> 5, 2 -> 9, 1 -> 1), 2).filterKeys[Int, Int](_ == 1)
+ 
+-    columnar(mapped.groupedSum) shouldBe valueSum
+-    columnar(mapped.groupedSum) shouldBe row(mapped.groupedSum)
+-    columnar(ColumnarPlanner.partitioning(mapped.plan).map(_.layout) shouldBe None)
++    columnar(filtered.groupedSum) shouldBe 6L
++    columnar(filtered.groupedSum) shouldBe row(filtered.groupedSum)
++    columnar(assertNarrow(filtered, 2))
++  }
++
++  it should "materialise only the grouped-sum batches when a filter or map precedes it" in {
++    val rows = Seq(1 -> 10, 1 -> 4, 2 -> 7, 3 -> 1, 2 -> 6)
++    val kept = new AtomicInteger
++    val rewritten = new AtomicInteger
++
++    def source = DistCollection(rows, 1)
++    def filtered = source.filter { case (key, value) =>
++      kept.incrementAndGet()
++      key > 0 && value > 3
++    }
++    def mapped = source.map { case (key, value) =>
++      rewritten.incrementAndGet()
++      (key + value, value - key)
++    }
++
++    val filteredExpected = groupedRow(filtered.groupedSum)
++    val mappedExpected = groupedRow(mapped.groupedSum)
++    kept.set(0)
++    rewritten.set(0)
++    val filteredFootprint = groupedFootprint(filtered.groupedSum)
++    val mappedFootprint = groupedFootprint(mapped.groupedSum)
++    val plainFootprint = groupedFootprint(source.groupedSum)
++
++    filteredFootprint.result shouldBe filteredExpected
++    mappedFootprint.result shouldBe mappedExpected
++    kept.get() shouldBe rows.length
++    rewritten.get() shouldBe rows.length
++    val width = groupedConf(columnarExecution = true).defaultShufflePartitions.toLong
++    val batches = 1L + 1L + width + width
++    val visits = 1L + 1L + 1L + width
++    filteredFootprint.batches shouldBe batches
++    filteredFootprint.visits shouldBe visits
++    mappedFootprint.batches shouldBe batches
++    mappedFootprint.visits shouldBe visits
++    plainFootprint.batches shouldBe batches
++    plainFootprint.visits shouldBe visits
++  }
++
++  it should "sum a flatMapped pair plan on the row path" in {
++    def expanded = DistCollection(Seq(1 -> 2, 3 -> 4), 1).flatMap { case (key, value) =>
++      Seq((key, value), (key, value + 1))
++    }
++
++    columnar(expanded.groupedSum) shouldBe row(expanded.groupedSum)
++    columnar(ColumnarPlanner.partitioning(expanded.plan) shouldBe None)
+   }
+ 
+   it should "fold every group sum" in {
+@@ -405,6 +528,32 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
+     batches shouldBe 1L
+     visits shouldBe 1L
+ 
++  private final case class Footprint(result: Long, batches: Long, visits: Long)
++
++  /** One partition, so the scan is one morsel. Shuffle width is the exchange and the final sum. */
++  private def groupedConf(columnarExecution: Boolean): ScarletConf =
++    originalConf.copy(
++      columnarExecution = columnarExecution,
++      columnarBatchSize = 1024,
++      defaultShufflePartitions = 4,
++      threadPoolSize = 2,
++    )
++
++  private def groupedRow(body: => Long): Long =
++    ScarletRuntime.get.shuffle.clear()
++    ScarletConf.set(groupedConf(columnarExecution = false))
++    body
++
++  private def groupedFootprint(body: => Long): Footprint =
++    ScarletRuntime.get.shuffle.clear()
++    ScarletConf.set(groupedConf(columnarExecution = true))
++    ColumnMetrics.arm()
++    val result = body
++    val batches = ColumnMetrics.batchCount
++    val visits = ColumnMetrics.visitCount
++    ColumnMetrics.disarm()
++    Footprint(result, batches, visits)
++
+   private def assertNarrow[A](collection: DistCollection[A], width: Int): Unit =
+     val info =
+       ColumnarPlanner.partitioning(collection.plan).getOrElse(fail("expected a columnar plan"))

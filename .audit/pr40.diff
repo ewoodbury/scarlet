@@ -1,0 +1,322 @@
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 4b83c1f..5480f56 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -65,10 +65,12 @@ filterKeys, filterValues, reduceByKey, and inner join when the values it sees ar
+ int pair narrow to that int column. `mapValues` runs when the new value stays an unboxed `Int`.
+ Any other node keeps the whole plan on the row path. This requires
+ `ScarletConf.columnarExecution` (the default). `Double` is the float64 column. A 32-bit `Float`
+-stays on the row path. Strings are a dictionary of JVM strings plus int codes (`Utf8Dict`). A
+-null string is a value, so filter and map see it. Group-by and join stay on int keys. Narrow columnar ops keep input order and the
+-input partition count. `reduceByKey` and `join` hash with `floorMod` into
+-`defaultShufflePartitions`.
++stays on the row path. Strings are a dictionary of JVM strings plus int codes (`Utf8Dict` /
++`DictUtf8Column`). An accepted string filter or map records that representation as
++`Layout.Utf8Dict`. A null string is a value, so filter and map see it. The string lambda stays
++scalar over the decoded string, and each batch has its own dictionary. Group-by and join stay on
++int keys. Narrow columnar ops keep input order and the input partition count. `reduceByKey` and
++`join` hash with `floorMod` into `defaultShufflePartitions`.
+ `columnarBatchSize` (default 8192) is the morsel width. Set `columnarExecution` false to force
+ the row path.
+ 
+@@ -103,8 +105,9 @@ as wide plans.
+   group. Bypass reads distribution, not layout: keyed ops require `Distribution.Hash` at the
+   target width; `repartition` skips a shuffle for any other distribution with that width.
+ - `PartitioningInfo` is distribution, ordering, and layout. The row path emits `Layout.BoxedRows`.
+-  `ColumnarPlanner.partitioning` reports `Layout.Columnar` for a plan it can run, and `None`
+-  otherwise.
++  `ColumnarPlanner.partitioning` reports `Layout.Columnar` for an int, double, or int-pair plan it
++  can run, and `Layout.Utf8Dict` for a string filter or map. That layout is the per-batch
++  dictionary of JVM strings plus int codes. `None` means the row path.
+   Sources are `Unknown(width)`. Keyed shuffles are `Hash`. `sortBy` is `Range` plus `Sorted`;
+   `map`, `flatMap`, and `mapPartitions` drop both. A repartition or coalesce shuffle is also
+   `Unknown`: the writer hashes the element, which is not pair-key hash and not round-robin. A
+diff --git a/docs/StageBuilder.md b/docs/StageBuilder.md
+index cf472e6..0f513c0 100644
+--- a/docs/StageBuilder.md
++++ b/docs/StageBuilder.md
+@@ -31,7 +31,8 @@ Input sources:
+   disambiguates multi-input operations (join/cogroup).
+ 
+ `PartitioningInfo` is distribution, ordering, and layout. The row path always uses
+-`Layout.BoxedRows`.
++`Layout.BoxedRows`. `Layout.Columnar` is a primitive column batch. `Layout.Utf8Dict` is the
++string batch: a dictionary of JVM strings plus int codes.
+ 
+ - `Hash(n, Seq(0))` — key hash (`groupByKey`, `reduceByKey`, `partitionBy`, join, cogroup), or a
+   bypass chained after one. `Seq(0)` is the pair key, not a schema column.
+diff --git a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
+index 91f99b8..3003728 100644
+--- a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
++++ b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
+@@ -47,7 +47,10 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
+  * on the calling thread. A boxed `Vector` or `List` is still read through its iterator.
+  *
+  * A null string is a value. Classification skips a leading null and keeps looking for a `String`.
+- * An all-null source stays on the row path, because there is no witness.
++ * An all-null source stays on the row path, because there is no witness. An accepted string plan
++ * records [[Layout.Utf8Dict]]: that dictionary plus codes, one dictionary per batch. The string
++ * lambda stays scalar over the decoded string. Int, double, and int-pair plans stay
++ * [[Layout.Columnar]].
+  */
+ @SuppressWarnings(
+   Array(
+@@ -59,9 +62,11 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
+ object ColumnarPlanner:
+ 
+   /**
+-   * Layout the planner would use, without running the plan. `None` means the row path. A pair map
+-   * that [[tryGroupedSum]] can fuse reports columnar here and still lowers to `None`, because
+-   * `collect` and `reduceByKey` do not run that map on the columnar path.
++   * Layout the planner would use, without running the plan. `None` means the row path. A string
++   * filter or map reports [[Layout.Utf8Dict]]. An int, double, or int-pair plan reports
++   * [[Layout.Columnar]]. A pair map that [[tryGroupedSum]] can fuse reports columnar here and
++   * still lowers to `None`, because `collect` and `reduceByKey` do not run that map on the
++   * columnar path.
+    */
+   def partitioning[A](plan: Plan[A]): Option[PartitioningInfo] =
+     accepted(plan).map(infoOf).orElse(fusedPairLayout(plan))
+@@ -267,7 +272,7 @@ object ColumnarPlanner:
+         case source: Plan.Source[_] if steps.exists(isPairMap) =>
+           classify(source.partitions) match
+             case Some(PhysicalOp.Kind.Pairs) =>
+-              Some(narrow(Distribution.Unknown(source.partitions.length)))
++              Some(narrow(Distribution.Unknown(source.partitions.length), primitiveLayout))
+             case _ => None
+         case _ => None
+ 
+@@ -505,8 +510,8 @@ object ColumnarPlanner:
+     case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin => hashed
+     case PhysicalOp.Exchange(_) =>
+       throw new IllegalStateException("exchange is only a child of aggregate or join")
+-    case PhysicalOp.Scan(_, partitions) =>
+-      narrow(Distribution.Unknown(partitions.length))
++    case PhysicalOp.Scan(kind, partitions) =>
++      narrow(Distribution.Unknown(partitions.length), layoutOf(kind))
+ 
+   private def interpret(plan: Plan[_], op: PhysicalOp): Columns = (plan, op) match
+     case (Plan.Source(partitions), PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) =>
+@@ -721,17 +726,27 @@ object ColumnarPlanner:
+     case Columns.Strings(parts) =>
+       parts.map(batch => Partition(BatchCodec.decodeStrings(batch)))
+ 
+-  private def narrow(distribution: Distribution): PartitioningInfo =
+-    PartitioningInfo(distribution, OrderingTag.Unsorted, layout)
++  private def narrow(distribution: Distribution, chosen: Layout): PartitioningInfo =
++    PartitioningInfo(distribution, OrderingTag.Unsorted, chosen)
+ 
+   private def hashed: PartitioningInfo =
+     PartitioningInfo(
+       Distribution.Hash(shuffleWidth, PartitioningInfo.RowKeyOrdinals),
+       OrderingTag.Unsorted,
+-      layout,
++      primitiveLayout,
+     )
+ 
+-  private def layout: Layout = Layout.Columnar(ScarletConf.get.columnarBatchSize)
++  /** String plans name the dictionary layout. Int, double, and pair plans stay columnar. */
++  private def layoutOf(kind: PhysicalOp.Kind): Layout = kind match
++    case PhysicalOp.Kind.Strings => stringLayout
++    case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs |
++        PhysicalOp.Kind.Triples =>
++      primitiveLayout
++
++  private def primitiveLayout: Layout = Layout.Columnar(ScarletConf.get.columnarBatchSize)
++
++  /** Per-batch dictionary of JVM strings plus int codes. */
++  private def stringLayout: Layout = Layout.Utf8Dict(ScarletConf.get.columnarBatchSize)
+ 
+   private def batchSize: Int =
+     val size = ScarletConf.get.columnarBatchSize
+diff --git a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/PartitioningInfo.scala b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/PartitioningInfo.scala
+index 1fa6f58..53c6422 100644
+--- a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/PartitioningInfo.scala
++++ b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/PartitioningInfo.scala
+@@ -2,10 +2,11 @@ package com.ewoodbury.scarlet.execution
+ 
+ /**
+  * Physical description of a stage output: how rows are distributed, whether they are ordered, and
+- * whether they are boxed rows or column batches.
++ * how the rows are batched.
+  *
+- * The row path always uses [[Layout.BoxedRows]]. `None` on a stage means the distribution was
+- * dropped (union). A present value always names a width.
++ * The row path always uses [[Layout.BoxedRows]]. Primitive columnar plans use [[Layout.Columnar]].
++ * A string plan uses [[Layout.Utf8Dict]], the dictionary-plus-codes column. `None` on a stage
++ * means the distribution was dropped (union). A present value always names a width.
+  *
+  * Hash and range on this path use [[PartitioningInfo.RowKeyOrdinals]] (`Seq(0)`): the single
+  * logical key (the pair key, or the sort key). That is not a schema column. Columnar execution
+@@ -94,9 +95,9 @@ final case class PartitioningInfo(
+       }
+ 
+     val layoutReason = layout match {
+-      case Layout.Columnar(batchSize) if batchSize <= 0 =>
+-        Some(s"Columnar layout has batchSize=$batchSize <= 0")
+-      case _ => None
++      case Layout.BoxedRows => None
++      case Layout.Columnar(batchSize) => batchReason("Columnar", batchSize)
++      case Layout.Utf8Dict(batchSize) => batchReason("Utf8Dict", batchSize)
+     }
+ 
+     val orderingReason = ordering match {
+@@ -111,6 +112,9 @@ final case class PartitioningInfo(
+     distributionReason.orElse(widthReason).orElse(layoutReason).orElse(orderingReason)
+   }
+ 
++  private def batchReason(label: String, batchSize: Int): Option[String] =
++    if (batchSize <= 0) Some(s"$label layout has batchSize=$batchSize <= 0") else None
++
+ /**
+  * How rows are spread across the output partitions.
+  *
+@@ -133,10 +137,18 @@ enum OrderingTag:
+   case Unsorted
+   case Sorted(keyOrdinals: Seq[Int], ascending: Seq[Boolean])
+ 
+-/** Physical batching of the output. The row engine emits [[Layout.BoxedRows]] only. */
++/**
++ * Physical batching of the output. The row engine emits [[Layout.BoxedRows]] only.
++ *
++ * [[Layout.Columnar]] is an unboxed primitive column: int, double, or int pair.
++ * [[Layout.Utf8Dict]] is the string layout. It names the dictionary of JVM strings plus int codes
++ * (`LogicalType.Utf8Dict` / `DictUtf8Column`). Each batch has its own dictionary. A string lambda
++ * still sees the decoded string, and a null string is a value.
++ */
+ enum Layout:
+   case BoxedRows
+   case Columnar(batchSize: Int)
++  case Utf8Dict(batchSize: Int)
+ 
+ object PartitioningInfo:
+ 
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarSelection.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarSelection.scala
+index c862603..b3f8cd6 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarSelection.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarSelection.scala
+@@ -69,7 +69,14 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
+     DistCollection(Seq(1, 2, 3), 2).map(_.toString).collect() shouldBe Seq("1", "2", "3")
+   }
+ 
+-  "string keys" should "keep reduceByKey and join on the row path" in {
++  "string keys" should "keep groupByKey, reduceByKey, and join on the row path" in {
++    val grouped = DistCollection(Seq("a" -> 1, "a" -> 2, "b" -> 3), 2).groupByKey
++    infoOf(grouped) shouldBe Option.empty[PartitioningInfo]
++    grouped.collect().map { case (key, values) => key -> values.toSet }.toMap shouldBe Map(
++      "a" -> Set(1, 2),
++      "b" -> Set(3),
++    )
++
+     val reduced = DistCollection(Seq("a" -> 1, "a" -> 2, "b" -> 3), 2).reduceByKey[String, Int](_ + _)
+     reduced.collect().toMap shouldBe Map("a" -> 3, "b" -> 3)
+     infoOf(reduced) shouldBe Option.empty[PartitioningInfo]
+@@ -163,7 +170,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
+     assertHashed(build.join(probe))
+   }
+ 
+-  "string filter" should "keep input order, nulls, and a columnar layout" in {
++  "string filter" should "keep input order, nulls, and a dictionary layout" in {
+     val filtered = DistCollection(texts(Some("a"), None, Some("bb"), Some("a"), Some("")), 2).filter {
+       value =>
+         Option(value) match
+@@ -172,7 +179,8 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
+     }
+ 
+     filtered.collect() shouldBe texts(Some("a"), None, Some("a"), Some(""))
+-    assertNarrow(filtered, 2)
++    assertUtf8(filtered, 2)
++    columnar(filtered.collect()) shouldBe row(filtered.collect())
+   }
+ 
+   it should "keep order when map and filter run as morsels" in {
+@@ -182,21 +190,21 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
+       .filter(_.length > 1)
+ 
+     mapped.collect() shouldBe Seq("BB", "CCC", "EE")
+-    assertNarrow(mapped, 1)
++    assertUtf8(mapped, 1)
+   }
+ 
+   it should "select strings that start with null, and leave an all-null source on the row path" in {
+     val witnessed =
+       DistCollection(texts(None, Some("a"), Some("b")), 1).filter(value => Option(value).isDefined)
+     witnessed.collect() shouldBe Seq("a", "b")
+-    assertNarrow(witnessed, 1)
++    assertUtf8(witnessed, 1)
+ 
+     val unseen = DistCollection(texts(None, None), 2).filter(_ => true)
+     unseen.collect() shouldBe texts(None, None)
+     infoOf(unseen) shouldBe Option.empty[PartitioningInfo]
+   }
+ 
+-  it should "match the row path when a map introduces and removes nulls" in {
++  it should "record a dictionary layout and match the row path when a map changes nulls" in {
+     val plan = DistCollection(texts(Some("a"), None, Some("bb"), Some("a")), 2).map { value =>
+       Option(value) match
+         case None => "n"
+@@ -204,7 +212,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
+         case Some(present) => present.toUpperCase(java.util.Locale.ENGLISH)
+     }
+ 
+-    assertNarrow(plan, 2)
++    assertUtf8(plan, 2)
+     columnar(plan.collect()) shouldBe row(plan.collect())
+   }
+ 
+@@ -266,6 +274,15 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
+   private def infoOf[A](collection: DistCollection[A]): Option[PartitioningInfo] =
+     ColumnarPlanner.partitioning(collection.plan)
+ 
++  private def assertUtf8[A](collection: DistCollection[A], width: Int): PartitioningInfo =
++    val info = PartitioningInfo(
++      Distribution.Unknown(width),
++      OrderingTag.Unsorted,
++      Layout.Utf8Dict(ScarletConf.get.columnarBatchSize),
++    )
++    infoOf(collection) shouldBe Some(info)
++    info
++
+   private def assertNarrow[A](collection: DistCollection[A], width: Int): PartitioningInfo =
+     val info = infoOf(collection).getOrElse(fail("expected a columnar plan"))
+     info.distribution shouldBe Distribution.Unknown(width)
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestPartitioningInfo.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestPartitioningInfo.scala
+index 761e4a8..37e38ac 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestPartitioningInfo.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestPartitioningInfo.scala
+@@ -180,7 +180,7 @@ class TestPartitioningInfo extends AnyFlatSpec with Matchers:
+     stage.outputPartitioning shouldBe Some(PartitioningInfo.unknown(4))
+   }
+ 
+-  "validation" should "accept singleton and a positive columnar batch" in {
++  "validation" should "accept singleton and a positive columnar or dictionary batch" in {
+     StageBuilder.validateStageGraph(
+       lone(
+         PartitioningInfo(
+@@ -190,6 +190,15 @@ class TestPartitioningInfo extends AnyFlatSpec with Matchers:
+         ),
+       ),
+     )
++    StageBuilder.validateStageGraph(
++      lone(
++        PartitioningInfo(
++          distribution = Distribution.Unknown(1),
++          ordering = OrderingTag.Unsorted,
++          layout = Layout.Utf8Dict(batchSize = 1024),
++        ),
++      ),
++    )
+   }
+ 
+   it should "reject empty hash keys, non-positive range, and a non-positive batch" in {
+@@ -216,6 +225,11 @@ class TestPartitioningInfo extends AnyFlatSpec with Matchers:
+         OrderingTag.Unsorted,
+         Layout.Columnar(batchSize = 0),
+       ),
++      PartitioningInfo(
++        Distribution.Unknown(1),
++        OrderingTag.Unsorted,
++        Layout.Utf8Dict(batchSize = 0),
++      ),
+     )
+ 
+     rejected.foreach { info =>

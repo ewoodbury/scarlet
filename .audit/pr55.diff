@@ -1,0 +1,655 @@
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/BatchCodec.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/BatchCodec.scala
+index ec8175b..3876e86 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/BatchCodec.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/BatchCodec.scala
+@@ -39,7 +39,7 @@ object BatchCodec:
+    * one encode copy.
+    */
+   private[scarlet] def copiedInts(values: Array[Int]): ColumnBatch =
+-    ColumnMetrics.notePrimitiveEncode()
++    ColumnMetrics.primitiveEncode()
+     int32Batch(Arrays.copyOf(values, values.length))
+ 
+   /**
+@@ -53,7 +53,7 @@ object BatchCodec:
+ 
+   /** Copies `values`. See [[copiedInts]] for why the column does not adopt the array. */
+   private[scarlet] def copiedFloat64s(values: Array[Double]): ColumnBatch =
+-    ColumnMetrics.notePrimitiveEncode()
++    ColumnMetrics.primitiveEncode()
+     float64Batch(Arrays.copyOf(values, values.length))
+ 
+   def nullableFloat64s(values: Seq[Option[Double]]): ColumnBatch =
+@@ -86,7 +86,7 @@ object BatchCodec:
+   private[scarlet] def copiedIntPairs(keys: Array[Int], values: Array[Int]): ColumnBatch =
+     require(keys.length == values.length, LengthMismatch)
+     val rows = keys.length
+-    ColumnMetrics.notePrimitiveEncode()
++    ColumnMetrics.primitiveEncode()
+     pairBatch(
+       Int32Column.of(Arrays.copyOf(keys, rows), Validity.allValid(rows), rows),
+       Int32Column.of(Arrays.copyOf(values, rows), Validity.allValid(rows), rows),
+@@ -145,7 +145,7 @@ object BatchCodec:
+   def decodeInts(batch: ColumnBatch, maxRows: Int): Seq[Int] =
+     val column = int32(batch)
+     val rows = decodedLength(batch, maxRows)
+-    ColumnMetrics.noteDecoded(rows)
++    ColumnMetrics.decoded(rows)
+     Seq.tabulate(rows) { row =>
+       require(column.isValid(row), s"null Int32 at row $row")
+       column.values(row)
+@@ -175,7 +175,7 @@ object BatchCodec:
+   def decodeFloat64s(batch: ColumnBatch, maxRows: Int): Seq[Double] =
+     val column = float64(batch)
+     val rows = decodedLength(batch, maxRows)
+-    ColumnMetrics.noteDecoded(rows)
++    ColumnMetrics.decoded(rows)
+     Seq.tabulate(rows) { row =>
+       require(column.isValid(row), s"null Float64 at row $row")
+       column.values(row)
+@@ -210,7 +210,7 @@ object BatchCodec:
+   def decodeStrings(batch: ColumnBatch, maxRows: Int): Seq[String] =
+     val column = utf8(batch)
+     val rows = decodedLength(batch, maxRows)
+-    ColumnMetrics.noteDecoded(rows)
++    ColumnMetrics.decoded(rows)
+     Seq.tabulate(rows) { row =>
+       if (column.isValid(row)) then column.dictionary(column.codes(row))
+       else stringElement(None)
+@@ -233,7 +233,7 @@ object BatchCodec:
+   def decodeIntPairs(batch: ColumnBatch, maxRows: Int): Seq[(Int, Int)] =
+     val (left, right) = intPair(batch)
+     val rows = decodedLength(batch, maxRows)
+-    ColumnMetrics.noteDecoded(rows)
++    ColumnMetrics.decoded(rows)
+     Seq.tabulate(rows) { row =>
+       require(left.isValid(row) && right.isValid(row), s"null Int32 pair at row $row")
+       (left.values(row), right.values(row))
+@@ -263,7 +263,7 @@ object BatchCodec:
+           requireLivePrefix(keys, rows)
+           requireLivePrefix(build, rows)
+           requireLivePrefix(probe, rows)
+-        ColumnMetrics.noteDecoded(rows)
++        ColumnMetrics.decoded(rows)
+         Seq.tabulate(rows) { row =>
+           (keys.values(row), (build.values(row), probe.values(row)))
+         }
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnBatch.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnBatch.scala
+index 8978ff1..e6a61e6 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnBatch.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnBatch.scala
+@@ -2,7 +2,7 @@ package com.ewoodbury.scarlet.columnar
+ 
+ /**
+  * A published batch. `length` is the row count every column shares. The batch does not copy column
+- * buffers. Construction counts toward [[ColumnMetrics]] when that counter is armed.
++ * buffers. Construction notes a batch on the installed [[ColumnMetrics]] sink.
+  */
+ final class ColumnBatch(
+     val schema: IndexedSeq[LogicalType],
+@@ -25,4 +25,4 @@ final class ColumnBatch(
+       s"column $ordinal length ${column.length} does not match batch length $length",
+     )
+   }
+-  ColumnMetrics.noteBatch()
++  ColumnMetrics.batch()
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnMetrics.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnMetrics.scala
+index a22b766..71da420 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnMetrics.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnMetrics.scala
+@@ -1,69 +1,168 @@
+ package com.ewoodbury.scarlet.columnar
+ 
+-import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
++import java.util.concurrent.atomic.AtomicLong
++
++import scala.annotation.unused
+ 
+ /**
+- * Counts published batches, morsel visits, decoded rows, and primitive source encodes while armed.
+- * Disarmed by default, so a study does not record. A test arms around one action and disarms
+- * afterwards, including from `afterEach`.
++ * Receives one note per published batch, morsel visit, decoded row group, or primitive encode.
+  *
+- * Recording is one process-wide window. Nested or concurrent actions share the counters. Tests run
+- * sequentially, so one armed action does not overlap another when each suite disarms in
+- * `afterEach`.
++ * [[ColumnMetrics]] holds one sink for the process. A note reads that reference once and calls it.
++ */
++trait MetricsSink:
++
++  /** One published [[ColumnBatch]]. */
++  def batch(): Unit
++
++  /** One morsel handed to a worker. */
++  def visit(): Unit
++
++  /** `rows` decoded. A pair or triple row counts once, not once per cell. */
++  def decoded(rows: Int): Unit
++
++  /**
++   * One owned, `ArraySeq`, or raw int-pair copy. A pair copies two arrays and counts once. The
++   * iterator fill does not call this.
++   */
++  def primitiveEncode(): Unit
++
++/** Ignores every note. This is the sink installed at startup. */
++object NoOpSink extends MetricsSink:
++
++  def batch(): Unit = ()
++
++  def visit(): Unit = ()
++
++  def decoded(@unused rows: Int): Unit = ()
++
++  def primitiveEncode(): Unit = ()
++
++/**
++ * Counts notes for one installed window.
+  *
+- * A primitive encode is one `ArraySeq.ofInt`, `ArraySeq.ofDouble`, owned primitive array, or raw
+- * `intPairs(Array, Array)` copied into columns. One note may copy two arrays: a pair encode copies
+- * the keys and the values and still counts once. A boxed iterable does not count.
++ * One thread installs the sink. Morsel workers and task threads then note into that same sink, so
++ * each counter is an `AtomicLong`. A plain `Long` drops a visit or a batch when those threads
++ * interleave. A later [[ColumnMetrics.install]] still replaces this sink for every thread.
+  */
+-object ColumnMetrics:
++final class CountingSink extends MetricsSink:
+ 
+-  private val armed = new AtomicBoolean(false)
+   private val batches = new AtomicLong(0L)
+   private val visits = new AtomicLong(0L)
+-  private val decoded = new AtomicLong(0L)
++  private val decodedRows = new AtomicLong(0L)
+   private val primitiveEncodes = new AtomicLong(0L)
+ 
+-  /** Start from zero and record until [[disarm]]. */
+-  def arm(): Unit =
+-    batches.set(0L)
+-    visits.set(0L)
+-    decoded.set(0L)
+-    primitiveEncodes.set(0L)
+-    armed.set(true)
++  def batch(): Unit =
++    batches.incrementAndGet()
++    ()
+ 
+-  /** Stop recording. The last counts stay readable. */
+-  def disarm(): Unit =
+-    armed.set(false)
++  def visit(): Unit =
++    visits.incrementAndGet()
++    ()
++
++  def decoded(rows: Int): Unit =
++    decodedRows.addAndGet(rows.toLong)
++    ()
++
++  def primitiveEncode(): Unit =
++    primitiveEncodes.incrementAndGet()
++    ()
+ 
+   def batchCount: Long = batches.get()
+ 
+   def visitCount: Long = visits.get()
+ 
+-  /** Rows decoded since [[arm]]. A pair or triple row counts once, not once per cell. */
+-  def decodedValueCount: Long = decoded.get()
++  /** Rows decoded. A pair or triple row counts once, not once per cell. */
++  def decodedValueCount: Long = decodedRows.get()
++
++  /** Owned, `ArraySeq`, or raw int-pair encodes. A pair counts once. */
++  def primitiveEncodeCount: Long = primitiveEncodes.get()
++
++/**
++ * Counts published batches, morsel visits, decoded rows, and primitive source encodes on the
++ * installed [[MetricsSink]]. [[NoOpSink]] starts installed, so nothing is recorded until a caller
++ * installs a sink. [[withSink]] installs for one body and restores the previous sink afterwards,
++ * including when the body throws.
++ *
++ * The slot is one process-wide window. [[install]] reads the current sink and writes the new one,
++ * with no lock. Two overlapping installs can observe the same previous sink, and the later write
++ * is what every thread notes into until the matching [[restore]]. Nested or concurrent actions
++ * therefore cross-contaminate. Tests run sequentially and restore in `afterEach`, which is why one
++ * action's counts stay separate today. Giving each action its own sink means passing that sink
++ * into the codec and the morsel workers, instead of reading it from this slot.
++ *
++ * A primitive encode is one `ArraySeq.ofInt`, `ArraySeq.ofDouble`, owned primitive array, or raw
++ * `intPairs(Array, Array)` copied into columns. One note may copy two arrays: a pair encode copies
++ * the keys and the values and still counts once. A boxed iterable does not count. A pair or triple
++ * row counts once when decoded.
++ */
++object ColumnMetrics:
++
++  @SuppressWarnings(Array("org.wartremover.warts.Var"))
++  @volatile private var current: MetricsSink = NoOpSink
++
++  /** Install `sink` and return the sink that was current. */
++  def install(sink: MetricsSink): MetricsSink =
++    val previous = current
++    current = sink
++    previous
++
++  /** Put `previous` back. `previous` is the value [[install]] returned. */
++  def restore(previous: MetricsSink): Unit =
++    current = previous
+ 
+   /**
+-   * Owned, `ArraySeq`, or raw int-pair primitive encodes recorded since [[arm]]. A pair counts
+-   * once.
++   * Install `sink` for `body`, then restore the previous sink. The previous sink is restored when
++   * `body` throws.
+    */
+-  def primitiveEncodeCount: Long = primitiveEncodes.get()
++  def withSink[A](sink: MetricsSink)(body: => A): A =
++    val previous = install(sink)
++    try body
++    finally restore(previous)
+ 
+-  private[columnar] def noteBatch(): Unit =
+-    if (armed.get()) then batches.incrementAndGet()
+-    ()
++  /** Batches on the installed [[CountingSink]], or zero when the sink is anything else. */
++  def batchCount: Long = current match
++    case sink: CountingSink => sink.batchCount
++    case _ => 0L
+ 
+-  private[columnar] def noteVisit(): Unit =
+-    if (armed.get()) then visits.incrementAndGet()
+-    ()
++  /** Morsel visits on the installed [[CountingSink]], or zero when the sink is anything else. */
++  def visitCount: Long = current match
++    case sink: CountingSink => sink.visitCount
++    case _ => 0L
+ 
+-  private[columnar] def noteDecoded(count: Int): Unit =
+-    if (armed.get()) then decoded.addAndGet(count.toLong)
+-    ()
++  /**
++   * Rows decoded on the installed [[CountingSink]], or zero otherwise. A pair or triple row counts
++   * once, not once per cell.
++   */
++  def decodedValueCount: Long = current match
++    case sink: CountingSink => sink.decodedValueCount
++    case _ => 0L
+ 
+   /**
+-   * One primitive encode. A pair encode copies both arrays under this single note. The iterator
+-   * fill does not call this.
++   * Owned, `ArraySeq`, or raw int-pair encodes on the installed [[CountingSink]], or zero
++   * otherwise. A pair counts once.
+    */
+-  private[columnar] def notePrimitiveEncode(): Unit =
+-    if (armed.get()) then primitiveEncodes.incrementAndGet()
+-    ()
++  def primitiveEncodeCount: Long = current match
++    case sink: CountingSink => sink.primitiveEncodeCount
++    case _ => 0L
++
++  private[columnar] def batch(): Unit =
++    current.batch()
++
++  private[columnar] def visit(): Unit =
++    current.visit()
++
++  private[columnar] def decoded(rows: Int): Unit =
++    current.decoded(rows)
++
++  private[columnar] def primitiveEncode(): Unit =
++    current.primitiveEncode()
++
++  /** Installs a fresh [[CountingSink]] and drops whatever was current. */
++  @deprecated("Install a CountingSink and restore the previous sink.", "0.1.0")
++  def arm(): Unit =
++    val _ = install(new CountingSink)
++
++  /** Restores [[NoOpSink]]. Counts stay on the removed sink and read back as zero. */
++  @deprecated("Restore the sink that was current before install.", "0.1.0")
++  def disarm(): Unit =
++    restore(NoOpSink)
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/MorselScheduler.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/MorselScheduler.scala
+index 15c1053..6446dd1 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/MorselScheduler.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/MorselScheduler.scala
+@@ -11,7 +11,7 @@ import scala.annotation.tailrec
+  *
+  * Results line up with `morsels`. A worker failure, including an `Error`, fails the call with that
+  * throwable. `parallelism` of `1` runs on the calling thread. Each morsel handed to the worker
+- * counts as one visit when [[ColumnMetrics]] is armed.
++ * counts as one visit on the installed [[ColumnMetrics]] sink.
+  */
+ object MorselScheduler:
+ 
+@@ -22,7 +22,7 @@ object MorselScheduler:
+     if (morsels.isEmpty) then Vector.empty
+     else if (parallelism == 1 || morsels.length == 1) then
+       morsels.iterator.zipWithIndex.map { (batch, index) =>
+-        ColumnMetrics.noteVisit()
++        ColumnMetrics.visit()
+         worker(index, batch)
+       }.toVector
+     else
+@@ -67,7 +67,7 @@ object MorselScheduler:
+             throw new IllegalArgumentException(s"missing morsel $index")
+           }
+           try
+-            ColumnMetrics.noteVisit()
++            ColumnMetrics.visit()
+             slots(index).set(Some(worker(index, batch)))
+           catch case thrown: Throwable => failure.compareAndSet(None, Some(thrown))
+           drain(id, deques, slots, failure, morsels, worker)
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestColumnBatch.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestColumnBatch.scala
+index 3712a4a..ebedfc2 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestColumnBatch.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestColumnBatch.scala
+@@ -11,7 +11,7 @@ import com.ewoodbury.scarlet.core.{DoubleArrays, IntArrays, IntPairArrays}
+ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
+ 
+   override def afterEach(): Unit =
+-    ColumnMetrics.disarm()
++    ColumnMetrics.restore(NoOpSink)
+     ()
+ 
+   "primitive batches" should "roundtrip ints, longs, floats, bools, and int pairs" in {
+@@ -38,90 +38,123 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
+ 
+   it should "copy a primitive int array into the column" in {
+     val raw = Array(1, -2, 0)
+-    ColumnMetrics.arm()
+-    val batch = BatchCodec.ints(new ArraySeq.ofInt(raw))
+-    val boxed = BatchCodec.ints(Seq(1, -2, 0))
+-    ColumnMetrics.primitiveEncodeCount shouldBe 1L
+-    val column = int32(batch)
+-
+-    column.values should not be theSameInstanceAs(raw)
+-    raw(0) = 99
+-    BatchCodec.decodeInts(batch) shouldBe Seq(1, -2, 0)
+-    BatchCodec.decodeInts(boxed) shouldBe Seq(1, -2, 0)
++    ColumnMetrics.withSink(new CountingSink) {
++      val batch = BatchCodec.ints(new ArraySeq.ofInt(raw))
++      val boxed = BatchCodec.ints(Seq(1, -2, 0))
++      ColumnMetrics.primitiveEncodeCount shouldBe 1L
++      val column = int32(batch)
++
++      column.values should not be theSameInstanceAs(raw)
++      raw(0) = 99
++      BatchCodec.decodeInts(batch) shouldBe Seq(1, -2, 0)
++      BatchCodec.decodeInts(boxed) shouldBe Seq(1, -2, 0)
++    }
+   }
+ 
+   it should "copy an owned int array on the primitive path" in {
+     val raw = Array(1, -2, 0)
+     val owned = IntArrays(raw)
+-    ColumnMetrics.arm()
+-    val batch = BatchCodec.copiedInts(owned.values)
+-    ColumnMetrics.primitiveEncodeCount shouldBe 1L
+-    val column = int32(batch)
+-
+-    column.values should not be theSameInstanceAs(owned.values)
+-    owned.values(0) = 99
+-    BatchCodec.decodeInts(batch) shouldBe Seq(1, -2, 0)
++    ColumnMetrics.withSink(new CountingSink) {
++      val batch = BatchCodec.copiedInts(owned.values)
++      ColumnMetrics.primitiveEncodeCount shouldBe 1L
++      val column = int32(batch)
++
++      column.values should not be theSameInstanceAs(owned.values)
++      owned.values(0) = 99
++      BatchCodec.decodeInts(batch) shouldBe Seq(1, -2, 0)
++    }
+   }
+ 
+   it should "copy a primitive double array into the column" in {
+     val raw = Array(1.5, -0.25)
+-    ColumnMetrics.arm()
+-    val batch = BatchCodec.float64s(new ArraySeq.ofDouble(raw))
+-    val boxed = BatchCodec.float64s(Seq(1.5, -0.25))
+-    ColumnMetrics.primitiveEncodeCount shouldBe 1L
+-    val column = float64(batch)
+-
+-    column.values should not be theSameInstanceAs(raw)
+-    raw(0) = 9.0
+-    BatchCodec.decodeFloat64s(batch) shouldBe Seq(1.5, -0.25)
+-    BatchCodec.decodeFloat64s(boxed) shouldBe Seq(1.5, -0.25)
++    ColumnMetrics.withSink(new CountingSink) {
++      val batch = BatchCodec.float64s(new ArraySeq.ofDouble(raw))
++      val boxed = BatchCodec.float64s(Seq(1.5, -0.25))
++      ColumnMetrics.primitiveEncodeCount shouldBe 1L
++      val column = float64(batch)
++
++      column.values should not be theSameInstanceAs(raw)
++      raw(0) = 9.0
++      BatchCodec.decodeFloat64s(batch) shouldBe Seq(1.5, -0.25)
++      BatchCodec.decodeFloat64s(boxed) shouldBe Seq(1.5, -0.25)
++    }
+   }
+ 
+   it should "copy an owned double array on the primitive path" in {
+     val raw = Array(1.5, -0.25)
+     val owned = DoubleArrays(raw)
+-    ColumnMetrics.arm()
+-    val batch = BatchCodec.copiedFloat64s(owned.values)
+-    ColumnMetrics.primitiveEncodeCount shouldBe 1L
+-    val column = float64(batch)
+-
+-    column.values should not be theSameInstanceAs(owned.values)
+-    owned.values(0) = 9.0
+-    BatchCodec.decodeFloat64s(batch) shouldBe Seq(1.5, -0.25)
++    ColumnMetrics.withSink(new CountingSink) {
++      val batch = BatchCodec.copiedFloat64s(owned.values)
++      ColumnMetrics.primitiveEncodeCount shouldBe 1L
++      val column = float64(batch)
++
++      column.values should not be theSameInstanceAs(owned.values)
++      owned.values(0) = 9.0
++      BatchCodec.decodeFloat64s(batch) shouldBe Seq(1.5, -0.25)
++    }
+   }
+ 
+   it should "copy primitive int-pair arrays into the columns" in {
+     val keys = Array(1, 2)
+     val values = Array(10, 20)
+     val owned = IntPairArrays(keys, values)
+-    ColumnMetrics.arm()
+-    val checked = BatchCodec.intPairs(keys, values)
+-    val copied = BatchCodec.copiedIntPairs(owned.keys, owned.values)
+-    val boxed = BatchCodec.intPairs(Seq((1, 10), (2, 20)))
+-    ColumnMetrics.primitiveEncodeCount shouldBe 2L
+-    val (left, right) = intPair(checked)
+-    val (copiedLeft, copiedRight) = intPair(copied)
+-
+-    left.values should not be theSameInstanceAs(keys)
+-    right.values should not be theSameInstanceAs(values)
+-    left.values should not be theSameInstanceAs(owned.keys)
+-    copiedLeft.values should not be theSameInstanceAs(owned.keys)
+-    copiedRight.values should not be theSameInstanceAs(owned.values)
+-    keys(0) = 7
+-    values(1) = 8
+-    owned.keys(0) = 7
+-    owned.values(1) = 8
+-    BatchCodec.decodeIntPairs(checked) shouldBe Seq((1, 10), (2, 20))
+-    BatchCodec.decodeIntPairs(copied) shouldBe Seq((1, 10), (2, 20))
+-    BatchCodec.decodeIntPairs(boxed) shouldBe Seq((1, 10), (2, 20))
+-    val caught = intercept[IllegalArgumentException] {
+-      BatchCodec.intPairs(Array(1), Array.empty[Int])
++    ColumnMetrics.withSink(new CountingSink) {
++      val checked = BatchCodec.intPairs(keys, values)
++      val copied = BatchCodec.copiedIntPairs(owned.keys, owned.values)
++      val boxed = BatchCodec.intPairs(Seq((1, 10), (2, 20)))
++      ColumnMetrics.primitiveEncodeCount shouldBe 2L
++      val (left, right) = intPair(checked)
++      val (copiedLeft, copiedRight) = intPair(copied)
++
++      left.values should not be theSameInstanceAs(keys)
++      right.values should not be theSameInstanceAs(values)
++      left.values should not be theSameInstanceAs(owned.keys)
++      copiedLeft.values should not be theSameInstanceAs(owned.keys)
++      copiedRight.values should not be theSameInstanceAs(owned.values)
++      keys(0) = 7
++      values(1) = 8
++      owned.keys(0) = 7
++      owned.values(1) = 8
++      BatchCodec.decodeIntPairs(checked) shouldBe Seq((1, 10), (2, 20))
++      BatchCodec.decodeIntPairs(copied) shouldBe Seq((1, 10), (2, 20))
++      BatchCodec.decodeIntPairs(boxed) shouldBe Seq((1, 10), (2, 20))
++      val caught = intercept[IllegalArgumentException] {
++        BatchCodec.intPairs(Array(1), Array.empty[Int])
++      }
++      caught.getMessage shouldBe s"requirement failed: ${IntPairArrays.LengthMismatch}"
++      val ownedUnequal = intercept[IllegalArgumentException] {
++        BatchCodec.copiedIntPairs(Array(1), Array(10, 20))
++      }
++      ownedUnequal.getMessage shouldBe s"requirement failed: ${IntPairArrays.LengthMismatch}"
+     }
+-    caught.getMessage shouldBe s"requirement failed: ${IntPairArrays.LengthMismatch}"
+-    val ownedUnequal = intercept[IllegalArgumentException] {
+-      BatchCodec.copiedIntPairs(Array(1), Array(10, 20))
+-    }
+-    ownedUnequal.getMessage shouldBe s"requirement failed: ${IntPairArrays.LengthMismatch}"
++  }
++
++  // One process-wide slot. This checks that a thrown body puts the previous sink back.
++  // A second install from another thread would replace both sinks until restore.
++  it should "restore the previous sink when the body throws" in {
++    val outer = new CountingSink
++    val previous = ColumnMetrics.install(outer)
++    previous should be theSameInstanceAs NoOpSink
++    try
++      val inner = new CountingSink
++      val thrown = intercept[IllegalStateException] {
++        ColumnMetrics.withSink[Unit](inner) {
++          val recorded = BatchCodec.copiedInts(Array(1, 2))
++          recorded.length shouldBe 2
++          throw new IllegalStateException("metrics body failed")
++        }
++      }
++      thrown.getMessage shouldBe "metrics body failed"
++      inner.primitiveEncodeCount shouldBe 1L
++      inner.batchCount shouldBe 1L
++      ColumnMetrics.primitiveEncodeCount shouldBe 0L
++      val again = BatchCodec.copiedInts(Array(3))
++      again.length shouldBe 1
++      ColumnMetrics.primitiveEncodeCount shouldBe 1L
++      ColumnMetrics.batchCount shouldBe 1L
++      outer.primitiveEncodeCount shouldBe 1L
++      inner.primitiveEncodeCount shouldBe 1L
++    finally ColumnMetrics.restore(previous)
+   }
+ 
+   it should "share a pair column when narrowing to one column" in {
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestMorselScheduler.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestMorselScheduler.scala
+index f2df782..3a32f0a 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestMorselScheduler.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestMorselScheduler.scala
+@@ -9,7 +9,7 @@ import org.scalatest.matchers.should.Matchers
+ class TestMorselScheduler extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
+ 
+   override def afterEach(): Unit =
+-    ColumnMetrics.disarm()
++    ColumnMetrics.restore(NoOpSink)
+     ()
+ 
+   "scheduler" should "return results in morsel order on one thread" in {
+@@ -22,10 +22,11 @@ class TestMorselScheduler extends AnyFlatSpec with Matchers with BeforeAndAfterE
+ 
+   it should "count one visit for every morsel when several workers run" in {
+     val morsels = (0 until 8).toVector.map(row => BatchCodec.ints(Seq(row)))
+-    ColumnMetrics.arm()
+-    val lengths = MorselScheduler.map(morsels, parallelism = 4)((_, batch) => batch.length)
+-    lengths shouldBe morsels.map(_.length)
+-    ColumnMetrics.visitCount shouldBe morsels.length.toLong
++    ColumnMetrics.withSink(new CountingSink) {
++      val lengths = MorselScheduler.map(morsels, parallelism = 4)((_, batch) => batch.length)
++      lengths shouldBe morsels.map(_.length)
++      ColumnMetrics.visitCount shouldBe morsels.length.toLong
++    }
+   }
+ 
+   it should "steal the tail of a worker blocked on its own head" in {
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestTrailingProject.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestTrailingProject.scala
+index c3ecfe3..b151326 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestTrailingProject.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestTrailingProject.scala
+@@ -7,7 +7,7 @@ import org.scalatest.flatspec.AnyFlatSpec
+ import org.scalatest.matchers.should.Matchers
+ 
+ import com.ewoodbury.scarlet.api.DistCollection
+-import com.ewoodbury.scarlet.columnar.ColumnMetrics
++import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, NoOpSink}
+ import com.ewoodbury.scarlet.core.{Partition, ScarletConf}
+ import com.ewoodbury.scarlet.runtime.ScarletRuntime
+ 
+@@ -24,7 +24,7 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
+   private val filteredSurvivors = 500068L
+ 
+   override def afterEach(): Unit =
+-    ColumnMetrics.disarm()
++    ColumnMetrics.restore(NoOpSink)
+     ScarletRuntime.get.shuffle.clear()
+     ScarletConf.set(originalConf)
+     ()
+@@ -269,27 +269,27 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
+       }
+ 
+     armStudy()
+-    ColumnMetrics.arm()
+-    ColumnarPlanner.lower(chained.plan) shouldBe Option.empty[PhysicalOp]
+-    ColumnarPlanner.partitioning(chained.plan) shouldBe Option.empty[PartitioningInfo]
+-    ColumnarPlanner.tryRun(chained.plan) shouldBe Option.empty[Seq[Partition[Long]]]
+-    ColumnarPlanner.tryCount(chained.plan) shouldBe Option.empty[Long]
+-    ColumnarPlanner.trySumInt(chained.plan) shouldBe Option.empty[Long]
+-    calls.map(_.get()).toSeq shouldBe Seq(0, 0, 0, 0, 0)
+-    ColumnMetrics.batchCount shouldBe 0L
+-    ColumnMetrics.visitCount shouldBe 0L
+-    ColumnMetrics.primitiveEncodeCount shouldBe 0L
+-    ColumnMetrics.disarm()
++    ColumnMetrics.withSink(new CountingSink) {
++      ColumnarPlanner.lower(chained.plan) shouldBe Option.empty[PhysicalOp]
++      ColumnarPlanner.partitioning(chained.plan) shouldBe Option.empty[PartitioningInfo]
++      ColumnarPlanner.tryRun(chained.plan) shouldBe Option.empty[Seq[Partition[Long]]]
++      ColumnarPlanner.tryCount(chained.plan) shouldBe Option.empty[Long]
++      ColumnarPlanner.trySumInt(chained.plan) shouldBe Option.empty[Long]
++      calls.map(_.get()).toSeq shouldBe Seq(0, 0, 0, 0, 0)
++      ColumnMetrics.batchCount shouldBe 0L
++      ColumnMetrics.visitCount shouldBe 0L
++      ColumnMetrics.primitiveEncodeCount shouldBe 0L
++    }
+ 
+     val collected = chained.collect().toList
+     collected shouldBe List(5L, 6L, 7L)
+     calls.map(_.get()).toSeq shouldBe Seq(3, 3, 3, 3, 3)
+     collected shouldBe row(chained.collect().toList)
+-    ColumnMetrics.arm()
+-    chained.collect()
+-    ColumnMetrics.batchCount shouldBe 0L
+-    ColumnMetrics.visitCount shouldBe 0L
+-    ColumnMetrics.disarm()
++    ColumnMetrics.withSink(new CountingSink) {
++      chained.collect()
++      ColumnMetrics.batchCount shouldBe 0L
++      ColumnMetrics.visitCount shouldBe 0L
++    }
+   }
+ 
+   "sum" should "keep a long total when five increments wrap" in {
+@@ -394,8 +394,7 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
+ 
+   private def measure[A](body: => A): Footprint[A] =
+     ScarletRuntime.get.shuffle.clear()
+-    ColumnMetrics.arm()
+-    try
++    ColumnMetrics.withSink(new CountingSink) {
+       val result = body
+       Footprint(
+         result,
+@@ -403,7 +402,7 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
+         ColumnMetrics.visitCount,
+         ColumnMetrics.primitiveEncodeCount,
+       )
+-    finally ColumnMetrics.disarm()
++    }
+ 
+   private def row[A](body: => A): A =
+     val saved = ScarletConf.get

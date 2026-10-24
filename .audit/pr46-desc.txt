@@ -1,0 +1,18 @@
+Carry source descriptors for empty columnar inputs
+
+## Summary
+
+- Add `Plan.SourceDescriptor` to `Plan.Source`, defaulting to `Unknown` for generic sources; primitive array factories set `Ints`, `Doubles`, or `Pairs`.
+- Use a known descriptor to classify empty sources. For non-empty typed sources, keep the existing inferred kind and additionally verify all values agree with the descriptor; mismatches fall back to rows.
+- Accept empty typed pair sources in the columnar contract, pin empty sum/count/groupedSum and empty collect/take behavior, and update the architecture contract.
+
+## Design choice
+
+Extend `Plan.Source` with a defaulted descriptor rather than add a separate source node. This keeps the existing node recognized by execution and stage-building logic, preserves one-argument construction as `Unknown`, and limits the source-pattern updates to extractor sites. A new node would need propagation through each plan consumer and could silently route to the row path.
+
+## Validation
+
+- `make lint` — passed
+- `make test-lint` — passed
+- `make test` — passed (491 tests)
+

@@ -1,0 +1,852 @@
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 7a64362..def991d 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -43,7 +43,7 @@ DistCollection action
+          ColumnarPlanner.tryRun: lower and interpret an eligible plan
+          otherwise DAGScheduler.executePartitions
+        take:
+-         ColumnarPlanner.tryTake: scan eligible partitions in order and decode its prefix
++         ColumnarPlanner.tryTake: scan eligible partitions in order and decode their prefixes
+          otherwise row path
+             -> StageBuilder.buildStageGraph
+             -> TopologicalSort
+diff --git a/modules/scarlet-api/src/main/scala/com/ewoodbury/scarlet/api/DistCollection.scala b/modules/scarlet-api/src/main/scala/com/ewoodbury/scarlet/api/DistCollection.scala
+index cf936a9..e198353 100644
+--- a/modules/scarlet-api/src/main/scala/com/ewoodbury/scarlet/api/DistCollection.scala
++++ b/modules/scarlet-api/src/main/scala/com/ewoodbury/scarlet/api/DistCollection.scala
+@@ -49,7 +49,8 @@ final case class DistCollection[A](plan: Plan[A]):
+ 
+   /**
+    * Filters strings equal to `value`. This explicit form is recognized by the columnar planner,
+-   * which compares dictionary codes. A regular `filter(_ == value)` remains a scalar predicate.
++   * which compares dictionary codes. A null `value` is not recognized and stays on the scalar
++   * predicate. A regular `filter(_ == value)` remains a scalar predicate.
+    */
+   def filterStringEquals(value: String)(using ev: A =:= String): DistCollection[A] =
+     filterStringLiterals(Vector(value))
+@@ -65,10 +66,8 @@ final case class DistCollection[A](plan: Plan[A]):
+   private def filterStringLiterals(values: Vector[String])(using
+       ev: A =:= String,
+   ): DistCollection[A] =
+-    val stringValue: A => String = value => ev(value)
+-    val predicate = new DictionaryStringPredicate[A]:
++    val predicate = new DictionaryStringPredicate[A](ev):
+       val literals: Vector[String] = values
+-      def apply(value: A): Boolean = literals.contains(stringValue(value))
+     DistCollection(Plan.FilterOp(this.plan, predicate))
+ 
+   /**
+@@ -384,12 +383,19 @@ final case class DistCollection[A](plan: Plan[A]):
+ end DistCollection
+ 
+ /**
+- * Internal contract for a string literal predicate that the planner may execute by dictionary
+- * code.
++ * String literal predicate. [[literals]] is the only membership test: [[apply]] is final and uses
++ * that vector, so a columnar code comparison and the row path cannot disagree. The planner reads
++ * [[literals]] and does not call [[apply]].
+  */
+-private[scarlet] trait DictionaryStringPredicate[A] extends (A => Boolean):
++private[scarlet] abstract class DictionaryStringPredicate[A](ev: A =:= String)
++    extends (A => Boolean):
++
+   def literals: Vector[String]
+ 
++  private lazy val membership: Set[String] = literals.toSet
++
++  final def apply(value: A): Boolean = membership.contains(ev(value))
++
+ /** Internal marker for a tuple-free predicate over one int join column. */
+ private[scarlet] trait IntJoinTriplePredicate[A] extends (A => Boolean):
+   def selectedSlot: IntJoinTriplePredicate.Slot
+@@ -454,6 +460,7 @@ object DistCollection:
+    *   A new DistCollection.
+    */
+   def apply[A](data: Iterable[A], numPartitions: Int): DistCollection[A] =
++    require(numPartitions > 0, "Number of partitions must be positive.")
+     val elements = data.toVector
+     splitSource(elements.length, numPartitions, Plan.SourceDescriptor.Unknown)((start, end) =>
+       elements.slice(start, end),
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/BatchCodec.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/BatchCodec.scala
+index 819a7e5..ec8175b 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/BatchCodec.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/BatchCodec.scala
+@@ -281,10 +281,18 @@ object BatchCodec:
+     }
+ 
+   /** Throws once, naming the first clear live bit. Bits at `length` and beyond are not live. */
+-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+   private def requireLive(column: Int32Column): Unit =
+-    val live = column.length
+-    val words = column.validity.words
++    requireLiveRows(column.validity.words, column.length)
++
++  /**
++   * Same word check as [[requireLive]], limited to the decoded prefix. The tail word is masked to
++   * `rows`, so the scan does not walk one bit at a time.
++   */
++  private def requireLivePrefix(column: Int32Column, rows: Int): Unit =
++    requireLiveRows(column.validity.words, rows)
++
++  @SuppressWarnings(Array("org.wartremover.warts.Var"))
++  private def requireLiveRows(words: Array[Long], live: Int): Unit =
+     val fullWords = live >>> 6
+     var index = 0
+     while (index < fullWords) {
+@@ -452,12 +460,3 @@ object BatchCodec:
+   private def decodedLength(batch: ColumnBatch, maxRows: Int): Int =
+     require(maxRows >= 0, s"maximum decoded rows must be >= 0, got $maxRows")
+     math.min(batch.length, maxRows)
+-
+-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+-  private def requireLivePrefix(column: Int32Column, rows: Int): Unit =
+-    var row = 0
+-    while (row < rows) {
+-      if (!column.isValid(row)) then
+-        throw new IllegalArgumentException(s"null join value at row $row")
+-      row += 1
+-    }
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnKernel.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnKernel.scala
+index d18484a..bae6749 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnKernel.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnKernel.scala
+@@ -97,7 +97,8 @@ object ColumnKernel:
+       assemble(batch, ordinal, scanned.column, selection, scanned.count)
+ 
+   /**
+-   * Resolves literals against this batch dictionary, then filters its codes with the int kernel.
++   * Resolves literals against this batch dictionary once, then filters codes with an unboxed mask.
++   * A one-column batch publishes the filtered dictionary column directly.
+    */
+   def filterUtf8ByValues(
+       batch: ColumnBatch,
+@@ -105,23 +106,37 @@ object ColumnKernel:
+       values: Iterable[String],
+   ): ColumnBatch =
+     val column = asUtf8(columnAt(batch, ordinal), ordinal)
+-    val codes = values.iterator.map(column.codeOf).filter(_ >= 0).toSet
++    val mask = literalCodes(column, values)
++    val keep: Int32Predicate = code => code >= 0 && code < mask.length && mask(code)
+     val codeColumn = Int32Column.of(column.codes, column.validity, column.length)
+-    val selection = new Array[Int](batch.length)
+-    val scanned = scanInt32(
+-      codeColumn,
+-      value => codes.contains(value),
+-      record = true,
+-      selection = selection,
+-    )
++    if (batch.columns.length == 1) then
++      val scanned = scanInt32(codeColumn, keep, record = false, selection = noSelection)
++      publish(batch, filteredUtf8(column, scanned, ordinal), scanned.count)
++    else
++      val selection = new Array[Int](batch.length)
++      val scanned = scanInt32(codeColumn, keep, record = true, selection = selection)
++      assemble(batch, ordinal, filteredUtf8(column, scanned, ordinal), selection, scanned.count)
++
++  private def literalCodes(column: DictUtf8Column, values: Iterable[String]): Array[Boolean] =
++    val mask = new Array[Boolean](column.dictionary.length)
++    values.iterator.foreach { value =>
++      val code = column.codeOf(value)
++      if (code >= 0) then mask(code) = true
++    }
++    mask
++
++  private def filteredUtf8(
++      column: DictUtf8Column,
++      scanned: Scanned,
++      ordinal: Int,
++  ): DictUtf8Column =
+     val filteredCodes = asInt32(scanned.column, ordinal)
+-    val filtered = DictUtf8Column.of(
++    DictUtf8Column.of(
+       column.dictionary,
+       filteredCodes.values,
+       filteredCodes.validity,
+       scanned.count,
+     )
+-    assemble(batch, ordinal, filtered, selection, scanned.count)
+ 
+   def filterBool(batch: ColumnBatch, ordinal: Int, predicate: BoolPredicate): ColumnBatch =
+     val column = asBool(columnAt(batch, ordinal), ordinal)
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnMetrics.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnMetrics.scala
+index f450f7b..a22b766 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnMetrics.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnMetrics.scala
+@@ -3,9 +3,13 @@ package com.ewoodbury.scarlet.columnar
+ import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
+ 
+ /**
+- * Counts published batches, morsel visits, decoded values, and primitive source encodes while
+- * armed. Disarmed by default, so a study does not record. A test arms around one action and
+- * disarms afterwards, including from `afterEach`.
++ * Counts published batches, morsel visits, decoded rows, and primitive source encodes while armed.
++ * Disarmed by default, so a study does not record. A test arms around one action and disarms
++ * afterwards, including from `afterEach`.
++ *
++ * Recording is one process-wide window. Nested or concurrent actions share the counters. Tests run
++ * sequentially, so one armed action does not overlap another when each suite disarms in
++ * `afterEach`.
+  *
+  * A primitive encode is one `ArraySeq.ofInt`, `ArraySeq.ofDouble`, owned primitive array, or raw
+  * `intPairs(Array, Array)` copied into columns. One note may copy two arrays: a pair encode copies
+@@ -35,6 +39,7 @@ object ColumnMetrics:
+ 
+   def visitCount: Long = visits.get()
+ 
++  /** Rows decoded since [[arm]]. A pair or triple row counts once, not once per cell. */
+   def decodedValueCount: Long = decoded.get()
+ 
+   /**
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/PairKernel.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/PairKernel.scala
+index 175412a..b2cf07c 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/PairKernel.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/PairKernel.scala
+@@ -66,25 +66,20 @@ object PairKernel:
+     val rows = keys.length
+     require(leftValues.length == rows, "key and left value columns differ in length")
+     require(rightValues.length == rows, "key and right value columns differ in length")
++    if (!joinValuesPresent(keys, leftValues, rightValues, rows)) then
++      failNullTriple(keys, leftValues, rightValues, rows)
+     val outKeys = new Array[Int](rows)
+     val outLeft = new Array[Int](rows)
+     val outRight = new Array[Int](rows)
+-    val keyValues = keys.values
+-    val leftValueValues = leftValues.values
+-    val rightValueValues = rightValues.values
+-    val keyWords = keys.validity.words
+-    val leftValueWords = leftValues.validity.words
+-    val rightValueWords = rightValues.validity.words
++    val keyArr = keys.values
++    val leftArr = leftValues.values
++    val rightArr = rightValues.values
+     var written = 0
+     var row = 0
+     while (row < rows) {
+-      val keyValid = Validity.isSet(keyWords, row)
+-      val leftValueValid = Validity.isSet(leftValueWords, row)
+-      val rightValueValid = Validity.isSet(rightValueWords, row)
+-      require(keyValid && leftValueValid && rightValueValid, s"null Int32 join value at row $row")
+-      val key = keyValues(row)
+-      val left = leftValueValues(row)
+-      val right = rightValueValues(row)
++      val key = keyArr(row)
++      val left = leftArr(row)
++      val right = rightArr(row)
+       if (predicate(key, left, right)) then
+         outKeys(written) = key
+         outLeft(written) = left
+@@ -103,6 +98,36 @@ object PairKernel:
+       written,
+     )
+ 
++  private def joinValuesPresent(
++      keys: Int32Column,
++      leftValues: Int32Column,
++      rightValues: Int32Column,
++      rows: Int,
++  ): Boolean =
++    Validity.livePresent(keys.validity, rows) &&
++      Validity.livePresent(leftValues.validity, rows) &&
++      Validity.livePresent(rightValues.validity, rows)
++
++  private def failNullTriple(
++      keys: Int32Column,
++      leftValues: Int32Column,
++      rightValues: Int32Column,
++      rows: Int,
++  ): Unit =
++    var row = 0
++    while (row < rows) {
++      val present =
++        Validity.isSet(keys.validity.words, row) &&
++          Validity.isSet(leftValues.validity.words, row) &&
++          Validity.isSet(rightValues.validity.words, row)
++      if (!present) then
++        throw new IllegalArgumentException(
++          s"requirement failed: null Int32 join value at row $row",
++        )
++      row += 1
++    }
++    throw new IllegalArgumentException("requirement failed: null Int32 join value")
++
+   private def int32At(batch: ColumnBatch, ordinal: Int): Int32Column =
+     batch.columns.lift(ordinal) match
+       case Some(column: Int32Column) => column
+diff --git a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
+index 36b2598..162cf38 100644
+--- a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
++++ b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
+@@ -33,13 +33,15 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
+  * general tuple predicates stay on the row path. `keys` and `values` of an int pair are that
+  * column. The arrays are shared: a published column is not mutated, so a view is cheaper than a
+  * copy and still correct. `mapValues` lowers only when the function declares an unboxed `Int`
+- * result. A wider primitive or a reference result stays on the row path. That check reads the
+- * method descriptor and does not call the function. `reduceByKey` applies the user's function and
+- * wraps at `Int`. `join` hash-partitions both sides and probes one bucket at a time. Output width
+- * for those two is `defaultShufflePartitions`. [[tryCount]] reads finished column lengths.
+- * [[trySumInt]] and [[trySumDouble]] add a filter/project chain in the fused loop and do not write
+- * that chain's output column. Sum of `keys`, `values`, or an int `mapValues` reads the pair column
+- * in that morsel loop and does not build the projection. [[tryGroupedSum]] runs
++ * result and every other `apply` is an erasure bridge. A wider primitive, a reference result, or
++ * an overloaded `apply` stays on the row path. That check reads the method descriptor and does not
++ * call the function. `getDeclaredMethods` does not see an inherited `apply`, so that function
++ * stays on the row path too. `reduceByKey` applies the user's function and wraps at `Int`. `join`
++ * hash-partitions both sides and probes one bucket at a time. Output width for those two is
++ * `defaultShufflePartitions`. [[tryCount]] reads finished column lengths. [[trySumInt]] and
++ * [[trySumDouble]] add a filter/project chain in the fused loop and do not write that chain's
++ * output column. Sum of `keys`, `values`, or an int `mapValues` reads the pair column in that
++ * morsel loop and does not build the projection. [[tryGroupedSum]] runs
+  * [[ColumnPipeline.sumByKey]] on a typed pair source and folds the `Int64` group sums. A preceding
+  * `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that partial scan,
+  * so the action does not build those pairs. A source descriptor supplies the type when all
+@@ -55,7 +57,7 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
+  * A null string is a value. Classification skips a leading null and keeps looking for a `String`.
+  * An all-null source stays on the row path, because there is no witness. An accepted string plan
+  * records [[Layout.Utf8Dict]]: that dictionary plus codes, one dictionary per batch. The string
+- * lambda stays scalar over the decoded string. Int, double, and int-pair plans stay
++ * lambda stays scalar over the decoded string. Int, double, int-pair, and int-triple plans stay
+  * [[Layout.Columnar]].
+  *
+  * `take` has a separate bounded path for accepted partition-preserving shapes: it interprets one
+@@ -110,18 +112,26 @@ object ColumnarPlanner:
+   def tryTake[A](plan: Plan[A], n: Int): Option[Seq[A]] =
+     if (n <= 0) then Some(Seq.empty[A])
+     else
+-      accepted(plan).filter(isPartitionPreserving) match
++      accepted(plan).flatMap(op => preservedPartitions(op).map(count => (op, count))) match
+         case None => None
+-        case Some(op) =>
+-          try
+-            val values = (0 until partitionCount(op)).foldLeft(Vector.empty[Any]) {
+-              (result, index) =>
+-                if (result.length >= n) then result
+-                else result ++ decodePrefix(interpret(plan, op, Some(index)), n - result.length)
+-            }
+-            Some(values.asInstanceOf[Seq[A]])
++        case Some((op, count)) =>
++          try Some(prefixOf(plan, op, count, n).asInstanceOf[Seq[A]])
+           catch case _: ClassCastException => None
+ 
++  /**
++   * First `n` values in partition order. Decoding stops once `n` values are in hand, and every
++   * batch of a partition contributes before the next partition is read.
++   */
++  private def prefixOf(plan: Plan[_], op: PhysicalOp, count: Int, n: Int): Seq[Any] =
++    @tailrec
++    def read(index: Int, taken: Int, acc: List[Any]): List[Any] =
++      if (index >= count || taken >= n) then acc
++      else
++        val chunk = decodePrefix(interpret(plan, op, Some(index)), n - taken).toList
++        read(index + 1, taken + chunk.length, chunk.reverse ::: acc)
++
++    read(0, 0, Nil).reverse
++
+   /**
+    * Row count of a columnar plan. `None` means the row path. This reads batch lengths and does not
+    * decode.
+@@ -411,23 +421,18 @@ object ColumnarPlanner:
+   private def accepted(plan: Plan[_]): Option[PhysicalOp] =
+     lower(plan).filter(op => infoOf(op).invalidReason.isEmpty)
+ 
+-  private def isPartitionPreserving(op: PhysicalOp): Boolean = op match
+-    case PhysicalOp.Scan(_, _) => true
+-    case PhysicalOp.Filter(child, _) => isPartitionPreserving(child)
+-    case PhysicalOp.Project(child) => isPartitionPreserving(child)
+-    case PhysicalOp.Pipeline(child, _) => isPartitionPreserving(child)
+-    case PhysicalOp.Column(child, _) => isPartitionPreserving(child)
+-    case PhysicalOp.MapValue(child) => isPartitionPreserving(child)
+-    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.Exchange => false
+-
+-  private def partitionCount(op: PhysicalOp): Int = op match
+-    case PhysicalOp.Scan(_, partitions) => partitions.length
+-    case PhysicalOp.Filter(child, _) => partitionCount(child)
+-    case PhysicalOp.Project(child) => partitionCount(child)
+-    case PhysicalOp.Pipeline(child, _) => partitionCount(child)
+-    case PhysicalOp.Column(child, _) => partitionCount(child)
+-    case PhysicalOp.MapValue(child) => partitionCount(child)
+-    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.Exchange => 0
++  /**
++   * Partition count when `op` keeps input order and the input partition count. `None` is an
++   * exchange, aggregate, or join: `take` must not read one partition and present it as the result.
++   */
++  private def preservedPartitions(op: PhysicalOp): Option[Int] = op match
++    case PhysicalOp.Scan(_, partitions) => Some(partitions.length)
++    case PhysicalOp.Filter(child, _) => preservedPartitions(child)
++    case PhysicalOp.Project(child) => preservedPartitions(child)
++    case PhysicalOp.Pipeline(child, _) => preservedPartitions(child)
++    case PhysicalOp.Column(child, _) => preservedPartitions(child)
++    case PhysicalOp.MapValue(child) => preservedPartitions(child)
++    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.Exchange => None
+ 
+   private def selectPartition[A](
+       partitions: Seq[Partition[A]],
+@@ -436,17 +441,38 @@ object ColumnarPlanner:
+     case None => partitions
+     case Some(index) => partitions.slice(index, index + 1)
+ 
+-  private def decodePrefix(columns: Columns, limit: Int): Seq[Any] = columns match
+-    case Columns.Ints(parts) =>
+-      parts.headOption.toSeq.flatMap(batch => BatchCodec.decodeInts(batch, limit))
+-    case Columns.Floats(parts) =>
+-      parts.headOption.toSeq.flatMap(batch => BatchCodec.decodeFloat64s(batch, limit))
+-    case Columns.Pairs(parts) =>
+-      parts.headOption.toSeq.flatMap(batch => BatchCodec.decodeIntPairs(batch, limit))
+-    case Columns.Triples(parts) =>
+-      parts.headOption.toSeq.flatMap(batch => BatchCodec.decodeIntTriples(batch, limit))
+-    case Columns.Strings(parts) =>
+-      parts.headOption.toSeq.flatMap(batch => BatchCodec.decodeStrings(batch, limit))
++  private def decodePrefix(columns: Columns, limit: Int): Seq[Any] =
++    if (limit <= 0) then Seq.empty
++    else
++      columns match
++        case Columns.Ints(parts) =>
++          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeInts(batch, rows))
++        case Columns.Floats(parts) =>
++          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeFloat64s(batch, rows))
++        case Columns.Pairs(parts) =>
++          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeIntPairs(batch, rows))
++        case Columns.Triples(parts) =>
++          // Joins are not partition-preserving, so `take` does not reach this arm.
++          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeIntTriples(batch, rows))
++        case Columns.Strings(parts) =>
++          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeStrings(batch, rows))
++
++  private def prefixRows[A](
++      parts: Vector[ColumnBatch],
++      limit: Int,
++      decode: (ColumnBatch, Int) => Seq[A],
++  ): Seq[Any] =
++    @tailrec
++    def read(rest: List[ColumnBatch], taken: Int, acc: List[A]): List[A] =
++      if (taken >= limit) then acc
++      else
++        rest match
++          case Nil => acc
++          case batch :: tail =>
++            val chunk = decode(batch, limit - taken).toList
++            read(tail, taken + chunk.length, chunk.reverse ::: acc)
++
++    read(parts.toList, 0, Nil).reverse
+ 
+   private def lowerPlan(plan: Plan[_]): Option[PhysicalOp] =
+     val (base, steps) = elementSteps(plan, Int.MaxValue)
+@@ -567,10 +593,15 @@ object ColumnarPlanner:
+       Option.when(
+         literals.nonEmpty &&
+           literals.length <= MaxDictionaryStringLiterals &&
+-          literals.forall(value => Option(value).isDefined),
++          literals.forall(presentLiteral),
+       )(literals)
+     case _ => None
+ 
++  @SuppressWarnings(Array("org.wartremover.warts.Null"))
++  private def presentLiteral(value: String): Boolean = value match
++    case null => false
++    case _ => true
++
+   private def pairColumn(source: Plan[_], ordinal: Int): Option[PhysicalOp] =
+     lowerPlan(source).flatMap { child =>
+       child.kind match
+@@ -587,13 +618,14 @@ object ColumnarPlanner:
+     }
+ 
+   /**
+-   * True when `function` declares an unboxed `Int => Int` apply. A declared `apply` that returns
+-   * some other reference type is a change of type, including the bridge on an anonymous class, so
+-   * the plan stays on the row path. This does not call `function`.
++   * True when `function` declares an unboxed `Int => Int` apply and every other `apply` is the
++   * erasure bridge. A hand-written `apply(Any): Any` beside `apply(Int): Int` is not a bridge, so
++   * the plan stays on the row path. `getDeclaredMethods` ignores an inherited `apply`, which also
++   * stays on the row path. This does not call `function`.
+    */
+   private def returnsUnboxedInt(function: Any): Boolean =
+     val methods = function.getClass.getDeclaredMethods
+-    methods.exists(isUnboxedIntApply) && !methods.exists(isOtherReferenceApply)
++    methods.exists(isUnboxedIntApply) && !methods.exists(isDisqualifyingApply)
+ 
+   @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+   private def isUnboxedIntApply(method: java.lang.reflect.Method): Boolean =
+@@ -601,18 +633,25 @@ object ColumnarPlanner:
+       case "apply" | "apply$mcII$sp" => true
+       case _ => false
+     named &&
++    !method.isBridge &&
+     method.getReturnType.eq(classOf[Int]) &&
+     method.getParameterCount == 1 &&
+     method.getParameterTypes()(0).eq(classOf[Int])
+ 
+   @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+-  private def isOtherReferenceApply(method: java.lang.reflect.Method): Boolean =
+-    val named = method.getName match
+-      case "apply" => true
+-      case _ => false
+-    named &&
+-    !method.getReturnType.eq(classOf[Int]) &&
+-    !method.getReturnType.eq(classOf[AnyRef])
++  private def isDisqualifyingApply(method: java.lang.reflect.Method): Boolean =
++    method.getName == "apply" &&
++      method.getParameterCount == 1 &&
++      !isUnboxedIntApply(method) &&
++      !isErasureBridge(method)
++
++  /** Compiler bridge from a specialized `Int => Int` to `Function1.apply`. */
++  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
++  private def isErasureBridge(method: java.lang.reflect.Method): Boolean =
++    val erased =
++      method.getReturnType.eq(classOf[AnyRef]) &&
++        method.getParameterTypes()(0).eq(classOf[Object])
++    erased && (method.isBridge || method.isSynthetic)
+ 
+   private def columnFilter(source: Plan[_], slot: PhysicalOp.Slot): Option[PhysicalOp] =
+     lowerPlan(source).flatMap { child =>
+@@ -645,17 +684,49 @@ object ColumnarPlanner:
+       source: Plan.Source[_],
+       descriptor: Plan.SourceDescriptor,
+   ): Boolean =
+-    source.partitions.iterator
+-      .flatMap(_.data.iterator)
+-      .forall { value =>
+-        (descriptor, Option(value)) match
+-          case (Plan.SourceDescriptor.Ints, Some(_: Int)) => true
+-          case (Plan.SourceDescriptor.Doubles, Some(_: Double)) => true
+-          case (Plan.SourceDescriptor.Pairs, Some((_: Int, _: Int))) => true
+-          case (Plan.SourceDescriptor.Strings, Some(_: String)) => true
+-          case (Plan.SourceDescriptor.Strings, None) => true
+-          case _ => false
+-      }
++    if (ownedMatches(source, descriptor)) then true
++    else
++      val rows = source.partitions.iterator.flatMap(_.data.iterator)
++      descriptor match
++        case Plan.SourceDescriptor.Ints => rows.forall(isIntValue)
++        case Plan.SourceDescriptor.Doubles => rows.forall(isDoubleValue)
++        case Plan.SourceDescriptor.Pairs => rows.forall(isIntPairValue)
++        case Plan.SourceDescriptor.Strings => rows.forall(isStringValue)
++        case Plan.SourceDescriptor.Unknown => false
++
++  /**
++   * Engine-built primitive holders are type-safe by construction. Skipping them avoids a second
++   * scan that would box every element before encode.
++   */
++  private def ownedMatches(source: Plan.Source[_], descriptor: Plan.SourceDescriptor): Boolean =
++    import com.ewoodbury.scarlet.core.{DoubleArrays, IntArrays, IntPairArrays}
++
++    descriptor match
++      case Plan.SourceDescriptor.Ints =>
++        source.partitions.forall(partition => partition.data.isInstanceOf[IntArrays])
++      case Plan.SourceDescriptor.Doubles =>
++        source.partitions.forall(partition => partition.data.isInstanceOf[DoubleArrays])
++      case Plan.SourceDescriptor.Pairs =>
++        source.partitions.forall(partition => partition.data.isInstanceOf[IntPairArrays])
++      case Plan.SourceDescriptor.Strings | Plan.SourceDescriptor.Unknown => false
++
++  private def isIntValue(value: Any): Boolean = value match
++    case _: Int => true
++    case _ => false
++
++  private def isDoubleValue(value: Any): Boolean = value match
++    case _: Double => true
++    case _ => false
++
++  private def isIntPairValue(value: Any): Boolean = value match
++    case (_: Int, _: Int) => true
++    case _ => false
++
++  @SuppressWarnings(Array("org.wartremover.warts.Null"))
++  private def isStringValue(value: Any): Boolean = value match
++    case null => true
++    case _: String => true
++    case _ => false
+ 
+   private def classifyData(partitions: Seq[Partition[_]]): Option[PhysicalOp.Kind] =
+     if (partitions.isEmpty) then None
+@@ -741,6 +812,7 @@ object ColumnarPlanner:
+           Plan.ReduceByKeyOp(source, reduceFunc),
+           PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)),
+         ) =>
++      require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
+       val op = reduceFunc.asInstanceOf[(Int, Int) => Int]
+       Columns.Pairs(
+         HashReduce.byKey(
+@@ -755,6 +827,7 @@ object ColumnarPlanner:
+           Plan.JoinOp(left, right, _),
+           PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
+         ) =>
++      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+       Columns.Triples(
+         ColumnPipeline.innerJoin(
+           pairsOf(interpret(left, leftOp, selectedPartition)),
+@@ -790,6 +863,15 @@ object ColumnarPlanner:
+       Columns.Strings(onEach(parts)(batch => ElementPipeline.strings(batch, steps)))
+     case _ => throw new IllegalStateException("pipeline expects an int, float, or string column")
+ 
++  private def triplePredicate(
++      slot: PhysicalOp.Slot,
++      keep: IntJoinTriplePredicate[?],
++  ): PairKernel.IntTriplePredicate = slot match
++    case PhysicalOp.Slot.TripleKey => (key, _, _) => keep.keep(key)
++    case PhysicalOp.Slot.TripleLeftValue => (_, left, _) => keep.keep(left)
++    case PhysicalOp.Slot.TripleRightValue => (_, _, right) => keep.keep(right)
++    case _ => throw new IllegalStateException("triple filter has a non-triple slot")
++
+   private def applyFilter(columns: Columns, predicate: Any, slot: PhysicalOp.Slot): Columns =
+     slot match
+       case PhysicalOp.Slot.Element =>
+@@ -840,16 +922,9 @@ object ColumnarPlanner:
+         val keep = predicate match
+           case recognized: IntJoinTriplePredicate[?] => recognized
+           case _ => throw new IllegalStateException("triple filter lost its slot predicate")
++        val select = triplePredicate(slot, keep)
+         Columns.Triples(onEach(triplesOf(columns)) { batch =>
+-          PairKernel.filterTriple(
+-            batch,
+-            (key, left, right) =>
+-              slot match
+-                case PhysicalOp.Slot.TripleKey => keep.keep(key)
+-                case PhysicalOp.Slot.TripleLeftValue => keep.keep(left)
+-                case PhysicalOp.Slot.TripleRightValue => keep.keep(right)
+-                case _ => throw new IllegalStateException("triple filter has a non-triple slot"),
+-          )
++          PairKernel.filterTriple(batch, select)
+         })
+ 
+   private def project(columns: Columns, mapper: Any): Columns = columns match
+@@ -993,7 +1068,7 @@ object ColumnarPlanner:
+       layoutOf(PhysicalOp.Kind.Pairs),
+     )
+ 
+-  /** String plans name the dictionary layout. Int, double, and pair plans stay columnar. */
++  /** String plans name the dictionary layout. Every other classified kind stays columnar. */
+   private def layoutOf(kind: PhysicalOp.Kind): Layout = kind match
+     case PhysicalOp.Kind.Strings => Layout.Utf8Dict(ScarletConf.get.columnarBatchSize)
+     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs |
+diff --git a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/PartitioningInfo.scala b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/PartitioningInfo.scala
+index 53c6422..cb294ee 100644
+--- a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/PartitioningInfo.scala
++++ b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/PartitioningInfo.scala
+@@ -140,7 +140,7 @@ enum OrderingTag:
+ /**
+  * Physical batching of the output. The row engine emits [[Layout.BoxedRows]] only.
+  *
+- * [[Layout.Columnar]] is an unboxed primitive column: int, double, or int pair.
++ * [[Layout.Columnar]] is an unboxed primitive column: int, double, int pair, or int triple.
+  * [[Layout.Utf8Dict]] is the string layout. It names the dictionary of JVM strings plus int codes
+  * (`LogicalType.Utf8Dict` / `DictUtf8Column`). Each batch has its own dictionary. A string lambda
+  * still sees the decoded string, and a null string is a value.
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestColumnKernel.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestColumnKernel.scala
+index 326a321..5527499 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestColumnKernel.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestColumnKernel.scala
+@@ -610,3 +610,22 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
+     an[IllegalArgumentException] should be thrownBy
+       Utf8Pipeline.PP(pairs, (value: String) => value, (value: String) => value)
+   }
++
++  "triple filter" should "name the null component and keep dense survivors in order" in {
++    val rows = 3
++    val keys = Int32Column.of(Array(1, 2, 3), Validity.allValid(rows), rows)
++    val left = Int32Column.of(Array(10, 20, 30), Validity.allValid(rows), rows)
++    val right = Int32Column.of(Array(7, 8, 9), Validity.allValid(rows), rows)
++    val schema = Vector(LogicalType.Int32, LogicalType.Int32, LogicalType.Int32)
++    val dense = new ColumnBatch(schema, Vector(keys, left, right), rows)
++    val kept = PairKernel.filterTriple(dense, (key, _, _) => key != 2)
++
++    BatchCodec.decodeIntTriples(kept) shouldBe Seq((1, (10, 7)), (3, (30, 9)))
++
++    val rightHole = Int32Column.of(Array(7, 0, 9), Validity.pack(rows, row => row != 1), rows)
++    val sparse = new ColumnBatch(schema, Vector(keys, left, rightHole), rows)
++    val caught = intercept[IllegalArgumentException] {
++      PairKernel.filterTriple(sparse, (_, _, _) => true)
++    }
++    caught.getMessage shouldBe "requirement failed: null Int32 join value at row 1"
++  }
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/core/TestSourcePartitioning.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/core/TestSourcePartitioning.scala
+index 6426c84..a0abac1 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/core/TestSourcePartitioning.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/core/TestSourcePartitioning.scala
+@@ -55,9 +55,19 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
+     }
+   }
+ 
+-  it should "reject non-positive partition counts" in {
++  it should "reject non-positive partition counts before reading the source" in {
++    val read = new java.util.concurrent.atomic.AtomicBoolean(false)
++    val data = new Iterable[Int]:
++      def iterator: Iterator[Int] = new Iterator[Int]:
++        def hasNext: Boolean = true
++        def next(): Int =
++          read.set(true)
++          1
++
+     an[IllegalArgumentException] should be thrownBy DistCollection(Seq(1, 2), 0)
+-    an[IllegalArgumentException] should be thrownBy DistCollection(Seq(1, 2), -2)
++    an[IllegalArgumentException] should be thrownBy DistCollection(data, 0)
++    an[IllegalArgumentException] should be thrownBy DistCollection(data, -2)
++    read.get() shouldBe false
+   }
+ 
+   it should "support execution over empty partitions end to end" in {
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/DistCollectionStudy.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/DistCollectionStudy.scala
+index bf96a71..ac42f21 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/DistCollectionStudy.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/DistCollectionStudy.scala
+@@ -13,11 +13,14 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
+ /**
+  * Times `sum` and `groupedSum` on primitive sources. Not a test, and not part of `make test`.
+  *
+- * The timed region is the action. The checksum is outside it. `alloc_bytes` is the mean of bytes
+- * allocated during the action. A probe reads `ThreadMXBean` while the action runs, because morsel
+- * workers have exited by the time the action returns. The probe's own bytes are left out. Columnar
+- * and row run the same plans. Each thread count sets `ScarletConf.threadPoolSize` and installs a
+- * `LocalTaskScheduler` of that width, because the process-wide scheduler is built once.
++ * The timed region is the action. The checksum is outside it. `alloc_bytes` is a sampled
++ * lower bound of process-wide allocation during the action, not an isolated query total. The probe
++ * reads live threads while the action runs, because morsel workers have exited by the time the
++ * action returns. A worker that starts and exits between samples, or that allocates after its last
++ * sample, is missing from the total. Unrelated JVM threads that are live during the action are
++ * included. The probe's own bytes are left out. Columnar and row run the same plans. Each thread
++ * count sets `ScarletConf.threadPoolSize` and installs a `LocalTaskScheduler` of that width,
++ * because the process-wide scheduler is built once.
+  *
+  * Narrow is `ofInts.filter(_ > 0).map(_ * 2).sum` at 1e6 rows. The chain is six `map(_ + 1)`
+  * calls and then `sum`, on that same array. Grouped is `ofIntPairs.groupedSum` at 1e7 rows and
+@@ -207,7 +210,7 @@ object DistCollectionStudy:
+   ): String =
+     val conf = ScarletConf.get
+     val runtime = ManagementFactory.getRuntimeMXBean
+-    val alloc = if (allocOn) "probe" else "unavailable"
++    val alloc = if (allocOn) "sampled-lower-bound" else "unavailable"
+     s"distcollection study warmup=$warmup measure=$measure batch=${conf.columnarBatchSize} " +
+       s"partitions=$partitions shuffle=${conf.defaultShufflePartitions} alloc_bytes=$alloc\n" +
+       s"narrow rows=$narrowRows checksum=$narrowSum chain6 rows=$narrowRows checksum=$chainSum " +
+@@ -215,7 +218,7 @@ object DistCollectionStudy:
+       s"java=${runtime.getVmName} ${runtime.getVmVersion} args=${runtime.getInputArguments}"
+ 
+   private def startProbe(): Option[AllocProbe] =
+-    threadBean.flatMap { bean =>
++    threadBean.filter(_.isThreadAllocatedMemorySupported).flatMap { bean =>
+       bean.setThreadAllocatedMemoryEnabled(true)
+       if (bean.isThreadAllocatedMemoryEnabled) then Some(new AllocProbe(bean)) else None
+     }
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarActions.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarActions.scala
+index a9ebeac..e32f6e8 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarActions.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarActions.scala
+@@ -41,6 +41,24 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
+     mapped.first() shouldBe mapped.take(1).headOption.getOrElse(fail("take(1) was empty"))
+   }
+ 
++  it should "take a prefix that spans several morsels of one partition" in {
++    ScarletConf.set(
++      originalConf.copy(columnarExecution = true, columnarBatchSize = 4, threadPoolSize = 1),
++    )
++    val values = DistCollection(1 to 20, 1).filter(_ % 2 == 0).map(_ + 1)
++
++    values.take(7) shouldBe List(3, 5, 7, 9, 11, 13, 15)
++    values.take(12) shouldBe List(3, 5, 7, 9, 11, 13, 15, 17, 19, 21)
++  }
++
++  it should "stay on the row path when columnar execution is disabled" in {
++    ScarletConf.set(originalConf.copy(columnarExecution = false))
++    ColumnMetrics.arm()
++
++    DistCollection(1 to 8, 2).map(_ * 2).take(3) shouldBe List(2, 4, 6)
++    ColumnMetrics.decodedValueCount shouldBe 0L
++  }
++
+   it should "return empty for zero and negative limits" in {
+     armColumnar()
+     val values = DistCollection(1 to 8, 3).map(_ * 2)
+@@ -675,6 +693,23 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
+     )
+   }
+ 
++  it should "keep an overloaded apply(Int) that is not the mapValues contract on the row path" in {
++    checkOverloadedMapValues()
++  }
++
++  @SuppressWarnings(Array("org.wartremover.warts.Any"))
++  private def checkOverloadedMapValues(): Unit =
++    val overloaded = new Function1[Any, Any]:
++      def apply(value: Any): Any = "nope"
++      def apply(value: Int): Int = value * 2
++    val mapped =
++      DistCollection.ofIntPairs(Array(1), Array(10), 1).mapValues[Int, Int, Any](overloaded)
++
++    armColumnar()
++    ColumnarPlanner.partitioning(mapped.plan) shouldBe None
++    mapped.collect().toList shouldBe List((1, "nope"))
++    columnar(mapped.collect().toList) shouldBe row(mapped.collect().toList)
++
+   it should "leave a mapValues that changes type on the row path" in {
+     val keys = Array(1, 2, 3)
+     val values = Array(4, 5, 6)
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarSelection.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarSelection.scala
+index ce9998c..ab35249 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarSelection.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarSelection.scala
+@@ -177,6 +177,12 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
+       1 -> ((10, 8)),
+       1 -> ((10, 8)),
+     )
++    columnar {
++      val collected = build.join(probe).collect()
++      build.join(probe).filterJoinLeft(_ == 10).collect() shouldBe collected.filter {
++        case (_, (left, _)) => left == 10
++      }
++    }
+     columnar {
+       val info = assertHashed(filtered)
+       info.layout shouldBe Layout.Columnar(ScarletConf.get.columnarBatchSize)
+@@ -311,17 +317,12 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
+     actual.collect() shouldBe texts(Some("US"), Some("CA"), Some("US"))
+   }
+ 
+-  it should "not invoke a recognized predicate and keep startsWith on the scalar path" in {
+-    val recognizedCalls = new java.util.concurrent.atomic.AtomicInteger(0)
+-    val equality = new DictionaryStringPredicate[String]:
++  it should "filter a dictionary predicate by its literals and keep startsWith on the scalar path" in {
++    val equality = new DictionaryStringPredicate[String](summon[String =:= String]):
+       val literals: Vector[String] = Vector("US")
+-      def apply(value: String): Boolean =
+-        recognizedCalls.incrementAndGet()
+-        value == "US"
+     val recognized = columnar(DistCollection(Seq("US", "CA", "US"), 1).filter(equality))
+ 
+     recognized.collect() shouldBe Seq("US", "US")
+-    recognizedCalls.get() shouldBe 0
+     assertUtf8(recognized, 1)
+ 
+     val scalarCalls = new java.util.concurrent.atomic.AtomicInteger(0)
+@@ -336,6 +337,30 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
+     assertUtf8(startsWith, 1)
+   }
+ 
++  it should "match the scalar path for an empty list, a null literal, and the eight-literal boundary" in {
++    val values = texts(Some("a"), None, Some("b"), Some("c"))
++    def source = DistCollection(values, 2)
++    val eight = Vector("a", "b", "c", "d", "e", "f", "g", "h")
++    val nine = eight :+ "i"
++
++    def same(actual: DistCollection[String], keep: String => Boolean): Unit =
++      columnar(actual.collect()) shouldBe row(source.filter(keep).collect())
++
++    // Layout is read with columnar execution enabled. `same` leaves the row path selected.
++    columnar(assertUtf8(source.filterStringIn(eight*), 2))
++    same(source.filterStringIn(), _ => false)
++    same(source.filterStringEquals(text(None)), BatchCodec.isAbsent)
++    same(source.filterStringIn(eight*), value => eight.contains(value))
++    same(source.filterStringIn(nine*), value => nine.contains(value))
++    same(
++      source.filterStringIn("a", text(None)),
++      value =>
++        value match
++          case "a" => true
++          case other => BatchCodec.isAbsent(other),
++    )
++  }
++
+   it should "record a dictionary layout and match the row path when a map changes nulls" in {
+     val plan = DistCollection(texts(Some("a"), None, Some("bb"), Some("a")), 2).map { value =>
+       Option(value) match

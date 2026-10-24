@@ -1,0 +1,14 @@
+Fuse a preceding filter or map into grouped sum
+
+Fuse a preceding filter or map into grouped sum
+
+`groupedSum` on `DistCollection[(Int, Int)]` still runs `ColumnPipeline.sumByKey` and folds the `Int64` group sums into one `Long`. A preceding `filter`, `filterKeys`, `filterValues`, or pair `map` is applied inside the partial `sumInt32` scan. The action still does one scan of the source and one partials exchange, and does not build an intermediate pair collection.
+
+Value-only `filterValues` chains use the existing `keep`/`map` kernel. A row filter, a key filter, or a pair map runs as `PairStep`s in source order on each present pair. Null keys and null values stay dropped before those functions. A map that does not return a pair throws `ClassCastException` inside the scan and the action falls back to the row path.
+
+`collect` and `reduceByKey` of a pair map stay on the row path. There is no new plan node. `reduceByKey` is unchanged and still wraps at `Int`. A completely empty source still returns zero through the row engine. Any other refused shape sums through the row engine.
+
+`ColumnMetrics` counts published batches and morsel visits while a test arms it. It stays disarmed by default.
+
+`make lint`, `make test-lint`, and `make test` passed (465 tests).
+

@@ -1,0 +1,12 @@
+Record Utf8Dict as the string column layout
+
+Record Utf8Dict as the string column layout
+
+An accepted string filter or map reports `Layout.Utf8Dict` in `PartitioningInfo`: the per-batch dictionary of JVM strings plus int codes (`LogicalType.Utf8Dict` / `DictUtf8Column`). Int, double, and int-pair plans still report `Layout.Columnar`.
+
+String filter and map are unchanged. A null string is a value. The string lambda stays scalar over the decoded string, and each batch keeps its own dictionary. There is no new plan node and no second string representation.
+
+String `groupByKey`, `reduceByKey`, and join stay on the row path. A non-positive `Utf8Dict` batch size is rejected the same way a non-positive columnar batch is.
+
+`make lint`, `make test-lint`, and `make test` passed (474 tests).
+

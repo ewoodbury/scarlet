@@ -1,0 +1,16 @@
+Add bounded columnar take
+
+## Summary
+- Add a bounded take path that interprets accepted partition-preserving plans in partition order and decodes only the remaining requested prefix.
+- Preserve the row-engine fallback for unsupported plans and for plans requiring exchanges or aggregation.
+- Add decode metrics and regression coverage for ordering, limits, pairs, strings, and exchange fallback.
+
+## Bounded shapes
+The bounded path applies when the planner accepts a physical tree consisting only of a scan and partition-preserving filters, projects, pipelines, pair-column projections, or int mapValues. Concretely, this covers int/double/string sources with supported element filters and maps, and int-pair sources with row/key/value filters, keys/values projections, and int-to-int mapValues, including supported combinations of those operations.
+
+Plans containing an exchange or aggregate remain on the row path. For example, reduceByKey followed by take must process the full upstream input to determine the first output, so this change does not attempt a bounded columnar execution for that shape.
+
+## Verification
+- make lint
+- make test-lint
+- make test (487 tests passed)

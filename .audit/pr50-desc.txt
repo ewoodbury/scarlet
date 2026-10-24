@@ -1,0 +1,10 @@
+Refuse type-changing element maps before columnar execution
+
+## Summary
+
+An element map lowers only when its declared `apply` preserves the column: unboxed `Int => Int` (`apply` or `apply$mcII$sp`), unboxed `Double => Double` (`apply` or `apply$mcDD$sp`), or `String => String`. Every other `apply` must be an erasure bridge. The check reads method descriptors and does not call the function.
+
+One project that fails that witness refuses the whole element chain, including a fused pipeline of two to four steps. `partitioning`, `lower`, `tryRun`, `tryCount`, and `trySumInt` then all return `None`. The row path still produces the mapped values, and a mistyped mapper runs once per row.
+
+Type-preserving int, double, and string maps keep their existing physical shapes. The contract treats type-changing maps as row-path fixtures and checks that every accepted fixture is interpretable.
+
