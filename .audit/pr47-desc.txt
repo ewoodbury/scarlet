@@ -1,0 +1,26 @@
+Seal primitive source arrays behind owned holders
+
+## Summary
+
+`ofInts` and `ofDoubles` stored each partition as `ArraySeq.ofInt` or `ArraySeq.ofDouble`. Those sequences publish `unsafeArray`, so a caller who pattern-matches `Plan.Source` could change a constructed collection. Partitions are now `IntArrays` and `DoubleArrays`, the same shape as `IntPairArrays`: a private constructor, package-private arrays, a factory that copies, and `fromOwned` for a range that is already a private copy. The row path still iterates. Core does not name `ColumnBatch`.
+
+## Findings
+
+1. Immutability hole. `IntArrays` and `DoubleArrays` own the partition arrays. Encode reads those arrays. `unsafeArray` is no longer part of a primitive source.
+
+2. Second copy. Construction still copies each caller range once. Encode copies the owned array into the column and does not adopt it. The partition stays readable for the row path and for a later action, and a column buffer is writable, so sharing the array would let a column write change the source. `fromOwned` does not copy again, so there is no third copy.
+
+3. Duplicated validation. `numPartitions > 0` is checked only in `splitSource`. Pair lengths go through `IntPairArrays.requireSameLength` and `LengthMismatch`. `ofIntPairs` checks the full arrays before slicing, because a longer value array would otherwise disappear inside the slice. `fromOwned` does not check again, and encoding an `IntPairArrays` partition does not check again. `BatchCodec.intPairs(Array, Array)` still rejects unequal raw arrays. The columnar module does not depend on core, so that method repeats the same sentence. A test locks the two copies together.
+
+4. Duplicated fill loops. `BatchCodec.ints` and `float64s` share `copyOrFill`. Each call site still names its `ArraySeq` type. The copy and the iterator fill live in one helper.
+
+5. Tests. `ColumnMetrics.primitiveEncodeCount` records an `ArraySeq` or owned-array encode and stays at zero for a boxed iterable. Codec tests cover `ArraySeq.ofInt`, `ArraySeq.ofDouble`, owned int and double arrays, and `IntPairArrays`. `ofDoubles` and `ofIntPairs` reject a non-positive partition count. Empty input is covered for `ofInts`, `ofDoubles`, `ofIntPairs`, and the three array holders.
+
+Results are unchanged.
+
+## Left as-is
+
+The encode copy stays. Adopting the partition array would require that partition to be single-use, and the same collection can run again.
+
+The pair-length sentence is repeated in `BatchCodec` because the columnar module does not depend on core.
+

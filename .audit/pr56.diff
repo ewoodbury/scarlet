@@ -1,0 +1,1071 @@
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnPipeline.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnPipeline.scala
+index a918caa..325bef3 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnPipeline.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnPipeline.scala
+@@ -3,14 +3,15 @@ package com.ewoodbury.scarlet.columnar
+ /**
+  * Multi-batch sum and inner join.
+  *
+- * Each input batch is sliced into morsels. Sums run `sumInt32` on the morsel, `sumInt64` to merge
+- * that batch's partials, and `sumInt64` again after the exchange, so a partial sum does not wrap
+- * at `Int`. A `keep`/`map` or [[PairStep]] overload applies that work inside the partial
+- * `sumInt32`, so the exchange still sees one partial per input batch. Each output batch is an
+- * `Int32` key and an `Int64` sum. Fold the sum with [[ColumnReduce.sumInt64]] at ordinal 1; the
+- * batch has two columns. An empty input is `numPartitions` empty sum batches, the same convention
+- * as [[HashReduce.byKey]]. The join reads key column 0 and value column 1 on both sides, exchanges
+- * each side, and probes one partition at a time.
++ * Sums read each input batch in ranges of `batchSize` rows and leave those columns in place.
++ * `sumInt32` runs on the range, `sumInt64` merges that batch's partials, and `sumInt64` runs again
++ * after the exchange, so a partial sum does not wrap at `Int`. A `keep`/`map` or [[PairStep]]
++ * overload applies that work inside the partial `sumInt32`, so the exchange still sees one partial
++ * per input batch. Each output batch is an `Int32` key and an `Int64` sum. Fold the sum with
++ * [[ColumnReduce.sumInt64]] at ordinal 1; the batch has two columns. An empty input is
++ * `numPartitions` empty sum batches, the same convention as [[HashReduce.byKey]]. The join reads
++ * key column 0 and value column 1 on both sides, exchanges each side, and probes one partition at
++ * a time.
+  */
+ object ColumnPipeline:
+ 
+@@ -22,8 +23,16 @@ object ColumnPipeline:
+       parallelism: Int,
+       batchSize: Int,
+   ): Vector[ColumnBatch] =
+-    runSum(batches, numPartitions, parallelism, batchSize) { morsel =>
+-      HashAggregate.sumInt32(morsel, keyOrdinal, valueOrdinal)
++    runSum(batches, numPartitions, parallelism, batchSize) {
++      GroupedSumKernel.run(
++        batches,
++        keyOrdinal,
++        valueOrdinal,
++        numPartitions,
++        parallelism,
++        batchSize,
++        Vector.empty,
++      )
+     }
+ 
+   /**
+@@ -40,8 +49,17 @@ object ColumnPipeline:
+       keep: ColumnKernel.Int32Predicate,
+       map: ColumnKernel.Int32Map,
+   ): Vector[ColumnBatch] =
+-    runSum(batches, numPartitions, parallelism, batchSize) { morsel =>
+-      HashAggregate.sumInt32(morsel, keyOrdinal, valueOrdinal, keep, map)
++    runSum(batches, numPartitions, parallelism, batchSize) {
++      GroupedSumKernel.run(
++        batches,
++        keyOrdinal,
++        valueOrdinal,
++        numPartitions,
++        parallelism,
++        batchSize,
++        keep,
++        map,
++      )
+     }
+ 
+   /**
+@@ -74,8 +92,16 @@ object ColumnPipeline:
+             PassValue,
+           )
+         case None =>
+-          runSum(batches, numPartitions, parallelism, batchSize) { morsel =>
+-            HashAggregate.sumInt32(morsel, keyOrdinal, valueOrdinal, steps)
++          runSum(batches, numPartitions, parallelism, batchSize) {
++            GroupedSumKernel.run(
++              batches,
++              keyOrdinal,
++              valueOrdinal,
++              numPartitions,
++              parallelism,
++              batchSize,
++              steps,
++            )
+           }
+ 
+   private def runSum(
+@@ -83,19 +109,13 @@ object ColumnPipeline:
+       numPartitions: Int,
+       parallelism: Int,
+       batchSize: Int,
+-  )(partial: ColumnBatch => ColumnBatch): Vector[ColumnBatch] =
++  )(combinedOf: => Vector[ColumnBatch]): Vector[ColumnBatch] =
+     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+     require(batchSize > 0, s"batch size must be positive, got $batchSize")
+     if (batches.isEmpty) then Vector.fill(numPartitions)(emptySum)
+     else
+-      val combined = PartialCombine.perBatch(
+-        batches,
+-        batchSize,
+-        parallelism,
+-        partial,
+-        partials => HashAggregate.sumInt64(partials, keyOrdinal = 0, valueOrdinal = 1),
+-      )
++      val combined = combinedOf
+       val buckets = HashExchange.partitionAll(combined, keyOrdinal = 0, numPartitions, parallelism)
+       MorselScheduler.map(buckets, parallelism) { (_, bucket) =>
+         HashAggregate.sumInt64(bucket, keyOrdinal = 0, valueOrdinal = 1)
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/GroupedSumKernel.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/GroupedSumKernel.scala
+new file mode 100644
+index 0000000..5e558f0
+--- /dev/null
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/GroupedSumKernel.scala
+@@ -0,0 +1,160 @@
++package com.ewoodbury.scarlet.columnar
++
++/**
++ * Grouped sum of int pairs over whole input batches.
++ *
++ * Each batch becomes ranges of `batchSize` rows. The key and value columns stay where they are; a
++ * worker reads `[start, start + length)` and compacts one partial. One [[HashAggregate]] table per
++ * worker is cleared after that partial and reused for the next range. The partials of one input
++ * batch are merged with `sumInt64`, matching [[PartialCombine.mergeMorsels]]. The result is one
++ * partial per input batch. [[ColumnPipeline]] exchanges those partials.
++ *
++ * An empty input returns an empty vector. `numPartitions` is checked here so a direct caller still
++ * rejects a non-positive partition count. One scheduler task covers one range, so a morsel still
++ * counts as one visit.
++ */
++private[scarlet] object GroupedSumKernel:
++
++  def run(
++      batches: Vector[ColumnBatch],
++      keyOrdinal: Int,
++      valueOrdinal: Int,
++      numPartitions: Int,
++      parallelism: Int,
++      batchSize: Int,
++      steps: Vector[PairStep],
++  ): Vector[ColumnBatch] =
++    merge(batches, keyOrdinal, valueOrdinal, numPartitions, parallelism, batchSize, shapeOf(steps))
++
++  /** `keep` and `map` run inside the partial scan. A null value is dropped before `keep`. */
++  def run(
++      batches: Vector[ColumnBatch],
++      keyOrdinal: Int,
++      valueOrdinal: Int,
++      numPartitions: Int,
++      parallelism: Int,
++      batchSize: Int,
++      keep: ColumnKernel.Int32Predicate,
++      map: ColumnKernel.Int32Map,
++  ): Vector[ColumnBatch] =
++    merge(
++      batches,
++      keyOrdinal,
++      valueOrdinal,
++      numPartitions,
++      parallelism,
++      batchSize,
++      Filtered(keep, map),
++    )
++
++  /** One partial per range, in input order. The first vector counts the ranges of each batch. */
++  def partialMorsels(
++      batches: Vector[ColumnBatch],
++      keyOrdinal: Int,
++      valueOrdinal: Int,
++      parallelism: Int,
++      batchSize: Int,
++      steps: Vector[PairStep],
++  ): (Vector[Int], Vector[ColumnBatch]) =
++    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
++    require(batchSize > 0, s"batch size must be positive, got $batchSize")
++    accumulate(batches, keyOrdinal, valueOrdinal, parallelism, batchSize, shapeOf(steps))
++
++  private sealed trait Shape
++
++  private case object Plain extends Shape
++
++  private final case class Filtered(
++      keep: ColumnKernel.Int32Predicate,
++      map: ColumnKernel.Int32Map,
++  ) extends Shape
++
++  private final case class Stepped(steps: Array[PairStep]) extends Shape
++
++  /** Key column, value column, and the row range to scan. Neither column is copied. */
++  private final case class Span(keys: Int32Column, values: Int32Column, start: Int, length: Int)
++
++  private val mergeSum: ColumnBatch => ColumnBatch =
++    batch => HashAggregate.sumInt64(batch, keyOrdinal = 0, valueOrdinal = 1)
++
++  private object PassValue extends ColumnKernel.Int32Map:
++    def apply(value: Int): Int = value
++
++  private def merge(
++      batches: Vector[ColumnBatch],
++      keyOrdinal: Int,
++      valueOrdinal: Int,
++      numPartitions: Int,
++      parallelism: Int,
++      batchSize: Int,
++      shape: Shape,
++  ): Vector[ColumnBatch] =
++    require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
++    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
++    require(batchSize > 0, s"batch size must be positive, got $batchSize")
++    if (batches.isEmpty) then Vector.empty
++    else
++      val (sizes, partials) =
++        accumulate(batches, keyOrdinal, valueOrdinal, parallelism, batchSize, shape)
++      PartialCombine.mergeMorsels(sizes, partials, parallelism, mergeSum)
++
++  private def accumulate(
++      batches: Vector[ColumnBatch],
++      keyOrdinal: Int,
++      valueOrdinal: Int,
++      parallelism: Int,
++      batchSize: Int,
++      shape: Shape,
++  ): (Vector[Int], Vector[ColumnBatch]) =
++    val groups = batches.map(batch => spans(batch, keyOrdinal, valueOrdinal, batchSize))
++    val partials = MorselScheduler.map(groups.flatten, parallelism) { (_, span) =>
++      scan(span, shape)
++    }
++    (groups.map(_.length), partials)
++
++  private def spans(
++      batch: ColumnBatch,
++      keyOrdinal: Int,
++      valueOrdinal: Int,
++      batchSize: Int,
++  ): Vector[Span] =
++    val keys = ColumnHash.int32At(batch, keyOrdinal)
++    val values = ColumnHash.int32At(batch, valueOrdinal)
++    require(keys.length == values.length, "key and value columns differ in length")
++    val rows = keys.length
++    if (rows == 0) then Vector(Span(keys, values, 0, 0))
++    else
++      val pieces = (rows + batchSize - 1) / batchSize
++      Vector.tabulate(pieces) { piece =>
++        val start = piece * batchSize
++        val length = math.min(batchSize, rows - start)
++        Span(keys, values, start, length)
++      }
++
++  private def scan(span: Span, shape: Shape): ColumnBatch =
++    shape match
++      case Plain =>
++        HashAggregate.sumRange(span.keys, span.values, span.start, span.length)
++      case Filtered(keep, map) =>
++        HashAggregate.sumRange(span.keys, span.values, span.start, span.length, keep, map)
++      case Stepped(steps) =>
++        HashAggregate.sumRange(span.keys, span.values, span.start, span.length, steps)
++
++  private def shapeOf(steps: Vector[PairStep]): Shape =
++    if (steps.isEmpty) then Plain
++    else
++      valueKeeps(steps) match
++        case Some(predicates) => Filtered(keepValues(predicates), PassValue)
++        case None => Stepped(steps.toArray)
++
++  /** `Some` when every step is a value filter. The predicates stay in source order. */
++  private def valueKeeps(steps: Vector[PairStep]): Option[Vector[Int => Boolean]] =
++    val seed: Option[Vector[Int => Boolean]] = Some(Vector.empty[Int => Boolean])
++    steps.foldLeft(seed) { (acc, step) =>
++      (acc, step) match
++        case (Some(predicates), PairStep.KeepValue(predicate)) => Some(predicates :+ predicate)
++        case _ => None
++    }
++
++  private def keepValues(predicates: Vector[Int => Boolean]): ColumnKernel.Int32Predicate =
++    value => predicates.forall(predicate => predicate(value))
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/HashAggregate.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/HashAggregate.scala
+index 4a94661..aa336f6 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/HashAggregate.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/HashAggregate.scala
+@@ -18,12 +18,13 @@ import java.util.Arrays
+  * Partial sums merge by calling `sumInt64` on the sum column. Partial counts merge by calling
+  * `sumInt64` on the count column, not by calling `count` again. Min and max are not merged here.
+  *
+- * Output order is hash-table order, not input order and not sorted. Sums do not wrap at `Int`
+- * width. The value map itself is still `Int` arithmetic.
++ * Output order is first-seen order, not sorted. Sums do not wrap at `Int` width. The value map
++ * itself is still `Int` arithmetic.
+  *
+- * One open-addressed table serves every measure set. Capacity is at least twice the row count, so
+- * one batch does not rehash; a shorter capacity exists only so tests can force `grow`. Loops keep
+- * the row index in a `var` so the bodies stay allocation-free, matching `ColumnKernel`.
++ * One open-addressed table serves every measure set. A batch-sized table is at least twice the row
++ * count, so one batch does not rehash. The range scans reuse one small table per worker and grow
++ * it, and `grow` keeps first-seen order. A shorter capacity exists so tests can force `grow`.
++ * Loops keep the row index in a `var` so the bodies stay allocation-free, matching `ColumnKernel`.
+  */
+ @SuppressWarnings(Array("org.wartremover.warts.Var"))
+ object HashAggregate:
+@@ -82,11 +83,70 @@ object HashAggregate:
+       val table = new GroupTable(ColumnHash.tableSize(keys.length), SumOnly)
+       val slot = new PairSlot
+       val planned = steps.toArray
++      val end = keys.length
+       if (ColumnHash.fullyPresent(keys) && ColumnHash.fullyPresent(values)) then
+-        scanSumDenseSteps(table, keys, values, planned, slot)
+-      else scanSumSparseSteps(table, keys, values, planned, slot)
++        scanSumDenseSteps(table, keys, values, planned, slot, 0, end)
++      else scanSumSparseSteps(table, keys, values, planned, slot, 0, end)
+       table.compact()
+ 
++  /**
++   * Sums `[start, start + length)` of the two columns into the worker's table. The columns are
++   * read in place. The same table is cleared and reused for the next range on this thread.
++   */
++  private[columnar] def sumRange(
++      keys: Int32Column,
++      values: Int32Column,
++      start: Int,
++      length: Int,
++  ): ColumnBatch =
++    checkRange(keys, values, start, length)
++    val end = start + length
++    val dense = denseRange(keys, values, start, length)
++    withSumTable { (table, _) =>
++      if (length != 0) then
++        if (dense) then scanSumDense(table, keys, values, start, end)
++        else scanSumSparse(table, keys, values, filtered = false, KeepAll, Identity, start, end)
++    }
++
++  /** Same range as [[sumRange]], after `keep` and `map`. A null value is dropped before `keep`. */
++  private[columnar] def sumRange(
++      keys: Int32Column,
++      values: Int32Column,
++      start: Int,
++      length: Int,
++      keep: ColumnKernel.Int32Predicate,
++      map: ColumnKernel.Int32Map,
++  ): ColumnBatch =
++    checkRange(keys, values, start, length)
++    val end = start + length
++    val dense = denseRange(keys, values, start, length)
++    withSumTable { (table, _) =>
++      if (length != 0) then
++        if (dense) then scanSumDenseFiltered(table, keys, values, keep, map, start, end)
++        else scanSumSparse(table, keys, values, filtered = true, keep, map, start, end)
++    }
++
++  /**
++   * Same range as [[sumRange]], after `steps`. A null key or a null value is dropped before the
++   * steps. `steps` is shared by every worker and is not mutated.
++   */
++  private[columnar] def sumRange(
++      keys: Int32Column,
++      values: Int32Column,
++      start: Int,
++      length: Int,
++      steps: Array[PairStep],
++  ): ColumnBatch =
++    require(steps.nonEmpty, "pair sum needs a filter or a map")
++    checkRange(keys, values, start, length)
++    val end = start + length
++    val dense = denseRange(keys, values, start, length)
++    withSumTable { (table, slot) =>
++      if (length != 0) then
++        if (dense) then scanSumDenseSteps(table, keys, values, steps, slot, start, end)
++        else scanSumSparseSteps(table, keys, values, steps, slot, start, end)
++    }
++
+   /**
+    * Sums an `Int64` column into an `Int64` sum. This is the merge for partial sums, and for
+    * partial counts when `valueOrdinal` points at the count column. A null value does not update
+@@ -176,6 +236,41 @@ object HashAggregate:
+ 
+   private val SumOnly = Int32Aggs(sum = true, count = false, min = false, max = false)
+ 
++  /** Smallest power of two `GroupTable` accepts. The worker table grows from here. */
++  private val SumTableStart: Int = 16
++
++  private final class SumWorker:
++    val table: GroupTable = new GroupTable(SumTableStart, SumOnly)
++    val slot: PairSlot = new PairSlot
++
++  private val sumWorkers: ThreadLocal[SumWorker] = new ThreadLocal[SumWorker]:
++    override def initialValue(): SumWorker = new SumWorker
++
++  private def withSumTable(body: (GroupTable, PairSlot) => Unit): ColumnBatch =
++    val worker = sumWorkers.get()
++    val table = worker.table
++    table.release()
++    body(table, worker.slot)
++    val compacted = table.compact()
++    table.release()
++    compacted
++
++  private def checkRange(keys: Int32Column, values: Int32Column, start: Int, length: Int): Unit =
++    require(keys.length == values.length, "key and value columns differ in length")
++    require(
++      start >= 0 && length >= 0 && start <= keys.length && length <= keys.length - start,
++      s"range ($start, $length) outside ${keys.length} rows",
++    )
++
++  private def denseRange(
++      keys: Int32Column,
++      values: Int32Column,
++      start: Int,
++      length: Int,
++  ): Boolean =
++    Validity.rangePresent(keys.validity, start, length) &&
++      Validity.rangePresent(values.validity, start, length)
++
+   private def sumColumns(
+       keys: Int32Column,
+       values: Int32Column,
+@@ -188,10 +283,11 @@ object HashAggregate:
+     if (keys.length == 0) then emptySum
+     else
+       val table = new GroupTable(capacity, SumOnly)
++      val end = keys.length
+       if (ColumnHash.fullyPresent(keys) && ColumnHash.fullyPresent(values)) then
+-        if (filtered) then scanSumDenseFiltered(table, keys, values, keep, map)
+-        else scanSumDense(table, keys, values)
+-      else scanSumSparse(table, keys, values, filtered, keep, map)
++        if (filtered) then scanSumDenseFiltered(table, keys, values, keep, map, 0, end)
++        else scanSumDense(table, keys, values, 0, end)
++      else scanSumSparse(table, keys, values, filtered, keep, map, 0, end)
+       table.compact()
+ 
+   private def aggregateColumns(
+@@ -217,12 +313,17 @@ object HashAggregate:
+         else scanMeasureSparse(table, keys, values, filtered, keep, map)
+         table.compact()
+ 
+-  private def scanSumDense(table: GroupTable, keys: Int32Column, values: Int32Column): Unit =
++  private def scanSumDense(
++      table: GroupTable,
++      keys: Int32Column,
++      values: Int32Column,
++      start: Int,
++      end: Int,
++  ): Unit =
+     val keyValues = keys.values
+     val valueValues = values.values
+-    val rows = keys.length
+-    var row = 0
+-    while (row < rows) {
++    var row = start
++    while (row < end) {
+       table.addSum(keyValues(row), valueValues(row).toLong)
+       row += 1
+     }
+@@ -233,12 +334,13 @@ object HashAggregate:
+       values: Int32Column,
+       keep: ColumnKernel.Int32Predicate,
+       map: ColumnKernel.Int32Map,
++      start: Int,
++      end: Int,
+   ): Unit =
+     val keyValues = keys.values
+     val valueValues = values.values
+-    val rows = keys.length
+-    var row = 0
+-    while (row < rows) {
++    var row = start
++    while (row < end) {
+       val value = valueValues(row)
+       if (keep(value)) then table.addSum(keyValues(row), map(value).toLong)
+       row += 1
+@@ -251,14 +353,15 @@ object HashAggregate:
+       filtered: Boolean,
+       keep: ColumnKernel.Int32Predicate,
+       map: ColumnKernel.Int32Map,
++      start: Int,
++      end: Int,
+   ): Unit =
+     val keyValues = keys.values
+     val keyWords = keys.validity.words
+     val valueValues = values.values
+     val valueWords = values.validity.words
+-    val rows = keys.length
+-    var row = 0
+-    while (row < rows) {
++    var row = start
++    while (row < end) {
+       if (Validity.isSet(keyWords, row)) then
+         val valuePresent = Validity.isSet(valueWords, row)
+         if (filtered) then
+@@ -284,12 +387,13 @@ object HashAggregate:
+       values: Int32Column,
+       steps: Array[PairStep],
+       slot: PairSlot,
++      start: Int,
++      end: Int,
+   ): Unit =
+     val keyValues = keys.values
+     val valueValues = values.values
+-    val rows = keys.length
+-    var row = 0
+-    while (row < rows) {
++    var row = start
++    while (row < end) {
+       applySteps(keyValues(row), valueValues(row), steps, slot)
+       if (slot.kept) then table.addSum(slot.key, slot.value.toLong)
+       row += 1
+@@ -301,14 +405,15 @@ object HashAggregate:
+       values: Int32Column,
+       steps: Array[PairStep],
+       slot: PairSlot,
++      start: Int,
++      end: Int,
+   ): Unit =
+     val keyValues = keys.values
+     val keyWords = keys.validity.words
+     val valueValues = values.values
+     val valueWords = values.validity.words
+-    val rows = keys.length
+-    var row = 0
+-    while (row < rows) {
++    var row = start
++    while (row < end) {
+       if (Validity.isSet(keyWords, row) && Validity.isSet(valueWords, row)) then
+         applySteps(keyValues(row), valueValues(row), steps, slot)
+         if (slot.kept) then table.addSum(slot.key, slot.value.toLong)
+@@ -514,24 +619,41 @@ object HashAggregate:
+         rows,
+       )
+ 
++    /**
++     * Drops every group this morsel inserted. Walking `slots` leaves the rest of the arrays alone,
++     * and those slots are already empty.
++     */
++    def release(): Unit =
++      var cursor = 0
++      val rows = occupied
++      while (cursor < rows) {
++        val slot = slots(cursor)
++        state(slot) = 0
++        seen(slot) = 0
++        if (hasSum) then sums(slot) = 0L
++        cursor += 1
++      }
++      occupied = 0
++      missing = 0
++
+     private def notice(slot: Int): Unit =
+       if (seen(slot) == 0) then
+         seen(slot) = 1
+         missing -= 1
+ 
++    /** Doubles the table and reinserts `slots(0 until occupied)`, preserving first-seen order. */
+     private def grow(): Unit =
+       if (capacity >= ColumnHash.MaxCapacity) then
+         throw new IllegalStateException(
+           s"hash aggregate table is already at capacity $capacity",
+         )
+       val oldKeys = keys
+-      val oldState = state
+       val oldSums = sums
+       val oldCounts = counts
+       val oldMins = mins
+       val oldMaxs = maxs
+       val oldSeen = seen
+-      val oldCapacity = capacity
++      val live = occupied
+       capacity = capacity << 1
+       mask = capacity - 1
+       limit = capacity >>> 1
+@@ -543,20 +665,20 @@ object HashAggregate:
+       maxs = if (hasMax) new Array[Int](capacity) else Array.emptyIntArray
+       seen = new Array[Byte](capacity)
+       occupied = 0
+-      var slot = 0
+-      while (slot < oldCapacity) {
+-        if (oldState(slot) != 0) then
+-          val placed = locate(oldKeys(slot))
+-          state(placed) = 1
+-          keys(placed) = oldKeys(slot)
+-          if (hasSum) then sums(placed) = oldSums(slot)
+-          if (hasCount) then counts(placed) = oldCounts(slot)
+-          if (hasMin) then mins(placed) = oldMins(slot)
+-          if (hasMax) then maxs(placed) = oldMaxs(slot)
+-          seen(placed) = oldSeen(slot)
+-          slots(occupied) = placed
+-          occupied += 1
+-        slot += 1
++      var cursor = 0
++      while (cursor < live) {
++        val oldSlot = slots(cursor)
++        val placed = locate(oldKeys(oldSlot))
++        state(placed) = 1
++        keys(placed) = oldKeys(oldSlot)
++        if (hasSum) then sums(placed) = oldSums(oldSlot)
++        if (hasCount) then counts(placed) = oldCounts(oldSlot)
++        if (hasMin) then mins(placed) = oldMins(oldSlot)
++        if (hasMax) then maxs(placed) = oldMaxs(oldSlot)
++        seen(placed) = oldSeen(oldSlot)
++        slots(cursor) = placed
++        occupied += 1
++        cursor += 1
+       }
+ 
+     private def locate(key: Int): Int =
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/MorselScheduler.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/MorselScheduler.scala
+index 6446dd1..45e90c8 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/MorselScheduler.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/MorselScheduler.scala
+@@ -15,15 +15,15 @@ import scala.annotation.tailrec
+  */
+ object MorselScheduler:
+ 
+-  def map[A](morsels: Vector[ColumnBatch], parallelism: Int)(
+-      worker: (Int, ColumnBatch) => A,
++  def map[M, A](morsels: Vector[M], parallelism: Int)(
++      worker: (Int, M) => A,
+   ): Vector[A] =
+     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+     if (morsels.isEmpty) then Vector.empty
+     else if (parallelism == 1 || morsels.length == 1) then
+-      morsels.iterator.zipWithIndex.map { (batch, index) =>
++      morsels.iterator.zipWithIndex.map { (morsel, index) =>
+         ColumnMetrics.visit()
+-        worker(index, batch)
++        worker(index, morsel)
+       }.toVector
+     else
+       val workers = math.min(parallelism, morsels.length)
+@@ -51,24 +51,24 @@ object MorselScheduler:
+       }.toVector
+ 
+   @tailrec
+-  private def drain[A](
++  private def drain[M, A](
+       id: Int,
+       deques: Array[ConcurrentLinkedDeque[Int]],
+       slots: Array[AtomicReference[Option[A]]],
+       failure: AtomicReference[Option[Throwable]],
+-      morsels: Vector[ColumnBatch],
+-      worker: (Int, ColumnBatch) => A,
++      morsels: Vector[M],
++      worker: (Int, M) => A,
+   ): Unit =
+     if (failure.get().isEmpty) then
+       take(id, deques, failure) match
+         case None => ()
+         case Some(index) =>
+-          val batch = morsels.lift(index).getOrElse {
++          val morsel = morsels.lift(index).getOrElse {
+             throw new IllegalArgumentException(s"missing morsel $index")
+           }
+           try
+             ColumnMetrics.visit()
+-            slots(index).set(Some(worker(index, batch)))
++            slots(index).set(Some(worker(index, morsel)))
+           catch case thrown: Throwable => failure.compareAndSet(None, Some(thrown))
+           drain(id, deques, slots, failure, morsels, worker)
+ 
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/Validity.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/Validity.scala
+index 0dd17db..3f33139 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/Validity.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/Validity.scala
+@@ -38,6 +38,32 @@ object Validity:
+         val tail = live & 63
+         tail == 0 || (words(fullWords) & ((1L << tail) - 1L)) == (1L << tail) - 1L
+ 
++  /**
++   * Every bit in `[start, start + length)` is set. An empty range is present. The caller keeps the
++   * range inside the bitmap.
++   */
++  @SuppressWarnings(Array("org.wartremover.warts.Var"))
++  private[columnar] def rangePresent(validity: Validity, start: Int, length: Int): Boolean =
++    if (length <= 0) then true
++    else
++      val words = validity.words
++      val end = start + length
++      var row = start
++      var dense = true
++      while (dense && row < end && (row & 63) != 0) {
++        dense = isSet(words, row)
++        row += 1
++      }
++      while (dense && end - row >= 64) {
++        if (words(row >>> 6) != -1L) then dense = false
++        row += 64
++      }
++      while (dense && row < end) {
++        dense = isSet(words, row)
++        row += 1
++      }
++      dense
++
+   /** Row is in range and `words` covers it. Kernels use this on the hot path. */
+   private[columnar] inline def isSet(words: Array[Long], row: Int): Boolean =
+     ((words(row >>> 6) >>> (row & 63)) & 1L) != 0L
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestGroupedSumKernel.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestGroupedSumKernel.scala
+new file mode 100644
+index 0000000..5f5bd4e
+--- /dev/null
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestGroupedSumKernel.scala
+@@ -0,0 +1,321 @@
++package com.ewoodbury.scarlet.columnar
++
++import org.scalatest.flatspec.AnyFlatSpec
++import org.scalatest.matchers.should.Matchers
++
++class TestGroupedSumKernel extends AnyFlatSpec with Matchers:
++
++  private val trials = 128
++
++  "lost updates" should "sum one key split across morsels to 36 on several threads" in {
++    val batches = Vector(oneKey)
++    (0 until trials).foreach { _ =>
++      sums(run(batches, parallelism = 4, batchSize = 1)) shouldBe Map(1 -> Some(36L))
++    }
++  }
++
++  it should "sum one key split across morsels to 36 on one thread" in {
++    val batches = Vector(oneKey)
++    (0 until trials).foreach { _ =>
++      sums(run(batches, parallelism = 1, batchSize = 1)) shouldBe Map(1 -> Some(36L))
++    }
++  }
++
++  "reuse" should "omit the previous morsel's groups from the next partial" in {
++    val batch = BatchCodec.intPairs(Seq((1, 10), (1, 1), (2, 7), (3, 4)))
++    val (sizes, partials) = GroupedSumKernel.partialMorsels(
++      Vector(batch),
++      keyOrdinal = 0,
++      valueOrdinal = 1,
++      parallelism = 1,
++      batchSize = 2,
++      steps = Vector.empty[PairStep],
++    )
++
++    sizes shouldBe Vector(2)
++    partials match
++      case Vector(first, second) =>
++        sums(Vector(first)) shouldBe Map(1 -> Some(11L))
++        sums(Vector(second)) shouldBe Map(2 -> Some(7L), 3 -> Some(4L))
++      case other => fail(s"expected two partials, got ${other.length}")
++  }
++
++  "grow" should "match first-seen order after the worker table grows" in {
++    val rows = (0 until 50000).map(index => (index * 10000, index % 97))
++    val batch = BatchCodec.intPairs(rows)
++    val direct = HashAggregate.sumInt32(batch, keyOrdinal = 0, valueOrdinal = 1)
++    val first = onePartial(batch, parallelism = 4, batchSize = 50000)
++    val second = onePartial(batch, parallelism = 1, batchSize = 50000)
++
++    sums(Vector(first)) shouldBe sums(Vector(direct))
++    sums(Vector(second)) shouldBe sums(Vector(direct))
++    keysOf(first) shouldBe keysOf(direct)
++    keysOf(second) shouldBe keysOf(first)
++  }
++
++  "nulls" should "keep a null sum when every value of a key is null" in {
++    val batch = BatchCodec.nullableIntPairs(
++      Seq(
++        (Some(1), None),
++        (Some(1), Some(4)),
++        (Some(2), None),
++        (None, Some(9)),
++        (Some(2), None),
++      ),
++    )
++
++    sums(run(Vector(batch), parallelism = 4, batchSize = 1)) shouldBe Map(
++      1 -> Some(4L),
++      2 -> None,
++    )
++  }
++
++  it should "drop a null value and a rejected key when the sum filters" in {
++    val batch = BatchCodec.nullableIntPairs(
++      Seq(
++        (Some(1), Some(5)),
++        (Some(1), None),
++        (Some(1), Some(-2)),
++        (Some(2), None),
++        (Some(3), Some(-4)),
++        (None, Some(9)),
++      ),
++    )
++    val filtered = ColumnPipeline.sumByKey(
++      Vector(batch),
++      keyOrdinal = 0,
++      valueOrdinal = 1,
++      numPartitions = 1,
++      parallelism = 4,
++      batchSize = 1,
++      (value: Int) => value > 0,
++      (value: Int) => value * 10,
++    )
++    val kept = GroupedSumKernel.run(
++      Vector(batch),
++      keyOrdinal = 0,
++      valueOrdinal = 1,
++      numPartitions = 1,
++      parallelism = 1,
++      batchSize = 1,
++      Vector(PairStep.KeepValue((value: Int) => value > 0)),
++    )
++
++    sums(filtered) shouldBe Map(1 -> Some(50L))
++    sums(kept) shouldBe Map(1 -> Some(5L))
++  }
++
++  it should "drop a null value and a rejected key when steps filter" in {
++    val batch = BatchCodec.nullableIntPairs(
++      Seq(
++        (Some(1), Some(5)),
++        (Some(1), None),
++        (Some(7), Some(9)),
++        (Some(4), Some(-3)),
++        (Some(4), None),
++        (Some(8), None),
++      ),
++    )
++    val steps = Vector(
++      PairStep.KeepRow((key, value) => key != 7 && value > 0),
++      PairStep.MapPair((key, value) => (key + 1, value)),
++    )
++
++    sums(run(Vector(batch), parallelism = 4, batchSize = 1, steps)) shouldBe Map(2 -> Some(5L))
++  }
++
++  "ranges" should "publish an empty partial for a zero-row batch" in {
++    val empty = BatchCodec.intPairs(Seq.empty[(Int, Int)])
++    val keys = Int32Column.of(Array(1, 2), Validity.allValid(2), 2)
++    val values = Int32Column.of(Array(3, 4), Validity.allValid(2), 2)
++    val (sizes, partials) = GroupedSumKernel.partialMorsels(
++      Vector(empty),
++      keyOrdinal = 0,
++      valueOrdinal = 1,
++      parallelism = 4,
++      batchSize = 8,
++      steps = Vector.empty[PairStep],
++    )
++
++    sizes shouldBe Vector(1)
++    partials match
++      case Vector(only) =>
++        only.length shouldBe 0
++        only.schema shouldBe Vector(LogicalType.Int32, LogicalType.Int64)
++      case other => fail(s"expected one partial, got ${other.length}")
++    HashAggregate.sumRange(keys, values, start = 0, length = 0).length shouldBe 0
++  }
++
++  it should "return the partial of a batch that fits in one morsel" in {
++    val rows = Seq((4, 3), (1, 5), (4, 1))
++    val batch = BatchCodec.intPairs(rows)
++    val direct = HashAggregate.sumInt32(batch, keyOrdinal = 0, valueOrdinal = 1)
++    val partial = onePartial(batch, parallelism = 4, batchSize = 8)
++    val merged = GroupedSumKernel.run(
++      Vector(batch),
++      keyOrdinal = 0,
++      valueOrdinal = 1,
++      numPartitions = 4,
++      parallelism = 4,
++      batchSize = 8,
++      steps = Vector.empty[PairStep],
++    )
++
++    merged match
++      case Vector(only) =>
++        keysOf(partial) shouldBe keysOf(direct)
++        keysOf(only) shouldBe keysOf(direct)
++        sums(merged) shouldBe sums(Vector(direct))
++      case other => fail(s"expected one merged batch, got ${other.length}")
++  }
++
++  it should "sum when more workers are requested than morsels" in {
++    val rows = Seq((1, 1), (1, 2), (2, 3), (2, 4))
++    val summed = run(Vector(BatchCodec.intPairs(rows)), parallelism = 8, batchSize = 2)
++
++    sums(summed) shouldBe Map(1 -> Some(3L), 2 -> Some(7L))
++  }
++
++  it should "return one bucket when there is one partition" in {
++    val rows = Seq((1, 4), (2, 5), (1, 1), (3, 8))
++    val parts = ColumnPipeline.sumByKey(
++      Vector(BatchCodec.intPairs(rows)),
++      keyOrdinal = 0,
++      valueOrdinal = 1,
++      numPartitions = 1,
++      parallelism = 4,
++      batchSize = 2,
++    )
++
++    parts.length shouldBe 1
++    sums(parts) shouldBe Map(1 -> Some(5L), 2 -> Some(5L), 3 -> Some(8L))
++  }
++
++  it should "count one visit and one partial batch per morsel" in {
++    val batch = BatchCodec.intPairs((0 until 10).map(row => (row, 1)))
++    ColumnMetrics.withSink(new CountingSink) {
++      val (sizes, partials) = GroupedSumKernel.partialMorsels(
++        Vector(batch),
++        keyOrdinal = 0,
++        valueOrdinal = 1,
++        parallelism = 4,
++        batchSize = 4,
++        steps = Vector.empty[PairStep],
++      )
++
++      sizes shouldBe Vector(3)
++      partials.length shouldBe 3
++      ColumnMetrics.visitCount shouldBe 3L
++      ColumnMetrics.batchCount shouldBe partials.length.toLong
++    }
++  }
++
++  "partitions" should "reject a non-positive partition count" in {
++    val batches = Vector(BatchCodec.intPairs(Seq((1, 1))))
++
++    val zero = intercept[IllegalArgumentException] {
++      ColumnPipeline.sumByKey(
++        batches,
++        keyOrdinal = 0,
++        valueOrdinal = 1,
++        numPartitions = 0,
++        parallelism = 1,
++        batchSize = 8,
++      )
++    }
++    val negative = intercept[IllegalArgumentException] {
++      GroupedSumKernel.run(
++        batches,
++        keyOrdinal = 0,
++        valueOrdinal = 1,
++        numPartitions = -1,
++        parallelism = 1,
++        batchSize = 8,
++        steps = Vector.empty[PairStep],
++      )
++    }
++
++    zero.getMessage should include("numPartitions")
++    negative.getMessage should include("numPartitions")
++  }
++
++  it should "return one empty batch per partition for an empty input" in {
++    val parts = ColumnPipeline.sumByKey(
++      Vector.empty[ColumnBatch],
++      keyOrdinal = 0,
++      valueOrdinal = 1,
++      numPartitions = 4,
++      parallelism = 2,
++      batchSize = 8,
++    )
++    val direct = GroupedSumKernel.run(
++      Vector.empty[ColumnBatch],
++      keyOrdinal = 0,
++      valueOrdinal = 1,
++      numPartitions = 4,
++      parallelism = 2,
++      batchSize = 8,
++      steps = Vector.empty[PairStep],
++    )
++
++    parts.length shouldBe 4
++    parts.map(_.length) shouldBe Seq(0, 0, 0, 0)
++    direct.length shouldBe 0
++  }
++
++  private def oneKey: ColumnBatch =
++    BatchCodec.intPairs((1 to 8).map(value => (1, value)))
++
++  private def run(
++      batches: Vector[ColumnBatch],
++      parallelism: Int,
++      batchSize: Int,
++      steps: Vector[PairStep] = Vector.empty[PairStep],
++  ): Vector[ColumnBatch] =
++    ColumnPipeline.sumByKey(
++      batches,
++      keyOrdinal = 0,
++      valueOrdinal = 1,
++      numPartitions = 4,
++      parallelism = parallelism,
++      batchSize = batchSize,
++      steps = steps,
++    )
++
++  private def onePartial(batch: ColumnBatch, parallelism: Int, batchSize: Int): ColumnBatch =
++    val (sizes, partials) = GroupedSumKernel.partialMorsels(
++      Vector(batch),
++      keyOrdinal = 0,
++      valueOrdinal = 1,
++      parallelism = parallelism,
++      batchSize = batchSize,
++      steps = Vector.empty[PairStep],
++    )
++    sizes shouldBe Vector(1)
++    partials match
++      case Vector(only) => only
++      case other => fail(s"expected one partial, got ${other.length}")
++
++  private def sums(batches: Vector[ColumnBatch]): Map[Int, Option[Long]] =
++    batches.flatMap { batch =>
++      val keys = int32(batch, 0)
++      val values = int64(batch, 1)
++      (0 until batch.length).map { row =>
++        val value = if (values.isValid(row)) Some(values.values(row)) else None
++        keys.values(row) -> value
++      }
++    }.toMap
++
++  private def keysOf(batch: ColumnBatch): Seq[Int] =
++    val keys = int32(batch, 0)
++    (0 until batch.length).map(row => keys.values(row))
++
++  private def int32(batch: ColumnBatch, ordinal: Int): Int32Column =
++    batch.columns.lift(ordinal) match
++      case Some(column: Int32Column) => column
++      case other => fail(s"expected Int32 at $ordinal, got $other")
++
++  private def int64(batch: ColumnBatch, ordinal: Int): Int64Column =
++    batch.columns.lift(ordinal) match
++      case Some(column: Int64Column) => column
++      case other => fail(s"expected Int64 at $ordinal, got $other")
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/MaterialisationStudy.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/MaterialisationStudy.scala
+index 844965c..6970ddb 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/MaterialisationStudy.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/MaterialisationStudy.scala
+@@ -53,15 +53,12 @@ object MaterialisationStudy:
+   private val stagePlan: Vector[(String, String)] =
+     Vector(
+       ("encode", "copiedIntPairs"),
+-      ("partial", "slice+sumInt32"),
++      ("partial", "range+sumInt32"),
+       ("merge", "concat+sumInt64"),
+       ("exchange", "partitionAll"),
+       ("final", "sumInt64+ColumnReduce"),
+     )
+ 
+-  private val partialSum: ColumnBatch => ColumnBatch =
+-    morsel => HashAggregate.sumInt32(morsel, keyOrdinal = 0, valueOrdinal = 1)
+-
+   private val mergeSum: ColumnBatch => ColumnBatch =
+     batch => HashAggregate.sumInt64(batch, keyOrdinal = 0, valueOrdinal = 1)
+ 
+@@ -383,7 +380,14 @@ object MaterialisationStudy:
+     val (encoded, encodeMark) = meter(encodeOwnedPairs(grouped))
+     require(lengthOf(encoded) == groupedRows, "grouped encode dropped rows")
+     val (split, partialMark) = meter {
+-      PartialCombine.partialMorsels(encoded, batchSize, threads, partialSum)
++      GroupedSumKernel.partialMorsels(
++        encoded,
++        keyOrdinal = 0,
++        valueOrdinal = 1,
++        parallelism = threads,
++        batchSize = batchSize,
++        steps = Vector.empty[PairStep],
++      )
+     }
+     val (merged, mergeMark) = meter {
+       PartialCombine.mergeMorsels(split._1, split._2, threads, mergeSum)
+@@ -405,7 +409,14 @@ object MaterialisationStudy:
+ 
+   private def groupedOnce(source: DistCollection[(Int, Int)], threads: Int): Long =
+     val encoded = encodeOwnedPairs(source)
+-    val (sizes, partials) = PartialCombine.partialMorsels(encoded, batchSize, threads, partialSum)
++    val (sizes, partials) = GroupedSumKernel.partialMorsels(
++      encoded,
++      keyOrdinal = 0,
++      valueOrdinal = 1,
++      parallelism = threads,
++      batchSize = batchSize,
++      steps = Vector.empty[PairStep],
++    )
+     val merged = PartialCombine.mergeMorsels(sizes, partials, threads, mergeSum)
+     val buckets = HashExchange.partitionAll(
+       merged,

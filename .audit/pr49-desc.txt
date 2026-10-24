@@ -1,0 +1,63 @@
+Fix columnar take, mapValues, and dictionary-filter contracts
+
+## Summary
+
+Columnar `take` decodes every batch of a partition before moving to the next one. `mapValues` stays columnar only when the function declares an unboxed `Int` apply and every other `apply` is an erasure bridge. A string literal predicate's `apply` is final and uses the stored literals, and dictionary filters test codes with an unboxed mask. A positive partition count is required before a source iterable is read. Dense int-triple filters skip per-row validity checks, and a partition selector is rejected on aggregates and joins.
+
+Blocking and should-fix items: 30 fixed here, 29 already resolved on main, 18 deferred. Mechanical nits fixed: 13. The remaining nits were left as written. Three template placeholder lines were not findings.
+
+## Fixed here
+
+Correctness:
+
+- `decodePrefix` reads every batch in a partition, up to the remaining limit (`ColumnarPlanner.prefixRows`). A regression covers `columnarBatchSize = 4` and `take` across several morsels of one partition, and `take` with columnar execution disabled leaves `decodedValueCount` at 0.
+- `mapValues` rejects a hand-written `apply(Any)` beside `apply(Int)`. The row path and the columnar path agree, and an anonymous `Int => Int` stays columnar.
+- `DictionaryStringPredicate.apply` is final and tests `literals`. Empty lists, a null literal, eight literals, nine literals, and an IN-list that contains null match the scalar filter. Eight non-null literals still report `Utf8Dict`.
+- `DistCollection.apply` requires `numPartitions > 0` before `data.toVector`.
+
+Hot path:
+
+- Dictionary filtering builds a boolean mask from the batch dictionary and publishes a one-column batch without a temporary code column.
+- Scalar membership uses the literal set.
+- A fully valid triple filter does not re-check validity per row. A null component still fails with the row index. The slot match runs once per filter.
+- `take`'s preserving walk is one `preservedPartitions` traversal. The prefix accumulates in a list.
+- `dataMatchesDescriptor` skips engine-owned primitive holders and type-tests the other rows without allocating a pair per element.
+- `requireLivePrefix` uses the same word scan as `requireLive`.
+- Aggregates and joins require an empty partition selector.
+
+Other:
+
+- `DistCollectionStudy` checks `isThreadAllocatedMemorySupported` before enabling allocation monitoring, and labels `alloc_bytes` as a sampled process-wide lower bound.
+- `ColumnMetrics` documents the process-wide window and that `decodedValueCount` counts rows.
+- Layout docs include int triples. `filterStringEquals` documents that a null literal stays scalar.
+
+## Already resolved on main
+
+- Row `groupedSum` drops a null key or null value and rejects any other cell type (`DefaultExecutionService.scala:82-104`). Both row orders are tested.
+- `tryTake` goes through `lower`, which returns `None` when `columnarExecution` is false (`ColumnarPlanner.scala:92`).
+- `IntArrays` and `DoubleArrays` iterate with a primitive index (`IntArrays.scala:18`).
+- `IntPairArrays.fromOwned` and `BatchCodec.copiedIntPairs` check lengths before `notePrimitiveEncode` (`IntPairArrays.scala:41-47`, `BatchCodec.scala:87-89`).
+- `ofInts` and `ofDoubles` store `IntArrays` and `DoubleArrays` (`IntArrays.scala:13`, `DoubleArrays.scala:13`). Primitive encodes are asserted via `ColumnMetrics.primitiveEncodeCount`.
+- Accepted grouped-sum shapes assert `tryGroupedSum` and the total (`TestColumnarActions.scala:455`).
+- `MorselScheduler.drain` notes a visit (`MorselScheduler.scala:70`). `TestColumnReduce.scala:47` pins null skipping for `sumMappedInt32`.
+- `asInstanceOf` on the planner sits under the object suppression, with a local comment at the `mapValues` cast.
+- `ColumnMetrics.disarm` runs from `afterEach` in `TestColumnarActions`, `TestColumnarSelection`, `TestColumnBatch`, and `TestMorselScheduler`.
+- `BatchCodec.ints` and `float64s` match `ArraySeq` and fill with monomorphic loops. `encodeGroupedPairs` is one helper. `groupedSum` documents the null contract (`DistCollection.scala:324-332`).
+- `triplesOf` and `pairsOf` throw on an empty vector. Join and grouped-sum execution always pass `shuffleWidth` batches (`ColumnarPlanner.scala:1088-1090`, `ColumnPipeline.innerJoin`), and `invalidReason` refuses a non-positive partition count (`PartitioningInfo.scala:73-76`).
+- The architecture contracts for 32-bit `Float`, null strings, non-wrapping `Int` sums, empty sums, `reduceByKey` wrapping, and `floorMod` remain in `ColumnarPlanner` scaladoc, `DistCollection.sum`, `ExecutionService`, and `docs/ARCHITECTURE.md`.
+
+## Deferred with reason
+
+- Replacing `ColumnMetrics` with a recorder on `ScarletRuntime`. The class doc states the single process-wide window. Propagating a recorder through execution is a separate design.
+- A type witness for `mapValues` and for element projects, including threading a physical kind through `lowerElementPipeline`. An overloaded non-bridge `apply` already stays on the row path. Type-changing maps still report a columnar layout and fall back when `tryRun` hits a `ClassCastException`. The six pinned planner mismatches stay in the contract and in `docs/ARCHITECTURE.md`.
+- Replacing grouped sum's `sumByKey` with a single-pass value sum. That changes the documented shuffle and the pinned batch footprints.
+- An encode that reuses private partition arrays. Column buffers are writable, so sharing them would alias a partition that must stay re-readable.
+- A read-only column wrapper for `takeColumn`. Published columns are not mutated; a wrapper type is a new representation.
+- A closed role for `PhysicalOp.Column`'s ordinal. Call sites pass 0 or 1.
+- One slot enum shared by `IntJoinTriplePredicate` and `PhysicalOp`, with one `keepTriple`. The columnar match is hoisted to one predicate per filter.
+- Indexing `take` from the `Scan` partition list alone. `preservedPartitions` reads `Scan.partitions.length`, and interpret slices the `Plan.Source` list stored at lowering. Those lists are the same source.
+- Weakening exact `ColumnMetrics` footprint assertions. They pin the current kernel shape.
+- Expanding `TestColumnarContract` so every accepted fixture calls `tryRun`, splitting the suite into one example per fixture, or moving the six mismatches out. The discrepancies stay disclosed.
+- An `ofStrings` factory, or removing `SourceDescriptor.Strings`. One adds a public API; the other breaks hand-built plans.
+- Folding `assertUtf8` and `assertNarrow` into one helper. The two helpers differ by layout literal only.
+

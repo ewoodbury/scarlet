@@ -1,0 +1,10 @@
+Agree columnar layout with lower and name fused grouped sum
+
+`fusedPairLayout` follows `ColumnarPlanner.lower`. A plan `lower` refuses, including a pair map, no longer reports a columnar layout.
+
+`groupedSumShape` names the fused grouped-sum action without a `Plan` or `PhysicalOp` node. A typed int-pair source is `GroupedSum(Scan)`. Pair filters and a pair map wrap that scan in source order (`FilterRow`, `FilterKey`, `FilterValue`, `MapPair`). A pair map that stays `(Int, Int)` is refused by `lower` and has no layout, and `tryGroupedSum` still returns the fused sum. A map to `(Long, Int)` stays on the row path: `partitioning`, `tryRun`, and `tryGroupedSum` are empty. The peel shape remains `GroupedSum(MapPair(Scan))`.
+
+The contract checks `tryGroupedSum` for accepted fixtures in both directions. It is `Some` for an int-pair source and for a row, key, or value filter of one, and `None` for every other accepted plan. The mismatch list is empty.
+
+`lower` accepts a join when the hint is absent or shuffle-hash. Sort-merge and broadcast return `None`.
+

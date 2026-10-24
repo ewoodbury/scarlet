@@ -1,0 +1,12 @@
+Add dictionary-code string equality filters
+
+## Summary
+- Add `filterStringEquals` and `filterStringIn` helpers for recognized string literal predicates.
+- Resolve literals against each batch dictionary and filter the code column with `ColumnKernel.filterInt32`.
+- Preserve scalar lambda filtering for other predicate forms and retain `Layout.Utf8Dict`.
+- Cover equality, missing literals, nulls, IN-lists, and scalar fallback behavior.
+
+## Verification
+- `make lint`
+- `make test-lint`
+- `make test` (477 tests passed)

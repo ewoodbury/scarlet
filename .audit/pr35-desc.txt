@@ -1,0 +1,19 @@
+Copy primitive int, double, and int-pair sources into columns
+
+## Summary
+
+Primitive int, double, and int-pair sources are copied into columns with `System.arraycopy` instead of being pulled through a boxing iterator.
+
+- `BatchCodec.ints` and `float64s` recognize `ArraySeq.ofInt` and `ArraySeq.ofDouble` and copy the primitive array into the column. A boxed `Vector` or `List` still uses today's iterator.
+- `IntPairArrays` in core holds a partition's `Array[Int]` keys and values and still iterates pairs for the row path. `encodePairs` copies those two arrays. Core does not name a `ColumnBatch`.
+- `DistCollection.ofInts`, `ofDoubles`, and `ofIntPairs` store those representations. Construction splits them with the same contiguous ranges as `DistCollection.apply` and copies each range once. The caller's arrays are not retained. Encode stays on the calling thread. `columnarBatchSize` is unchanged.
+
+## Tests
+
+- An `ofInts` source and a boxed `Vector` or `List` return the same filtered `sum`, on the columnar path and the row path. `ofDoubles` matches a boxed vector. An `ofIntPairs` source matches `reduceByKey(_ + _)` on a fixture that does not overflow `Int`.
+- After `ofInts`, mutating the caller's array leaves `sum` and `collect` on the original values. The same holds for `ofDoubles` and `ofIntPairs` partition contents.
+- The int, double, and int-pair columns are distinct arrays from the input. Mutating the input after encode leaves the column values unchanged.
+- Partition ranges match the existing split (first `size % numPartitions` partitions get one extra element), including empty input. Unequal pair arrays and a non-positive partition count are rejected.
+
+`make lint` passed. `make test` passed, 452 tests.
+

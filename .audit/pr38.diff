@@ -1,0 +1,658 @@
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 1e12ca3..943f668 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -2,8 +2,8 @@
+ 
+ Scarlet is a data processing engine inspired by Spark, written in pure functional Scala 3. This
+ document describes the system as it exists today: a row path and a columnar path for `Int`,
+-`(Int, Int)`, and `String` filter and map, a clean logical/physical split, and type erasure
+-confined to named boundaries.
++`(Int, Int)`, and `String` filter and map, plus `keys`, `values`, and int `mapValues` on int
++pairs, a clean logical/physical split, and type erasure confined to named boundaries.
+ 
+ ## Module layout
+ 
+@@ -29,10 +29,12 @@ Two vocabularies, separated at the module level:
+ - **Physical** (`scarlet-execution`): `StageGraph` — stages, dependencies, shuffle boundaries.
+   Narrow operations are fused into stages; wide operations become shuffle stages carrying a
+   structured `WideOp` record. The columnar path has a second tree, `PhysicalOp`, with `Scan`,
+-  `Filter`, `Project`, `Pipeline`, `Exchange`, `HashAggregate`, and `HashJoin` nodes.
++  `Filter`, `Project`, `Pipeline`, `Key`, `Value`, `MapValue`, `Exchange`, `HashAggregate`, and
++  `HashJoin` nodes.
+   `ColumnarPlanner.lower` builds it and does not run user functions. Straight int, double, and
+   string filter/project runs of two to four steps use one fused pipeline kernel; longer runs are
+-  cut into chunks of four. Pair operations, aggregates, and joins remain separate nodes.
++  cut into chunks of four. Pair operations, aggregates, and joins remain separate nodes. `keys`
++  and `values` are one int column. `mapValues` is one node when the value stays an int.
+   `Exchange` is the boundary under an aggregate and on each side of a join; those kernels perform
+   the shuffle.
+ 
+@@ -59,18 +61,21 @@ DistCollection action
+ 
+ A bare `Plan.Source` short-circuits to its partitions. `ColumnarPlanner` runs filter, map,
+ filterKeys, filterValues, reduceByKey, and inner join when the values it sees are `Int` or
+-`(Int, Int)`, and filter and map when they are `Double` or `String`, if
+-`ScarletConf.columnarExecution` is true (the default). Any other node keeps the whole plan on
+-the row path. `Double` is the float64 column. A 32-bit `Float` stays on the row path. Strings are a
+-dictionary of JVM strings plus int codes (`Utf8Dict`). A null string is a value, so filter and
+-map see it. Group-by and join stay on int keys. Narrow columnar ops keep input order and the
++`(Int, Int)`, and filter and map when they are `Double` or `String`. `keys` and `values` of an
++int pair narrow to that int column. `mapValues` runs when the new value stays an unboxed `Int`.
++Any other node keeps the whole plan on the row path. This requires
++`ScarletConf.columnarExecution` (the default). `Double` is the float64 column. A 32-bit `Float`
++stays on the row path. Strings are a dictionary of JVM strings plus int codes (`Utf8Dict`). A
++null string is a value, so filter and map see it. Group-by and join stay on int keys. Narrow columnar ops keep input order and the
+ input partition count. `reduceByKey` and `join` hash with `floorMod` into
+ `defaultShufflePartitions`.
+ `columnarBatchSize` (default 8192) is the morsel width. Set `columnarExecution` false to force
+ the row path.
+ 
+ `count` and `sum` on an eligible plan read the finished columns. `count` sums batch lengths.
+-`sum` of `Int` returns a `Long` and does not wrap. `sum` of `Double` returns a `Double`.
++`sum` of `Int` returns a `Long` and does not wrap. `sum` of `Double` returns a `Double`. `sum` of
++`keys`, `values`, or the values after an int `mapValues` reads the pair column in the morsel loop
++and does not build another batch. The key or value column is a view: its arrays are shared.
+ `groupedSum` on `(Int, Int)` runs the wide grouped sum and folds the `Int64` group sums into one
+ `Long`. A non-empty source, `filterKeys`, or `filterValues` of int pairs stays on that kernel. A
+ completely empty source has no runtime type witness, so that sum returns zero on the row path.
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnBatch.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnBatch.scala
+index bb3f3e6..8978ff1 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnBatch.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnBatch.scala
+@@ -2,7 +2,7 @@ package com.ewoodbury.scarlet.columnar
+ 
+ /**
+  * A published batch. `length` is the row count every column shares. The batch does not copy column
+- * buffers.
++ * buffers. Construction counts toward [[ColumnMetrics]] when that counter is armed.
+  */
+ final class ColumnBatch(
+     val schema: IndexedSeq[LogicalType],
+@@ -25,3 +25,4 @@ final class ColumnBatch(
+       s"column $ordinal length ${column.length} does not match batch length $length",
+     )
+   }
++  ColumnMetrics.noteBatch()
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnBatches.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnBatches.scala
+index c27e440..ee9f880 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnBatches.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnBatches.scala
+@@ -21,6 +21,14 @@ object ColumnBatches:
+         copy(batch, start, length)
+       }
+ 
++  /**
++   * One column of `batch` as its own batch. The column object is shared, including its values and
++   * validity. A published column is not mutated, so this is a view rather than a copy.
++   */
++  def takeColumn(batch: ColumnBatch, ordinal: Int): ColumnBatch =
++    val column = columnAt(batch, ordinal)
++    new ColumnBatch(Vector(column.logicalType), Vector(column), column.length)
++
+   def concat(parts: Vector[ColumnBatch]): ColumnBatch =
+     require(parts.nonEmpty, "concat needs at least one batch")
+     val head = parts.headOption.getOrElse(
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnMetrics.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnMetrics.scala
+new file mode 100644
+index 0000000..f0e2ad9
+--- /dev/null
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnMetrics.scala
+@@ -0,0 +1,35 @@
++package com.ewoodbury.scarlet.columnar
++
++import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
++
++/**
++ * Counts published batches and morsel visits while armed. Disarmed by default, so a study does not
++ * record. A test arms around one action and disarms afterwards, including from `afterEach`.
++ */
++object ColumnMetrics:
++
++  private val armed = new AtomicBoolean(false)
++  private val batches = new AtomicLong(0L)
++  private val visits = new AtomicLong(0L)
++
++  /** Start from zero and record until [[disarm]]. */
++  def arm(): Unit =
++    batches.set(0L)
++    visits.set(0L)
++    armed.set(true)
++
++  /** Stop recording. The last counts stay readable. */
++  def disarm(): Unit =
++    armed.set(false)
++
++  def batchCount: Long = batches.get()
++
++  def visitCount: Long = visits.get()
++
++  private[columnar] def noteBatch(): Unit =
++    if (armed.get()) then batches.incrementAndGet()
++    ()
++
++  private[columnar] def noteVisit(): Unit =
++    if (armed.get()) then visits.incrementAndGet()
++    ()
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnReduce.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnReduce.scala
+index 998db1d..b7f2971 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnReduce.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/ColumnReduce.scala
+@@ -18,6 +18,35 @@ object ColumnReduce:
+   def sumInt32(batches: Vector[ColumnBatch]): Long =
+     batches.foldLeft(0L)((total, batch) => total + sumInt32(int32(batch)))
+ 
++  /**
++   * Sums the `Int32` column at `ordinal`. Other columns are left unread. Null slots are skipped.
++   */
++  def sumInt32At(batch: ColumnBatch, ordinal: Int): Long =
++    sumInt32(int32At(batch, ordinal))
++
++  /**
++   * Sums `mapper` applied to present slots of the `Int32` column at `ordinal`. Null slots are
++   * skipped and `mapper` is not called on them. The mapped `Int` may wrap; the total does not.
++   */
++  def sumMappedInt32(batch: ColumnBatch, ordinal: Int, mapper: ColumnKernel.Int32Map): Long =
++    val column = int32At(batch, ordinal)
++    val live = column.length
++    val values = column.values
++    var total = 0L
++    var row = 0
++    if (Validity.livePresent(column.validity, live)) then
++      while (row < live) {
++        total += mapper(values(row)).toLong
++        row += 1
++      }
++    else
++      val words = column.validity.words
++      while (row < live) {
++        if (Validity.isSet(words, row)) then total += mapper(values(row)).toLong
++        row += 1
++      }
++    total
++
+   /**
+    * Sums the `Int64` column at `ordinal`. Other columns are left unread. Null slots are skipped.
+    */
+@@ -83,7 +112,10 @@ object ColumnReduce:
+ 
+   private def int32(batch: ColumnBatch): Int32Column =
+     require(batch.columns.length == 1, s"int sum expects one column, got ${batch.columns.length}")
+-    ColumnKernel.asInt32(ColumnKernel.columnAt(batch, 0), 0)
++    int32At(batch, 0)
++
++  private def int32At(batch: ColumnBatch, ordinal: Int): Int32Column =
++    ColumnKernel.asInt32(ColumnKernel.columnAt(batch, ordinal), ordinal)
+ 
+   private def int64(batch: ColumnBatch, ordinal: Int): Int64Column =
+     ColumnKernel.asInt64(ColumnKernel.columnAt(batch, ordinal), ordinal)
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/MorselScheduler.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/MorselScheduler.scala
+index ced1953..15c1053 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/MorselScheduler.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/MorselScheduler.scala
+@@ -10,7 +10,8 @@ import scala.annotation.tailrec
+  * others, so one long morsel does not keep the rest of the queue behind it.
+  *
+  * Results line up with `morsels`. A worker failure, including an `Error`, fails the call with that
+- * throwable. `parallelism` of `1` runs on the calling thread.
++ * throwable. `parallelism` of `1` runs on the calling thread. Each morsel handed to the worker
++ * counts as one visit when [[ColumnMetrics]] is armed.
+  */
+ object MorselScheduler:
+ 
+@@ -20,7 +21,10 @@ object MorselScheduler:
+     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+     if (morsels.isEmpty) then Vector.empty
+     else if (parallelism == 1 || morsels.length == 1) then
+-      morsels.iterator.zipWithIndex.map { (batch, index) => worker(index, batch) }.toVector
++      morsels.iterator.zipWithIndex.map { (batch, index) =>
++        ColumnMetrics.noteVisit()
++        worker(index, batch)
++      }.toVector
+     else
+       val workers = math.min(parallelism, morsels.length)
+       val deques = Array.fill(workers)(new ConcurrentLinkedDeque[Int])
+@@ -62,7 +66,9 @@ object MorselScheduler:
+           val batch = morsels.lift(index).getOrElse {
+             throw new IllegalArgumentException(s"missing morsel $index")
+           }
+-          try slots(index).set(Some(worker(index, batch)))
++          try
++            ColumnMetrics.noteVisit()
++            slots(index).set(Some(worker(index, batch)))
+           catch case thrown: Throwable => failure.compareAndSet(None, Some(thrown))
+           drain(id, deques, slots, failure, morsels, worker)
+ 
+diff --git a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
+index 08ee763..1889005 100644
+--- a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
++++ b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
+@@ -27,13 +27,19 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
+  * source order first. One step stays a [[PhysicalOp.Filter]] or [[PhysicalOp.Project]]. Pair
+  * filters, aggregates, and joins stay one node per operator. Narrow map and filter keep input
+  * order and the input partition count. `Double` and `String` select filter and map only. A filter
+- * over a join result is not columnar. `reduceByKey` applies the user's function and wraps at
+- * `Int`. `join` hash-partitions both sides and probes one bucket at a time. Output width for those
+- * two is `defaultShufflePartitions`. [[tryCount]] reads finished column lengths. [[trySumInt]] and
++ * over a join result is not columnar. `keys` and `values` of an int pair are that column. The
++ * arrays are shared: a published column is not mutated, so a view is cheaper than a copy and still
++ * correct. `mapValues` lowers only when the function declares an unboxed `Int` result. A wider
++ * primitive or a reference result stays on the row path. That check reads the method descriptor
++ * and does not call the function. `reduceByKey` applies the user's function and wraps at `Int`.
++ * `join` hash-partitions both sides and probes one bucket at a time. Output width for those two is
++ * `defaultShufflePartitions`. [[tryCount]] reads finished column lengths. [[trySumInt]] and
+  * [[trySumDouble]] add a filter/project chain in the fused loop and do not write that chain's
+- * output column. [[tryGroupedSum]] runs [[ColumnPipeline.sumByKey]] on a witnessed pair source,
+- * `filterKeys`, or `filterValues`, then folds the `Int64` group sums. An empty source has no
+- * witness and is refused. It does not decode. `collect` still does.
++ * output column. Sum of `keys`, `values`, or an int `mapValues` reads the pair column in that
++ * morsel loop and does not build the projection. [[tryGroupedSum]] runs
++ * [[ColumnPipeline.sumByKey]] on a witnessed pair source, `filterKeys`, or `filterValues`, then
++ * folds the `Int64` group sums. An empty source has no witness and is refused. It does not decode.
++ * `collect` still does.
+  *
+  * An `ArraySeq.ofInt`, `ArraySeq.ofDouble`, or [[IntPairArrays]] source is copied into the column
+  * on the calling thread. A boxed `Vector` or `List` is still read through its iterator.
+@@ -147,6 +153,18 @@ object ColumnarPlanner:
+       foldLong(batchesOf(interpret(source, child))) { batch =>
+         ElementSum.sumInts(batch, steps)
+       }
++    case (
++          Plan.ValuesOp(Plan.MapValuesOp(source, mapper)),
++          PhysicalOp.Value(PhysicalOp.MapValue(child)),
++        ) =>
++      val fn = mapper.asInstanceOf[Int => Int]
++      foldLong(pairsOf(interpret(source, child))) { batch =>
++        ColumnReduce.sumMappedInt32(batch, ordinal = 1, value => fn(value))
++      }
++    case (Plan.KeysOp(source), PhysicalOp.Key(child)) =>
++      sumPairColumn(source, child, ordinal = 0)
++    case (Plan.ValuesOp(source), PhysicalOp.Value(child)) =>
++      sumPairColumn(source, child, ordinal = 1)
+     case _ =>
+       ColumnReduce.sumInt32(batchesOf(interpret(plan, op)))
+ 
+@@ -192,6 +210,12 @@ object ColumnarPlanner:
+     case PhysicalOp.Kind.Floats => true
+     case _ => false
+ 
++  /** Read one int column of a pair plan. Does not allocate a projection batch. */
++  private def sumPairColumn(source: Plan[_], child: PhysicalOp, ordinal: Int): Long =
++    foldLong(pairsOf(interpret(source, child))) { batch =>
++      ColumnReduce.sumInt32At(batch, ordinal)
++    }
++
+   private def foldLong(parts: Vector[ColumnBatch])(fn: ColumnBatch => Long): Long =
+     if (parts.isEmpty) then 0L
+     else
+@@ -249,6 +273,12 @@ object ColumnarPlanner:
+       columnFilter(source, PhysicalOp.Slot.Key)
+     case Plan.FilterValuesOp(source, _) =>
+       columnFilter(source, PhysicalOp.Slot.Value)
++    case Plan.KeysOp(source) =>
++      pairColumn(source, key = true)
++    case Plan.ValuesOp(source) =>
++      pairColumn(source, key = false)
++    case Plan.MapValuesOp(source, mapper) =>
++      if (returnsUnboxedInt(mapper)) then mapValue(source) else None
+     case Plan.ReduceByKeyOp(source, _) =>
+       lowerPlan(source).flatMap { child =>
+         child.kind match
+@@ -316,6 +346,49 @@ object ColumnarPlanner:
+         case _ => PhysicalOp.Pipeline(current, group.length)
+     }
+ 
++  private def pairColumn(source: Plan[_], key: Boolean): Option[PhysicalOp] =
++    lowerPlan(source).flatMap { child =>
++      child.kind match
++        case PhysicalOp.Kind.Pairs =>
++          if (key) then Some(PhysicalOp.Key(child)) else Some(PhysicalOp.Value(child))
++        case _ => None
++    }
++
++  private def mapValue(source: Plan[_]): Option[PhysicalOp] =
++    lowerPlan(source).flatMap { child =>
++      child.kind match
++        case PhysicalOp.Kind.Pairs => Some(PhysicalOp.MapValue(child))
++        case _ => None
++    }
++
++  /**
++   * True when `function` declares an unboxed `Int => Int` apply. A declared `apply` that returns
++   * some other reference type is a change of type, including the bridge on an anonymous class, so
++   * the plan stays on the row path. This does not call `function`.
++   */
++  private def returnsUnboxedInt(function: Any): Boolean =
++    val methods = function.getClass.getDeclaredMethods
++    methods.exists(isUnboxedIntApply) && !methods.exists(isOtherReferenceApply)
++
++  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
++  private def isUnboxedIntApply(method: java.lang.reflect.Method): Boolean =
++    val named = method.getName match
++      case "apply" | "apply$mcII$sp" => true
++      case _ => false
++    named &&
++    method.getReturnType.eq(classOf[Int]) &&
++    method.getParameterCount == 1 &&
++    method.getParameterTypes()(0).eq(classOf[Int])
++
++  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
++  private def isOtherReferenceApply(method: java.lang.reflect.Method): Boolean =
++    val named = method.getName match
++      case "apply" => true
++      case _ => false
++    named &&
++    !method.getReturnType.eq(classOf[Int]) &&
++    !method.getReturnType.eq(classOf[AnyRef])
++
+   private def columnFilter(source: Plan[_], slot: PhysicalOp.Slot): Option[PhysicalOp] =
+     lowerPlan(source).flatMap { child =>
+       child.kind match
+@@ -353,6 +426,9 @@ object ColumnarPlanner:
+     case PhysicalOp.Filter(child, _) => infoOf(child)
+     case PhysicalOp.Project(child) => infoOf(child)
+     case PhysicalOp.Pipeline(child, _) => infoOf(child)
++    case PhysicalOp.Key(child) => infoOf(child).withoutPairDistribution
++    case PhysicalOp.Value(child) => infoOf(child).withoutPairDistribution
++    case PhysicalOp.MapValue(child) => infoOf(child)
+     case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin => hashed
+     case PhysicalOp.Exchange(_) =>
+       throw new IllegalStateException("exchange is only a child of aggregate or join")
+@@ -381,6 +457,21 @@ object ColumnarPlanner:
+           PhysicalOp.Filter(child, PhysicalOp.Slot.Value),
+         ) =>
+       applyFilter(interpret(source, child), predicate, PhysicalOp.Slot.Value)
++    case (Plan.KeysOp(source), PhysicalOp.Key(child)) =>
++      val columns = pairsOf(interpret(source, child)).map { batch =>
++        ColumnBatches.takeColumn(batch, 0)
++      }
++      Columns.Ints(columns)
++    case (Plan.ValuesOp(source), PhysicalOp.Value(child)) =>
++      val columns = pairsOf(interpret(source, child)).map { batch =>
++        ColumnBatches.takeColumn(batch, 1)
++      }
++      Columns.Ints(columns)
++    case (Plan.MapValuesOp(source, mapper), PhysicalOp.MapValue(child)) =>
++      val fn = mapper.asInstanceOf[Int => Int]
++      Columns.Pairs(onEach(pairsOf(interpret(source, child))) { batch =>
++        ColumnKernel.projectInt32(batch, 1, value => fn(value))
++      })
+     case (
+           Plan.ReduceByKeyOp(source, reduceFunc),
+           PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)),
+diff --git a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/PhysicalOp.scala b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/PhysicalOp.scala
+index 91e7829..21dd8f2 100644
+--- a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/PhysicalOp.scala
++++ b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/PhysicalOp.scala
+@@ -8,15 +8,26 @@ import com.ewoodbury.scarlet.core.Partition
+  * User functions stay on the logical plan, so lowering and interpretation have to agree node for
+  * node. A straight int, float, or string filter/project chain can be one [[PhysicalOp.Pipeline]]
+  * node. Other filters and projects remain one node per step. [[PhysicalOp.Project]] and `Pipeline`
+- * keep the child kind. [[PhysicalOp.Exchange]] sits under [[PhysicalOp.HashAggregate]] and on each
+- * side of [[PhysicalOp.HashJoin]]. Those kernels perform the shuffle. Interpreting the boundary on
+- * its own does not.
++ * keep the child kind. [[PhysicalOp.Key]] and [[PhysicalOp.Value]] narrow a pair to one int column
++ * and share that column's arrays. [[PhysicalOp.MapValue]] rewrites an int value and keeps the
++ * pair. [[PhysicalOp.Exchange]] sits under [[PhysicalOp.HashAggregate]] and on each side of
++ * [[PhysicalOp.HashJoin]]. Those kernels perform the shuffle. Interpreting the boundary on its own
++ * does not.
+  */
+ enum PhysicalOp:
+   case Scan(sourceKind: PhysicalOp.Kind, partitions: Seq[Partition[_]])
+   case Filter(child: PhysicalOp, slot: PhysicalOp.Slot)
+   case Project(child: PhysicalOp)
+ 
++  /** Key column of an int pair. Kind is [[PhysicalOp.Kind.Ints]]. */
++  case Key(child: PhysicalOp)
++
++  /** Value column of an int pair. Kind is [[PhysicalOp.Kind.Ints]]. */
++  case Value(child: PhysicalOp)
++
++  /** `mapValues` whose new value is an unboxed int. Kind stays [[PhysicalOp.Kind.Pairs]]. */
++  case MapValue(child: PhysicalOp)
++
+   /**
+    * An element pipeline for the outer `length` consecutive logical FilterOp/MapOp nodes.
+    * Interpretation re-derives their kinds and reads their functions from Plan.
+@@ -32,6 +43,9 @@ enum PhysicalOp:
+     case Project(child) => child.kind
+     case Pipeline(child, _) => child.kind
+     case Exchange(child) => child.kind
++    case Key(_) => PhysicalOp.Kind.Ints
++    case Value(_) => PhysicalOp.Kind.Ints
++    case MapValue(_) => PhysicalOp.Kind.Pairs
+     case HashAggregate(_) => PhysicalOp.Kind.Pairs
+     case HashJoin(_, _) => PhysicalOp.Kind.Triples
+ 
+@@ -42,6 +56,9 @@ enum PhysicalOp:
+     case Project(child) => s"Project(${child.shape})"
+     case Pipeline(child, length) => s"Pipeline$length(${child.shape})"
+     case Exchange(child) => s"Exchange(${child.shape})"
++    case Key(child) => s"Key(${child.shape})"
++    case Value(child) => s"Value(${child.shape})"
++    case MapValue(child) => s"MapValue(${child.shape})"
+     case HashAggregate(child) => s"HashAggregate(${child.shape})"
+     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
+ 
+@@ -60,5 +77,5 @@ object PhysicalOp:
+     def label: String = this match
+       case Element => "Filter"
+       case Row => "FilterRow"
+-      case Key => "FilterKey"
+-      case Value => "FilterValue"
++      case Slot.Key => "FilterKey"
++      case Slot.Value => "FilterValue"
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestColumnBatch.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestColumnBatch.scala
+index 1177827..b8bf1fc 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestColumnBatch.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/columnar/TestColumnBatch.scala
+@@ -73,6 +73,19 @@ class TestColumnBatch extends AnyFlatSpec with Matchers:
+     an[IllegalArgumentException] should be thrownBy BatchCodec.intPairs(Array(1), Array.empty[Int])
+   }
+ 
++  it should "share a pair column when narrowing to one column" in {
++    val batch = BatchCodec.intPairs(Array(1, 2), Array(10, 20))
++    val values = ColumnBatches.takeColumn(batch, 1)
++
++    values.length shouldBe 2
++    values.schema shouldBe Vector(LogicalType.Int32)
++    val (view, source) = (values.columns, batch.columns) match
++      case (Seq(column), Seq(_, valueColumn)) => (column, valueColumn)
++      case other => fail(s"expected a one-column view of the value column, got $other")
++    view should be theSameInstanceAs source
++    BatchCodec.decodeInts(values) shouldBe Seq(10, 20)
++  }
++
+   "nulls" should "roundtrip through the validity bitmap" in {
+     val ints = Seq(Some(3), None, Some(0), None)
+     val longs = Seq(None, Some(8L))
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarActions.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarActions.scala
+index 74fc847..ea7d079 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarActions.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarActions.scala
+@@ -7,6 +7,7 @@ import org.scalatest.flatspec.AnyFlatSpec
+ import org.scalatest.matchers.should.Matchers
+ 
+ import com.ewoodbury.scarlet.api.DistCollection
++import com.ewoodbury.scarlet.columnar.ColumnMetrics
+ import com.ewoodbury.scarlet.core.ScarletConf
+ import com.ewoodbury.scarlet.runtime.ScarletRuntime
+ 
+@@ -15,6 +16,7 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
+   private val originalConf = ScarletConf.get
+ 
+   override def afterEach(): Unit =
++    ColumnMetrics.disarm()
+     ScarletRuntime.get.shuffle.clear()
+     ScarletConf.set(originalConf)
+     ()
+@@ -264,6 +266,145 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
+     row(primitive) shouldBe row(boxed)
+   }
+ 
++  "int pair projections" should "sum values from the shared value column" in {
++    val keys = Array(1, -4, 3, Int.MaxValue)
++    val values = Array(Int.MaxValue, 5, -2, Int.MaxValue)
++
++    def rows = DistCollection.ofIntPairs(keys, values, 1)
++    def summed = rows.values.sum
++
++    val expected = row(summed)
++    armColumnar()
++    ColumnMetrics.arm()
++    summed shouldBe expected
++    assertColumnar(rows.values, width = 1)
++    assertOnePass()
++    columnar(DistCollection.ofIntPairs(keys, values, 2).values.collect()) shouldBe
++      row(DistCollection.ofIntPairs(keys, values, 2).values.collect())
++  }
++
++  it should "sum keys from the shared key column" in {
++    val keys = Array(1, -4, 3, Int.MaxValue)
++    val values = Array(Int.MaxValue, 5, -2, Int.MaxValue)
++
++    def rows = DistCollection.ofIntPairs(keys, values, 1)
++    def summed = rows.keys.sum
++
++    val expected = row(summed)
++    armColumnar()
++    ColumnMetrics.arm()
++    summed shouldBe expected
++    assertColumnar(rows.keys, width = 1)
++    assertOnePass()
++    columnar(DistCollection.ofIntPairs(keys, values, 2).keys.collect()) shouldBe
++      row(DistCollection.ofIntPairs(keys, values, 2).keys.collect())
++  }
++
++  it should "sum mapValues that stay ints without writing a value column" in {
++    val keys = Array(1, -4, 3, Int.MaxValue)
++    val values = Array(10, 20, 30, 40)
++    val calls = new AtomicInteger
++
++    // mapValues keeps the pair. The sum is the mapped value column.
++    def rows = DistCollection.ofIntPairs(keys, values, 1).mapValues { (value: Int) =>
++      calls.incrementAndGet()
++      value * 2
++    }
++    def summed = rows.values.sum
++
++    val expected = row(summed)
++    calls.getAndSet(0)
++    armColumnar()
++    ColumnarPlanner.partitioning(rows.plan)
++    calls.get() shouldBe 0
++    ColumnMetrics.arm()
++    summed shouldBe expected
++    calls.get() shouldBe values.length
++    assertColumnar(rows, width = 1)
++    assertOnePass()
++    val projected = DistCollection.ofIntPairs(keys, values, 2).mapValues[Int, Int, Int](_ * 2)
++    columnar(projected.collect()) shouldBe row(projected.collect())
++  }
++
++  it should "keep an anonymous int mapValues on the columnar path" in {
++    val keys = Array(1, 2)
++    val values = Array(3, 4)
++    val double: Int => Int = new Function1[Int, Int]:
++      def apply(value: Int): Int = value * 2
++
++    def summed = DistCollection.ofIntPairs(keys, values, 1).mapValues(double).values.sum
++
++    val expected = row(summed)
++    armColumnar()
++    summed shouldBe expected
++    assertColumnar(
++      DistCollection.ofIntPairs(keys, values, 1).mapValues(double),
++      width = 1,
++    )
++  }
++
++  it should "leave a mapValues that changes type on the row path" in {
++    val keys = Array(1, 2, 3)
++    val values = Array(4, 5, 6)
++
++    def strings = DistCollection.ofIntPairs(keys, values, 2).mapValues[Int, Int, String](_.toString)
++    def widened = DistCollection.ofIntPairs(keys, values, 2).mapValues[Int, Int, Long](_.toLong)
++
++    armColumnar()
++    ColumnarPlanner.partitioning(strings.plan) shouldBe None
++    ColumnarPlanner.partitioning(widened.plan) shouldBe None
++    ColumnMetrics.arm()
++    val collected = strings.collect()
++    ColumnMetrics.batchCount shouldBe 0L
++    ColumnMetrics.visitCount shouldBe 0L
++    ColumnMetrics.disarm()
++    collected shouldBe row(strings.collect())
++    columnar(widened.collect()) shouldBe row(widened.collect())
++  }
++
++  it should "sum values after filterValues and stay columnar" in {
++    val keys = Array(1, 2, 3)
++    val values = Array(-1, 4, 5)
++
++    def filtered = DistCollection.ofIntPairs(keys, values, 2).filterValues[Int, Int](_ > 0)
++
++    val expected = row(filtered.values.sum)
++    armColumnar()
++    filtered.values.sum shouldBe expected
++    assertColumnar(filtered.values, width = 2)
++  }
++
++  it should "return zero for an empty pair projection through the row engine" in {
++    def empty = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 1)
++
++    columnar(empty.values.sum) shouldBe 0L
++    columnar(empty.keys.sum) shouldBe 0L
++    columnar(ColumnarPlanner.partitioning(empty.values.plan) shouldBe None)
++  }
++
++  private def armColumnar(): Unit =
++    ScarletRuntime.get.shuffle.clear()
++    ScarletConf.set(
++      originalConf.copy(columnarExecution = true, columnarBatchSize = 1024, threadPoolSize = 4),
++    )
++
++  private def assertColumnar[A](collection: DistCollection[A], width: Int): Unit =
++    ColumnarPlanner.partitioning(collection.plan) shouldBe Some(
++      PartitioningInfo(
++        Distribution.Unknown(width),
++        OrderingTag.Unsorted,
++        Layout.Columnar(ScarletConf.get.columnarBatchSize),
++      ),
++    )
++
++  /** The source copy is the only batch, and the sum visits that one morsel. */
++  private def assertOnePass(): Unit =
++    val batches = ColumnMetrics.batchCount
++    val visits = ColumnMetrics.visitCount
++    ColumnMetrics.disarm()
++    batches shouldBe 1L
++    visits shouldBe 1L
++
+   private def assertNarrow[A](collection: DistCollection[A], width: Int): Unit =
+     val info =
+       ColumnarPlanner.partitioning(collection.plan).getOrElse(fail("expected a columnar plan"))
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestPhysicalPlan.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestPhysicalPlan.scala
+index 7945821..86feb59 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestPhysicalPlan.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestPhysicalPlan.scala
+@@ -225,6 +225,19 @@ class TestPhysicalPlan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
+     shape(rows) shouldBe "FilterRow(Scan)"
+   }
+ 
++  it should "narrow keys and values to an int column and project an int mapValues" in {
++    val pairs = DistCollection.ofIntPairs(Array(1, 2), Array(10, 20), 1)
++    shape(pairs.keys) shouldBe "Key(Scan)"
++    shape(pairs.values) shouldBe "Value(Scan)"
++    shape(pairs.mapValues[Int, Int, Int](_ * 2)) shouldBe "MapValue(Scan)"
++    shape(pairs.values.map(_ + 1)) shouldBe "Project(Value(Scan))"
++    ColumnarPlanner.lower(pairs.keys.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.Ints)
++    ColumnarPlanner.lower(pairs.mapValues[Int, Int, Int](_ * 2).plan).map(_.kind) shouldBe Some(
++      PhysicalOp.Kind.Pairs,
++    )
++    ColumnarPlanner.lower(pairs.mapValues[Int, Int, String](_.toString).plan) shouldBe rowPath
++  }
++
+   it should "exchange each join input, including an aggregate input" in {
+     val build = DistCollection(Seq(1 -> 1, 1 -> 2), 1).reduceByKey[Int, Int](_ + _)
+     val probe = DistCollection(Seq(1 -> 10), 1)

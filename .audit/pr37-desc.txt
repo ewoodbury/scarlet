@@ -1,0 +1,35 @@
+Time sum and groupedSum in DistCollectionStudy
+
+Measurement only. `DistCollectionStudy` now times `sum` and `groupedSum` on primitive sources. The planner and the kernels are unchanged.
+
+Same plans, columnar and row. Warmup 5, measure 11. p50 is sorted index 5 and p95 is sorted index 9. `alloc` is the mean `ThreadMXBean` bytes per query, sampled while the action runs. Machine: Apple M1 Pro, Homebrew OpenJDK 17.0.16, G1, in-process sbt, `-Xmx3g`. Full writeup: `notes/sparklet/kernel-benchmarks.md` (the log; the earlier sections are unchanged).
+
+Narrow is `ofInts.filter(_ > 0).map(_ * 2).sum` at 1e6 rows, checksum `500354792612`. The chain is six `map(_ + 1)` then `sum` on that same array, checksum `238777139`. Grouped is `ofIntPairs.groupedSum` at 1e7 rows and 1,024 groups, checksum `49999995000000`.
+
+| query | threads | path | p50 | p95 | alloc |
+| --- | ---: | --- | ---: | ---: | ---: |
+| narrow 1e6 | 1 | columnar | 4.420 ms | 4.908 ms | 8.37 MB |
+| narrow 1e6 | 1 | row | 36.144 ms | 49.977 ms | 100.07 MB |
+| narrow 1e6 | 4 | columnar | 2.225 ms | 2.311 ms | 8.37 MB |
+| narrow 1e6 | 4 | row | 27.767 ms | 41.260 ms | 100.06 MB |
+| chain6 1e6 | 1 | columnar | 11.204 ms | 11.936 ms | 20.76 MB |
+| chain6 1e6 | 1 | row | 184.936 ms | 205.796 ms | 520.06 MB |
+| chain6 1e6 | 4 | columnar | 4.334 ms | 4.411 ms | 18.62 MB |
+| chain6 1e6 | 4 | row | 146.695 ms | 188.109 ms | 520.05 MB |
+| grouped 1e7, 1024 groups | 1 | columnar | 64.076 ms | 71.642 ms | 547.73 MB |
+| grouped 1e7, 1024 groups | 1 | row | 85.400 ms | 85.926 ms | 940.01 MB |
+| grouped 1e7, 1024 groups | 4 | columnar | 27.647 ms | 28.487 ms | 524.46 MB |
+| grouped 1e7, 1024 groups | 4 | row | 85.798 ms | 86.715 ms | 940.01 MB |
+
+Six maps are past the four-step fusion window: a four-add column is written, and the last two adds fold into the sum. At one thread that is 11.2 ms and 20.8 MB, about 2.5× the fused narrow sum.
+
+The row `groupedSum` of a bare `ofIntPairs` source adds values on the calling thread and boxes each pair. One thread and four threads match, at 85.5 ms and 940 MB. The totals matched the checksum. Left as-is.
+
+Every sample matched its checksum. No engine bug turned up.
+
+`make lint`, `make test-lint`, and `make test` passed (458 tests). The study is a `main` and is not part of that suite:
+
+```text
+sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.DistCollectionStudy"
+```
+

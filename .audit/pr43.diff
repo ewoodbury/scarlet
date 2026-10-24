@@ -1,0 +1,407 @@
+diff --git a/modules/scarlet-api/src/main/scala/com/ewoodbury/scarlet/api/DistCollection.scala b/modules/scarlet-api/src/main/scala/com/ewoodbury/scarlet/api/DistCollection.scala
+index b980970..23fe8da 100644
+--- a/modules/scarlet-api/src/main/scala/com/ewoodbury/scarlet/api/DistCollection.scala
++++ b/modules/scarlet-api/src/main/scala/com/ewoodbury/scarlet/api/DistCollection.scala
+@@ -160,6 +160,43 @@ final case class DistCollection[A](plan: Plan[A]):
+   def filterValues[K, V](p: V => Boolean)(using ev: A =:= (K, V)): DistCollection[(K, V)] =
+     DistCollection(Plan.FilterValuesOp(kvPlan, p))
+ 
++  /**
++   * Filters an int join result by its key. This explicit form can filter the three join columns
++   * without constructing a `(Int, (Int, Int))` tuple for each row. A general `filter` remains on
++   * the row path because its predicate accepts that tuple.
++   */
++  def filterJoinKey(p: Int => Boolean)(using
++      ev: A =:= (Int, (Int, Int)),
++  ): DistCollection[A] =
++    filterJoinColumn(p, IntJoinTriplePredicate.Slot.Key)
++
++  /** Filters an int join result by the left value without constructing a row tuple. */
++  def filterJoinLeft(p: Int => Boolean)(using
++      ev: A =:= (Int, (Int, Int)),
++  ): DistCollection[A] =
++    filterJoinColumn(p, IntJoinTriplePredicate.Slot.LeftValue)
++
++  /** Filters an int join result by the right value without constructing a row tuple. */
++  def filterJoinRight(p: Int => Boolean)(using
++      ev: A =:= (Int, (Int, Int)),
++  ): DistCollection[A] =
++    filterJoinColumn(p, IntJoinTriplePredicate.Slot.RightValue)
++
++  private def filterJoinColumn(
++      predicate: Int => Boolean,
++      slot: IntJoinTriplePredicate.Slot,
++  )(using ev: A =:= (Int, (Int, Int))): DistCollection[A] =
++    val triplePredicate = new IntJoinTriplePredicate[A]:
++      val selectedSlot: IntJoinTriplePredicate.Slot = slot
++      def keep(value: Int): Boolean = predicate(value)
++      def apply(value: A): Boolean =
++        val (key, (left, right)) = ev(value)
++        selectedSlot match
++          case IntJoinTriplePredicate.Slot.Key => keep(key)
++          case IntJoinTriplePredicate.Slot.LeftValue => keep(left)
++          case IntJoinTriplePredicate.Slot.RightValue => keep(right)
++    DistCollection(Plan.FilterOp(plan, triplePredicate))
++
+   /**
+    * Transformation: Applies a function to the values of the elements in the collection. Returns a
+    * new DistCollection representing the result of the flatMap. Does not trigger computation.
+@@ -354,6 +391,15 @@ end DistCollection
+ private[scarlet] trait DictionaryStringPredicate[A] extends (A => Boolean):
+   def literals: Vector[String]
+ 
++/** Internal marker for a tuple-free predicate over one int join column. */
++private[scarlet] trait IntJoinTriplePredicate[A] extends (A => Boolean):
++  def selectedSlot: IntJoinTriplePredicate.Slot
++  def keep(value: Int): Boolean
++
++private[scarlet] object IntJoinTriplePredicate:
++  enum Slot:
++    case Key, LeftValue, RightValue
++
+ // Companion object for creating a DistCollection from a source
+ object DistCollection:
+ 
+diff --git a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/PairKernel.scala b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/PairKernel.scala
+index 756344b..175412a 100644
+--- a/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/PairKernel.scala
++++ b/modules/scarlet-columnar/src/main/scala/com/ewoodbury/scarlet/columnar/PairKernel.scala
+@@ -10,6 +10,9 @@ object PairKernel:
+   trait IntPairPredicate:
+     def apply(key: Int, value: Int): Boolean
+ 
++  trait IntTriplePredicate:
++    def apply(key: Int, left: Int, right: Int): Boolean
++
+   def filter(batch: ColumnBatch, predicate: IntPairPredicate): ColumnBatch =
+     require(
+       batch.columns.length == 2,
+@@ -47,6 +50,59 @@ object PairKernel:
+       written,
+     )
+ 
++  /**
++   * Filter and compact a three-column int join batch in one pass. Join rows are non-nullable at
++   * the row API, so a null component is an error rather than a row to silently discard. Survivors
++   * stay in input order.
++   */
++  def filterTriple(batch: ColumnBatch, predicate: IntTriplePredicate): ColumnBatch =
++    require(
++      batch.columns.length == 3,
++      s"triple filter expected 3 columns, got ${batch.columns.length}",
++    )
++    val keys = int32At(batch, 0)
++    val leftValues = int32At(batch, 1)
++    val rightValues = int32At(batch, 2)
++    val rows = keys.length
++    require(leftValues.length == rows, "key and left value columns differ in length")
++    require(rightValues.length == rows, "key and right value columns differ in length")
++    val outKeys = new Array[Int](rows)
++    val outLeft = new Array[Int](rows)
++    val outRight = new Array[Int](rows)
++    val keyValues = keys.values
++    val leftValueValues = leftValues.values
++    val rightValueValues = rightValues.values
++    val keyWords = keys.validity.words
++    val leftValueWords = leftValues.validity.words
++    val rightValueWords = rightValues.validity.words
++    var written = 0
++    var row = 0
++    while (row < rows) {
++      val keyValid = Validity.isSet(keyWords, row)
++      val leftValueValid = Validity.isSet(leftValueWords, row)
++      val rightValueValid = Validity.isSet(rightValueWords, row)
++      require(keyValid && leftValueValid && rightValueValid, s"null Int32 join value at row $row")
++      val key = keyValues(row)
++      val left = leftValueValues(row)
++      val right = rightValueValues(row)
++      if (predicate(key, left, right)) then
++        outKeys(written) = key
++        outLeft(written) = left
++        outRight(written) = right
++        written += 1
++      row += 1
++    }
++    val present = Validity.prefixValid(rows, written)
++    new ColumnBatch(
++      batch.schema,
++      Vector(
++        Int32Column.of(outKeys, present, written),
++        Int32Column.of(outLeft, present, written),
++        Int32Column.of(outRight, present, written),
++      ),
++      written,
++    )
++
+   private def int32At(batch: ColumnBatch, ordinal: Int): Int32Column =
+     batch.columns.lift(ordinal) match
+       case Some(column: Int32Column) => column
+diff --git a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
+index 2be00f7..1155e14 100644
+--- a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
++++ b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/ColumnarPlanner.scala
+@@ -2,7 +2,7 @@ package com.ewoodbury.scarlet.execution
+ 
+ import scala.annotation.tailrec
+ 
+-import com.ewoodbury.scarlet.api.DictionaryStringPredicate
++import com.ewoodbury.scarlet.api.{DictionaryStringPredicate, IntJoinTriplePredicate}
+ import com.ewoodbury.scarlet.columnar.*
+ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
+ 
+@@ -28,16 +28,17 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
+  * source order first. One step stays a [[PhysicalOp.Filter]] or [[PhysicalOp.Project]]. Pair
+  * filters, aggregates, and joins stay one node per operator. Narrow map and filter keep input
+  * order and the input partition count. `Double` and `String` select filter and map only. A filter
+- * over a join result is not columnar. `keys` and `values` of an int pair are that column. The
+- * arrays are shared: a published column is not mutated, so a view is cheaper than a copy and still
+- * correct. `mapValues` lowers only when the function declares an unboxed `Int` result. A wider
+- * primitive or a reference result stays on the row path. That check reads the method descriptor
+- * and does not call the function. `reduceByKey` applies the user's function and wraps at `Int`.
+- * `join` hash-partitions both sides and probes one bucket at a time. Output width for those two is
+- * `defaultShufflePartitions`. [[tryCount]] reads finished column lengths. [[trySumInt]] and
+- * [[trySumDouble]] add a filter/project chain in the fused loop and do not write that chain's
+- * output column. Sum of `keys`, `values`, or an int `mapValues` reads the pair column in that
+- * morsel loop and does not build the projection. [[tryGroupedSum]] runs
++ * over an int join result is columnar only for explicit key, left-value, and right-value filters;
++ * general tuple predicates stay on the row path. `keys` and `values` of an int pair are that
++ * column. The arrays are shared: a published column is not mutated, so a view is cheaper than a
++ * copy and still correct. `mapValues` lowers only when the function declares an unboxed `Int`
++ * result. A wider primitive or a reference result stays on the row path. That check reads the
++ * method descriptor and does not call the function. `reduceByKey` applies the user's function and
++ * wraps at `Int`. `join` hash-partitions both sides and probes one bucket at a time. Output width
++ * for those two is `defaultShufflePartitions`. [[tryCount]] reads finished column lengths.
++ * [[trySumInt]] and [[trySumDouble]] add a filter/project chain in the fused loop and do not write
++ * that chain's output column. Sum of `keys`, `values`, or an int `mapValues` reads the pair column
++ * in that morsel loop and does not build the projection. [[tryGroupedSum]] runs
+  * [[ColumnPipeline.sumByKey]] on a witnessed pair source and folds the `Int64` group sums. A
+  * preceding `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that
+  * partial scan, so the action does not build those pairs. An empty source has no witness and is
+@@ -405,12 +406,24 @@ object ColumnarPlanner:
+ 
+   private def lowerElementStep(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
+     step match
+-      case ElementStep.Filter(_) =>
++      case ElementStep.Filter(predicate) =>
+         child.kind match
+           case PhysicalOp.Kind.Pairs => Some(PhysicalOp.Filter(child, PhysicalOp.Slot.Row))
++          case PhysicalOp.Kind.Triples =>
++            tripleFilterSlot(predicate).map { slot =>
++              PhysicalOp.Filter(child, slot)
++            }
+           case _ => None
+       case ElementStep.Project(_) => None
+ 
++  private def tripleFilterSlot(predicate: Any): Option[PhysicalOp.Slot] = predicate match
++    case recognized: IntJoinTriplePredicate[?] =>
++      recognized.selectedSlot match
++        case IntJoinTriplePredicate.Slot.Key => Some(PhysicalOp.Slot.TripleKey)
++        case IntJoinTriplePredicate.Slot.LeftValue => Some(PhysicalOp.Slot.TripleLeftValue)
++        case IntJoinTriplePredicate.Slot.RightValue => Some(PhysicalOp.Slot.TripleRightValue)
++    case _ => None
++
+   private def lowerElementPipeline(child: PhysicalOp, steps: List[ElementStep]): PhysicalOp =
+     def lower(current: PhysicalOp, remaining: List[ElementStep]): PhysicalOp =
+       val (ordinary, rest) = remaining.span {
+@@ -659,6 +672,22 @@ object ColumnarPlanner:
+         Columns.Pairs(onEach(pairsOf(columns)) { batch =>
+           ColumnKernel.filterInt32(batch, 1, value => keep(value))
+         })
++      case PhysicalOp.Slot.TripleKey | PhysicalOp.Slot.TripleLeftValue |
++          PhysicalOp.Slot.TripleRightValue =>
++        val keep = predicate match
++          case recognized: IntJoinTriplePredicate[?] => recognized
++          case _ => throw new IllegalStateException("triple filter lost its slot predicate")
++        Columns.Triples(onEach(triplesOf(columns)) { batch =>
++          PairKernel.filterTriple(
++            batch,
++            (key, left, right) =>
++              slot match
++                case PhysicalOp.Slot.TripleKey => keep.keep(key)
++                case PhysicalOp.Slot.TripleLeftValue => keep.keep(left)
++                case PhysicalOp.Slot.TripleRightValue => keep.keep(right)
++                case _ => throw new IllegalStateException("triple filter has a non-triple slot"),
++          )
++        })
+ 
+   private def project(columns: Columns, mapper: Any): Columns = columns match
+     case Columns.Ints(parts) =>
+@@ -686,6 +715,13 @@ object ColumnarPlanner:
+     case _ =>
+       throw new IllegalStateException("columnar op expected int pairs")
+ 
++  private def triplesOf(columns: Columns): Vector[ColumnBatch] = columns match
++    case Columns.Triples(parts) if parts.nonEmpty => parts
++    case Columns.Triples(_) =>
++      throw new IllegalStateException("columnar triples have no partitions")
++    case _ =>
++      throw new IllegalStateException("columnar op expected int triples")
++
+   private def onEach(
+       parts: Vector[ColumnBatch],
+   )(fn: ColumnBatch => ColumnBatch): Vector[ColumnBatch] =
+diff --git a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/PhysicalOp.scala b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/PhysicalOp.scala
+index 7eda31f..d18794c 100644
+--- a/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/PhysicalOp.scala
++++ b/modules/scarlet-execution/src/main/scala/com/ewoodbury/scarlet/execution/PhysicalOp.scala
+@@ -69,13 +69,16 @@ object PhysicalOp:
+   /**
+    * `Element` is the single column, an int, a double, or a string, and its shape label is
+    * `Filter`. `Row` is a predicate on both columns of a pair. `Key` and `Value` name which pair
+-   * column.
++   * column. The triple slots select one of the three int columns in a join result.
+    */
+   enum Slot:
+-    case Element, Row, Key, Value
++    case Element, Row, Key, Value, TripleKey, TripleLeftValue, TripleRightValue
+ 
+     def label: String = this match
+       case Element => "Filter"
+       case Row => "FilterRow"
+       case Slot.Key => "FilterKey"
+       case Slot.Value => "FilterValue"
++      case TripleKey => "FilterTripleKey"
++      case TripleLeftValue => "FilterTripleLeftValue"
++      case TripleRightValue => "FilterTripleRightValue"
+diff --git a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarSelection.scala b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarSelection.scala
+index 833fb38..ce9998c 100644
+--- a/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarSelection.scala
++++ b/modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/TestColumnarSelection.scala
+@@ -5,7 +5,7 @@ import org.scalatest.flatspec.AnyFlatSpec
+ import org.scalatest.matchers.should.Matchers
+ 
+ import com.ewoodbury.scarlet.api.{DictionaryStringPredicate, DistCollection}
+-import com.ewoodbury.scarlet.columnar.BatchCodec
++import com.ewoodbury.scarlet.columnar.{BatchCodec, ColumnMetrics}
+ import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan, ScarletConf}
+ import com.ewoodbury.scarlet.runtime.ScarletRuntime
+ 
+@@ -17,6 +17,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
+   private val originalConf = ScarletConf.get
+ 
+   override def afterEach(): Unit =
++    ColumnMetrics.disarm()
+     ScarletRuntime.get.shuffle.clear()
+     ScarletConf.set(originalConf)
+     ()
+@@ -161,13 +162,95 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
+     assertHashed(joined)
+   }
+ 
+-  it should "leave a later filter on the row path" in {
+-    val build = DistCollection(Seq(1 -> 10, 2 -> 20), 1)
+-    val probe = DistCollection(Seq(1 -> 7, 3 -> 8), 1)
+-    val filtered = build.join(probe).filter { case (_, (left, _)) => left > 0 }
+-    filtered.collect().toSeq should contain theSameElementsAs Seq(1 -> ((10, 7)))
+-    infoOf(filtered) shouldBe Option.empty[PartitioningInfo]
+-    assertHashed(build.join(probe))
++  it should "filter a later join result columnarly and preserve duplicate rows" in {
++    val build = DistCollection(Seq(1 -> 10, 2 -> 20, 1 -> 10, 1 -> 11), 1)
++    val probe = DistCollection(Seq(1 -> 7, 1 -> 8, 3 -> 9), 1)
++    val filtered = build.join(probe).filterJoinLeft(_ == 10)
++    val actual = columnar(filtered.collect()).toSeq
++
++    actual should contain theSameElementsAs row {
++      build.join(probe).filter { case (_, (left, _)) => left == 10 }.collect().toSeq
++    }
++    actual should contain theSameElementsAs Seq(
++      1 -> ((10, 7)),
++      1 -> ((10, 7)),
++      1 -> ((10, 8)),
++      1 -> ((10, 8)),
++    )
++    columnar {
++      val info = assertHashed(filtered)
++      info.layout shouldBe Layout.Columnar(ScarletConf.get.columnarBatchSize)
++    }
++  }
++
++  it should "filter each supported join column" in {
++    val build = DistCollection(Seq(1 -> 10, 2 -> 20, 1 -> 11), 1)
++    val probe = DistCollection(Seq(1 -> 7, 2 -> 8, 1 -> 9), 1)
++    val joined = build.join(probe)
++
++    columnar(joined.filterJoinKey(_ == 1).collect()).toSeq should contain theSameElementsAs row {
++      build.join(probe).filter { case (key, _) => key == 1 }.collect().toSeq
++    }
++    columnar(joined.filterJoinLeft(_ > 10).collect()).toSeq should contain theSameElementsAs row {
++      build.join(probe).filter { case (_, (left, _)) => left > 10 }.collect().toSeq
++    }
++    columnar(joined.filterJoinRight(_ == 8).collect()).toSeq should contain theSameElementsAs row {
++      build.join(probe).filter { case (_, (_, right)) => right == 8 }.collect().toSeq
++    }
++    columnar(assertHashed(joined.filterJoinKey(_ => true)))
++  }
++
++  it should "keep empty and all-surviving join filters columnar" in {
++    val joined = DistCollection(Seq(1 -> 10, 2 -> 20), 1).join(
++      DistCollection(Seq(1 -> 7, 2 -> 8), 1),
++    )
++    val emptyFilter = joined.filterJoinRight(_ < 0)
++    val all = joined.filterJoinKey(_ => true)
++
++    columnar(emptyFilter.collect()) shouldBe empty
++    assertHashed(emptyFilter)
++    columnar(all.collect()).toSeq should contain theSameElementsAs Seq(
++      1 -> ((10, 7)),
++      2 -> ((20, 8)),
++    )
++    assertHashed(all)
++  }
++
++  it should "leave a general later join predicate on the row path" in {
++    val build = DistCollection(Seq(1 -> 10, 2 -> 20, 1 -> 11), 1)
++    val probe = DistCollection(Seq(1 -> 7, 2 -> 8, 1 -> 9), 1)
++    val filtered = build.join(probe).filter { case (_, (left, right)) => left + right > 15 }
++    val actual = columnar(filtered.collect()).toSeq
++
++    actual should contain theSameElementsAs row {
++      build.join(probe).filter { case (_, (left, right)) => left + right > 15 }.collect().toSeq
++    }
++    columnar(infoOf(filtered)) shouldBe Option.empty[PartitioningInfo]
++  }
++
++  it should "scan a joined triple once and publish only the compacted partitions" in {
++    val conf = originalConf.copy(
++      columnarExecution = true,
++      columnarBatchSize = 1024,
++      defaultShufflePartitions = 4,
++      threadPoolSize = 2,
++    )
++    ScarletConf.set(conf)
++    val build = DistCollection(Seq.fill(4)(1 -> 10), 1)
++    val probe = DistCollection(Seq.fill(3)(1 -> 20), 1)
++    val baseline = measuredJoin(build.join(probe))
++    val predicateCalls = new java.util.concurrent.atomic.AtomicInteger(0)
++    val filtered = build.join(probe).filterJoinKey { key =>
++      predicateCalls.incrementAndGet()
++      key == 1
++    }
++    val compacted = measuredJoin(filtered)
++
++    baseline.count shouldBe 12L
++    compacted.count shouldBe baseline.count
++    predicateCalls.get() shouldBe baseline.count.toInt
++    compacted.batches - baseline.batches shouldBe conf.defaultShufflePartitions.toLong
++    compacted.visits - baseline.visits shouldBe conf.defaultShufflePartitions.toLong
+   }
+ 
+   "string filter" should "keep input order, nulls, and a dictionary layout" in {
+@@ -349,6 +432,17 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
+     info.layout shouldBe Layout.Columnar(ScarletConf.get.columnarBatchSize)
+     info
+ 
++  private final case class JoinFootprint(count: Long, batches: Long, visits: Long)
++
++  private def measuredJoin[A](collection: DistCollection[A]): JoinFootprint =
++    ScarletRuntime.get.shuffle.clear()
++    ColumnMetrics.arm()
++    val count = collection.count()
++    val batches = ColumnMetrics.batchCount
++    val visits = ColumnMetrics.visitCount
++    ColumnMetrics.disarm()
++    JoinFootprint(count, batches, visits)
++
+   private def assertBuckets[V](parts: Seq[Partition[(Int, V)]]): Unit =
+     val width = parts.length
+     parts.zipWithIndex.foreach { (partition, index) =>

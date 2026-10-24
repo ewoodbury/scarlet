@@ -1,0 +1,16 @@
+Add executable columnar completion contract
+
+## Summary
+- Add an exhaustive, no-default `Plan` inventory in `TestColumnarContract`, pinning 121 accepted layouts/shapes and 37 row-path exclusions.
+- Document accepted physical shapes, boxed action exits, and action-level grouped-sum/take behavior in `docs/ARCHITECTURE.md`.
+- Preserve current engine behavior and record six observed mismatches in the test and docs.
+
+## Observed mismatches
+- Type-changing int, double, and string maps report `Some` partitioning and `Project(Scan)`, but `tryRun` falls back to the row path.
+- Explicit sort-merge and broadcast joins currently lower to the columnar hash-join shape.
+- Fused pair-map `groupedSum` reports a columnar layout but has no `PhysicalOp.shape`; it remains action-level.
+
+## Validation
+- `make lint` — passed
+- `make test-lint` — passed
+- `make test` — passed (489 tests)

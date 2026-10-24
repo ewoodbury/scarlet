@@ -1,0 +1,19 @@
+Fold a trailing int projection into sum and count
+
+## Summary
+
+`sum` and `count` of an int column fold a trailing projection into the action. A five-step int chain still lowers to `Project(Pipeline4(Scan))`. The action reads the scan morsels and applies the pipeline steps and the trailing map in one fold, so the pipeline does not write its output column. A chain longer than four stays in that fold when `lower` splits it into `Project(Pipeline4(Scan))` or `Pipeline2(Pipeline4(Scan))`, including a filter among the steps. One trailing int project is counted the same way.
+
+`sum` still returns `Long`. `count` is unchanged. `collect` still writes the column. A type-changing trailing map is refused and runs on the row path. Double and string chains still write the pipeline column. There is no new `Plan` or `PhysicalOp` node.
+
+The materialisation study reports P5 as that folded fifth map. B4 minus F4 remains the forced boundary, and S5 minus B4 remains the fifth map on that boundary.
+
+## Tests
+
+- Five `map(_ + 1)` then `sum` matches the row path and the checksum `237777139`. The batch count matches four maps (`126` = 2 encodes + 124 morsels), not an extra output column per morsel.
+- Four maps still sum to `236777139` on `Pipeline4(Scan)`.
+- Five maps then `count` is the row count, with the same footprint.
+- A filter followed by five maps sums to `250179896646` and counts `500068` survivors, without a written column.
+- A filter inside a longer chain keeps source order and does not call later maps on a rejected row.
+- `collect` of five maps still publishes a column.
+
