@@ -5,9 +5,9 @@ package com.ewoodbury.scarlet.columnar
  *
  * Each batch becomes ranges of `batchSize` rows. The key and value columns stay where they are; a
  * worker reads `[start, start + length)` and compacts one partial. One [[HashAggregate]] table per
- * worker is cleared after that partial and reused for the next range. The partials of one input
- * batch are merged with `sumInt64`, matching [[PartialCombine.mergeMorsels]]. The result is one
- * partial per input batch. [[ColumnPipeline]] exchanges those partials.
+ * worker is cleared before the next range and dropped when the action returns. The partials of one
+ * input batch are merged with `sumInt64`, matching [[PartialCombine.mergeMorsels]]. The result is
+ * one partial per input batch. [[ColumnPipeline]] exchanges those partials.
  *
  * An empty input returns an empty vector. `numPartitions` is checked here so a direct caller still
  * rejects a non-positive partition count. One scheduler task covers one range, so a morsel still
@@ -24,7 +24,17 @@ private[scarlet] object GroupedSumKernel:
       batchSize: Int,
       steps: Vector[PairStep],
   ): Vector[ColumnBatch] =
-    merge(batches, keyOrdinal, valueOrdinal, numPartitions, parallelism, batchSize, shapeOf(steps))
+    finishing(
+      merge(
+        batches,
+        keyOrdinal,
+        valueOrdinal,
+        numPartitions,
+        parallelism,
+        batchSize,
+        shapeOf(steps),
+      ),
+    )
 
   /** `keep` and `map` run inside the partial scan. A null value is dropped before `keep`. */
   def run(
@@ -37,14 +47,16 @@ private[scarlet] object GroupedSumKernel:
       keep: ColumnKernel.Int32Predicate,
       map: ColumnKernel.Int32Map,
   ): Vector[ColumnBatch] =
-    merge(
-      batches,
-      keyOrdinal,
-      valueOrdinal,
-      numPartitions,
-      parallelism,
-      batchSize,
-      Filtered(keep, map),
+    finishing(
+      merge(
+        batches,
+        keyOrdinal,
+        valueOrdinal,
+        numPartitions,
+        parallelism,
+        batchSize,
+        Filtered(keep, map),
+      ),
     )
 
   /** One partial per range, in input order. The first vector counts the ranges of each batch. */
@@ -56,9 +68,11 @@ private[scarlet] object GroupedSumKernel:
       batchSize: Int,
       steps: Vector[PairStep],
   ): (Vector[Int], Vector[ColumnBatch]) =
-    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
-    require(batchSize > 0, s"batch size must be positive, got $batchSize")
-    accumulate(batches, keyOrdinal, valueOrdinal, parallelism, batchSize, shapeOf(steps))
+    finishing {
+      require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+      require(batchSize > 0, s"batch size must be positive, got $batchSize")
+      accumulate(batches, keyOrdinal, valueOrdinal, parallelism, batchSize, shapeOf(steps))
+    }
 
   private sealed trait Shape
 
@@ -77,8 +91,15 @@ private[scarlet] object GroupedSumKernel:
   private val mergeSum: ColumnBatch => ColumnBatch =
     batch => HashAggregate.sumInt64(batch, keyOrdinal = 0, valueOrdinal = 1)
 
-  private object PassValue extends ColumnKernel.Int32Map:
-    def apply(value: Int): Int = value
+  /**
+   * Runs `body` and then drops this thread's worker table. Ranges inside `body` still share it.
+   * `MorselScheduler` runs on the calling thread when `parallelism` is 1 or there is one morsel,
+   * and that thread outlives the action. The other worker threads are started for the call and
+   * exit with it.
+   */
+  private def finishing[A](body: => A): A =
+    try body
+    finally HashAggregate.releaseSumWorkers()
 
   private def merge(
       batches: Vector[ColumnBatch],
@@ -143,18 +164,9 @@ private[scarlet] object GroupedSumKernel:
   private def shapeOf(steps: Vector[PairStep]): Shape =
     if (steps.isEmpty) then Plain
     else
-      valueKeeps(steps) match
-        case Some(predicates) => Filtered(keepValues(predicates), PassValue)
+      // ColumnPipeline.sumByKey rewrites an all-KeepValue chain to the keep/map overload before
+      // run(steps), so a production sum does not reach this branch. partialMorsels and a direct
+      // run(steps) still scan that chain with keep and map.
+      PairStep.valueKeeps(steps) match
+        case Some(predicates) => Filtered(PairStep.keepValues(predicates), PairStep.PassValue)
         case None => Stepped(steps.toArray)
-
-  /** `Some` when every step is a value filter. The predicates stay in source order. */
-  private def valueKeeps(steps: Vector[PairStep]): Option[Vector[Int => Boolean]] =
-    val seed: Option[Vector[Int => Boolean]] = Some(Vector.empty[Int => Boolean])
-    steps.foldLeft(seed) { (acc, step) =>
-      (acc, step) match
-        case (Some(predicates), PairStep.KeepValue(predicate)) => Some(predicates :+ predicate)
-        case _ => None
-    }
-
-  private def keepValues(predicates: Vector[Int => Boolean]): ColumnKernel.Int32Predicate =
-    value => predicates.forall(predicate => predicate(value))

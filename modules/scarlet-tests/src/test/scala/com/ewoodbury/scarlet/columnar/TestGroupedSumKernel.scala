@@ -40,6 +40,32 @@ class TestGroupedSumKernel extends AnyFlatSpec with Matchers:
       case other => fail(s"expected two partials, got ${other.length}")
   }
 
+  it should "omit an all-null group when the next morsel reuses the table on one thread" in {
+    val batch = BatchCodec.nullableIntPairs(
+      Seq(
+        (Some(1), None),
+        (Some(1), None),
+        (Some(4), Some(8)),
+        (Some(5), None),
+      ),
+    )
+    val (sizes, partials) = GroupedSumKernel.partialMorsels(
+      Vector(batch),
+      keyOrdinal = 0,
+      valueOrdinal = 1,
+      parallelism = 1,
+      batchSize = 2,
+      steps = Vector.empty[PairStep],
+    )
+
+    sizes shouldBe Vector(2)
+    partials match
+      case Vector(first, second) =>
+        sums(Vector(first)) shouldBe Map(1 -> None)
+        sums(Vector(second)) shouldBe Map(4 -> Some(8L), 5 -> None)
+      case other => fail(s"expected two partials, got ${other.length}")
+  }
+
   "grow" should "match first-seen order after the worker table grows" in {
     val rows = (0 until 50000).map(index => (index * 10000, index % 97))
     val batch = BatchCodec.intPairs(rows)
@@ -51,6 +77,59 @@ class TestGroupedSumKernel extends AnyFlatSpec with Matchers:
     sums(Vector(second)) shouldBe sums(Vector(direct))
     keysOf(first) shouldBe keysOf(direct)
     keysOf(second) shouldBe keysOf(first)
+  }
+
+  it should "reuse the grown worker table for the next morsel" in {
+    val firstRows = (0 until 20).map(index => (index, index + 1))
+    val secondRows = Seq((10000, 4), (10001, 6), (10002, 1))
+    val batch = BatchCodec.intPairs(firstRows ++ secondRows)
+    val (sizes, partials) = GroupedSumKernel.partialMorsels(
+      Vector(batch),
+      keyOrdinal = 0,
+      valueOrdinal = 1,
+      parallelism = 1,
+      batchSize = firstRows.length,
+      steps = Vector.empty[PairStep],
+    )
+
+    sizes shouldBe Vector(2)
+    val (first, second) = partials match
+      case Vector(left, right) => (left, right)
+      case other => fail(s"expected two partials, got ${other.length}")
+    val firstDirect = HashAggregate.sumInt32(
+      BatchCodec.intPairs(firstRows),
+      keyOrdinal = 0,
+      valueOrdinal = 1,
+    )
+    val secondDirect = HashAggregate.sumInt32(
+      BatchCodec.intPairs(secondRows),
+      keyOrdinal = 0,
+      valueOrdinal = 1,
+    )
+    sums(Vector(first)) shouldBe sums(Vector(firstDirect))
+    sums(Vector(second)) shouldBe sums(Vector(secondDirect))
+    keysOf(first) shouldBe keysOf(firstDirect)
+    keysOf(second) shouldBe keysOf(secondDirect)
+
+    // The action dropped the grown table, so the next scan starts at the initial capacity.
+    try
+      val restarted = scanRange(Seq((7, 1)))
+      HashAggregate.sumWorkerCapacity shouldBe HashAggregate.SumTableStart
+      sums(Vector(restarted)) shouldBe Map(7 -> Some(1L))
+    finally HashAggregate.releaseSumWorkers()
+
+    // SumTableStart doubles at 8 live groups and again at 16, so 20 groups sit at 64.
+    try
+      val grown = scanRange(firstRows)
+      val grownCapacity = HashAggregate.sumWorkerCapacity
+      val reused = scanRange(secondRows)
+      grownCapacity shouldBe 64
+      HashAggregate.sumWorkerCapacity shouldBe grownCapacity
+      sums(Vector(grown)) shouldBe sums(Vector(first))
+      sums(Vector(reused)) shouldBe sums(Vector(second))
+      keysOf(grown) shouldBe keysOf(first)
+      keysOf(reused) shouldBe keysOf(second)
+    finally HashAggregate.releaseSumWorkers()
   }
 
   "nulls" should "keep a null sum when every value of a key is null" in {
@@ -143,7 +222,9 @@ class TestGroupedSumKernel extends AnyFlatSpec with Matchers:
         only.length shouldBe 0
         only.schema shouldBe Vector(LogicalType.Int32, LogicalType.Int64)
       case other => fail(s"expected one partial, got ${other.length}")
-    HashAggregate.sumRange(keys, values, start = 0, length = 0).length shouldBe 0
+    val emptyRange = HashAggregate.sumRange(keys, values, start = 0, length = 0)
+    try emptyRange.length shouldBe 0
+    finally HashAggregate.releaseSumWorkers()
   }
 
   it should "return the partial of a batch that fits in one morsel" in {
@@ -262,6 +343,10 @@ class TestGroupedSumKernel extends AnyFlatSpec with Matchers:
     parts.map(_.length) shouldBe Seq(0, 0, 0, 0)
     direct.length shouldBe 0
   }
+
+  private def scanRange(rows: Seq[(Int, Int)]): ColumnBatch =
+    val batch = BatchCodec.intPairs(rows)
+    HashAggregate.sumRange(int32(batch, 0), int32(batch, 1), start = 0, length = batch.length)
 
   private def oneKey: ColumnBatch =
     BatchCodec.intPairs((1 to 8).map(value => (1, value)))

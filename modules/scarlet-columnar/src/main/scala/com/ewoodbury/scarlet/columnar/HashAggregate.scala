@@ -23,8 +23,9 @@ import java.util.Arrays
  *
  * One open-addressed table serves every measure set. A batch-sized table is at least twice the row
  * count, so one batch does not rehash. The range scans reuse one small table per worker and grow
- * it, and `grow` keeps first-seen order. A shorter capacity exists so tests can force `grow`.
- * Loops keep the row index in a `var` so the bodies stay allocation-free, matching `ColumnKernel`.
+ * it, and `grow` keeps first-seen order. The kernel drops that table when the action returns. A
+ * shorter capacity exists so tests can force `grow`. Loops keep the row index in a `var` so the
+ * bodies stay allocation-free, matching `ColumnKernel`.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object HashAggregate:
@@ -92,6 +93,7 @@ object HashAggregate:
   /**
    * Sums `[start, start + length)` of the two columns into the worker's table. The columns are
    * read in place. The same table is cleared and reused for the next range on this thread.
+   * [[releaseSumWorkers]] drops it when the action returns.
    */
   private[columnar] def sumRange(
       keys: Int32Column,
@@ -237,7 +239,7 @@ object HashAggregate:
   private val SumOnly = Int32Aggs(sum = true, count = false, min = false, max = false)
 
   /** Smallest power of two `GroupTable` accepts. The worker table grows from here. */
-  private val SumTableStart: Int = 16
+  private[columnar] val SumTableStart: Int = 16
 
   private final class SumWorker:
     val table: GroupTable = new GroupTable(SumTableStart, SumOnly)
@@ -246,14 +248,25 @@ object HashAggregate:
   private val sumWorkers: ThreadLocal[SumWorker] = new ThreadLocal[SumWorker]:
     override def initialValue(): SumWorker = new SumWorker
 
+  /**
+   * Drops this thread's reused sum table. [[GroupedSumKernel]] calls this when the action returns.
+   * A range runs on the calling thread when `parallelism` is 1 or there is one morsel, and that
+   * thread outlives the action.
+   */
+  private[columnar] def releaseSumWorkers(): Unit =
+    sumWorkers.remove()
+
+  /** Slot count of this thread's reused sum table. The first read on a thread allocates it. */
+  private[columnar] def sumWorkerCapacity: Int =
+    sumWorkers.get().table.currentCapacity
+
   private def withSumTable(body: (GroupTable, PairSlot) => Unit): ColumnBatch =
     val worker = sumWorkers.get()
     val table = worker.table
+    // The next range clears before it reads, including a range that follows a failed scan.
     table.release()
     body(table, worker.slot)
-    val compacted = table.compact()
-    table.release()
-    compacted
+    table.compact()
 
   private def checkRange(keys: Int32Column, values: Int32Column, start: Int, length: Int): Unit =
     require(keys.length == values.length, "key and value columns differ in length")
@@ -542,6 +555,8 @@ object HashAggregate:
     private val hasMin: Boolean = aggs.min
     private val hasMax: Boolean = aggs.max
 
+    def currentCapacity: Int = capacity
+
     def addSum(key: Int, value: Long): Unit =
       accumulate(ensure(key), value)
 
@@ -620,8 +635,10 @@ object HashAggregate:
       )
 
     /**
-     * Drops every group this morsel inserted. Walking `slots` leaves the rest of the arrays alone,
-     * and those slots are already empty.
+     * Drops every group this morsel inserted. Walking `slots` leaves the rest of the arrays alone.
+     * `compact` publishes count, min, and max once a slot is seen, and the sum scan marks a slot
+     * seen without rewriting those measures, so a reused slot must not keep them. Only the sum
+     * table is reused today.
      */
     def release(): Unit =
       var cursor = 0
@@ -631,6 +648,9 @@ object HashAggregate:
         state(slot) = 0
         seen(slot) = 0
         if (hasSum) then sums(slot) = 0L
+        if (hasCount) then counts(slot) = 0L
+        if (hasMin) then mins(slot) = 0
+        if (hasMax) then maxs(slot) = 0
         cursor += 1
       }
       occupied = 0

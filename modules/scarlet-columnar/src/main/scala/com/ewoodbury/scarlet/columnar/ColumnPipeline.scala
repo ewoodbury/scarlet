@@ -4,14 +4,14 @@ package com.ewoodbury.scarlet.columnar
  * Multi-batch sum and inner join.
  *
  * Sums read each input batch in ranges of `batchSize` rows and leave those columns in place.
- * `sumInt32` runs on the range, `sumInt64` merges that batch's partials, and `sumInt64` runs again
- * after the exchange, so a partial sum does not wrap at `Int`. A `keep`/`map` or [[PairStep]]
- * overload applies that work inside the partial `sumInt32`, so the exchange still sees one partial
- * per input batch. Each output batch is an `Int32` key and an `Int64` sum. Fold the sum with
- * [[ColumnReduce.sumInt64]] at ordinal 1; the batch has two columns. An empty input is
- * `numPartitions` empty sum batches, the same convention as [[HashReduce.byKey]]. The join reads
- * key column 0 and value column 1 on both sides, exchanges each side, and probes one partition at
- * a time.
+ * [[HashAggregate.sumRange]] scans each range, `sumInt64` merges that batch's partials, and
+ * `sumInt64` runs again after the exchange, so a partial sum does not wrap at `Int`. A
+ * `keep`/`map` or [[PairStep]] overload applies that work inside the range scan, so the exchange
+ * still sees one partial per input batch. Each output batch is an `Int32` key and an `Int64` sum.
+ * Fold the sum with [[ColumnReduce.sumInt64]] at ordinal 1; the batch has two columns. An empty
+ * input is `numPartitions` empty sum batches, the same convention as [[HashReduce.byKey]]. The
+ * join reads key column 0 and value column 1 on both sides, exchanges each side, and probes one
+ * partition at a time.
  */
 object ColumnPipeline:
 
@@ -23,9 +23,9 @@ object ColumnPipeline:
       parallelism: Int,
       batchSize: Int,
   ): Vector[ColumnBatch] =
-    runSum(batches, numPartitions, parallelism, batchSize) {
+    runSum(batches, numPartitions, parallelism, batchSize) { rows =>
       GroupedSumKernel.run(
-        batches,
+        rows,
         keyOrdinal,
         valueOrdinal,
         numPartitions,
@@ -36,7 +36,7 @@ object ColumnPipeline:
     }
 
   /**
-   * Filters and projects the value inside the partial `sumInt32`. The merge and the final sum
+   * Filters and projects the value inside the partial range scan. The merge and the final sum
    * still read the `Int64` partials.
    */
   def sumByKey(
@@ -49,9 +49,9 @@ object ColumnPipeline:
       keep: ColumnKernel.Int32Predicate,
       map: ColumnKernel.Int32Map,
   ): Vector[ColumnBatch] =
-    runSum(batches, numPartitions, parallelism, batchSize) {
+    runSum(batches, numPartitions, parallelism, batchSize) { rows =>
       GroupedSumKernel.run(
-        batches,
+        rows,
         keyOrdinal,
         valueOrdinal,
         numPartitions,
@@ -63,9 +63,9 @@ object ColumnPipeline:
     }
 
   /**
-   * Runs `steps` inside the partial `sumInt32`. A chain of value filters uses the `keep`/`map`
-   * overload. Any other chain, including a key filter, a row filter, or a pair map, uses the pair
-   * scan.
+   * Runs `steps` inside the partial range scan. A chain of value filters uses the `keep`/`map`
+   * overload before [[GroupedSumKernel.run]] sees those steps. Any other chain, including a key
+   * filter, a row filter, or a pair map, uses the pair scan.
    */
   def sumByKey(
       batches: Vector[ColumnBatch],
@@ -79,7 +79,7 @@ object ColumnPipeline:
     if (steps.isEmpty) then
       sumByKey(batches, keyOrdinal, valueOrdinal, numPartitions, parallelism, batchSize)
     else
-      valueKeeps(steps) match
+      PairStep.valueKeeps(steps) match
         case Some(predicates) =>
           sumByKey(
             batches,
@@ -88,13 +88,13 @@ object ColumnPipeline:
             numPartitions,
             parallelism,
             batchSize,
-            keepValues(predicates),
-            PassValue,
+            PairStep.keepValues(predicates),
+            PairStep.PassValue,
           )
         case None =>
-          runSum(batches, numPartitions, parallelism, batchSize) {
+          runSum(batches, numPartitions, parallelism, batchSize) { rows =>
             GroupedSumKernel.run(
-              batches,
+              rows,
               keyOrdinal,
               valueOrdinal,
               numPartitions,
@@ -104,37 +104,26 @@ object ColumnPipeline:
             )
           }
 
+  /**
+   * Exchanges one combined partial vector. `combine` runs once. An empty input returns before that
+   * call, so the kernel is not asked to build partials.
+   */
   private def runSum(
       batches: Vector[ColumnBatch],
       numPartitions: Int,
       parallelism: Int,
       batchSize: Int,
-  )(combinedOf: => Vector[ColumnBatch]): Vector[ColumnBatch] =
+  )(combine: Vector[ColumnBatch] => Vector[ColumnBatch]): Vector[ColumnBatch] =
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
     if (batches.isEmpty) then Vector.fill(numPartitions)(emptySum)
     else
-      val combined = combinedOf
+      val combined = combine(batches)
       val buckets = HashExchange.partitionAll(combined, keyOrdinal = 0, numPartitions, parallelism)
       MorselScheduler.map(buckets, parallelism) { (_, bucket) =>
         HashAggregate.sumInt64(bucket, keyOrdinal = 0, valueOrdinal = 1)
       }
-
-  /** `Some` when every step is a value filter. The predicates stay in source order. */
-  private def valueKeeps(steps: Vector[PairStep]): Option[Vector[Int => Boolean]] =
-    val seed: Option[Vector[Int => Boolean]] = Some(Vector.empty[Int => Boolean])
-    steps.foldLeft(seed) { (acc, step) =>
-      (acc, step) match
-        case (Some(predicates), PairStep.KeepValue(predicate)) => Some(predicates :+ predicate)
-        case _ => None
-    }
-
-  private def keepValues(predicates: Vector[Int => Boolean]): ColumnKernel.Int32Predicate =
-    value => predicates.forall(predicate => predicate(value))
-
-  private object PassValue extends ColumnKernel.Int32Map:
-    def apply(value: Int): Int = value
 
   def innerJoin(
       build: Vector[ColumnBatch],
