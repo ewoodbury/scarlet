@@ -493,6 +493,18 @@ object DistCollection:
     }
 
   /**
+   * Partitions a primitive `Boolean` array. Each partition is a
+   * [[com.ewoodbury.scarlet.core.BoolArrays]] copy of its range. The caller's array is not
+   * retained, and the partition array is not publicly mutable.
+   */
+  def ofBools(values: Array[Boolean], numPartitions: Int): DistCollection[Boolean] =
+    import com.ewoodbury.scarlet.core.BoolArrays
+
+    splitSource(values.length, numPartitions, Plan.SourceDescriptor.Bools) { (start, end) =>
+      BoolArrays.fromOwned(values.slice(start, end))
+    }
+
+  /**
    * Partitions a primitive `Double` array. Each partition is a
    * [[com.ewoodbury.scarlet.core.DoubleArrays]] copy of its range. The caller's array is not
    * retained, and the partition array is not publicly mutable.

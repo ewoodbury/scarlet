@@ -19,6 +19,7 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     BatchCodec.decodeLongs(BatchCodec.longs(Seq(1L, Long.MinValue))) shouldBe Seq(1L, Long.MinValue)
     BatchCodec.decodeFloat64s(BatchCodec.float64s(Seq(1.5, -0.25))) shouldBe Seq(1.5, -0.25)
     BatchCodec.decodeBools(BatchCodec.bools(Seq(true, false, true))) shouldBe Seq(true, false, true)
+    BatchCodec.decodeBools(BatchCodec.bools(Iterable(true, false))) shouldBe Seq(true, false)
     BatchCodec.decodeIntPairs(BatchCodec.intPairs(Seq((1, 2), (3, 4)))) shouldBe Seq((1, 2), (3, 4))
   }
 
@@ -32,6 +33,8 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     BatchCodec.decodeFloat64s(
       BatchCodec.float64s(new ArraySeq.ofDouble(Array.empty[Double])),
     ) shouldBe Seq.empty[Double]
+    BatchCodec.decodeBools(BatchCodec.bools(new ArraySeq.ofBoolean(Array.empty[Boolean]))) shouldBe
+      Seq.empty[Boolean]
     BatchCodec.decodeIntPairs(BatchCodec.intPairs(Array.empty[Int], Array.empty[Int])) shouldBe
       Seq.empty[(Int, Int)]
   }
@@ -90,6 +93,30 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       column.values should not be theSameInstanceAs(raw)
       raw(0) = 99L
       BatchCodec.decodeLongs(batch) shouldBe Seq(1L, -2L, 0L)
+    }
+  }
+
+  it should "copy a primitive boolean array into the column" in {
+    val raw = Array(true, false, true)
+    ColumnMetrics.withSink(new CountingSink) {
+      val batch = BatchCodec.bools(new ArraySeq.ofBoolean(raw))
+      val boxed = BatchCodec.bools(Seq(true, false, true))
+      ColumnMetrics.primitiveEncodeCount shouldBe 1L
+
+      raw(0) = false
+      BatchCodec.decodeBools(batch) shouldBe Seq(true, false, true)
+      BatchCodec.decodeBools(boxed) shouldBe Seq(true, false, true)
+    }
+  }
+
+  it should "copy an owned boolean array on the primitive path" in {
+    val raw = Array(true, false, true)
+    ColumnMetrics.withSink(new CountingSink) {
+      val batch = BatchCodec.copiedBools(raw)
+      ColumnMetrics.primitiveEncodeCount shouldBe 1L
+
+      raw(0) = false
+      BatchCodec.decodeBools(batch) shouldBe Seq(true, false, true)
     }
   }
 

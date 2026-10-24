@@ -42,6 +42,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.Pairs(parts) => parts
     case Columns.Triples(parts) => parts
     case Columns.Strings(parts) => parts
+    case Columns.Bools(parts) => parts
 
   private[execution] enum Columns:
     case Ints(parts: Vector[ColumnBatch])
@@ -50,6 +51,7 @@ private[execution] object ColumnarInterpreter:
     case Pairs(parts: Vector[ColumnBatch])
     case Triples(parts: Vector[ColumnBatch])
     case Strings(parts: Vector[ColumnBatch])
+    case Bools(parts: Vector[ColumnBatch])
 
   private def selectPartition[A](
       partitions: Seq[Partition[A]],
@@ -75,6 +77,8 @@ private[execution] object ColumnarInterpreter:
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeIntTriples(batch, rows))
         case Columns.Strings(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeStrings(batch, rows))
+        case Columns.Bools(parts) =>
+          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeBools(batch, rows))
 
   private def prefixRows[A](
       parts: Vector[ColumnBatch],
@@ -101,6 +105,7 @@ private[execution] object ColumnarInterpreter:
         case PhysicalOp.Kind.Floats => Columns.Floats(encodeFloats(selected))
         case PhysicalOp.Kind.Pairs => Columns.Pairs(encodePairs(selected))
         case PhysicalOp.Kind.Strings => Columns.Strings(encodeStrings(selected))
+        case PhysicalOp.Kind.Bools => Columns.Bools(encodeBools(selected))
         case PhysicalOp.Kind.Triples =>
           throw new IllegalStateException(
             s"physical tree does not match ${plan.getClass.getSimpleName}",
@@ -196,8 +201,7 @@ private[execution] object ColumnarInterpreter:
         Columns.Floats(onEach(parts)(batch => ElementPipeline.floats(batch, steps)))
       case Columns.Strings(parts) =>
         Columns.Strings(onEach(parts)(batch => ElementPipeline.strings(batch, steps)))
-      case Columns.Pairs(_) => rejected
-      case Columns.Triples(_) => rejected
+      case Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) => rejected
 
   private def triplePredicate(
       slot: PhysicalOp.Slot,
@@ -240,9 +244,11 @@ private[execution] object ColumnarInterpreter:
                 Columns.Strings(onEach(parts) { batch =>
                   ColumnKernel.filterUtf8(batch, 0, value => keep(value))
                 })
+          case Columns.Bools(parts) =>
+            Columns.Bools(onEach(parts)(batch => BoolPipeline.filter(batch, predicate)))
           case Columns.Pairs(_) | Columns.Triples(_) =>
             throw new IllegalStateException(
-              "columnar element filter expects ints, longs, floats, or strings",
+              s"columnar element filter expects ${elementColumnList(includeBooleans = true)}",
             )
       case PhysicalOp.Slot.Row =>
         val keep = predicate.asInstanceOf[((Int, Int)) => Boolean]
@@ -300,15 +306,17 @@ private[execution] object ColumnarInterpreter:
       Columns.Strings(onEach(parts) { batch =>
         ColumnKernel.projectUtf8(batch, 0, value => ColumnarPlanner.stringResult(fn(value)))
       })
-    case Columns.Pairs(_) | Columns.Triples(_) =>
-      throw new IllegalStateException("columnar map expects ints, longs, floats, or strings")
+    case Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) =>
+      throw new IllegalStateException(
+        s"columnar map expects ${elementColumnList(includeBooleans = false)}",
+      )
 
   private[execution] def pairsOf(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.Pairs(parts) if parts.nonEmpty => parts
     case Columns.Pairs(_) =>
       throw new IllegalStateException("columnar pairs have no partitions")
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Triples(_) |
-        Columns.Strings(_) =>
+        Columns.Strings(_) | Columns.Bools(_) =>
       throw new IllegalStateException("columnar op expected int pairs")
 
   private def triplesOf(columns: Columns): Vector[ColumnBatch] = columns match
@@ -316,8 +324,16 @@ private[execution] object ColumnarInterpreter:
     case Columns.Triples(_) =>
       throw new IllegalStateException("columnar triples have no partitions")
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Pairs(_) |
-        Columns.Strings(_) =>
+        Columns.Strings(_) | Columns.Bools(_) =>
       throw new IllegalStateException("columnar op expected int triples")
+
+  /**
+   * Kinds an element filter or map accepts. A filter accepts booleans. A map does not: a boolean
+   * project is refused before execution, and the map arm is the guard if one arrives anyway.
+   */
+  private def elementColumnList(includeBooleans: Boolean): String =
+    if (includeBooleans) then "ints, longs, floats, booleans, or strings"
+    else "ints, longs, floats, or strings"
 
   private def onEach(
       parts: Vector[ColumnBatch],
@@ -363,6 +379,19 @@ private[execution] object ColumnarInterpreter:
           @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
           val rows = other.asInstanceOf[Iterable[Long]]
           BatchCodec.longs(rows)
+    }.toVector
+
+  private[execution] def encodeBools(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+    import com.ewoodbury.scarlet.core.BoolArrays
+
+    partitions.map { partition =>
+      partition.data match
+        case owned: BoolArrays => BatchCodec.copiedBools(owned.values)
+        case other =>
+          // Named erasure boundary. Classification already selected boolean elements.
+          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+          val rows = other.asInstanceOf[Iterable[Boolean]]
+          BatchCodec.bools(rows)
     }.toVector
 
   private[execution] def encodeInts(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
@@ -426,3 +455,5 @@ private[execution] object ColumnarInterpreter:
       parts.map(batch => Partition(BatchCodec.decodeIntTriples(batch)))
     case Columns.Strings(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeStrings(batch)))
+    case Columns.Bools(parts) =>
+      parts.map(batch => Partition(BatchCodec.decodeBools(batch)))

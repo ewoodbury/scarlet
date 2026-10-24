@@ -7,8 +7,8 @@ import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 
 /**
- * Lowers `Int`, `Long`, `Double`, `(Int, Int)`, and `String` plans to [[PhysicalOp]] and runs that
- * tree on the columnar kernels.
+ * Lowers `Int`, `Long`, `Double`, `Boolean`, `(Int, Int)`, and `String` plans to [[PhysicalOp]]
+ * and runs that tree on the columnar kernels.
  *
  * Named erasure boundary. `Plan` is invariant and its element type is erased, so non-empty sources
  * are classified by their values and checked against any descriptor, while empty sources use their
@@ -22,7 +22,8 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * selected operation. A result that is not that type throws `ClassCastException`. [[tryRun]]
  * catches it and returns `None`, and the row path runs the whole plan. Any unsupported node
  * (union, flatMap, distinct, sort, a map that is not fed by `Int`, `Long`, `Double`, or `String`,
- * and the rest) makes the whole plan ineligible, so a supported prefix is not executed on its own.
+ * any `Boolean` map, and the rest) makes the whole plan ineligible, so a supported prefix is not
+ * executed on its own.
  *
  * [[lower]] and interpretation walk the same logical plan. The physical node records the operator
  * and not the function, so each logical node is matched to the node [[lower]] built for it. A
@@ -35,44 +36,51 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * [[lower]] does not call user functions. A straight `Int`, `Long`, `Double`, or `String`
  * filter/project run of two to four steps is one [[PhysicalOp.Pipeline]]. A longer run is cut into
  * those chunks, source order first. One step stays a [[PhysicalOp.Filter]] or
- * [[PhysicalOp.Project]]. Pair filters, aggregates, and joins stay one node per operator. Narrow
- * map and filter keep input order and the input partition count. `Double` and `String` select
- * filter and map only. A filter over an int join result is columnar only for explicit key,
- * left-value, and right-value filters; general tuple predicates stay on the row path. `keys` and
- * `values` of an int pair are that column. The arrays are shared: a published column is not
- * mutated, so a view is cheaper than a copy and still correct. `mapValues` lowers only when the
- * function declares an unboxed `Int` result and every other `apply` is an erasure bridge. A wider
- * primitive, a reference result, or an overloaded `apply` stays on the row path. That check reads
- * the method descriptor and does not call the function. `getDeclaredMethods` does not see an
- * inherited `apply`, so that function stays on the row path too. `reduceByKey` applies the user's
- * function and wraps at `Int`. A `join` with no hint, or with an explicit shuffle-hash hint,
- * hash-partitions both sides and probes one bucket at a time. Sort-merge and broadcast are not
- * implemented: those hints make `lower` return `None`, so the plan stays on the row path. Output
- * width for an accepted join or aggregate is `defaultShufflePartitions`. [[tryCount]] and
- * [[trySumInt]] fold an int filter/map chain that starts at a scan or at `keys` or `values`,
- * including an int `mapValues`, and do not write that chain. Sum folds one trailing project and
- * chains longer than four. Count folds those and chains of two to four steps. [[trySumLong]] folds
- * a long filter/map chain the same way, and the sum wraps. [[trySumDouble]] folds at most four
- * steps. Sum of `keys`, `values`, or an int `mapValues` with no further element chain reads the
- * pair column in that morsel loop and does not build the projection. [[tryGroupedSum]] runs
- * [[ColumnPipeline.sumByKey]] on a typed pair source and folds the `Int64` group sums. A preceding
- * `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that partial scan,
- * so the action does not build those pairs. [[groupedSumPeel]] labels those walked steps. It is
- * not an action shape and not a physical node. A source descriptor supplies the type when all
- * partitions are empty. It does not decode. `collect` still does. A pair `MapOp` stays on the row
- * path for `collect` and `reduceByKey`, and [[partitioning]] reports no layout for it.
+ * [[PhysicalOp.Project]]. A `Boolean` plan lowers filters only, one [[PhysicalOp.Filter]] per
+ * step, through [[BoolPipeline]]. That chain does not enter [[lowerElementPipeline]]. A boolean
+ * column that reaches the element pipeline throws `IllegalStateException`, and [[tryRun]] catches
+ * only `ClassCastException`. A `Boolean` map is refused without being called. `Function1` has no
+ * `apply$mcZZ$sp`, so `Boolean => Boolean` cannot be distinguished from `Boolean => Int`. Boolean
+ * has no sum. Count reads batch lengths. Take decodes a prefix. Pair filters, aggregates, and
+ * joins stay one node per operator. Narrow map and filter keep input order and the input partition
+ * count. `Double` and `String` select filter and map only. A filter over an int join result is
+ * columnar only for explicit key, left-value, and right-value filters; general tuple predicates
+ * stay on the row path. `keys` and `values` of an int pair are that column. The arrays are shared:
+ * a published column is not mutated, so a view is cheaper than a copy and still correct.
+ * `mapValues` lowers only when the function declares an unboxed `Int` result and every other
+ * `apply` is an erasure bridge. A wider primitive, a reference result, or an overloaded `apply`
+ * stays on the row path. That check reads the method descriptor and does not call the function.
+ * `getDeclaredMethods` does not see an inherited `apply`, so that function stays on the row path
+ * too. `reduceByKey` applies the user's function and wraps at `Int`. A `join` with no hint, or
+ * with an explicit shuffle-hash hint, hash-partitions both sides and probes one bucket at a time.
+ * Sort-merge and broadcast are not implemented: those hints make `lower` return `None`, so the
+ * plan stays on the row path. Output width for an accepted join or aggregate is
+ * `defaultShufflePartitions`. [[tryCount]] and [[trySumInt]] fold an int filter/map chain that
+ * starts at a scan or at `keys` or `values`, including an int `mapValues`, and do not write that
+ * chain. Sum folds one trailing project and chains longer than four. Count folds those and chains
+ * of two to four steps. [[trySumLong]] folds a long filter/map chain the same way, and the sum
+ * wraps. [[trySumDouble]] folds at most four steps. Sum of `keys`, `values`, or an int `mapValues`
+ * with no further element chain reads the pair column in that morsel loop and does not build the
+ * projection. [[tryGroupedSum]] runs [[ColumnPipeline.sumByKey]] on a typed pair source and folds
+ * the `Int64` group sums. A preceding `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is
+ * applied inside that partial scan, so the action does not build those pairs. [[groupedSumPeel]]
+ * labels those walked steps. It is not an action shape and not a physical node. A source
+ * descriptor supplies the type when all partitions are empty. It does not decode. `collect` still
+ * does. A pair `MapOp` stays on the row path for `collect` and `reduceByKey`, and [[partitioning]]
+ * reports no layout for it.
  *
  * An [[com.ewoodbury.scarlet.core.IntArrays]], [[com.ewoodbury.scarlet.core.LongArrays]],
- * [[com.ewoodbury.scarlet.core.DoubleArrays]], or [[com.ewoodbury.scarlet.core.IntPairArrays]]
- * source is copied into the column on the calling thread. The partition stays readable, so the
- * column does not adopt its array. A boxed `Vector` or `List` is still read through its iterator.
- * An `ArraySeq` passed straight to the codec is copied the same way.
+ * [[com.ewoodbury.scarlet.core.BoolArrays]], [[com.ewoodbury.scarlet.core.DoubleArrays]], or
+ * [[com.ewoodbury.scarlet.core.IntPairArrays]] source is copied into the column on the calling
+ * thread. The partition stays readable, so the column does not adopt its array. A boxed `Vector`
+ * or `List` is still read through its iterator. An `ArraySeq` passed straight to the codec is
+ * copied the same way.
  *
  * A null string is a value. Classification skips a leading null and keeps looking for a `String`.
  * An all-null source stays on the row path, because there is no witness. An accepted string plan
  * records [[Layout.Utf8Dict]]: that dictionary plus codes, one dictionary per batch. The string
- * lambda stays scalar over the decoded string. Int, long, double, int-pair, and int-triple plans
- * stay [[Layout.Columnar]].
+ * lambda stays scalar over the decoded string. Int, long, boolean, double, int-pair, and
+ * int-triple plans stay [[Layout.Columnar]].
  *
  * `take` has a separate bounded path for accepted partition-preserving shapes: it interprets one
  * source partition at a time in order and decodes only the remaining requested values. Plans with
@@ -94,9 +102,9 @@ object ColumnarPlanner:
    * Layout of an accepted plan, without running it. A plan is accepted when [[lower]] returns a
    * physical tree and that tree's layout is valid. `None` means the plan is not accepted, which is
    * the row path. There is no second layout source. A string filter or map reports
-   * [[Layout.Utf8Dict]]. An int, long, double, or int-pair plan reports [[Layout.Columnar]]. A
-   * pair map, including one that [[tryGroupedSum]] fuses and one that changes `(Int, Int)` to
-   * another pair type, is not accepted, so this is `None`.
+   * [[Layout.Utf8Dict]]. An int, long, boolean, double, or int-pair plan reports
+   * [[Layout.Columnar]]. A pair map, including one that [[tryGroupedSum]] fuses and one that
+   * changes `(Int, Int)` to another pair type, is not accepted, so this is `None`.
    */
   def partitioning[A](plan: Plan[A]): Option[PartitioningInfo] =
     accepted(plan).map(infoOf)
@@ -119,14 +127,20 @@ object ColumnarPlanner:
   def tryRun[A](plan: Plan[A]): Option[Seq[Partition[A]]] =
     accepted(plan) match
       case None => None
-      case Some(op) =>
-        try
-          Some(
-            ColumnarInterpreter
-              .decode(ColumnarInterpreter.interpret(plan, op))
-              .asInstanceOf[Seq[Partition[A]]],
-          )
-        catch case _: ClassCastException => None
+      case Some(op) => runLowered(plan, op)
+
+  /**
+   * Decode a tree [[lower]] would hand to [[tryRun]]. `ClassCastException` is the row-path
+   * fallback. Any other failure, including a boolean column in the element pipeline, propagates.
+   */
+  private[execution] def runLowered[A](plan: Plan[A], op: PhysicalOp): Option[Seq[Partition[A]]] =
+    try
+      Some(
+        ColumnarInterpreter
+          .decode(ColumnarInterpreter.interpret(plan, op))
+          .asInstanceOf[Seq[Partition[A]]],
+      )
+    catch case _: ClassCastException => None
 
   /**
    * Run a partition-preserving accepted plan only until its first `n` results are available. Plans
@@ -416,7 +430,8 @@ object ColumnarPlanner:
           case None => false
           case Some(first) => isNullableIntPair(first) && values.forall(isNullableIntPair)
       case Plan.SourceDescriptor.Ints | Plan.SourceDescriptor.Longs |
-          Plan.SourceDescriptor.Doubles | Plan.SourceDescriptor.Strings =>
+          Plan.SourceDescriptor.Doubles | Plan.SourceDescriptor.Bools |
+          Plan.SourceDescriptor.Strings =>
         false
 
   /**
@@ -560,11 +575,13 @@ object ColumnarPlanner:
       child: PhysicalOp,
       steps: List[ElementStep],
   ): Option[PhysicalOp] = child.kind match
+    case PhysicalOp.Kind.Bools =>
+      BoolPipeline.lower(child, steps)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Strings =>
       if (elementProjectsMatch(child.kind, steps)) then Some(lowerElementPipeline(child, steps))
       else None
-    case _ =>
+    case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples =>
       steps.foldLeft(Option(child)) { (current, step) =>
         current.flatMap(op => lowerElementStep(op, step))
       }
@@ -688,6 +705,7 @@ object ColumnarPlanner:
     case Plan.SourceDescriptor.Doubles => Some(PhysicalOp.Kind.Floats)
     case Plan.SourceDescriptor.Pairs => Some(PhysicalOp.Kind.Pairs)
     case Plan.SourceDescriptor.Strings => Some(PhysicalOp.Kind.Strings)
+    case Plan.SourceDescriptor.Bools => Some(PhysicalOp.Kind.Bools)
 
   private def dataMatchesDescriptor(
       source: Plan.Source[_],
@@ -702,6 +720,7 @@ object ColumnarPlanner:
         case Plan.SourceDescriptor.Doubles => rows.forall(isDoubleValue)
         case Plan.SourceDescriptor.Pairs => rows.forall(isIntPairValue)
         case Plan.SourceDescriptor.Strings => rows.forall(isStringValue)
+        case Plan.SourceDescriptor.Bools => rows.forall(isBoolValue)
         // Boundary guard: classify does not call this with Unknown.
         case Plan.SourceDescriptor.Unknown => false
 
@@ -710,7 +729,13 @@ object ColumnarPlanner:
    * scan that would box every element before encode.
    */
   private def ownedMatches(source: Plan.Source[_], descriptor: Plan.SourceDescriptor): Boolean =
-    import com.ewoodbury.scarlet.core.{DoubleArrays, IntArrays, IntPairArrays, LongArrays}
+    import com.ewoodbury.scarlet.core.{
+      BoolArrays,
+      DoubleArrays,
+      IntArrays,
+      IntPairArrays,
+      LongArrays,
+    }
 
     descriptor match
       case Plan.SourceDescriptor.Ints =>
@@ -721,6 +746,8 @@ object ColumnarPlanner:
         source.partitions.forall(partition => partition.data.isInstanceOf[DoubleArrays])
       case Plan.SourceDescriptor.Pairs =>
         source.partitions.forall(partition => partition.data.isInstanceOf[IntPairArrays])
+      case Plan.SourceDescriptor.Bools =>
+        source.partitions.forall(partition => partition.data.isInstanceOf[BoolArrays])
       case Plan.SourceDescriptor.Strings | Plan.SourceDescriptor.Unknown => false
 
   private def isIntValue(value: Any): Boolean = value match
@@ -733,6 +760,10 @@ object ColumnarPlanner:
 
   private def isDoubleValue(value: Any): Boolean = value match
     case _: Double => true
+    case _ => false
+
+  private def isBoolValue(value: Any): Boolean = value match
+    case _: Boolean => true
     case _ => false
 
   private def isIntPairValue(value: Any): Boolean = value match
@@ -762,6 +793,7 @@ object ColumnarPlanner:
       case Some(_: Long) => Some(PhysicalOp.Kind.Longs)
       case Some(_: Double) => Some(PhysicalOp.Kind.Floats)
       case Some((_: Int, _: Int)) => Some(PhysicalOp.Kind.Pairs)
+      case Some(_: Boolean) => Some(PhysicalOp.Kind.Bools)
       case Some(_: String) => Some(PhysicalOp.Kind.Strings)
       case Some(_) => None
       case None => stringWitness(rest)
@@ -811,7 +843,7 @@ object ColumnarPlanner:
   private def layoutOf(kind: PhysicalOp.Kind): Layout = kind match
     case PhysicalOp.Kind.Strings => Layout.Utf8Dict(ScarletConf.get.columnarBatchSize)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
-        PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples =>
+        PhysicalOp.Kind.Bools | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples =>
       Layout.Columnar(ScarletConf.get.columnarBatchSize)
 
   private[execution] def batchSize: Int =

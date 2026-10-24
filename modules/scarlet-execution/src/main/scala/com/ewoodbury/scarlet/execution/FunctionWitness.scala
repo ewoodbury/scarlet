@@ -7,6 +7,8 @@ package com.ewoodbury.scarlet.execution
  * column's signature. `Int => Int` is `apply$mcII$sp`, `Long => Long` is `apply$mcJJ$sp`,
  * `Double => Double` is `apply$mcDD$sp`, and `String => String` is `apply`. The check reads method
  * descriptors and does not call the function. A primitive specialized apply is not a bridge.
+ * `Boolean` has no specialized apply, so [[declaredElement]] is false for that kind and does not
+ * inspect the function.
  */
 private[execution] object FunctionWitness:
 
@@ -32,7 +34,7 @@ private[execution] object FunctionWitness:
       )
     case PhysicalOp.Kind.Strings =>
       declaredSignature(function, "apply", classOf[String], classOf[String], allowBridge = true)
-    case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples => false
+    case PhysicalOp.Kind.Bools | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples => false
 
   /**
    * True when `function` declares `apply` or `specialized` from `argument` to `result`, and every
