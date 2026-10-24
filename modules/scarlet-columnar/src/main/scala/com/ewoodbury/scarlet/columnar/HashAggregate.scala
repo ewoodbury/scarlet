@@ -18,12 +18,14 @@ import java.util.Arrays
  * Partial sums merge by calling `sumInt64` on the sum column. Partial counts merge by calling
  * `sumInt64` on the count column, not by calling `count` again. Min and max are not merged here.
  *
- * Output order is hash-table order, not input order and not sorted. Sums do not wrap at `Int`
- * width. The value map itself is still `Int` arithmetic.
+ * Output order is first-seen order, not sorted. Sums do not wrap at `Int` width. The value map
+ * itself is still `Int` arithmetic.
  *
- * One open-addressed table serves every measure set. Capacity is at least twice the row count, so
- * one batch does not rehash; a shorter capacity exists only so tests can force `grow`. Loops keep
- * the row index in a `var` so the bodies stay allocation-free, matching `ColumnKernel`.
+ * One open-addressed table serves every measure set. A batch-sized table is at least twice the row
+ * count, so one batch does not rehash. The range scans reuse one small table per worker and grow
+ * it, and `grow` keeps first-seen order. The kernel drops that table when the action returns. A
+ * shorter capacity exists so tests can force `grow`. Loops keep the row index in a `var` so the
+ * bodies stay allocation-free, matching `ColumnKernel`.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object HashAggregate:
@@ -82,10 +84,70 @@ object HashAggregate:
       val table = new GroupTable(ColumnHash.tableSize(keys.length), SumOnly)
       val slot = new PairSlot
       val planned = steps.toArray
+      val end = keys.length
       if (ColumnHash.fullyPresent(keys) && ColumnHash.fullyPresent(values)) then
-        scanSumDenseSteps(table, keys, values, planned, slot)
-      else scanSumSparseSteps(table, keys, values, planned, slot)
+        scanSumDenseSteps(table, keys, values, planned, slot, 0, end)
+      else scanSumSparseSteps(table, keys, values, planned, slot, 0, end)
       table.compact()
+
+  /**
+   * Sums `[start, start + length)` of the two columns into the worker's table. The columns are
+   * read in place. The same table is cleared and reused for the next range on this thread.
+   * [[releaseSumWorkers]] drops it when the action returns.
+   */
+  private[columnar] def sumRange(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+  ): ColumnBatch =
+    checkRange(keys, values, start, length)
+    val end = start + length
+    val dense = denseRange(keys, values, start, length)
+    withSumTable { (table, _) =>
+      if (length != 0) then
+        if (dense) then scanSumDense(table, keys, values, start, end)
+        else scanSumSparse(table, keys, values, filtered = false, KeepAll, Identity, start, end)
+    }
+
+  /** Same range as [[sumRange]], after `keep` and `map`. A null value is dropped before `keep`. */
+  private[columnar] def sumRange(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      keep: ColumnKernel.Int32Predicate,
+      map: ColumnKernel.Int32Map,
+  ): ColumnBatch =
+    checkRange(keys, values, start, length)
+    val end = start + length
+    val dense = denseRange(keys, values, start, length)
+    withSumTable { (table, _) =>
+      if (length != 0) then
+        if (dense) then scanSumDenseFiltered(table, keys, values, keep, map, start, end)
+        else scanSumSparse(table, keys, values, filtered = true, keep, map, start, end)
+    }
+
+  /**
+   * Same range as [[sumRange]], after `steps`. A null key or a null value is dropped before the
+   * steps. `steps` is shared by every worker and is not mutated.
+   */
+  private[columnar] def sumRange(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      steps: Array[PairStep],
+  ): ColumnBatch =
+    require(steps.nonEmpty, "pair sum needs a filter or a map")
+    checkRange(keys, values, start, length)
+    val end = start + length
+    val dense = denseRange(keys, values, start, length)
+    withSumTable { (table, slot) =>
+      if (length != 0) then
+        if (dense) then scanSumDenseSteps(table, keys, values, steps, slot, start, end)
+        else scanSumSparseSteps(table, keys, values, steps, slot, start, end)
+    }
 
   /**
    * Sums an `Int64` column into an `Int64` sum. This is the merge for partial sums, and for
@@ -176,6 +238,52 @@ object HashAggregate:
 
   private val SumOnly = Int32Aggs(sum = true, count = false, min = false, max = false)
 
+  /** Smallest power of two `GroupTable` accepts. The worker table grows from here. */
+  private[columnar] val SumTableStart: Int = 16
+
+  private final class SumWorker:
+    val table: GroupTable = new GroupTable(SumTableStart, SumOnly)
+    val slot: PairSlot = new PairSlot
+
+  private val sumWorkers: ThreadLocal[SumWorker] = new ThreadLocal[SumWorker]:
+    override def initialValue(): SumWorker = new SumWorker
+
+  /**
+   * Drops this thread's reused sum table. [[GroupedSumKernel]] calls this when the action returns.
+   * A range runs on the calling thread when `parallelism` is 1 or there is one morsel, and that
+   * thread outlives the action.
+   */
+  private[columnar] def releaseSumWorkers(): Unit =
+    sumWorkers.remove()
+
+  /** Slot count of this thread's reused sum table. The first read on a thread allocates it. */
+  private[columnar] def sumWorkerCapacity: Int =
+    sumWorkers.get().table.currentCapacity
+
+  private def withSumTable(body: (GroupTable, PairSlot) => Unit): ColumnBatch =
+    val worker = sumWorkers.get()
+    val table = worker.table
+    // The next range clears before it reads, including a range that follows a failed scan.
+    table.release()
+    body(table, worker.slot)
+    table.compact()
+
+  private def checkRange(keys: Int32Column, values: Int32Column, start: Int, length: Int): Unit =
+    require(keys.length == values.length, "key and value columns differ in length")
+    require(
+      start >= 0 && length >= 0 && start <= keys.length && length <= keys.length - start,
+      s"range ($start, $length) outside ${keys.length} rows",
+    )
+
+  private def denseRange(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+  ): Boolean =
+    Validity.rangePresent(keys.validity, start, length) &&
+      Validity.rangePresent(values.validity, start, length)
+
   private def sumColumns(
       keys: Int32Column,
       values: Int32Column,
@@ -188,10 +296,11 @@ object HashAggregate:
     if (keys.length == 0) then emptySum
     else
       val table = new GroupTable(capacity, SumOnly)
+      val end = keys.length
       if (ColumnHash.fullyPresent(keys) && ColumnHash.fullyPresent(values)) then
-        if (filtered) then scanSumDenseFiltered(table, keys, values, keep, map)
-        else scanSumDense(table, keys, values)
-      else scanSumSparse(table, keys, values, filtered, keep, map)
+        if (filtered) then scanSumDenseFiltered(table, keys, values, keep, map, 0, end)
+        else scanSumDense(table, keys, values, 0, end)
+      else scanSumSparse(table, keys, values, filtered, keep, map, 0, end)
       table.compact()
 
   private def aggregateColumns(
@@ -217,12 +326,17 @@ object HashAggregate:
         else scanMeasureSparse(table, keys, values, filtered, keep, map)
         table.compact()
 
-  private def scanSumDense(table: GroupTable, keys: Int32Column, values: Int32Column): Unit =
+  private def scanSumDense(
+      table: GroupTable,
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      end: Int,
+  ): Unit =
     val keyValues = keys.values
     val valueValues = values.values
-    val rows = keys.length
-    var row = 0
-    while (row < rows) {
+    var row = start
+    while (row < end) {
       table.addSum(keyValues(row), valueValues(row).toLong)
       row += 1
     }
@@ -233,12 +347,13 @@ object HashAggregate:
       values: Int32Column,
       keep: ColumnKernel.Int32Predicate,
       map: ColumnKernel.Int32Map,
+      start: Int,
+      end: Int,
   ): Unit =
     val keyValues = keys.values
     val valueValues = values.values
-    val rows = keys.length
-    var row = 0
-    while (row < rows) {
+    var row = start
+    while (row < end) {
       val value = valueValues(row)
       if (keep(value)) then table.addSum(keyValues(row), map(value).toLong)
       row += 1
@@ -251,14 +366,15 @@ object HashAggregate:
       filtered: Boolean,
       keep: ColumnKernel.Int32Predicate,
       map: ColumnKernel.Int32Map,
+      start: Int,
+      end: Int,
   ): Unit =
     val keyValues = keys.values
     val keyWords = keys.validity.words
     val valueValues = values.values
     val valueWords = values.validity.words
-    val rows = keys.length
-    var row = 0
-    while (row < rows) {
+    var row = start
+    while (row < end) {
       if (Validity.isSet(keyWords, row)) then
         val valuePresent = Validity.isSet(valueWords, row)
         if (filtered) then
@@ -284,12 +400,13 @@ object HashAggregate:
       values: Int32Column,
       steps: Array[PairStep],
       slot: PairSlot,
+      start: Int,
+      end: Int,
   ): Unit =
     val keyValues = keys.values
     val valueValues = values.values
-    val rows = keys.length
-    var row = 0
-    while (row < rows) {
+    var row = start
+    while (row < end) {
       applySteps(keyValues(row), valueValues(row), steps, slot)
       if (slot.kept) then table.addSum(slot.key, slot.value.toLong)
       row += 1
@@ -301,14 +418,15 @@ object HashAggregate:
       values: Int32Column,
       steps: Array[PairStep],
       slot: PairSlot,
+      start: Int,
+      end: Int,
   ): Unit =
     val keyValues = keys.values
     val keyWords = keys.validity.words
     val valueValues = values.values
     val valueWords = values.validity.words
-    val rows = keys.length
-    var row = 0
-    while (row < rows) {
+    var row = start
+    while (row < end) {
       if (Validity.isSet(keyWords, row) && Validity.isSet(valueWords, row)) then
         applySteps(keyValues(row), valueValues(row), steps, slot)
         if (slot.kept) then table.addSum(slot.key, slot.value.toLong)
@@ -437,6 +555,8 @@ object HashAggregate:
     private val hasMin: Boolean = aggs.min
     private val hasMax: Boolean = aggs.max
 
+    def currentCapacity: Int = capacity
+
     def addSum(key: Int, value: Long): Unit =
       accumulate(ensure(key), value)
 
@@ -514,24 +634,46 @@ object HashAggregate:
         rows,
       )
 
+    /**
+     * Drops every group this morsel inserted. Walking `slots` leaves the rest of the arrays alone.
+     * `compact` publishes count, min, and max once a slot is seen, and the sum scan marks a slot
+     * seen without rewriting those measures, so a reused slot must not keep them. Only the sum
+     * table is reused today.
+     */
+    def release(): Unit =
+      var cursor = 0
+      val rows = occupied
+      while (cursor < rows) {
+        val slot = slots(cursor)
+        state(slot) = 0
+        seen(slot) = 0
+        if (hasSum) then sums(slot) = 0L
+        if (hasCount) then counts(slot) = 0L
+        if (hasMin) then mins(slot) = 0
+        if (hasMax) then maxs(slot) = 0
+        cursor += 1
+      }
+      occupied = 0
+      missing = 0
+
     private def notice(slot: Int): Unit =
       if (seen(slot) == 0) then
         seen(slot) = 1
         missing -= 1
 
+    /** Doubles the table and reinserts `slots(0 until occupied)`, preserving first-seen order. */
     private def grow(): Unit =
       if (capacity >= ColumnHash.MaxCapacity) then
         throw new IllegalStateException(
           s"hash aggregate table is already at capacity $capacity",
         )
       val oldKeys = keys
-      val oldState = state
       val oldSums = sums
       val oldCounts = counts
       val oldMins = mins
       val oldMaxs = maxs
       val oldSeen = seen
-      val oldCapacity = capacity
+      val live = occupied
       capacity = capacity << 1
       mask = capacity - 1
       limit = capacity >>> 1
@@ -543,20 +685,20 @@ object HashAggregate:
       maxs = if (hasMax) new Array[Int](capacity) else Array.emptyIntArray
       seen = new Array[Byte](capacity)
       occupied = 0
-      var slot = 0
-      while (slot < oldCapacity) {
-        if (oldState(slot) != 0) then
-          val placed = locate(oldKeys(slot))
-          state(placed) = 1
-          keys(placed) = oldKeys(slot)
-          if (hasSum) then sums(placed) = oldSums(slot)
-          if (hasCount) then counts(placed) = oldCounts(slot)
-          if (hasMin) then mins(placed) = oldMins(slot)
-          if (hasMax) then maxs(placed) = oldMaxs(slot)
-          seen(placed) = oldSeen(slot)
-          slots(occupied) = placed
-          occupied += 1
-        slot += 1
+      var cursor = 0
+      while (cursor < live) {
+        val oldSlot = slots(cursor)
+        val placed = locate(oldKeys(oldSlot))
+        state(placed) = 1
+        keys(placed) = oldKeys(oldSlot)
+        if (hasSum) then sums(placed) = oldSums(oldSlot)
+        if (hasCount) then counts(placed) = oldCounts(oldSlot)
+        if (hasMin) then mins(placed) = oldMins(oldSlot)
+        if (hasMax) then maxs(placed) = oldMaxs(oldSlot)
+        seen(placed) = oldSeen(oldSlot)
+        slots(cursor) = placed
+        occupied += 1
+        cursor += 1
       }
 
     private def locate(key: Int): Int =
