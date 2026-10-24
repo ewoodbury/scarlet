@@ -54,7 +54,7 @@ object MaterialisationStudy:
     Vector(
       ("encode", "copiedIntPairs"),
       ("partial", "range+sumInt32"),
-      ("merge", "concat+sumInt64"),
+      ("merge", "mergeSumPartials"),
       ("exchange", "partitionAll"),
       ("final", "sumInt64+ColumnReduce"),
     )
@@ -389,8 +389,10 @@ object MaterialisationStudy:
         steps = Vector.empty[PairStep],
       )
     }
+    // Two input batches, each with many morsels. The fold publishes one partial per batch: 2
+    // batches and 2 visits. Concatenation used to add one batch per input batch (4 batches).
     val (merged, mergeMark) = meter {
-      PartialCombine.mergeMorsels(split._1, split._2, threads, mergeSum)
+      GroupedSumKernel.mergePartials(split._1, split._2, threads)
     }
     val (buckets, exchangeMark) = meter {
       HashExchange.partitionAll(
@@ -417,7 +419,7 @@ object MaterialisationStudy:
       batchSize = batchSize,
       steps = Vector.empty[PairStep],
     )
-    val merged = PartialCombine.mergeMorsels(sizes, partials, threads, mergeSum)
+    val merged = GroupedSumKernel.mergePartials(sizes, partials, threads)
     val buckets = HashExchange.partitionAll(
       merged,
       keyOrdinal = 0,

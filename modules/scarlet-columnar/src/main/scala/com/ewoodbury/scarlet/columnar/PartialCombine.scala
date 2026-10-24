@@ -56,6 +56,30 @@ object PartialCombine:
         if (piece.combine) then merge(batch) else batch
       }
 
+  /**
+   * One group of partials per input batch, in batch order. `sizes` counts the partials of each
+   * batch. The partials are not concatenated.
+   */
+  private[columnar] def groupPartials(
+      sizes: Vector[Int],
+      partials: Vector[ColumnBatch],
+  ): Vector[Vector[ColumnBatch]] =
+    val seed: (Vector[ColumnBatch], Vector[Vector[ColumnBatch]]) =
+      (partials, Vector.empty[Vector[ColumnBatch]])
+    val (left, groups) = sizes.foldLeft(seed) { (state, size) =>
+      val (rest, acc) = state
+      require(size > 0, s"morsel group size must be positive, got $size")
+      val (group, tail) = rest.splitAt(size)
+      if (group.length != size) then
+        throw new IllegalArgumentException(
+          s"morsel group has ${group.length} partials, expected $size",
+        )
+      (tail, acc :+ group)
+    }
+    if (left.nonEmpty) then
+      throw new IllegalArgumentException(s"${left.length} partials were not grouped")
+    groups
+
   private final case class Piece(batch: ColumnBatch, combine: Boolean)
 
   private def gather(sizes: Vector[Int], partials: Vector[ColumnBatch]): Vector[Piece] =

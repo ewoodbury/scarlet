@@ -6,8 +6,8 @@ package com.ewoodbury.scarlet.columnar
  * Each batch becomes ranges of `batchSize` rows. The key and value columns stay where they are; a
  * worker reads `[start, start + length)` and compacts one partial. One [[HashAggregate]] table per
  * worker is cleared before the next range and dropped when the action returns. The partials of one
- * input batch are merged with `sumInt64`, matching [[PartialCombine.mergeMorsels]]. The result is
- * one partial per input batch. [[ColumnPipeline]] exchanges those partials.
+ * input batch are folded by [[HashAggregate.mergeSumPartials]] into one partial. A batch that is
+ * already a single range keeps that partial. [[ColumnPipeline]] exchanges the partials.
  *
  * An empty input returns an empty vector. `numPartitions` is checked here so a direct caller still
  * rejects a non-positive partition count. One scheduler task covers one range, so a morsel still
@@ -88,8 +88,26 @@ private[scarlet] object GroupedSumKernel:
   /** Key column, value column, and the row range to scan. Neither column is copied. */
   private final case class Span(keys: Int32Column, values: Int32Column, start: Int, length: Int)
 
-  private val mergeSum: ColumnBatch => ColumnBatch =
-    batch => HashAggregate.sumInt64(batch, keyOrdinal = 0, valueOrdinal = 1)
+  /**
+   * One partial per input batch. A group of one partial stays as it is. Wider groups fold through
+   * [[HashAggregate.mergeSumPartials]].
+   */
+  private[scarlet] def mergePartials(
+      sizes: Vector[Int],
+      partials: Vector[ColumnBatch],
+      parallelism: Int,
+  ): Vector[ColumnBatch] =
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    val groups = PartialCombine.groupPartials(sizes, partials)
+    MorselScheduler.map(groups, parallelism)((_, group) => combine(group))
+
+  private def combine(group: Vector[ColumnBatch]): ColumnBatch =
+    if (group.length > 1) then
+      HashAggregate.mergeSumPartials(group, keyOrdinal = 0, valueOrdinal = 1)
+    else
+      group.headOption.getOrElse {
+        throw new IllegalArgumentException("morsel group is empty")
+      }
 
   /**
    * Runs `body` and then drops this thread's worker table. Ranges inside `body` still share it.
@@ -117,7 +135,7 @@ private[scarlet] object GroupedSumKernel:
     else
       val (sizes, partials) =
         accumulate(batches, keyOrdinal, valueOrdinal, parallelism, batchSize, shape)
-      PartialCombine.mergeMorsels(sizes, partials, parallelism, mergeSum)
+      mergePartials(sizes, partials, parallelism)
 
   private def accumulate(
       batches: Vector[ColumnBatch],
