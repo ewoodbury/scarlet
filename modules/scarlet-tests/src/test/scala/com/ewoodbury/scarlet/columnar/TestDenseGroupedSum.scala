@@ -40,29 +40,30 @@ class TestDenseGroupedSum extends AnyFlatSpec with Matchers:
     DenseSum.classify(keys, start = 0, length = 3, DenseSum.cap(4)) shouldBe DenseSum.Wide
   }
 
-  "budget" should "derive the cap from 4 MiB of 9-byte slots" in {
-    DenseSum.BytesPerSlot shouldBe 9L
+  "budget" should "derive the cap from 4 MiB of 13-byte slots" in {
+    DenseSum.BytesPerSlot shouldBe 13L
     DenseSum.BudgetBytes shouldBe 4L * 1024L * 1024L
     DenseSum.cap(1) shouldBe (DenseSum.BudgetBytes / DenseSum.BytesPerSlot).toInt
     DenseSum.cap(4) shouldBe (DenseSum.BudgetBytes / (DenseSum.BytesPerSlot * 4L)).toInt
+    (DenseSum.cap(1).toLong * DenseSum.BytesPerSlot) should be <= DenseSum.BudgetBytes
     (4L * 65536L * DenseSum.BytesPerSlot) should be < DenseSum.BudgetBytes
     DenseSum.cap(4) should be >= 65536
+    DenseSum.cap(1) should be > DenseSum.cap(4)
     DenseSum.DirectPrefix shouldBe 65536
     DenseSum.directLimit(DenseSum.cap(1)) shouldBe DenseSum.DirectPrefix
     DenseSum.directLimit(DenseSum.cap(4)) shouldBe DenseSum.DirectPrefix
     DenseSum.directLimit(3) shouldBe 3
   }
 
-  "cap" should "index a range of denseCap and hash a range one past it" in {
-    val cap = DenseSum.cap(4)
-    val atCap = onePartial(BatchCodec.intPairs(Seq((cap - 1, 3), (0, 4))), parallelism = 4)
-    val overAtFour = onePartial(BatchCodec.intPairs(Seq((cap, 3), (0, 4))), parallelism = 4)
-    val overAtOne = onePartial(BatchCodec.intPairs(Seq((cap, 3), (0, 4))), parallelism = 1)
+  "cap" should "index a window that fits and hash a window one past it" in {
+    val cap = 3
+    val indexed = cappedPartial(Seq((2, 3), (0, 4)), cap)
+    val hashed = cappedPartial(Seq((3, 3), (0, 4)), cap)
 
-    keysOf(atCap) shouldBe Seq(0, cap - 1)
-    sums(Vector(atCap)) shouldBe Map(0 -> Some(4L), cap - 1 -> Some(3L))
-    keysOf(overAtFour) shouldBe Seq(cap, 0)
-    keysOf(overAtOne) shouldBe Seq(0, cap)
+    keysOf(indexed) shouldBe Seq(0, 2)
+    sums(Vector(indexed)) shouldBe Map(0 -> Some(4L), 2 -> Some(3L))
+    keysOf(hashed) shouldBe Seq(3, 0)
+    sums(Vector(hashed)) shouldBe Map(0 -> Some(4L), 3 -> Some(3L))
   }
 
   "sums" should "match the hash table, including a null sum and a rejected key" in {
@@ -209,6 +210,121 @@ class TestDenseGroupedSum extends AnyFlatSpec with Matchers:
     thrown.getMessage should include("dense window")
   }
 
+  it should "reject a wrapped index instead of summing the wrong slot" in {
+    val table = new DenseSum.Accumulator
+    table.prepare(min = Int.MaxValue, range = 2)
+    val batch = BatchCodec.intPairs(Seq((Int.MaxValue, 4), (Int.MinValue, 9)))
+
+    val thrown = intercept[IllegalStateException] {
+      table.addTrusted(int32(batch, 0), int32(batch, 1), start = 0, end = batch.length)
+    }
+    thrown.getMessage should include("dense window")
+    sums(Vector(table.compact())) shouldBe Map(Int.MaxValue -> Some(4L))
+  }
+
+  it should "drop sums from a direct block that rejects its last key" in {
+    val table = new DenseSum.Accumulator
+    val limit = 8
+    val failed = BatchCodec.intPairs(
+      Seq((0, 10), (1, 20), (2, 30), (3, 40), (4, 50), (5, 60), (6, 70), (limit, 80)),
+    )
+    val follow = BatchCodec.intPairs(Seq((0, 1), (1, 1), (6, 1)))
+    table.prepareDirect(limit)
+    table.addDirect(int32(failed, 0), int32(failed, 1), start = 0, end = failed.length) shouldBe
+      false
+    table.abandonDirect()
+    table.prepareDirect(limit)
+    table.addDirect(int32(follow, 0), int32(follow, 1), start = 0, end = follow.length) shouldBe
+      true
+
+    sums(Vector(table.compactDirect())) shouldBe Map(0 -> Some(1L), 1 -> Some(1L), 6 -> Some(1L))
+  }
+
+  it should "write nothing when a later key falls outside the prefix" in {
+    val table = new DenseSum.Accumulator
+    val limit = 8
+    val failed = BatchCodec.intPairs((0 until limit).map(key => (key, 10 + key)) :+ (limit, 80))
+    val follow = BatchCodec.intPairs(Seq((0, 1), (3, 1)))
+    table.prepareDirect(limit)
+    table.addDirect(int32(failed, 0), int32(failed, 1), start = 0, end = failed.length) shouldBe
+      false
+    table.abandonDirect()
+    table.prepareDirect(limit)
+    table.addDirect(int32(follow, 0), int32(follow, 1), start = 0, end = follow.length) shouldBe
+      true
+
+    sums(Vector(table.compactDirect())) shouldBe Map(0 -> Some(1L), 3 -> Some(1L))
+  }
+
+  "failure" should "not carry a rejected direct scan into the next morsel" in {
+    val wide = DenseSum.cap(1)
+    val failed = Seq((0, 10), (1, 20), (2, 30), (3, 40), (4, 50), (5, 60), (6, 70), (wide, 80))
+    val follow = Seq((0, 1), (1, 1), (6, 1))
+    val batch = BatchCodec.intPairs(failed ++ follow)
+    val morsels = partials(batch, batchSize = failed.length)
+    val expected = sums(Vector(HashAggregate.sumInt32(batch, 0, 1)))
+
+    val failedSum = sums(Vector(HashAggregate.sumInt32(BatchCodec.intPairs(failed), 0, 1)))
+    val followSum = sums(Vector(HashAggregate.sumInt32(BatchCodec.intPairs(follow), 0, 1)))
+    morsels match
+      case Vector(first, second) =>
+        sums(Vector(first)) shouldBe failedSum
+        sums(Vector(second)) shouldBe followSum
+      case other => fail(s"expected two partials, got ${other.length}")
+    sums(plain(Vector(batch), parallelism = 1, batchSize = failed.length)) shouldBe expected
+  }
+
+  "publish" should "give each morsel its own key array and validity" in {
+    val rows = Seq((0, 1), (1, 2), (2, 3), (0, 4), (1, 5), (2, 6))
+    partials(BatchCodec.intPairs(rows), batchSize = 3) match
+      case Vector(first, second) =>
+        val leftKeys = int32(first, 0)
+        val rightKeys = int32(second, 0)
+        val leftSums = int64(first, 1)
+        val rightSums = int64(second, 1)
+        leftKeys.values should not be theSameInstanceAs(rightKeys.values)
+        leftKeys.validity should not be theSameInstanceAs(rightKeys.validity)
+        leftSums.validity should not be theSameInstanceAs(rightSums.validity)
+        leftKeys.validity should not be theSameInstanceAs(rightSums.validity)
+        leftSums.values should not be theSameInstanceAs(rightSums.values)
+      case other => fail(s"expected two partials, got ${other.length}")
+  }
+
+  "threads" should "repeat dense sums at four threads" in {
+    val rows = (0 until 128).map(row => (row % 16, row % 7))
+    val batch = BatchCodec.intPairs(rows)
+    val expected = sums(Vector(HashAggregate.sumInt32(batch, 0, 1)))
+    val runs = (0 until 8).map { _ =>
+      sums(plain(Vector(batch), parallelism = 4, batchSize = 8))
+    }
+
+    runs.foreach(_ shouldBe expected)
+  }
+
+  it should "match the hash table when dense and wide morsels share a batch" in {
+    val rows = Seq(
+      (1, 4),
+      (4, 1),
+      (1, 2),
+      (8, 3),
+      (1, 5),
+      (Int.MaxValue, 7),
+      (4, 1),
+      (0, 2),
+      (8, 1),
+      (0, 6),
+      (2, 2),
+      (2, 2),
+    )
+    val batch = BatchCodec.intPairs(rows)
+    val expected = sums(Vector(HashAggregate.sumInt32(batch, 0, 1)))
+    val runs = (0 until 8).map { _ =>
+      sums(plain(Vector(batch), parallelism = 4, batchSize = 4))
+    }
+
+    runs.foreach(_ shouldBe expected)
+  }
+
   "ranges" should "sum a single-row morsel and publish an empty partial for a zero-row batch" in {
     val rows = Seq((2, 5), (2, 1), (-3, 4))
     val batch = BatchCodec.intPairs(rows)
@@ -300,6 +416,22 @@ class TestDenseGroupedSum extends AnyFlatSpec with Matchers:
       keep,
       map,
     )
+
+  private def cappedPartial(rows: Seq[(Int, Int)], denseCap: Int): ColumnBatch =
+    val batch = BatchCodec.intPairs(rows)
+    val (sizes, morsels) = GroupedSumKernel.partialMorsels(
+      Vector(batch),
+      keyOrdinal = 0,
+      valueOrdinal = 1,
+      parallelism = 1,
+      batchSize = math.max(batch.length, 1),
+      steps = Vector.empty[PairStep],
+      denseCap = denseCap,
+    )
+    sizes shouldBe Vector(1)
+    morsels match
+      case Vector(only) => only
+      case other => fail(s"expected one partial, got ${other.length}")
 
   private def onePartial(
       batch: ColumnBatch,

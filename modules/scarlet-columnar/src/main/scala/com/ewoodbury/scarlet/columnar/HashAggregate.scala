@@ -152,8 +152,10 @@ object HashAggregate:
     }
 
   /**
-   * Sums a present range whose keys may sit in `[0, directLimit)`. Returns `None` when a key is
-   * outside that prefix so the caller can classify. A hit emits ascending keys.
+   * Sums a present range whose keys all lie in `[0, directLimit)`. Returns `None` when a key is
+   * outside that prefix, without publishing, so the caller can classify. A hit emits ascending
+   * keys. An index that passed that check and still falls outside the table is a bug: the slots
+   * already written are cleared and the exception propagates.
    */
   private[columnar] def tryDirectSum(
       keys: Int32Column,
@@ -168,14 +170,16 @@ object HashAggregate:
       checkRange(keys, values, start, length)
       val dense = sumWorkers.get().dense
       dense.prepareDirect(limit)
-      // The prefix loop has no handler. A key outside it fails the array check and is classified.
-      try
-        dense.addDirect(keys, values, start, start + length)
-        Some(dense.compactDirect())
-      catch
-        case _: ArrayIndexOutOfBoundsException =>
-          dense.abandonDirect()
-          None
+      val accepted =
+        try dense.addDirect(keys, values, start, start + length)
+        catch
+          case ex: ArrayIndexOutOfBoundsException =>
+            dense.abandonDirect()
+            throw ex
+      if (accepted) then Some(dense.compactDirect())
+      else
+        dense.abandonDirect()
+        None
 
   /**
    * Sums `[start, start + length)` into the worker's direct-index table. `minKey` and `keyRange`

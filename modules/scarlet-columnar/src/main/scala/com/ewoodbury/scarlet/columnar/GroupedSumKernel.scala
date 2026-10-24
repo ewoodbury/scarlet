@@ -75,10 +75,42 @@ private[scarlet] object GroupedSumKernel:
       batchSize: Int,
       steps: Vector[PairStep],
   ): (Vector[Int], Vector[ColumnBatch]) =
+    partialMorsels(
+      batches,
+      keyOrdinal,
+      valueOrdinal,
+      parallelism,
+      batchSize,
+      steps,
+      DenseSum.cap(parallelism),
+    )
+
+  /**
+   * [[partialMorsels]] with an explicit window cap. Tests pass a small cap so the fit-or-hash
+   * boundary does not allocate the production tables.
+   */
+  private[columnar] def partialMorsels(
+      batches: Vector[ColumnBatch],
+      keyOrdinal: Int,
+      valueOrdinal: Int,
+      parallelism: Int,
+      batchSize: Int,
+      steps: Vector[PairStep],
+      denseCap: Int,
+  ): (Vector[Int], Vector[ColumnBatch]) =
     finishing {
       require(parallelism > 0, s"parallelism must be positive, got $parallelism")
       require(batchSize > 0, s"batch size must be positive, got $batchSize")
-      accumulate(batches, keyOrdinal, valueOrdinal, parallelism, batchSize, shapeOf(steps))
+      require(denseCap > 0, s"dense cap must be positive, got $denseCap")
+      accumulate(
+        batches,
+        keyOrdinal,
+        valueOrdinal,
+        parallelism,
+        batchSize,
+        shapeOf(steps),
+        denseCap,
+      )
     }
 
   private sealed trait Shape
@@ -134,7 +166,15 @@ private[scarlet] object GroupedSumKernel:
     if (batches.isEmpty) then Vector.empty
     else
       val (sizes, partials) =
-        accumulate(batches, keyOrdinal, valueOrdinal, parallelism, batchSize, shape)
+        accumulate(
+          batches,
+          keyOrdinal,
+          valueOrdinal,
+          parallelism,
+          batchSize,
+          shape,
+          DenseSum.cap(parallelism),
+        )
       PartialCombine.mergeMorsels(sizes, partials, parallelism, mergeSum)
 
   private def accumulate(
@@ -144,9 +184,9 @@ private[scarlet] object GroupedSumKernel:
       parallelism: Int,
       batchSize: Int,
       shape: Shape,
+      denseCap: Int,
   ): (Vector[Int], Vector[ColumnBatch]) =
     val groups = batches.map(batch => spans(batch, keyOrdinal, valueOrdinal, batchSize))
-    val denseCap = DenseSum.cap(parallelism)
     val partials = MorselScheduler.map(groups.flatten, parallelism) { (_, span) =>
       scan(span, shape, denseCap)
     }
