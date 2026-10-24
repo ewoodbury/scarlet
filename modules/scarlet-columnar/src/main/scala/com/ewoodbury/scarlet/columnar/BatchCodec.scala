@@ -83,11 +83,17 @@ object BatchCodec:
     batch(Float64Column.fromNullable(values))
 
   /**
-   * An `ArraySeq.ofBoolean` is copied from its primitive array. Any other iterable, including a
-   * `Seq[Boolean]`, is filled from its iterator. An owned partition array is [[copiedBools]]: this
-   * module does not see that holder. The column stores bytes and does not retain `values`.
+   * An `ArraySeq.ofBoolean` is copied from its primitive array. Any other sequence is filled from
+   * its iterator. The `Seq` signature stays for callers compiled against it. [[boolsFromIterable]]
+   * is the same encoding for a non-sequence iterable. An owned partition array is [[copiedBools]]:
+   * this module does not see that holder. The column stores bytes and does not retain `values`.
    */
-  def bools(values: Iterable[Boolean]): ColumnBatch = values match
+  def bools(values: Seq[Boolean]): ColumnBatch = boolsFromIterable(values)
+
+  /** Same encoding as the [[Seq]] overload, for a non-sequence iterable. */
+  def bools(values: Iterable[Boolean]): ColumnBatch = boolsFromIterable(values)
+
+  private def boolsFromIterable(values: Iterable[Boolean]): ColumnBatch = values match
     case array: ArraySeq.ofBoolean => copiedBools(array.unsafeArray)
     case other => boolBatch(fillBoolBytes(other))
 

@@ -27,10 +27,17 @@ class TestBoolColumnar extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ScarletConf.set(originalConf)
     ()
 
-  "boolean plans" should "match the row path for a million rows, a short array, and an empty array" in {
-    check(million, 4)
+  "boolean plans" should "match the row path for a short array and an empty array" in {
+    check(Array.tabulate(32)(index => (index % 3) != 0), 4)
     check(Array(true, false, true, false, true), 3)
     check(Array.empty[Boolean], 2)
+  }
+
+  it should "match a million-row filter count once" in {
+    val rows = million
+    val expected = rows.count(value => value).toLong
+    val counted = agree(DistCollection.ofBools(rows, 4).filter(value => value).count())
+    counted shouldBe expected
   }
 
   it should "nest each filter and keep a five-filter chain on the columnar path" in {
@@ -44,7 +51,8 @@ class TestBoolColumnar extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     shape(five) shouldBe "Filter(Filter(Filter(Filter(Filter(Scan)))))"
     agree(one.collect().toVector) shouldBe Vector(true, true)
     agree(two.collect().toVector) shouldBe Vector.empty[Boolean]
-    agree(five.count()) shouldBe 2L
+    val fiveCount = agree(five.count())
+    fiveCount shouldBe 2L
     agree(five.take(1)) shouldBe List(true)
   }
 
@@ -111,6 +119,26 @@ class TestBoolColumnar extends AnyFlatSpec with Matchers with BeforeAndAfterEach
 
   it should "refuse a Boolean to Int map and run it once per element" in {
     refuseMap(Array(true, false, true), value => if (value) 1 else 0, Seq(1, 0, 1))
+  }
+
+  it should "throw when a boolean column reaches the element pipeline" in {
+    val source = DistCollection.ofBools(Array(true, false), 1).plan
+    val plan = Plan.FilterOp(
+      Plan.FilterOp(source, (value: Boolean) => value),
+      (value: Boolean) => value,
+    )
+    val partitions = source match
+      case Plan.Source(stored, _) => stored
+      case other => fail(s"expected a source, got $other")
+    val pipeline = PhysicalOp.Pipeline(PhysicalOp.Scan(PhysicalOp.Kind.Bools, partitions), 2)
+
+    ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some("Filter(Filter(Scan))")
+    ColumnarPlanner.tryRun(plan).isDefined shouldBe true
+
+    val thrown = the[IllegalStateException] thrownBy {
+      ColumnarPlanner.runLowered(plan, pipeline)
+    }
+    thrown.getMessage shouldBe "pipeline expects an int, long, float, or string column"
   }
 
   it should "accept filter, count, and take, and refuse map and sum" in {

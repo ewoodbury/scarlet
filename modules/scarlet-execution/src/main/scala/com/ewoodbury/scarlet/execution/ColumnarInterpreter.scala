@@ -248,7 +248,7 @@ private[execution] object ColumnarInterpreter:
             Columns.Bools(onEach(parts)(batch => BoolPipeline.filter(batch, predicate)))
           case Columns.Pairs(_) | Columns.Triples(_) =>
             throw new IllegalStateException(
-              "columnar element filter expects ints, longs, floats, or strings",
+              s"columnar element filter expects ${elementColumnList(includeBooleans = true)}",
             )
       case PhysicalOp.Slot.Row =>
         val keep = predicate.asInstanceOf[((Int, Int)) => Boolean]
@@ -307,7 +307,9 @@ private[execution] object ColumnarInterpreter:
         ColumnKernel.projectUtf8(batch, 0, value => ColumnarPlanner.stringResult(fn(value)))
       })
     case Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) =>
-      throw new IllegalStateException("columnar map expects ints, longs, floats, or strings")
+      throw new IllegalStateException(
+        s"columnar map expects ${elementColumnList(includeBooleans = false)}",
+      )
 
   private[execution] def pairsOf(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.Pairs(parts) if parts.nonEmpty => parts
@@ -324,6 +326,14 @@ private[execution] object ColumnarInterpreter:
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Pairs(_) |
         Columns.Strings(_) | Columns.Bools(_) =>
       throw new IllegalStateException("columnar op expected int triples")
+
+  /**
+   * Kinds an element filter or map accepts. A filter accepts booleans. A map does not: a boolean
+   * project is refused before execution, and the map arm is the guard if one arrives anyway.
+   */
+  private def elementColumnList(includeBooleans: Boolean): String =
+    if (includeBooleans) then "ints, longs, floats, booleans, or strings"
+    else "ints, longs, floats, or strings"
 
   private def onEach(
       parts: Vector[ColumnBatch],

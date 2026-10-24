@@ -127,14 +127,20 @@ object ColumnarPlanner:
   def tryRun[A](plan: Plan[A]): Option[Seq[Partition[A]]] =
     accepted(plan) match
       case None => None
-      case Some(op) =>
-        try
-          Some(
-            ColumnarInterpreter
-              .decode(ColumnarInterpreter.interpret(plan, op))
-              .asInstanceOf[Seq[Partition[A]]],
-          )
-        catch case _: ClassCastException => None
+      case Some(op) => runLowered(plan, op)
+
+  /**
+   * Decode a tree [[lower]] would hand to [[tryRun]]. `ClassCastException` is the row-path
+   * fallback. Any other failure, including a boolean column in the element pipeline, propagates.
+   */
+  private[execution] def runLowered[A](plan: Plan[A], op: PhysicalOp): Option[Seq[Partition[A]]] =
+    try
+      Some(
+        ColumnarInterpreter
+          .decode(ColumnarInterpreter.interpret(plan, op))
+          .asInstanceOf[Seq[Partition[A]]],
+      )
+    catch case _: ClassCastException => None
 
   /**
    * Run a partition-preserving accepted plan only until its first `n` results are available. Plans

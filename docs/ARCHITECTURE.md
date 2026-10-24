@@ -103,9 +103,10 @@ and decodes only the requested prefix. The contract checks an int `Pipeline2(Sca
 
 Boolean columns support filter, count, and take. A filter chain is one `Filter` node per step, in
 source order, for any number of filters. Boolean has no arithmetic and no `sum`. A Boolean map is
-refused, including `Boolean => Boolean`: `Function1` has no `apply$mcZZ$sp`, so that map cannot be
-distinguished from `Boolean => Int` without calling the function. The planner does not call it.
-`partitioning` is `None`, and the row path runs the function once per element.
+refused, including `Boolean => Boolean` and a map after a filter: `Function1` has no
+`apply$mcZZ$sp`, so that map cannot be distinguished from `Boolean => Int` without calling the
+function. The planner does not call it. `partitioning` is `None`. The row path runs a map on the
+source once per element, and a map after a filter once per element the filter keeps.
 
 | Operation | Columnar |
 |---|---|
@@ -128,7 +129,7 @@ the pair type, such as `(Int, Int) => (Long, Int)`, is excluded: `partitioning`,
 `tryGroupedSum` stay on the row path. The structural peel label is still
 `GroupedSum(MapPair(Scan))`.
 
-These 49 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+These 50 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
 `sortBy`, map on join triples, a general tuple filter on join triples, non-Int `mapValues`,
 string/double pair projection or pair filters, string/double-key `groupByKey`, `reduceByKey`, and
@@ -137,8 +138,9 @@ strings, empty generic sources without a type descriptor, and
 element maps that do not preserve the column type.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then
 `toString`, and a type-changing map inside a three-step chain), a `Long` mapped to `Int` or
-`String`, a `Double` mapped to `Int`, a `Boolean` mapped to `Boolean` or to `Int`, and a
-`String` mapped through `length`, plus a pair map from `(Int, Int)` to `(Long, Int)`. A
+`String`, a `Double` mapped to `Int`, a `Boolean` mapped to `Boolean` or to `Int`, a boolean
+filter followed by a map, and a `String` mapped through `length`, plus a pair map from
+`(Int, Int)` to `(Long, Int)`. A
 type-changing step refuses the whole element chain, so the plan stays on the row path and reports
 no columnar layout. Primitive source factories carry a descriptor, which supplies the type for
 empty partitions; when values are present, the planner still requires data inference to agree with

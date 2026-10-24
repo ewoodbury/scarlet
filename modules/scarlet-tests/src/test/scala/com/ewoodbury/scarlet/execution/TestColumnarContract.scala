@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -29,7 +31,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
     accepted.size shouldBe 160
-    excluded.size shouldBe 49
+    excluded.size shouldBe 50
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -109,6 +111,10 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       .plan
     ColumnarPlanner.lower(stringPipeline).map(_.shape) shouldBe Some("Project(Filter(Scan))")
     ColumnarPlanner.tryTake(stringPipeline, 1) shouldBe Some(Seq("RED"))
+  }
+
+  it should "refuse a boolean project after a filter and run the mapper once per survivor" in {
+    booleanFilterThenMap.observe()
   }
 
   it should "keep a type-changing element map on the row path" in {
@@ -255,7 +261,11 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       longProbe: Option[() => Option[String]] = None,
   )
 
-  private final case class ExcludedCase(label: String, plan: Plan[_])
+  private final case class ExcludedCase(
+      label: String,
+      plan: Plan[_],
+      observe: () => Unit = () => (),
+  )
 
   private enum PlanNode:
     case MapPartitions, Repartition, Coalesce, PartitionBy, Source, Map, Filter, FlatMap, Distinct
@@ -539,6 +549,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         "boolean map to int",
         Plan.MapOp(boolSource, (value: Boolean) => if (value) 1 else 0),
       ),
+      booleanFilterThenMap,
       ExcludedCase("int map to long", Plan.MapOp(intSource, (value: Int) => value.toLong)),
       ExcludedCase("long map to int", Plan.MapOp(longSource, (value: Long) => value.toInt)),
       ExcludedCase("long map to string", Plan.MapOp(longSource, (value: Long) => value.toString)),
@@ -570,6 +581,37 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
           (value: String) => value.nonEmpty,
         ),
       ),
+    )
+
+  /**
+   * A boolean filter, then a project. The project is the second element step. `lower` refuses the
+   * chain, so `partitioning` and `tryRun` are empty and do not call the mapper. The row path runs
+   * it once for each element the filter keeps.
+   */
+  private def booleanFilterThenMap: ExcludedCase =
+    val keep = (value: Boolean) => value
+    val hits = new AtomicInteger
+    val mapped = Plan.MapOp(
+      Plan.FilterOp(boolSource, keep),
+      (value: Boolean) => {
+        hits.incrementAndGet()
+        !value
+      },
+    )
+    val elements = boolSource match
+      case Plan.Source(partitions, _) => partitions.flatMap(_.data)
+      case other => fail(s"expected a boolean source, got $other")
+    val expected = elements.filter(keep).map(value => !value)
+    ExcludedCase(
+      "boolean filter then map",
+      mapped,
+      () => {
+        ColumnarPlanner.partitioning(mapped) shouldBe Option.empty[PartitioningInfo]
+        ColumnarPlanner.tryRun(mapped) shouldBe Option.empty[Seq[Partition[Boolean]]]
+        hits.get() shouldBe 0
+        DistCollection(mapped).collect() shouldBe expected
+        hits.get() shouldBe expected.length
+      },
     )
 
   /**
