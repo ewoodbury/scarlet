@@ -15,15 +15,15 @@ import scala.annotation.tailrec
  */
 object MorselScheduler:
 
-  def map[A](morsels: Vector[ColumnBatch], parallelism: Int)(
-      worker: (Int, ColumnBatch) => A,
+  def map[M, A](morsels: Vector[M], parallelism: Int)(
+      worker: (Int, M) => A,
   ): Vector[A] =
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     if (morsels.isEmpty) then Vector.empty
     else if (parallelism == 1 || morsels.length == 1) then
-      morsels.iterator.zipWithIndex.map { (batch, index) =>
+      morsels.iterator.zipWithIndex.map { (morsel, index) =>
         ColumnMetrics.visit()
-        worker(index, batch)
+        worker(index, morsel)
       }.toVector
     else
       val workers = math.min(parallelism, morsels.length)
@@ -51,24 +51,24 @@ object MorselScheduler:
       }.toVector
 
   @tailrec
-  private def drain[A](
+  private def drain[M, A](
       id: Int,
       deques: Array[ConcurrentLinkedDeque[Int]],
       slots: Array[AtomicReference[Option[A]]],
       failure: AtomicReference[Option[Throwable]],
-      morsels: Vector[ColumnBatch],
-      worker: (Int, ColumnBatch) => A,
+      morsels: Vector[M],
+      worker: (Int, M) => A,
   ): Unit =
     if (failure.get().isEmpty) then
       take(id, deques, failure) match
         case None => ()
         case Some(index) =>
-          val batch = morsels.lift(index).getOrElse {
+          val morsel = morsels.lift(index).getOrElse {
             throw new IllegalArgumentException(s"missing morsel $index")
           }
           try
             ColumnMetrics.visit()
-            slots(index).set(Some(worker(index, batch)))
+            slots(index).set(Some(worker(index, morsel)))
           catch case thrown: Throwable => failure.compareAndSet(None, Some(thrown))
           drain(id, deques, slots, failure, morsels, worker)
 

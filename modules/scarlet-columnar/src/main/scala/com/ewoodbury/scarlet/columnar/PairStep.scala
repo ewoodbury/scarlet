@@ -38,3 +38,21 @@ object PairStep:
           loop(projected._1, projected._2, tail)
 
     loop(key, value, steps)
+
+  /** `Some` when every step is a value filter. The predicates stay in source order. */
+  private[columnar] def valueKeeps(steps: Vector[PairStep]): Option[Vector[Int => Boolean]] =
+    val seed: Option[Vector[Int => Boolean]] = Some(Vector.empty[Int => Boolean])
+    steps.foldLeft(seed) { (acc, step) =>
+      (acc, step) match
+        case (Some(predicates), KeepValue(predicate)) => Some(predicates :+ predicate)
+        case _ => None
+    }
+
+  private[columnar] def keepValues(
+      predicates: Vector[Int => Boolean],
+  ): ColumnKernel.Int32Predicate =
+    value => predicates.forall(predicate => predicate(value))
+
+  /** Leaves the value unchanged. Shared by the keep/map sum and the value-filter chain. */
+  private[columnar] object PassValue extends ColumnKernel.Int32Map:
+    def apply(value: Int): Int = value
