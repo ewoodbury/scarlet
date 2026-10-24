@@ -14,9 +14,10 @@ import java.util.Arrays
  * rows are all dropped is absent. A `keep` that accepts every present value is therefore not the
  * plain overload.
  *
- * `sumInt32` reads `Int32` values and writes an `Int64` sum. `sumInt64` reads `Int64` values.
- * Partial sums merge by calling `sumInt64` on the sum column. Partial counts merge by calling
- * `sumInt64` on the count column, not by calling `count` again. Min and max are not merged here.
+ * `sumInt32` reads `Int32` values and writes an `Int64` sum. `sumInt64` reads `Int64` values. One
+ * batch of partial sums, or of partial counts, merges by calling `sumInt64` on that column.
+ * Several partial-sum batches fold through [[mergeSumPartials]] without being concatenated. Min
+ * and max are not merged here.
  *
  * Output order is first-seen order, not sorted. Sums do not wrap at `Int` width. The value map
  * itself is still `Int` arithmetic.
@@ -150,9 +151,9 @@ object HashAggregate:
     }
 
   /**
-   * Sums an `Int64` column into an `Int64` sum. This is the merge for partial sums, and for
-   * partial counts when `valueOrdinal` points at the count column. A null value does not update
-   * the sum, and the group still exists.
+   * Sums an `Int64` column into an `Int64` sum. This merges one batch of partial sums, and partial
+   * counts when `valueOrdinal` points at the count column. A null value does not update the sum,
+   * and the group still exists. Several partial-sum batches use [[mergeSumPartials]].
    */
   def sumInt64(batch: ColumnBatch, keyOrdinal: Int, valueOrdinal: Int): ColumnBatch =
     val keys = ColumnHash.int32At(batch, keyOrdinal)
@@ -165,6 +166,36 @@ object HashAggregate:
         scanSumLongDense(table, keys, values)
       else scanSumLongSparse(table, keys, values)
       table.compact()
+
+  /**
+   * Folds partial-sum batches into one partial, in order. The table starts at
+   * `tableSize(2 * widest)`, where `widest` is the longest partial, and `grow` covers a later
+   * partial that introduces more groups. Each partial picks its own scan: dense only when that
+   * partial's key and value columns are fully present, otherwise sparse. A null sum is not read as
+   * zero. A group that is null and then valued becomes valued; the reverse stays valued; a group
+   * that is only ever null stays present with a null sum.
+   */
+  private[columnar] def mergeSumPartials(
+      partials: Vector[ColumnBatch],
+      keyOrdinal: Int,
+      valueOrdinal: Int,
+  ): ColumnBatch =
+    if (partials.isEmpty) then emptySum
+    else
+      val batches = partials.toArray
+      val table = new GroupTable(mergeSeed(widestPartial(batches)), SumOnly)
+      var index = 0
+      val count = batches.length
+      while (index < count) {
+        foldSumPartial(table, batches(index), keyOrdinal, valueOrdinal)
+        index += 1
+      }
+      noteMergeCapacity(table.currentCapacity)
+      table.compact()
+
+  /** Slot count of the table the last [[mergeSumPartials]] on this thread finished with. */
+  private[columnar] def mergeSumTableCapacity: Int =
+    mergeSlots.get().capacity
 
   /** Keeps a group whose values are all null. Sum, min, and max are null, and count is 0. */
   def aggregateInt32(
@@ -247,6 +278,44 @@ object HashAggregate:
 
   private val sumWorkers: ThreadLocal[SumWorker] = new ThreadLocal[SumWorker]:
     override def initialValue(): SumWorker = new SumWorker
+
+  private final class MergeSlots:
+    var capacity: Int = 0
+
+  private val mergeSlots: ThreadLocal[MergeSlots] = new ThreadLocal[MergeSlots]:
+    override def initialValue(): MergeSlots = new MergeSlots
+
+  private def noteMergeCapacity(capacity: Int): Unit =
+    mergeSlots.get().capacity = capacity
+
+  private def widestPartial(partials: Array[ColumnBatch]): Int =
+    var widest = 0
+    var index = 0
+    val count = partials.length
+    while (index < count) {
+      val rows = partials(index).length
+      if (rows > widest) then widest = rows
+      index += 1
+    }
+    widest
+
+  private def mergeSeed(widest: Int): Int =
+    val doubled = if (widest > (1 << 28)) then Int.MaxValue else widest << 1
+    ColumnHash.tableSize(doubled)
+
+  private def foldSumPartial(
+      table: GroupTable,
+      partial: ColumnBatch,
+      keyOrdinal: Int,
+      valueOrdinal: Int,
+  ): Unit =
+    val keys = ColumnHash.int32At(partial, keyOrdinal)
+    val values = ColumnHash.int64At(partial, valueOrdinal)
+    require(keys.length == values.length, "key and value columns differ in length")
+    if (keys.length != 0) then
+      if (ColumnHash.fullyPresent(keys) && ColumnHash.fullyPresent(values)) then
+        scanSumLongDense(table, keys, values, remember = true)
+      else scanSumLongSparse(table, keys, values)
 
   /**
    * Drops this thread's reused sum table. [[GroupedSumKernel]] calls this when the action returns.
@@ -454,15 +523,13 @@ object HashAggregate:
     slot.value = value
     slot.kept = kept
 
-  private def scanSumLongDense(table: GroupTable, keys: Int32Column, values: Int64Column): Unit =
-    val keyValues = keys.values
-    val valueValues = values.values
-    val rows = keys.length
-    var row = 0
-    while (row < rows) {
-      table.addSum(keyValues(row), valueValues(row))
-      row += 1
-    }
+  private def scanSumLongDense(
+      table: GroupTable,
+      keys: Int32Column,
+      values: Int64Column,
+      remember: Boolean = false,
+  ): Unit =
+    table.addPresentSums(keys.values, values.values, keys.length, remember)
 
   private def scanSumLongSparse(table: GroupTable, keys: Int32Column, values: Int64Column): Unit =
     val keyValues = keys.values
@@ -550,6 +617,10 @@ object HashAggregate:
       if (aggs.max) new Array[Int](initialCapacity) else Array.emptyIntArray
     private var seen: Array[Byte] = new Array[Byte](initialCapacity)
     private var slots: Array[Int] = new Array[Int](16)
+    // Slots for the last dense key sequence. Valid until grow or release moves or clears groups.
+    private var cachedKeys: Array[Int] = Array.emptyIntArray
+    private var cachedSlots: Array[Int] = Array.emptyIntArray
+    private var cachedRows: Int = 0
     private val hasSum: Boolean = aggs.sum
     private val hasCount: Boolean = aggs.count
     private val hasMin: Boolean = aggs.min
@@ -560,19 +631,103 @@ object HashAggregate:
     def addSum(key: Int, value: Long): Unit =
       accumulate(ensure(key), value)
 
+    /**
+     * Adds a present value for every row. A key that is already in the table updates its sum in
+     * this loop. A new key goes through [[ensure]], which may grow the table. When `remember` is
+     * set, a later call with the same key sequence adds through the slots this probe found.
+     */
+    def addPresentSums(
+        keyValues: Array[Int],
+        valueValues: Array[Long],
+        rows: Int,
+        remember: Boolean,
+    ): Unit =
+      if (remember && rows == cachedRows && sameKeys(cachedKeys, keyValues, rows)) then
+        addCachedSums(valueValues, rows)
+      else probePresentSums(keyValues, valueValues, rows, remember)
+
+    private def addCachedSums(valueValues: Array[Long], rows: Int): Unit =
+      val sumSlots = sums
+      val placed = cachedSlots
+      var row = 0
+      while (row < rows) {
+        sumSlots(placed(row)) += valueValues(row)
+        row += 1
+      }
+
+    private def probePresentSums(
+        keyValues: Array[Int],
+        valueValues: Array[Long],
+        rows: Int,
+        remember: Boolean,
+    ): Unit =
+      val placed = if (remember) new Array[Int](rows) else Array.emptyIntArray
+      val started = capacity
+      var keySlots = keys
+      var occupiedState = state
+      var sumSlots = sums
+      var seenSlots = seen
+      var probeMask = mask
+      val trackSeen = missing != 0
+      var stable = true
+      var row = 0
+      while (row < rows) {
+        val key = keyValues(row)
+        var slot = ColumnHash.mix(key) & probeMask
+        while (occupiedState(slot) != 0 && keySlots(slot) != key)
+          slot = (slot + 1) & probeMask
+        if (occupiedState(slot) != 0) then
+          sumSlots(slot) += valueValues(row)
+          if (trackSeen && seenSlots(slot) == 0) then
+            seenSlots(slot) = 1
+            missing -= 1
+          if (remember && stable) then placed(row) = slot
+        else
+          val inserted = ensure(key)
+          accumulate(inserted, valueValues(row))
+          if (capacity != started) then stable = false
+          if (remember && stable) then placed(row) = inserted
+          if (capacity != started) then
+            keySlots = keys
+            occupiedState = state
+            sumSlots = sums
+            seenSlots = seen
+            probeMask = mask
+        row += 1
+      }
+      if (remember && stable) then
+        cachedKeys = Arrays.copyOf(keyValues, rows)
+        cachedSlots = placed
+        cachedRows = rows
+
+    private def sameKeys(left: Array[Int], right: Array[Int], rows: Int): Boolean =
+      Arrays.equals(left, 0, rows, right, 0, rows)
+
     def accumulate(slot: Int, value: Long): Unit =
       sums(slot) += value
       notice(slot)
 
     def ensure(key: Int): Int =
-      if (occupied >= limit) then grow()
-      val slot = locate(key)
-      if (state(slot) == 0) then
+      val found = locate(key)
+      if (state(found) != 0) then found
+      else
+        // A duplicate of a live key must not grow. Grow only when this key is absent and the
+        // table is already at its load limit.
+        val slot = slotForNew(key, found)
         state(slot) = 1
         keys(slot) = key
         missing += 1
         remember(slot)
-      slot
+        slot
+
+    /**
+     * `found` is empty. At the load limit, rehash before inserting so the probe still terminates.
+     */
+    private def slotForNew(key: Int, found: Int): Int =
+      if (occupied < limit) then found
+      else
+        grow()
+        locate(key)
 
     def observe(slot: Int, value: Int): Unit =
       if (seen(slot) == 0) then
@@ -655,6 +810,7 @@ object HashAggregate:
       }
       occupied = 0
       missing = 0
+      cachedRows = 0
 
     private def notice(slot: Int): Unit =
       if (seen(slot) == 0) then
@@ -663,6 +819,7 @@ object HashAggregate:
 
     /** Doubles the table and reinserts `slots(0 until occupied)`, preserving first-seen order. */
     private def grow(): Unit =
+      cachedRows = 0
       if (capacity >= ColumnHash.MaxCapacity) then
         throw new IllegalStateException(
           s"hash aggregate table is already at capacity $capacity",

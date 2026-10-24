@@ -4,14 +4,14 @@ package com.ewoodbury.scarlet.columnar
  * Multi-batch sum and inner join.
  *
  * Sums read each input batch in ranges of `batchSize` rows and leave those columns in place.
- * [[HashAggregate.sumRange]] scans each range, `sumInt64` merges that batch's partials, and
- * `sumInt64` runs again after the exchange, so a partial sum does not wrap at `Int`. A
- * `keep`/`map` or [[PairStep]] overload applies that work inside the range scan, so the exchange
- * still sees one partial per input batch. Each output batch is an `Int32` key and an `Int64` sum.
- * Fold the sum with [[ColumnReduce.sumInt64]] at ordinal 1; the batch has two columns. An empty
- * input is `numPartitions` empty sum batches, the same convention as [[HashReduce.byKey]]. The
- * join reads key column 0 and value column 1 on both sides, exchanges each side, and probes one
- * partition at a time.
+ * [[HashAggregate.sumRange]] scans each range, [[HashAggregate.mergeSumPartials]] folds that
+ * batch's partials, and `sumInt64` runs again after the exchange, so a partial sum does not wrap
+ * at `Int`. A `keep`/`map` or [[PairStep]] overload applies that work inside the range scan, so
+ * the exchange still sees one partial per input batch. Each output batch is an `Int32` key and an
+ * `Int64` sum. Fold the sum with [[ColumnReduce.sumInt64]] at ordinal 1; the batch has two
+ * columns. An empty input is `numPartitions` empty sum batches, the same convention as
+ * [[HashReduce.byKey]]. The join reads key column 0 and value column 1 on both sides, exchanges
+ * each side, and probes one partition at a time.
  */
 object ColumnPipeline:
 
