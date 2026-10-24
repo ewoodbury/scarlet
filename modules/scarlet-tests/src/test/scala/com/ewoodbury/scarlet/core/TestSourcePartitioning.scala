@@ -205,6 +205,54 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
     an[IllegalArgumentException] should be thrownBy DistCollection.ofLongs(Array(1L), -2)
   }
 
+  "DistCollection.ofBools" should "copy contiguous ranges into primitive partitions" in {
+    val input = Array(true, false, true, false, true)
+    val dc = DistCollection.ofBools(input, 3)
+    input(0) = false
+
+    partitionSizes(dc) shouldEqual Seq(2, 2, 1)
+    sourceDescriptor(dc) shouldEqual Plan.SourceDescriptor.Bools
+    dc.collect() shouldEqual Seq(true, false, true, false, true)
+    dc.count() shouldEqual 5L
+    sourceData(dc).foreach {
+      case stored: BoolArrays =>
+        stored.values should not be theSameInstanceAs(input)
+      case other => fail(s"expected BoolArrays, got $other")
+    }
+  }
+
+  it should "produce exactly N empty primitive partitions" in {
+    val dc = DistCollection.ofBools(Array.empty[Boolean], 3)
+
+    partitionSizes(dc) shouldEqual Seq(0, 0, 0)
+    dc.collect() shouldEqual Seq.empty[Boolean]
+    dc.count() shouldEqual 0L
+    sourceData(dc).foreach {
+      case stored: BoolArrays => stored.knownSize shouldEqual 0
+      case other => fail(s"expected BoolArrays, got $other")
+    }
+  }
+
+  it should "reject a non-positive partition count" in {
+    val caught = intercept[IllegalArgumentException] {
+      DistCollection.ofBools(Array(true), 0)
+    }
+    caught.getMessage shouldBe partitionCountMessage
+    an[IllegalArgumentException] should be thrownBy DistCollection.ofBools(Array(true), -2)
+  }
+
+  "BoolArrays" should "iterate copied booleans, including an empty array" in {
+    val raw = Array(true, false)
+    val owned = BoolArrays(raw)
+    raw(0) = false
+
+    owned.toList shouldEqual List(true, false)
+    owned.knownSize shouldEqual 2
+    owned.values should not be theSameInstanceAs(raw)
+    BoolArrays(Array.empty[Boolean]).toList shouldEqual Nil
+    BoolArrays(Array.empty[Boolean]).knownSize shouldEqual 0
+  }
+
   "LongArrays" should "iterate copied longs, including an empty array" in {
     val raw = Array(1L, 2L)
     val owned = LongArrays(raw)
