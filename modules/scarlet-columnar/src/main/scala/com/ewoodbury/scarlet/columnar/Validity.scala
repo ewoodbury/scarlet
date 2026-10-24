@@ -18,8 +18,11 @@ final class Validity private (val words: Array[Long], val capacity: Int):
 object Validity:
 
   /**
-   * Every row below `live` is present. Spare bits past `live` are ignored, so a filter result
-   * whose bitmap is longer than the survivor count still qualifies.
+   * Returns true when every row in `[0, live)` is present, and false when any of those rows is
+   * null. `live == 0` returns true. Bits at index `live` and beyond are ignored, so a filter
+   * result whose bitmap is longer than the survivor count still returns true. This is not
+   * [[allValid]]: spare capacity past `live` may be clear, and a null inside the live prefix
+   * returns false even when every other bit is set.
    */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private[columnar] def livePresent(validity: Validity, live: Int): Boolean =

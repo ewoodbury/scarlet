@@ -44,9 +44,10 @@ object BatchCodec:
 
   /**
    * Adopts `values`. The caller must not mutate that array and must not retain it. [[copiedLongs]]
-   * is the path that copies first.
+   * is the path that copies first. Private, like [[int32Batch]], so a later caller cannot alias a
+   * published column.
    */
-  private[scarlet] def fromOwnedLongs(values: Array[Long]): ColumnBatch =
+  private def fromOwnedLongs(values: Array[Long]): ColumnBatch =
     int64Batch(values)
 
   def nullableLongs(values: Seq[Option[Long]]): ColumnBatch =

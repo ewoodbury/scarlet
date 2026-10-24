@@ -30,6 +30,15 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
 
     accepted.size shouldBe 156
     excluded.size shouldBe 48
+    val mismatches = accepted.flatMap { expected =>
+      expected.longProbe match
+        case None => Nil
+        case Some(probe) => probe().toList.map(detail => s"${expected.label}: $detail")
+    }
+    accepted.count(_.longProbe.isDefined) shouldBe accepted.count { expected =>
+      ColumnarPlanner.lower(expected.plan).exists(sumsLongs)
+    }
+    mismatches shouldBe empty
     covered.map(planNode).toSet shouldBe PlanNode.values.toSet
     // A refused plan has no layout. Acceptance is lower plus a valid layout.
     covered.count { plan =>
@@ -237,6 +246,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       info: PartitioningInfo,
       physicalShape: Option[String],
       groupedSum: Option[Long] = None,
+      longProbe: Option[() => Option[String]] = None,
   )
 
   private final case class ExcludedCase(label: String, plan: Plan[_])
@@ -335,10 +345,10 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       AcceptedCase("int source", intSource, narrowInfo(2, layout), Some("Scan")),
       AcceptedCase("int filter", intFilter, narrowInfo(2, layout), Some("Filter(Scan)")),
       AcceptedCase("int map", intMap, narrowInfo(2, layout), Some("Project(Scan)")),
-      AcceptedCase("long source", longSource, narrowInfo(2, layout), Some("Scan")),
-      AcceptedCase("empty long source", emptyLongSource, narrowInfo(2, layout), Some("Scan")),
-      AcceptedCase("long filter", longFilter, narrowInfo(2, layout), Some("Filter(Scan)")),
-      AcceptedCase("long map", longMap, narrowInfo(2, layout), Some("Project(Scan)")),
+      acceptedLong("long source", longSource, narrowInfo(2, layout), Some("Scan")),
+      acceptedLong("empty long source", emptyLongSource, narrowInfo(2, layout), Some("Scan")),
+      acceptedLong("long filter", longFilter, narrowInfo(2, layout), Some("Filter(Scan)")),
+      acceptedLong("long map", longMap, narrowInfo(2, layout), Some("Project(Scan)")),
       AcceptedCase("double source", doubleSource, narrowInfo(2, layout), Some("Scan")),
       AcceptedCase("double filter", doubleFilter, narrowInfo(2, layout), Some("Filter(Scan)")),
       AcceptedCase("double map", doubleMap, narrowInfo(2, layout), Some("Project(Scan)")),
@@ -382,6 +392,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         plan => Plan.FilterOp(plan, (value: Long) => value > 1L),
         plan => Plan.MapOp(plan, (value: Long) => value + 1L),
         layout,
+        probe = plan => Some(() => longDisagreement(plan)),
       ) ++
       elementPipelineCases(
         "double",
@@ -410,6 +421,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         plan => Plan.FilterOp(plan, (value: Long) => value > 0L),
         plan => Plan.MapOp(plan, (value: Long) => value + 1L),
         layout,
+        probe = plan => Some(() => longDisagreement(plan)),
       ) ++
       longPipelineCases(
         "double",
@@ -612,11 +624,47 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     DistCollection(plan).collect().toSeq
 
   private def rowResult[A](plan: Plan[A]): Seq[A] =
+    rowAction(collected(plan))
+
+  /** Columnar collect, sum, and count against the row path. `None` means they agree. */
+  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+  private def longDisagreement(plan: Plan[Long]): Option[String] =
+    val collectedRows = collected(plan)
+    val rowRows = rowResult(plan)
+    val columnarSum = DistCollection(plan).sum
+    val rowSum = rowAction(DistCollection(plan).sum)
+    val columnarCount = DistCollection(plan).count()
+    val rowCount = rowAction(DistCollection(plan).count())
+    val details = List(
+      Option.when(collectedRows != rowRows)(s"collect $collectedRows != $rowRows"),
+      Option.when(columnarSum != rowSum)(s"sum $columnarSum != $rowSum"),
+      Option.when(columnarCount != rowCount)(s"count $columnarCount != $rowCount"),
+    ).flatten
+    if (details.isEmpty) then None else Some(details.mkString(", "))
+
+  private def rowAction[A](body: => A): A =
     val saved = ScarletConf.get
     try
       ScarletConf.set(saved.copy(columnarExecution = false))
-      collected(plan)
-    finally ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
+      body
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
+
+  private def acceptedLong(
+      label: String,
+      plan: Plan[Long],
+      info: PartitioningInfo,
+      physicalShape: Option[String],
+  ): AcceptedCase =
+    AcceptedCase(
+      label,
+      plan,
+      info,
+      physicalShape,
+      longProbe = Some(() => longDisagreement(plan)),
+    )
 
   private def elementPipelineCases[A](
       kind: String,
@@ -624,6 +672,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       filterStep: Plan[A] => Plan[A],
       mapStep: Plan[A] => Plan[A],
       layout: Layout,
+      probe: Plan[A] => Option[() => Option[String]] = (_: Plan[A]) => None,
   ): Seq[AcceptedCase] =
     for
       length <- 2 to 4
@@ -637,6 +686,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         plan,
         narrowInfo(2, layout),
         Some(s"Pipeline$length(Scan)"),
+        longProbe = probe(plan),
       )
 
   private def longPipelineCases[A](
@@ -645,6 +695,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       filterStep: Plan[A] => Plan[A],
       mapStep: Plan[A] => Plan[A],
       layout: Layout,
+      probe: Plan[A] => Option[() => Option[String]] = (_: Plan[A]) => None,
   ): Seq[AcceptedCase] =
     val fiveSteps = (0 until 5).foldLeft(source)((current, _) => mapStep(current))
     val sixSteps = filterStep(fiveSteps)
@@ -654,12 +705,14 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         fiveSteps,
         narrowInfo(2, layout),
         Some("Project(Pipeline4(Scan))"),
+        longProbe = probe(fiveSteps),
       ),
       AcceptedCase(
         s"$kind six-step element pipeline",
         sixSteps,
         narrowInfo(2, layout),
         Some("Pipeline2(Pipeline4(Scan))"),
+        longProbe = probe(sixSteps),
       ),
     )
 

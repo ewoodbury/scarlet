@@ -25,8 +25,8 @@ trait MetricsSink:
   def decoded(rows: Int): Unit
 
   /**
-   * One owned, `ArraySeq`, or raw int-pair copy. A pair copies two arrays and counts once. The
-   * iterator fill does not call this.
+   * One owned, `ArraySeq`, or raw primitive copy. Ints, longs, doubles, and int pairs count. A
+   * pair copies two arrays and counts once. The iterator fill does not call this.
    */
   def primitiveEncode(): Unit
 
@@ -88,10 +88,10 @@ final class CountingSink extends MetricsSink:
  * that another caller has already replaced. Tests run sequentially and restore [[NoOpSink]] in
  * `afterEach`.
  *
- * A primitive encode is one `ArraySeq.ofInt`, `ArraySeq.ofDouble`, owned primitive array, or raw
- * `intPairs(Array, Array)` copied into columns. One note may copy two arrays: a pair encode copies
- * the keys and the values and still counts once. A boxed iterable does not count. A pair or triple
- * row counts once when decoded.
+ * A primitive encode is one `ArraySeq.ofInt`, `ArraySeq.ofLong`, `ArraySeq.ofDouble`, owned
+ * primitive array, or raw `intPairs(Array, Array)` copied into columns. One note may copy two
+ * arrays: a pair encode copies the keys and the values and still counts once. A boxed iterable
+ * does not count. A pair or triple row counts once when decoded.
  */
 object ColumnMetrics:
 
@@ -133,8 +133,8 @@ object ColumnMetrics:
   def decodedValueCount: Long = counting.fold(0L)(_.decodedValueCount)
 
   /**
-   * Owned, `ArraySeq`, or raw int-pair encodes on the installed [[CountingSink]], or zero
-   * otherwise. A pair counts once.
+   * Owned, `ArraySeq`, or raw primitive encodes on the installed [[CountingSink]], or zero
+   * otherwise. Ints, longs, doubles, and int pairs count. A pair counts once.
    */
   def primitiveEncodeCount: Long = counting.fold(0L)(_.primitiveEncodeCount)
 

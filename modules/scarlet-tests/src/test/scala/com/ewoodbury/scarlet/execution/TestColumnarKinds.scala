@@ -6,9 +6,10 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.core.Plan
 
 /**
- * Compile-time guard. An `inline` match on a Scala 3 enum is an error when a case is missing, so a
- * new source descriptor or physical kind fails this file instead of becoming a runtime
- * `MatchError`.
+ * Names every current source descriptor and physical kind. An inline match is checked where it is
+ * expanded, so adding an enum case does not fail this file unless a call site passes that case.
+ * A new case fails the build through the `values.length` assertions below and through
+ * `-Wconf:name=PatternMatchExhaustivity:e` on the matches that receive the value.
  */
 class TestColumnarKinds extends AnyFlatSpec with Matchers:
 

@@ -8,8 +8,7 @@ import scala.collection.AbstractIterator
  * The iterator yields values for the row path. The array is `private[scarlet]`, so a caller who
  * pattern matches [[Partition.data]] on a public plan cannot mutate a constructed collection. The
  * columnar encoder copies it into a column. The partition stays readable for a later action, so
- * the column does not adopt the array. `length` and `apply` stay on that array and are not a
- * public mutable surface.
+ * the column does not adopt the array.
  */
 final class LongArrays private (private[scarlet] val values: Array[Long]) extends Iterable[Long]:
 
