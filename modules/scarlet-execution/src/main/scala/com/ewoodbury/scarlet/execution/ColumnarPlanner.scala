@@ -6,8 +6,6 @@ import com.ewoodbury.scarlet.api.{DictionaryStringPredicate, IntJoinTriplePredic
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 
-import ColumnarInterpreter.*
-
 /**
  * Lowers `Int`, `Long`, `Double`, `(Int, Int)`, and `String` plans to [[PhysicalOp]] and runs that
  * tree on the columnar kernels.
@@ -29,9 +27,10 @@ import ColumnarInterpreter.*
  * [[lower]] and interpretation walk the same logical plan. The physical node records the operator
  * and not the function, so each logical node is matched to the node [[lower]] built for it. A
  * mismatch is a planner bug: interpretation throws `IllegalStateException`, and [[tryRun]] does
- * not turn that into a row-path fallback. A `ClassCastException` from a filter, or from a string
- * map that declares `String` and returns another value, is still a fallback, and that function may
- * already have run.
+ * not turn that into a row-path fallback. A partition selector on an aggregate or a join fails a
+ * `require` guard with `IllegalArgumentException`, and that is not a fallback either. A
+ * `ClassCastException` from a filter, or from a string map that declares `String` and returns
+ * another value, is still a fallback, and that function may already have run.
  *
  * [[lower]] does not call user functions. A straight `Int`, `Long`, `Double`, or `String`
  * filter/project run of two to four steps is one [[PhysicalOp.Pipeline]]. A longer run is cut into
@@ -121,7 +120,12 @@ object ColumnarPlanner:
     accepted(plan) match
       case None => None
       case Some(op) =>
-        try Some(decode(interpret(plan, op)).asInstanceOf[Seq[Partition[A]]])
+        try
+          Some(
+            ColumnarInterpreter
+              .decode(ColumnarInterpreter.interpret(plan, op))
+              .asInstanceOf[Seq[Partition[A]]],
+          )
         catch case _: ClassCastException => None
 
   /**
@@ -147,7 +151,8 @@ object ColumnarPlanner:
     takeChunks(
       n,
       Iterator.range(0, count).map { index => (remaining: Int) =>
-        decodePrefix(interpret(plan, op, Some(index)), remaining)
+        ColumnarInterpreter
+          .decodePrefix(ColumnarInterpreter.interpret(plan, op, Some(index)), remaining)
       },
     )
 
@@ -179,7 +184,9 @@ object ColumnarPlanner:
         catch case _: ClassCastException => None
 
   private def finishedCount(plan: Plan[_], op: PhysicalOp): Option[Long] =
-    Some(ColumnReduce.count(batchesOf(interpret(plan, op))))
+    Some(
+      ColumnReduce.count(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op))),
+    )
 
   /**
    * Wide sum of a finished int column. `None` means the row path, including a plan whose result is
@@ -244,19 +251,21 @@ object ColumnarPlanner:
 
   private def matchedSumInt(plan: Plan[_], op: PhysicalOp): Long = (plan, op) match
     case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) =>
-      ColumnReduce.sumInt32(encodeInts(partitions))
+      ColumnReduce.sumInt32(ColumnarInterpreter.encodeInts(partitions))
     case (Plan.FilterOp(source, predicate), PhysicalOp.Filter(child, PhysicalOp.Slot.Element))
         if isInt(child) =>
       val keep = predicate.asInstanceOf[Int => Boolean]
-      foldLong(batchesOf(interpret(source, child))) { batch =>
-        Int32Pipeline.sumFiltered(batch, value => keep(value))
+      foldLong(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
+        batch =>
+          Int32Pipeline.sumFiltered(batch, value => keep(value))
       }
     case (logical, PhysicalOp.Pipeline(child, length)) if isInt(child) =>
       val (source, steps) = elementSteps(logical, length)
       if (steps.length < length) then
         throw new IllegalStateException("pipeline does not match logical element steps")
-      foldLong(batchesOf(interpret(source, child))) { batch =>
-        ElementSum.sumInts(batch, steps)
+      foldLong(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
+        batch =>
+          ElementSum.sumInts(batch, steps)
       }
     case (
           Plan.ValuesOp(Plan.MapValuesOp(source, mapper)),
@@ -266,62 +275,73 @@ object ColumnarPlanner:
       // before lowering, so this cast is safe.
       @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Int => Int]
-      foldLong(pairsOf(interpret(source, child))) { batch =>
-        ColumnReduce.sumMappedInt32(batch, ordinal = 1, value => fn(value))
+      foldLong(ColumnarInterpreter.pairsOf(ColumnarInterpreter.interpret(source, child))) {
+        batch =>
+          ColumnReduce.sumMappedInt32(batch, ordinal = 1, value => fn(value))
       }
     case (Plan.KeysOp(source), PhysicalOp.Column(child, 0)) =>
       sumPairColumn(source, child, ordinal = 0)
     case (Plan.ValuesOp(source), PhysicalOp.Column(child, 1)) =>
       sumPairColumn(source, child, ordinal = 1)
     case _ =>
-      ColumnReduce.sumInt32(batchesOf(interpret(plan, op)))
+      ColumnReduce.sumInt32(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op)))
 
   private def sumLong(plan: Plan[_], op: PhysicalOp): Long =
     TrailingProject.sumLong(plan, op).getOrElse(matchedSumLong(plan, op))
 
   private def matchedSumLong(plan: Plan[_], op: PhysicalOp): Long = (plan, op) match
     case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Longs, _)) =>
-      ColumnReduce.sumInt64(encodeLongs(partitions), 0)
+      ColumnReduce.sumInt64(ColumnarInterpreter.encodeLongs(partitions), 0)
     case (Plan.FilterOp(source, predicate), PhysicalOp.Filter(child, PhysicalOp.Slot.Element))
         if isLong(child) =>
-      foldLong(batchesOf(interpret(source, child))) { batch =>
-        ElementSum.sumLongs(batch, List(ElementStep.Filter(predicate)))
+      foldLong(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
+        batch =>
+          ElementSum.sumLongs(batch, List(ElementStep.Filter(predicate)))
       }
     case (logical, PhysicalOp.Pipeline(child, length)) if isLong(child) =>
       val (source, steps) = elementSteps(logical, length)
       if (steps.length < length) then
         throw new IllegalStateException("pipeline does not match logical element steps")
-      foldLong(batchesOf(interpret(source, child))) { batch =>
-        ElementSum.sumLongs(batch, steps)
+      foldLong(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
+        batch =>
+          ElementSum.sumLongs(batch, steps)
       }
     case _ =>
-      ColumnReduce.sumInt64(batchesOf(interpret(plan, op)), 0)
+      ColumnReduce.sumInt64(
+        ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op)),
+        0,
+      )
 
   private def sumDouble(plan: Plan[_], op: PhysicalOp): Double = (plan, op) match
     case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Floats, _)) =>
-      ColumnReduce.sumFloat64(encodeFloats(partitions))
+      ColumnReduce.sumFloat64(ColumnarInterpreter.encodeFloats(partitions))
     case (
           Plan.FilterOp(source, predicate),
           PhysicalOp.Filter(child, PhysicalOp.Slot.Element),
         ) if isFloat(child) =>
       val keep = predicate.asInstanceOf[Double => Boolean]
-      foldDouble(batchesOf(interpret(source, child))) { batch =>
-        Float64Pipeline.sumFiltered(batch, value => keep(value))
+      foldDouble(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
+        batch =>
+          Float64Pipeline.sumFiltered(batch, value => keep(value))
       }
     case (Plan.MapOp(source, mapper), PhysicalOp.Project(child)) if isFloat(child) =>
       val fn = mapper.asInstanceOf[Double => Double]
-      foldDouble(batchesOf(interpret(source, child))) { batch =>
-        Float64Pipeline.sumProjected(batch, value => fn(value))
+      foldDouble(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
+        batch =>
+          Float64Pipeline.sumProjected(batch, value => fn(value))
       }
     case (logical, PhysicalOp.Pipeline(child, length)) if isFloat(child) =>
       val (source, steps) = elementSteps(logical, length)
       if (steps.length < length) then
         throw new IllegalStateException("pipeline does not match logical element steps")
-      foldDouble(batchesOf(interpret(source, child))) { batch =>
-        ElementSum.sumFloats(batch, steps)
+      foldDouble(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
+        batch =>
+          ElementSum.sumFloats(batch, steps)
       }
     case _ =>
-      ColumnReduce.sumFloat64(batchesOf(interpret(plan, op)))
+      ColumnReduce.sumFloat64(
+        ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op)),
+      )
 
   /**
    * Pair filters and pair maps above `base`, in source order. The functions are cast here and
@@ -353,7 +373,7 @@ object ColumnarPlanner:
   private def runGroupedSum(source: Plan.Source[_], steps: List[PairStep]): Option[Long] =
     if (!groupedPairSource(source)) then None
     else
-      val parts = encodeGroupedPairs(source.partitions)
+      val parts = ColumnarInterpreter.encodeGroupedPairs(source.partitions)
       val grouped = ColumnPipeline.sumByKey(
         parts,
         keyOrdinal = 0,
@@ -430,14 +450,14 @@ object ColumnarPlanner:
 
   /** Read one int column of a pair plan. Does not allocate a projection batch. */
   private def sumPairColumn(source: Plan[_], child: PhysicalOp, ordinal: Int): Long =
-    foldLong(pairsOf(interpret(source, child))) { batch =>
+    foldLong(ColumnarInterpreter.pairsOf(ColumnarInterpreter.interpret(source, child))) { batch =>
       ColumnReduce.sumInt32At(batch, ordinal)
     }
 
   private[execution] def foldInterpreted(plan: Plan[_], op: PhysicalOp)(
       fn: ColumnBatch => Long,
   ): Long =
-    foldLong(batchesOf(interpret(plan, op)))(fn)
+    foldLong(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op)))(fn)
 
   private def foldLong(parts: Vector[ColumnBatch])(fn: ColumnBatch => Long): Long =
     if (parts.isEmpty) then 0L

@@ -4,17 +4,16 @@ import com.ewoodbury.scarlet.api.IntJoinTriplePredicate
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan}
 
-import ColumnarPlanner.*
-
 /**
  * Runs a lowered [[PhysicalOp]] tree and encodes source partitions into columns.
  *
  * Named erasure boundary, shared with [[ColumnarPlanner]]. [[ColumnarPlanner.lower]] chooses the
  * tree and does not call user functions. [[interpret]] walks that same logical plan and applies
  * the operator recorded on each physical node. A mismatch throws `IllegalStateException`, which
- * [[ColumnarPlanner.tryRun]] does not turn into a row-path fallback. A `ClassCastException` from a
- * filter, or from a string map that declares `String` and returns another value, is still a
- * fallback, and that function may already have run.
+ * [[ColumnarPlanner.tryRun]] does not turn into a row-path fallback. A partition selector on an
+ * aggregate or a join fails a `require` guard with `IllegalArgumentException`, and that is not a
+ * fallback either. A `ClassCastException` from a filter, or from a string map that declares
+ * `String` and returns another value, is still a fallback, and that function may already have run.
  */
 @SuppressWarnings(
   Array(
@@ -82,7 +81,7 @@ private[execution] object ColumnarInterpreter:
       limit: Int,
       decode: (ColumnBatch, Int) => Seq[A],
   ): Seq[Any] =
-    takeChunks(
+    ColumnarPlanner.takeChunks(
       limit,
       parts.iterator.map { batch => (remaining: Int) =>
         decode(batch, remaining)
@@ -94,16 +93,18 @@ private[execution] object ColumnarInterpreter:
       op: PhysicalOp,
       selectedPartition: Option[Int] = None,
   ): Columns = (plan, op) match
-    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) =>
-      Columns.Ints(encodeInts(selectPartition(partitions, selectedPartition)))
-    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Longs, _)) =>
-      Columns.Longs(encodeLongs(selectPartition(partitions, selectedPartition)))
-    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Floats, _)) =>
-      Columns.Floats(encodeFloats(selectPartition(partitions, selectedPartition)))
-    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Pairs, _)) =>
-      Columns.Pairs(encodePairs(selectPartition(partitions, selectedPartition)))
-    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Strings, _)) =>
-      Columns.Strings(encodeStrings(selectPartition(partitions, selectedPartition)))
+    case (Plan.Source(partitions, _), PhysicalOp.Scan(kind, _)) =>
+      val selected = selectPartition(partitions, selectedPartition)
+      kind match
+        case PhysicalOp.Kind.Ints => Columns.Ints(encodeInts(selected))
+        case PhysicalOp.Kind.Longs => Columns.Longs(encodeLongs(selected))
+        case PhysicalOp.Kind.Floats => Columns.Floats(encodeFloats(selected))
+        case PhysicalOp.Kind.Pairs => Columns.Pairs(encodePairs(selected))
+        case PhysicalOp.Kind.Strings => Columns.Strings(encodeStrings(selected))
+        case PhysicalOp.Kind.Triples =>
+          throw new IllegalStateException(
+            s"physical tree does not match ${plan.getClass.getSimpleName}",
+          )
     case (Plan.FilterOp(source, predicate), PhysicalOp.Filter(child, slot)) =>
       applyFilter(interpret(source, child, selectedPartition), predicate, slot)
     case (Plan.MapOp(source, mapper), PhysicalOp.Project(child)) =>
@@ -135,29 +136,31 @@ private[execution] object ColumnarInterpreter:
         ) =>
       // Boundary guard: take refuses an aggregate, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
+      // Named erasure boundary. Grouped pair reduction declares `(Int, Int) => Int`.
+      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val op = reduceFunc.asInstanceOf[(Int, Int) => Int]
       Columns.Pairs(
         HashReduce.byKey(
           pairsOf(interpret(source, child, selectedPartition)),
-          shuffleWidth,
-          parallelism,
-          batchSize,
+          ColumnarPlanner.shuffleWidth,
+          ColumnarPlanner.parallelism,
+          ColumnarPlanner.batchSize,
           (left, right) => op(left, right),
         ),
       )
     case (
           Plan.JoinOp(left, right, strategy),
           PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
-        ) if acceptsHashJoin(strategy) =>
+        ) if ColumnarPlanner.acceptsHashJoin(strategy) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       Columns.Triples(
         ColumnPipeline.innerJoin(
           pairsOf(interpret(left, leftOp, selectedPartition)),
           pairsOf(interpret(right, rightOp, selectedPartition)),
-          shuffleWidth,
-          parallelism,
-          batchSize,
+          ColumnarPlanner.shuffleWidth,
+          ColumnarPlanner.parallelism,
+          ColumnarPlanner.batchSize,
         ),
       )
     case _ =>
@@ -171,23 +174,30 @@ private[execution] object ColumnarInterpreter:
       length: Int,
       selectedPartition: Option[Int],
   ): Columns =
-    val (source, steps) = elementSteps(plan, length)
+    val (source, steps) = ColumnarPlanner.elementSteps(plan, length)
     if (steps.length < length) then
       // Lowering uses this same collector, so this only guards a malformed physical tree.
       throw new IllegalStateException("pipeline does not match logical element steps")
     pipeline(interpret(source, child, selectedPartition), steps)
 
-  private def pipeline(columns: Columns, steps: List[ElementStep]): Columns = columns match
-    case Columns.Ints(parts) =>
-      Columns.Ints(onEach(parts)(batch => ElementPipeline.ints(batch, steps)))
-    case Columns.Longs(parts) =>
-      Columns.Longs(onEach(parts)(batch => ElementPipeline.longs(batch, steps)))
-    case Columns.Floats(parts) =>
-      Columns.Floats(onEach(parts)(batch => ElementPipeline.floats(batch, steps)))
-    case Columns.Strings(parts) =>
-      Columns.Strings(onEach(parts)(batch => ElementPipeline.strings(batch, steps)))
-    case _ =>
+  private def pipeline(
+      columns: Columns,
+      steps: List[ColumnarPlanner.ElementStep],
+  ): Columns =
+    def rejected: Nothing =
       throw new IllegalStateException("pipeline expects an int, long, float, or string column")
+
+    columns match
+      case Columns.Ints(parts) =>
+        Columns.Ints(onEach(parts)(batch => ElementPipeline.ints(batch, steps)))
+      case Columns.Longs(parts) =>
+        Columns.Longs(onEach(parts)(batch => ElementPipeline.longs(batch, steps)))
+      case Columns.Floats(parts) =>
+        Columns.Floats(onEach(parts)(batch => ElementPipeline.floats(batch, steps)))
+      case Columns.Strings(parts) =>
+        Columns.Strings(onEach(parts)(batch => ElementPipeline.strings(batch, steps)))
+      case Columns.Pairs(_) => rejected
+      case Columns.Triples(_) => rejected
 
   private def triplePredicate(
       slot: PhysicalOp.Slot,
@@ -196,7 +206,9 @@ private[execution] object ColumnarInterpreter:
     case PhysicalOp.Slot.TripleKey => (key, _, _) => keep.keep(key)
     case PhysicalOp.Slot.TripleLeftValue => (_, left, _) => keep.keep(left)
     case PhysicalOp.Slot.TripleRightValue => (_, _, right) => keep.keep(right)
-    case _ => throw new IllegalStateException("triple filter has a non-triple slot")
+    case PhysicalOp.Slot.Element | PhysicalOp.Slot.Row | PhysicalOp.Slot.Key |
+        PhysicalOp.Slot.Value =>
+      throw new IllegalStateException("triple filter has a non-triple slot")
 
   private def applyFilter(columns: Columns, predicate: Any, slot: PhysicalOp.Slot): Columns =
     slot match
@@ -218,7 +230,7 @@ private[execution] object ColumnarInterpreter:
               ColumnKernel.filterFloat64(batch, 0, value => keep(value))
             })
           case Columns.Strings(parts) =>
-            dictionaryStringLiterals(predicate) match
+            ColumnarPlanner.dictionaryStringLiterals(predicate) match
               case Some(literals) =>
                 Columns.Strings(onEach(parts) { batch =>
                   ColumnKernel.filterUtf8ByValues(batch, 0, literals)
@@ -228,7 +240,7 @@ private[execution] object ColumnarInterpreter:
                 Columns.Strings(onEach(parts) { batch =>
                   ColumnKernel.filterUtf8(batch, 0, value => keep(value))
                 })
-          case _ =>
+          case Columns.Pairs(_) | Columns.Triples(_) =>
             throw new IllegalStateException(
               "columnar element filter expects ints, longs, floats, or strings",
             )
@@ -260,40 +272,51 @@ private[execution] object ColumnarInterpreter:
 
   private def project(columns: Columns, mapper: Any): Columns = columns match
     case Columns.Ints(parts) =>
+      // Named erasure boundary. Lowering already checked the declared `Int => Int` shape.
+      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Int => Int]
       Columns.Ints(onEach(parts) { batch =>
         ColumnKernel.projectInt32(batch, 0, value => fn(value))
       })
     case Columns.Longs(parts) =>
+      // Named erasure boundary. Lowering already checked the declared `Long => Long` shape.
+      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Long => Long]
       Columns.Longs(onEach(parts) { batch =>
         ColumnKernel.projectInt64(batch, 0, value => fn(value))
       })
     case Columns.Floats(parts) =>
+      // Named erasure boundary. Lowering already checked the declared `Double => Double` shape.
+      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Double => Double]
       Columns.Floats(onEach(parts) { batch =>
         ColumnKernel.projectFloat64(batch, 0, value => fn(value))
       })
     case Columns.Strings(parts) =>
+      // Named erasure boundary. A declared string map may return another value; `stringResult`
+      // turns that into `ClassCastException`, which is the row-path fallback.
+      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Any"))
       val fn = mapper.asInstanceOf[String => Any]
       Columns.Strings(onEach(parts) { batch =>
-        ColumnKernel.projectUtf8(batch, 0, value => stringResult(fn(value)))
+        ColumnKernel.projectUtf8(batch, 0, value => ColumnarPlanner.stringResult(fn(value)))
       })
-    case _ =>
+    case Columns.Pairs(_) | Columns.Triples(_) =>
       throw new IllegalStateException("columnar map expects ints, longs, floats, or strings")
 
   private[execution] def pairsOf(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.Pairs(parts) if parts.nonEmpty => parts
     case Columns.Pairs(_) =>
       throw new IllegalStateException("columnar pairs have no partitions")
-    case _ =>
+    case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Triples(_) |
+        Columns.Strings(_) =>
       throw new IllegalStateException("columnar op expected int pairs")
 
   private def triplesOf(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.Triples(parts) if parts.nonEmpty => parts
     case Columns.Triples(_) =>
       throw new IllegalStateException("columnar triples have no partitions")
-    case _ =>
+    case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Pairs(_) |
+        Columns.Strings(_) =>
       throw new IllegalStateException("columnar op expected int triples")
 
   private def onEach(
@@ -301,9 +324,10 @@ private[execution] object ColumnarInterpreter:
   )(fn: ColumnBatch => ColumnBatch): Vector[ColumnBatch] =
     if (parts.isEmpty) then parts
     else
-      val sliced = parts.map(part => ColumnBatches.slice(part, batchSize))
+      val sliced = parts.map(part => ColumnBatches.slice(part, ColumnarPlanner.batchSize))
       val flat = sliced.flatten
-      val mapped = MorselScheduler.map(flat, parallelism)((_, morsel) => fn(morsel))
+      val mapped =
+        MorselScheduler.map(flat, ColumnarPlanner.parallelism)((_, morsel) => fn(morsel))
       regroup(sliced.map(_.length), mapped)
 
   private def regroup(counts: Vector[Int], flat: Vector[ColumnBatch]): Vector[ColumnBatch] =
@@ -383,7 +407,10 @@ private[execution] object ColumnarInterpreter:
 
   private def encodeStrings(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
     partitions.map { partition =>
-      BatchCodec.strings(partition.data.asInstanceOf[Iterable[String]])
+      // Named erasure boundary. Classification already selected string elements.
+      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+      val rows = partition.data.asInstanceOf[Iterable[String]]
+      BatchCodec.strings(rows)
     }.toVector
 
   private[execution] def decode(columns: Columns): Seq[Partition[_]] = columns match
