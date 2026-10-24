@@ -313,9 +313,9 @@ final case class DistCollection[A](plan: Plan[A]):
     ExecutionService.get.count(this.plan)
 
   /**
-   * Action: Sums an `Int` collection as a `Long`, or a `Double` collection as a `Double`. Empty
-   * input returns zero. An `Int` sum does not wrap. A columnar plan adds the finished column and
-   * does not build a `Seq`.
+   * Action: Sums an `Int` collection as a `Long`, a `Long` collection as a `Long`, or a `Double`
+   * collection as a `Double`. Empty input returns zero. An `Int` sum does not wrap. A `Long` sum
+   * wraps. A columnar plan adds the finished column and does not build a `Seq`.
    */
   def sum[R](using result: DistCollection.SumOf[A, R]): R =
     result(this.plan)
@@ -407,13 +407,16 @@ private[scarlet] object IntJoinTriplePredicate:
 // Companion object for creating a DistCollection from a source
 object DistCollection:
 
-  /** Sum of an `Int` column as a `Long`, or a `Double` column as a `Double`. */
+  /** Sum of an `Int` or `Long` column as a `Long`, or a `Double` column as a `Double`. */
   trait SumOf[A, R]:
     def apply(plan: Plan[A]): R
 
   object SumOf:
     given SumOf[Int, Long] with
       def apply(plan: Plan[Int]): Long = ExecutionService.get.sumInt(plan)
+
+    given SumOf[Long, Long] with
+      def apply(plan: Plan[Long]): Long = ExecutionService.get.sumLong(plan)
 
     given SumOf[Double, Double] with
       def apply(plan: Plan[Double]): Double = ExecutionService.get.sumDouble(plan)
@@ -475,6 +478,18 @@ object DistCollection:
 
     splitSource(values.length, numPartitions, Plan.SourceDescriptor.Ints) { (start, end) =>
       IntArrays.fromOwned(values.slice(start, end))
+    }
+
+  /**
+   * Partitions a primitive `Long` array. Each partition is a
+   * [[com.ewoodbury.scarlet.core.LongArrays]] copy of its range. The caller's array is not
+   * retained, and the partition array is not publicly mutable.
+   */
+  def ofLongs(values: Array[Long], numPartitions: Int): DistCollection[Long] =
+    import com.ewoodbury.scarlet.core.LongArrays
+
+    splitSource(values.length, numPartitions, Plan.SourceDescriptor.Longs) { (start, end) =>
+      LongArrays.fromOwned(values.slice(start, end))
     }
 
   /**

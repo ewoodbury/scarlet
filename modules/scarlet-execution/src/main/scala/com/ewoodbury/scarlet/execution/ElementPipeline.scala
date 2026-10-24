@@ -1,12 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{
-  ColumnBatch,
-  ColumnKernel,
-  Float64Pipeline,
-  Int32Pipeline,
-  Utf8Pipeline,
-}
+import com.ewoodbury.scarlet.columnar.*
 
 /** The 28 filter/project patterns for one element pipeline. The match is outside the row loop. */
 @SuppressWarnings(
@@ -88,6 +82,23 @@ object ElementPipeline:
         Int32Pipeline.PPPP(batch, proj(a), proj(b), proj(c), proj(d))
       case _ =>
         throw new IllegalStateException(s"unsupported ints pipeline of length ${steps.length}")
+
+  def longs(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): ColumnBatch =
+    import ColumnarPlanner.ElementStep.*
+
+    Int64Pipeline(
+      batch,
+      steps.map {
+        case Filter(fn) =>
+          // Named erasure boundary. A long filter is a runtime cast.
+          val predicate = fn.asInstanceOf[Long => Boolean]
+          Int64Pipeline.Step.Filter(value => predicate(value))
+        case Project(fn) =>
+          // Named erasure boundary. declaredElement required apply$mcJJ$sp before lowering.
+          val mapper = fn.asInstanceOf[Long => Long]
+          Int64Pipeline.Step.Project(value => mapper(value))
+      },
+    )
 
   def floats(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): ColumnBatch =
     import ColumnarPlanner.ElementStep.*

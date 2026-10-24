@@ -65,6 +65,34 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     }
   }
 
+  it should "copy a primitive long array into the column" in {
+    val raw = Array(1L, Long.MinValue, 0L)
+    ColumnMetrics.withSink(new CountingSink) {
+      val batch = BatchCodec.longs(new ArraySeq.ofLong(raw))
+      val boxed = BatchCodec.longs(Seq(1L, Long.MinValue, 0L))
+      ColumnMetrics.primitiveEncodeCount shouldBe 1L
+      val column = int64(batch)
+
+      column.values should not be theSameInstanceAs(raw)
+      raw(0) = 99L
+      BatchCodec.decodeLongs(batch) shouldBe Seq(1L, Long.MinValue, 0L)
+      BatchCodec.decodeLongs(boxed) shouldBe Seq(1L, Long.MinValue, 0L)
+    }
+  }
+
+  it should "copy an owned long array on the primitive path" in {
+    val raw = Array(1L, -2L, 0L)
+    ColumnMetrics.withSink(new CountingSink) {
+      val batch = BatchCodec.copiedLongs(raw)
+      ColumnMetrics.primitiveEncodeCount shouldBe 1L
+      val column = int64(batch)
+
+      column.values should not be theSameInstanceAs(raw)
+      raw(0) = 99L
+      BatchCodec.decodeLongs(batch) shouldBe Seq(1L, -2L, 0L)
+    }
+  }
+
   it should "copy a primitive double array into the column" in {
     val raw = Array(1.5, -0.25)
     ColumnMetrics.withSink(new CountingSink) {
@@ -367,6 +395,10 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   private def int32(batch: ColumnBatch): Int32Column = batch.columns match
     case Seq(column: Int32Column) => column
     case other => fail(s"expected an Int32 column, got $other")
+
+  private def int64(batch: ColumnBatch): Int64Column = batch.columns match
+    case Seq(column: Int64Column) => column
+    case other => fail(s"expected an Int64 column, got $other")
 
   private def float64(batch: ColumnBatch): Float64Column = batch.columns match
     case Seq(column: Float64Column) => column

@@ -28,8 +28,17 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    accepted.size shouldBe 122
-    excluded.size shouldBe 46
+    accepted.size shouldBe 156
+    excluded.size shouldBe 48
+    val mismatches = accepted.flatMap { expected =>
+      expected.longProbe match
+        case None => Nil
+        case Some(probe) => probe().toList.map(detail => s"${expected.label}: $detail")
+    }
+    accepted.count(_.longProbe.isDefined) shouldBe accepted.count { expected =>
+      ColumnarPlanner.lower(expected.plan).exists(sumsLongs)
+    }
+    mismatches shouldBe empty
     covered.map(planNode).toSet shouldBe PlanNode.values.toSet
     // A refused plan has no layout. Acceptance is lower plus a valid layout.
     covered.count { plan =>
@@ -198,15 +207,22 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     )
     val emptyStringCollection = DistCollection(emptyStrings)
 
+    val emptyLongs = DistCollection.ofLongs(Array.empty[Long], 2)
     ColumnarPlanner.partitioning(emptyInts.plan).map(_.layout) shouldBe Some(columnarLayout)
     emptyInts.sum shouldBe 0L
     emptyInts.count() shouldBe 0L
+    ColumnarPlanner.partitioning(emptyLongs.plan).map(_.layout) shouldBe Some(columnarLayout)
+    ColumnarPlanner.lower(emptyLongs.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.Longs)
+    emptyLongs.sum shouldBe 0L
+    emptyLongs.count() shouldBe 0L
     ColumnarPlanner.partitioning(emptyDoubles.plan).map(_.layout) shouldBe Some(columnarLayout)
     emptyDoubles.sum shouldBe 0.0
     ColumnarPlanner.partitioning(emptyStringCollection.plan).map(_.layout) shouldBe Some(utf8Layout)
 
     emptyInts.collect() shouldBe empty
     emptyInts.take(3) shouldBe empty
+    emptyLongs.collect() shouldBe empty
+    emptyLongs.take(3) shouldBe empty
     emptyDoubles.collect() shouldBe empty
     emptyDoubles.take(3) shouldBe empty
     emptyStringCollection.collect() shouldBe empty
@@ -230,6 +246,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       info: PartitioningInfo,
       physicalShape: Option[String],
       groupedSum: Option[Long] = None,
+      longProbe: Option[() => Option[String]] = None,
   )
 
   private final case class ExcludedCase(label: String, plan: Plan[_])
@@ -241,6 +258,9 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
 
   private val intSource: Plan[Int] = Plan.Source(
     Seq(Partition(Seq(1, 2)), Partition(Seq(3, 4))),
+  )
+  private val longSource: Plan[Long] = Plan.Source(
+    Seq(Partition(Seq(1L, 2L)), Partition(Seq(3L, 4L))),
   )
   private val doubleSource: Plan[Double] = Plan.Source(
     Seq(Partition(Seq(1.5, 2.5)), Partition(Seq(3.5))),
@@ -263,6 +283,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
   private val emptyPairSource: Plan[(Int, Int)] =
     DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 2).plan
   private val emptyIntSource: Plan[Int] = Plan.Source(Seq(Partition(Seq.empty[Int])))
+  private val emptyLongSource: Plan[Long] = DistCollection.ofLongs(Array.empty[Long], 2).plan
   private val nullText: String = BatchCodec.stringElement(None)
   private val allNullStringSource: Plan[String] = Plan.Source(
     Seq(Partition(Seq(nullText, nullText))),
@@ -275,6 +296,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
   private def acceptedCases: Seq[AcceptedCase] =
     val intFilter = Plan.FilterOp(intSource, (value: Int) => value > 1)
     val intMap = Plan.MapOp(intSource, (value: Int) => value + 1)
+    val longFilter = Plan.FilterOp(longSource, (value: Long) => value > 1L)
+    val longMap = Plan.MapOp(longSource, (value: Long) => value + 1L)
     val doubleFilter = Plan.FilterOp(doubleSource, (value: Double) => value > 0.0)
     val doubleMap = Plan.MapOp(doubleSource, (value: Double) => value * 2.0)
     val stringFilter = Plan.FilterOp(stringSource, (value: String) => value.nonEmpty)
@@ -322,6 +345,10 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       AcceptedCase("int source", intSource, narrowInfo(2, layout), Some("Scan")),
       AcceptedCase("int filter", intFilter, narrowInfo(2, layout), Some("Filter(Scan)")),
       AcceptedCase("int map", intMap, narrowInfo(2, layout), Some("Project(Scan)")),
+      acceptedLong("long source", longSource, narrowInfo(2, layout), Some("Scan")),
+      acceptedLong("empty long source", emptyLongSource, narrowInfo(2, layout), Some("Scan")),
+      acceptedLong("long filter", longFilter, narrowInfo(2, layout), Some("Filter(Scan)")),
+      acceptedLong("long map", longMap, narrowInfo(2, layout), Some("Project(Scan)")),
       AcceptedCase("double source", doubleSource, narrowInfo(2, layout), Some("Scan")),
       AcceptedCase("double filter", doubleFilter, narrowInfo(2, layout), Some("Filter(Scan)")),
       AcceptedCase("double map", doubleMap, narrowInfo(2, layout), Some("Project(Scan)")),
@@ -360,6 +387,14 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         layout,
       ) ++
       elementPipelineCases(
+        "long",
+        longSource,
+        plan => Plan.FilterOp(plan, (value: Long) => value > 1L),
+        plan => Plan.MapOp(plan, (value: Long) => value + 1L),
+        layout,
+        probe = plan => Some(() => longDisagreement(plan)),
+      ) ++
+      elementPipelineCases(
         "double",
         doubleSource,
         plan => Plan.FilterOp(plan, (value: Double) => value > 0.0),
@@ -379,6 +414,14 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         plan => Plan.FilterOp(plan, (value: Int) => value > 0),
         plan => Plan.MapOp(plan, (value: Int) => value + 1),
         layout,
+      ) ++
+      longPipelineCases(
+        "long",
+        longSource,
+        plan => Plan.FilterOp(plan, (value: Long) => value > 0L),
+        plan => Plan.MapOp(plan, (value: Long) => value + 1L),
+        layout,
+        probe = plan => Some(() => longDisagreement(plan)),
       ) ++
       longPipelineCases(
         "double",
@@ -472,6 +515,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ExcludedCase("empty int source without a witness", emptyIntSource),
       ExcludedCase("unsupported Boolean source", Plan.Source(Seq(Partition(Seq(true, false))))),
       ExcludedCase("int map to long", Plan.MapOp(intSource, (value: Int) => value.toLong)),
+      ExcludedCase("long map to int", Plan.MapOp(longSource, (value: Long) => value.toInt)),
+      ExcludedCase("long map to string", Plan.MapOp(longSource, (value: Long) => value.toString)),
       ExcludedCase("int map to pair", Plan.MapOp(intSource, (value: Int) => (value, value))),
       ExcludedCase(
         "type-changing pair map",
@@ -506,7 +551,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
    * `lower` and the action gates share one decision. A refused plan, including a sort-merge or
    * broadcast join and a type-changing pair map, makes every gate return `None`. An accepted plan
    * runs `tryRun` and `tryCount`. `tryTake` runs when the physical tree keeps input partitions.
-   * `trySumInt` and `trySumDouble` run only for that numeric kind. `tryGroupedSum` equals
+   * `trySumInt`, `trySumLong`, and `trySumDouble` run only for that numeric kind. `tryGroupedSum` equals
    * `groupedSum` for an accepted grouped pair source and for an accepted row, key, or value
    * filter of one, and is `None` for every other accepted plan. The peel label follows
    * [[expectedGroupedPeel]]. A pair map that stays `(Int, Int)` is outside these lists:
@@ -523,6 +568,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     ColumnarPlanner.tryRun(plan).isDefined shouldBe accepted
     ColumnarPlanner.tryCount(plan).isDefined shouldBe accepted
     ColumnarPlanner.trySumInt(plan).isDefined shouldBe lowered.exists(sumsInts)
+    ColumnarPlanner.trySumLong(plan).isDefined shouldBe lowered.exists(sumsLongs)
     ColumnarPlanner.trySumDouble(plan).isDefined shouldBe lowered.exists(sumsFloats)
     ColumnarPlanner.tryTake(plan, 1).isDefined shouldBe lowered.exists(preservesPartitions)
     if (accepted) then
@@ -536,14 +582,20 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
 
   private def sumsInts(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Ints => true
-    case PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
-        PhysicalOp.Kind.Strings =>
+    case PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs |
+        PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings =>
+      false
+
+  private def sumsLongs(op: PhysicalOp): Boolean = op.kind match
+    case PhysicalOp.Kind.Longs => true
+    case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs |
+        PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings =>
       false
 
   private def sumsFloats(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Floats => true
-    case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
-        PhysicalOp.Kind.Strings =>
+    case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Pairs |
+        PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings =>
       false
 
   private def preservesPartitions(op: PhysicalOp): Boolean = op match
@@ -562,6 +614,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     ColumnarPlanner.tryRun(plan) shouldBe None
     ColumnarPlanner.tryCount(plan) shouldBe None
     ColumnarPlanner.trySumInt(plan) shouldBe None
+    ColumnarPlanner.trySumLong(plan) shouldBe None
     ColumnarPlanner.trySumDouble(plan) shouldBe None
     ColumnarPlanner.tryTake(plan, 1) shouldBe None
     ColumnarPlanner.tryGroupedSum(plan) shouldBe None
@@ -571,11 +624,47 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     DistCollection(plan).collect().toSeq
 
   private def rowResult[A](plan: Plan[A]): Seq[A] =
+    rowAction(collected(plan))
+
+  /** Columnar collect, sum, and count against the row path. `None` means they agree. */
+  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+  private def longDisagreement(plan: Plan[Long]): Option[String] =
+    val collectedRows = collected(plan)
+    val rowRows = rowResult(plan)
+    val columnarSum = DistCollection(plan).sum
+    val rowSum = rowAction(DistCollection(plan).sum)
+    val columnarCount = DistCollection(plan).count()
+    val rowCount = rowAction(DistCollection(plan).count())
+    val details = List(
+      Option.when(collectedRows != rowRows)(s"collect $collectedRows != $rowRows"),
+      Option.when(columnarSum != rowSum)(s"sum $columnarSum != $rowSum"),
+      Option.when(columnarCount != rowCount)(s"count $columnarCount != $rowCount"),
+    ).flatten
+    if (details.isEmpty) then None else Some(details.mkString(", "))
+
+  private def rowAction[A](body: => A): A =
     val saved = ScarletConf.get
     try
       ScarletConf.set(saved.copy(columnarExecution = false))
-      collected(plan)
-    finally ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
+      body
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
+
+  private def acceptedLong(
+      label: String,
+      plan: Plan[Long],
+      info: PartitioningInfo,
+      physicalShape: Option[String],
+  ): AcceptedCase =
+    AcceptedCase(
+      label,
+      plan,
+      info,
+      physicalShape,
+      longProbe = Some(() => longDisagreement(plan)),
+    )
 
   private def elementPipelineCases[A](
       kind: String,
@@ -583,6 +672,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       filterStep: Plan[A] => Plan[A],
       mapStep: Plan[A] => Plan[A],
       layout: Layout,
+      probe: Plan[A] => Option[() => Option[String]] = (_: Plan[A]) => None,
   ): Seq[AcceptedCase] =
     for
       length <- 2 to 4
@@ -596,6 +686,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         plan,
         narrowInfo(2, layout),
         Some(s"Pipeline$length(Scan)"),
+        longProbe = probe(plan),
       )
 
   private def longPipelineCases[A](
@@ -604,6 +695,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       filterStep: Plan[A] => Plan[A],
       mapStep: Plan[A] => Plan[A],
       layout: Layout,
+      probe: Plan[A] => Option[() => Option[String]] = (_: Plan[A]) => None,
   ): Seq[AcceptedCase] =
     val fiveSteps = (0 until 5).foldLeft(source)((current, _) => mapStep(current))
     val sixSteps = filterStep(fiveSteps)
@@ -613,12 +705,14 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         fiveSteps,
         narrowInfo(2, layout),
         Some("Project(Pipeline4(Scan))"),
+        longProbe = probe(fiveSteps),
       ),
       AcceptedCase(
         s"$kind six-step element pipeline",
         sixSteps,
         narrowInfo(2, layout),
         Some("Pipeline2(Pipeline4(Scan))"),
+        longProbe = probe(sixSteps),
       ),
     )
 

@@ -12,7 +12,9 @@ lazy val checkFileLength = taskKey[Unit](
 lazy val commonSettings = Seq(
   semanticdbEnabled := true,
   scalacOptions ++= List(
-    "-Wunused:all"
+    "-Wunused:all",
+    // E029: a new enum case without a match arm is a compile error, not a runtime MatchError.
+    "-Wconf:name=PatternMatchExhaustivity:e",
   ),
   // Prefer async loggers
   ThisBuild / javaOptions ++= Seq(

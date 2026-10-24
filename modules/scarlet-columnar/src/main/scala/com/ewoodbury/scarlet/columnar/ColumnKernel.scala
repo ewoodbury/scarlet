@@ -17,7 +17,7 @@ package com.ewoodbury.scarlet.columnar
  *
  * Primitive loops keep the row index in a `var` so the bodies stay allocation-free. Each primitive
  * has its own loop so the copy stays monomorphic. Fused runs of two to four filters and projects
- * are [[Int32Pipeline]], [[Float64Pipeline]], and [[Utf8Pipeline]].
+ * are [[Int32Pipeline]], [[Int64Pipeline]], [[Float64Pipeline]], and [[Utf8Pipeline]].
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object ColumnKernel:
