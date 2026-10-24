@@ -23,16 +23,25 @@ private[execution] object MaterialisationStudyReport:
   private val stageNames: Vector[String] =
     Vector("encode", "partial", "merge", "exchange", "final")
 
-  def printAll(queries: Vector[Row], stages: Vector[Row], probes: Vector[Row], facts: Facts): Unit =
+  def printAll(
+      queries: Vector[Row],
+      stages: Vector[Row],
+      permuted: Vector[Row],
+      probes: Vector[Row],
+      facts: Facts,
+  ): Unit =
     println(header(facts))
     println()
     queries.foreach(row => println(tsv(row)))
     stages.foreach(row => println(tsv(row)))
+    permuted.foreach(row => println(tsv(row)))
     probes.foreach(row => println(tsv(row)))
     println()
     table("Queries", queries.filter(row => sameText(row.kind, "query")))
     attribution(queries, stages)
+    keyOrder()
     table("Grouped stages and replay", groupedTable(queries, stages))
+    table("Permuted keys", permutedTable(queries, permuted))
     replayGap(queries, stages)
     table("Caller probes", probes)
     batches(queries, probes, facts)
@@ -56,6 +65,8 @@ private[execution] object MaterialisationStudyReport:
       s"S5 checksum=${facts.projectedSum} P5 checksum=${facts.projectedSum} " +
       s"RAW checksum=${facts.fusedSum} RAWD checksum=${facts.dependentSum}\n" +
       s"GROUPED rows=$groupedRows groups=$groups checksum=${facts.groupedSum} " +
+      "keys=row%groups batch_multiple_of_groups cached_slot_merge " +
+      s"PERMUTED seed=$permutedSeed shuffled_same_multiset " +
       s"element_morsels=${facts.morsels} grouped_morsels=${facts.groupedMorsels}\n" +
       s"java=${runtime.getVmName} ${runtime.getVmVersion} args=${runtime.getInputArguments}"
 
@@ -119,11 +130,16 @@ private[execution] object MaterialisationStudyReport:
       val described = stageRows.map(row => s"${row.name} ${ms(row.p50Ns)} ms").mkString(", ")
       val stageSum = stageRows.map(_.p50Ns).sum
       val gap = replay.p50Ns - grouped.p50Ns
+      val permuted = findRow(queries, "query", "PERMUTED", threads)
       println(
         s"threads=$threads stage p50: $described. Sum of those p50 values is ${ms(stageSum)} ms. " +
-          "That sum is not a measurement. The replay times encode, partial, merge, exchange, and " +
-          s"final in one call: ${ms(replay.p50Ns)} ms. GROUPED p50 is ${ms(grouped.p50Ns)} ms. " +
-          s"Gap replay-query is ${signedMs(gap)} ms. Spread replay ${spreadText(replay.spreadNs)}.",
+          "That sum is not a measurement. Those stages use repeating keys, so the merge p50 is " +
+          "the cached-slot path. REPLAY times encode, partial, merge, exchange, and final in one " +
+          s"harness call: ${ms(replay.p50Ns)} ms. It is a synthetic stage replay, not a query " +
+          s"result. GROUPED p50 is ${ms(grouped.p50Ns)} ms, the query-level result from " +
+          s"tryGroupedSum on the repeating keys. PERMUTED p50 is ${ms(permuted.p50Ns)} ms, " +
+          s"tryGroupedSum on the shuffled keys. Gap replay-minus-GROUPED is ${signedMs(gap)} ms. " +
+          s"Spread replay ${spreadText(replay.spreadNs)}.",
       )
     }
     println(
@@ -249,6 +265,29 @@ private[execution] object MaterialisationStudyReport:
       s"spread_ns=${row.spreadNs}\talloc_bytes=${row.allocBytes}\t" +
       s"caller_bytes=${row.callerBytes}\talloc_kind=${row.allocKind}\tbatches=${row.batches}\t" +
       s"encodes=${row.encodes}\tvisits=${row.visits}\tgc_ms=${row.gcMs}\tchecksum=${row.checksum}"
+
+  private def keyOrder(): Unit =
+    println(
+      "Sequential grouped keys are row % group count. The batch size is a multiple of that " +
+        "count, so every morsel repeats one key sequence and every dense partial shares it. " +
+        "The merge then adds through cached slots. That is a best case.",
+    )
+    println(
+      s"PERMUTED shuffles that key multiset with seed $permutedSeed. Values stay in row order, " +
+        "so the checksum matches GROUPED. Partials do not share a key sequence, and the merge " +
+        "probes. The partial scan is faster on the repeating keys too, because each morsel " +
+        "probes one key order. Most of the query gap is that scan. REPLAY and REPLAY-PERM call " +
+        "the five stages from the harness. They are synthetic stage replays, not query results. " +
+        "GROUPED p50 is the query-level result for the repeating keys.",
+    )
+    println()
+
+  private def permutedTable(queries: Vector[Row], stages: Vector[Row]): Vector[Row] =
+    val names = stageNames :+ "REPLAY-PERM"
+    (stages ++ queries.filter(row => sameText(row.kind, "permuted"))).sortBy { row =>
+      val index = names.indexOf(row.name)
+      (row.threads, if (index < 0) then names.length else index)
+    }
 
   private def groupedTable(queries: Vector[Row], stages: Vector[Row]): Vector[Row] =
     val names = stageNames :+ "REPLAY"

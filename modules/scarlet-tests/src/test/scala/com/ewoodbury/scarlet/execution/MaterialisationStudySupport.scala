@@ -27,6 +27,9 @@ private[execution] object MaterialisationStudySupport:
   val elementRows: Int = 1000000
   val groupedRows: Int = 10000000
   val groups: Int = 1024
+
+  /** Fixed seed for the shuffled grouped keys. The multiset matches `row % groups`. */
+  val permutedSeed: Long = 58L
   val threadCounts: Vector[Int] = Vector(1, 4)
   val estimatedKind: String = "process-wide-estimate"
   val callerKind: String = "caller-thread"
