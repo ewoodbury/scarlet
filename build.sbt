@@ -25,8 +25,9 @@ lazy val commonSettings = Seq(
   // Type erasure policy: asInstanceOf and Any-inference are compile ERRORS. They are allowed
   // only at named erasure boundaries (Operation.fromPlan, StageBuilder, StageExecutor,
   // ShuffleHandler, JoinExecutor, DAGScheduler.executePartitions, DistCollection.kvPlan,
-  // ColumnarPlanner, BatchCodec.writeComponent, DefaultExecutionService.addRows, and the storage
-  // implementations), each carrying a suppression and a comment explaining why the cast is safe.
+  // ColumnarPlanner, ColumnarInterpreter, BatchCodec.writeComponent,
+  // DefaultExecutionService.addRows, and the storage implementations), each carrying a
+  // suppression and a comment explaining why the cast is safe.
   // Do not add new cast sites outside those boundaries.
   wartremoverErrors ++= Seq(Wart.AsInstanceOf, Wart.Any),
   wartremoverWarnings ++= Warts.allBut(
