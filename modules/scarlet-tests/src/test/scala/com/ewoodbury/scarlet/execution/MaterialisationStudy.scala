@@ -23,8 +23,12 @@ import MaterialisationStudySupport.*
  *
  * RAW is four dependent `+1` adds, a folded-loop floor. RAWD is four data-dependent updates.
  * Both create and join their workers inside the sample when the width is above one. GROUPED is
- * `tryGroupedSum`. REPLAY times the five stage calls as one action. Stage percentiles are not
- * added together.
+ * `tryGroupedSum` on keys `row % groups`. The batch size is a multiple of the group count, so
+ * every dense partial repeats one key sequence and the merge adds through cached slots. That is
+ * a best case. PERMUTED is `tryGroupedSum` on a fixed-seed shuffle of the same key multiset.
+ * GROUPED p50 is the query-level result for the repeating keys. REPLAY times the five stage
+ * calls as one harness action. It is a synthetic stage replay, not a query result. REPLAY-PERM
+ * is that replay on the shuffled keys. Stage percentiles are not added together.
  *
  * Timed F4, P5, and GROUPED fail if the planner returns `None`, so a row-path fallback is not
  * recorded as a columnar result. `tryRun` is asserted in `prepare` for the int source, F4, and P5.
@@ -59,6 +63,11 @@ object MaterialisationStudy:
       ("final", "sumInt64+ColumnReduce"),
     )
 
+  private val mergeStage: Int =
+    val index = stagePlan.indexWhere(described => sameText(described._1, "merge"))
+    require(index >= 0, "merge stage is missing")
+    index
+
   private val mergeSum: ColumnBatch => ColumnBatch =
     batch => HashAggregate.sumInt64(batch, keyOrdinal = 0, valueOrdinal = 1)
 
@@ -74,6 +83,7 @@ object MaterialisationStudy:
       fused: DistCollection[Int],
       projected: DistCollection[Int],
       grouped: DistCollection[(Int, Int)],
+      permuted: DistCollection[(Int, Int)],
       fusedSum: Long,
       projectedSum: Long,
       dependentSum: Long,
@@ -134,13 +144,14 @@ object MaterialisationStudy:
     val setup = prepare()
     val queries = buildQueries(setup)
     val stages = Array.fill(stagePlan.length)(Array.fill(threadCounts.length)(new Series))
+    val permutedStages = Array.fill(stagePlan.length)(Array.fill(threadCounts.length)(new Series))
     System.err.println("warm")
-    rounds(warmup, record = false, queries, stages, setup)
+    rounds(warmup, record = false, queries, stages, permutedStages, setup)
     System.err.println("measure")
-    rounds(measure, record = true, queries, stages, setup)
+    rounds(measure, record = true, queries, stages, permutedStages, setup)
     sampler.foreach { active =>
       System.err.println("allocate")
-      allocate(active, queries, stages, setup)
+      allocate(active, queries, stages, permutedStages, setup)
     }
     installThreads(1)
     val probes = measureProbes(sampler.map(_.bean), setup)
@@ -155,7 +166,8 @@ object MaterialisationStudy:
     )
     MaterialisationStudyReport.printAll(
       queries.flatMap(query => threadCounts.map(threads => toQueryRow(query, threads, facts))),
-      stageRows(stages, facts),
+      stageRows(stages, facts, "stage"),
+      stageRows(permutedStages, facts, "permuted"),
       probes,
       facts,
     )
@@ -166,8 +178,12 @@ object MaterialisationStudy:
     val fused = (0 until 4).foldLeft(element)((current, _) => current.map(_ + 1))
     val projected = fused.map(_ + 1)
     val keys = Array.tabulate(groupedRows)(row => row % groups)
+    val shuffled = shuffleKeys(keys, permutedSeed)
+    require(sumInts(keys) == sumInts(shuffled), "shuffled keys changed the multiset")
+    require(!keys.sameElements(shuffled), "shuffled keys kept the sequential order")
     val groupValues = Array.tabulate(groupedRows)(row => row)
     val grouped = DistCollection.ofIntPairs(keys, groupValues, sourcePartitions)
+    val permuted = DistCollection.ofIntPairs(shuffled, groupValues, sourcePartitions)
     val fusedSum = expectPlus(values, steps = 4)
     val projectedSum = expectPlus(values, steps = 5)
     val dependentSum = rawDependent(values, 0, values.length)
@@ -180,9 +196,14 @@ object MaterialisationStudy:
       throw new IllegalStateException("grouped sum did not peel")
     }
     require(sameText(groupedShape, "GroupedSum(Scan)"), groupedShape)
+    val permutedShape = ColumnarPlanner.groupedSumPeel(permuted.plan).getOrElse {
+      throw new IllegalStateException("permuted grouped sum did not peel")
+    }
+    require(sameText(permutedShape, "GroupedSum(Scan)"), permutedShape)
     requireSum(fused.plan, fusedSum, "F4")
     requireSum(projected.plan, projectedSum, "P5")
     requireGrouped(grouped.plan, groupedSum)
+    requireGrouped(permuted.plan, groupedSum)
     requireRun(element.plan, elementRows, "source")
     requireRun(fused.plan, elementRows, "F4")
     requireRun(projected.plan, elementRows, "P5")
@@ -196,6 +217,7 @@ object MaterialisationStudy:
       fused,
       projected,
       grouped,
+      permuted,
       fusedSum,
       projectedSum,
       dependentSum,
@@ -242,6 +264,15 @@ object MaterialisationStudy:
         acceptedGrouped(setup.grouped.plan)
       },
       action(
+        "query",
+        "PERMUTED",
+        "GroupedSum(Scan) shuffled keys",
+        groupedRows,
+        setup.groupedSum,
+      ) { _ =>
+        acceptedGrouped(setup.permuted.plan)
+      },
+      action(
         "replay",
         "REPLAY",
         "encode+partial+merge+exchange+final",
@@ -250,6 +281,15 @@ object MaterialisationStudy:
       ) { threads =>
         groupedOnce(setup.grouped, threads)
       },
+      action(
+        "permuted",
+        "REPLAY-PERM",
+        "shuffled-keys encode+partial+merge+exchange+final",
+        groupedRows,
+        setup.groupedSum,
+      ) { threads =>
+        groupedOnce(setup.permuted, threads)
+      },
     )
 
   private def rounds(
@@ -257,6 +297,7 @@ object MaterialisationStudy:
       record: Boolean,
       queries: Vector[Query],
       stages: Array[Array[Series]],
+      permuted: Array[Array[Series]],
       setup: Setup,
   ): Unit =
     var round = 0
@@ -266,7 +307,8 @@ object MaterialisationStudy:
       order.foreach { threads =>
         installThreads(threads)
         queries.foreach(query => runQuery(query, threads, recorded, setup.values))
-        runStages(setup, threads, recorded, stages)
+        runStages(setup.grouped, threads, setup.groupedSum, recorded, stages)
+        runStages(setup.permuted, threads, setup.groupedSum, recorded, permuted)
       }
       System.err.println(s"${if (record) then "measure" else "warm"} ${round + 1}/$count")
       round += 1
@@ -287,18 +329,26 @@ object MaterialisationStudy:
     else runChecked(label, query.checksum, slot)(query.body(threads))
 
   private def runStages(
-      setup: Setup,
+      grouped: DistCollection[(Int, Int)],
       threads: Int,
+      checksum: Long,
       recorded: Option[Int],
       stages: Array[Array[Series]],
   ): Unit =
     clearShuffle()
     val marks = stageChain(
-      setup.grouped,
+      grouped,
       threads,
-      setup.groupedSum,
+      checksum,
       new Meter[Timed]:
         def apply[B](body: => B): (B, Timed) = timeOnce(body),
+    )
+    val merge = marks.lift(mergeStage).getOrElse {
+      throw new IllegalStateException(s"missing merge stage $mergeStage")
+    }
+    require(
+      merge.batches == 2L && merge.visits == 2L,
+      s"merge footprint ${merge.batches} batches / ${merge.visits} visits",
     )
     recorded.foreach { index =>
       marks.zipWithIndex.foreach { (timed, stage) =>
@@ -315,6 +365,7 @@ object MaterialisationStudy:
       sampler: AllocSampler,
       queries: Vector[Query],
       stages: Array[Array[Series]],
+      permuted: Array[Array[Series]],
       setup: Setup,
   ): Unit =
     var sample = 0
@@ -323,7 +374,8 @@ object MaterialisationStudy:
       threadCounts.foreach { threads =>
         installThreads(threads)
         queries.foreach(query => allocateQuery(sampler, query, threads, at, setup.values))
-        allocateStages(sampler, setup, threads, at, stages)
+        allocateStages(sampler, setup.grouped, setup.groupedSum, threads, at, stages)
+        allocateStages(sampler, setup.permuted, setup.groupedSum, threads, at, permuted)
       }
       System.err.println(s"allocate ${at + 1}/$allocSamples")
       sample += 1
@@ -349,16 +401,17 @@ object MaterialisationStudy:
 
   private def allocateStages(
       sampler: AllocSampler,
-      setup: Setup,
+      grouped: DistCollection[(Int, Int)],
+      checksum: Long,
       threads: Int,
       sample: Int,
       stages: Array[Array[Series]],
   ): Unit =
     clearShuffle()
     val marks = stageChain(
-      setup.grouped,
+      grouped,
       threads,
-      setup.groupedSum,
+      checksum,
       new Meter[(Long, Long)]:
         def apply[B](body: => B): (B, (Long, Long)) =
           val account = sampler.account(body)(0L)
@@ -391,6 +444,7 @@ object MaterialisationStudy:
     }
     // Two input batches, each with many morsels. The fold publishes one partial per batch: 2
     // batches and 2 visits. Concatenation used to add one batch per input batch (4 batches).
+    // Repeating keys take the cached-slot path. The shuffled chain probes. Both publish 2/2.
     val (merged, mergeMark) = meter {
       GroupedSumKernel.mergePartials(split._1, split._2, threads)
     }
@@ -552,13 +606,17 @@ object MaterialisationStudy:
       orderSpread(series.elapsed, threads == 1),
     )
 
-  private def stageRows(stages: Array[Array[Series]], facts: MaterialisationStudyReport.Facts): Vector[Row] =
+  private def stageRows(
+      stages: Array[Array[Series]],
+      facts: MaterialisationStudyReport.Facts,
+      kind: String,
+  ): Vector[Row] =
     stagePlan.zipWithIndex.flatMap { (described, stage) =>
       val (name, shape) = described
       threadCounts.map { threads =>
         val series = stages(stage)(widthSlot(threads))
         rowOf(
-          "stage",
+          kind,
           name,
           threads,
           shape,
@@ -689,6 +747,29 @@ object MaterialisationStudy:
   private def morselCount(rows: Int, parts: Int, size: Int): Int =
     val perPartition = rows / parts
     parts * ((perPartition + size - 1) / size)
+
+  private def shuffleKeys(keys: Array[Int], seed: Long): Array[Int] =
+    val copy = keys.clone()
+    val random = new scala.util.Random(seed)
+    var index = copy.length
+    while (index > 1) {
+      index -= 1
+      val swap = random.nextInt(index + 1)
+      val held = copy(index)
+      copy(index) = copy(swap)
+      copy(swap) = held
+    }
+    copy
+
+  private def sumInts(values: Array[Int]): Long =
+    var index = 0
+    var total = 0L
+    val rows = values.length
+    while (index < rows) {
+      total += values(index)
+      index += 1
+    }
+    total
 
   private def widthSlot(threads: Int): Int =
     val index = threadCounts.indexOf(threads)

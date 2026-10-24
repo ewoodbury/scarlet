@@ -169,11 +169,19 @@ object HashAggregate:
 
   /**
    * Folds partial-sum batches into one partial, in order. The table starts at
-   * `tableSize(2 * widest)`, where `widest` is the longest partial, and `grow` covers a later
-   * partial that introduces more groups. Each partial picks its own scan: dense only when that
-   * partial's key and value columns are fully present, otherwise sparse. A null sum is not read as
-   * zero. A group that is null and then valued becomes valued; the reverse stays valued; a group
-   * that is only ever null stays present with a null sum.
+   * `tableSize(2 * widest)`, where `widest` is the longest partial. A later partial that
+   * introduces new groups may grow the table. Disjoint partials rehash: each grow doubles the
+   * table, so the number of grows is at most `log2(total / widest)` when `total` is the number of
+   * distinct keys. A widest partial above the seed limit is rejected before that table is
+   * allocated.
+   *
+   * Each partial picks its own scan: dense only when that partial's key and value columns are
+   * fully present, otherwise sparse. A null sum is not read as zero. A null key is dropped. A
+   * group that is null and then valued becomes valued; the reverse stays valued; a group that is
+   * only ever null stays present with a null sum.
+   *
+   * The slots of the most recent dense key sequence are reused when the next dense partial repeats
+   * that sequence. `grow` and `release` drop the cached sequence.
    */
   private[columnar] def mergeSumPartials(
       partials: Vector[ColumnBatch],
@@ -193,7 +201,13 @@ object HashAggregate:
       noteMergeCapacity(table.currentCapacity)
       table.compact()
 
-  /** Slot count of the table the last [[mergeSumPartials]] on this thread finished with. */
+  /**
+   * Slot count of the table the last [[mergeSumPartials]] on this thread finished with.
+   *
+   * The slot is thread-local. A merge that runs on a worker updates that worker's value. A read on
+   * the caller, including a read while those workers are still in the merge, is the caller's
+   * previous value.
+   */
   private[columnar] def mergeSumTableCapacity: Int =
     mergeSlots.get().capacity
 
@@ -299,9 +313,15 @@ object HashAggregate:
     }
     widest
 
-  private def mergeSeed(widest: Int): Int =
-    val doubled = if (widest > (1 << 28)) then Int.MaxValue else widest << 1
-    ColumnHash.tableSize(doubled)
+  /**
+   * Capacity for a table sized from the longest partial. `tableSize` doubles the count again and
+   * rounds up, so a widest partial above `MaxCapacity >>> 3` would seed the maximum table and
+   * allocate it before the first probe. `MaxCapacity >>> 2` still rounds up to that table.
+   */
+  private[columnar] def mergeSeed(widest: Int): Int =
+    val limit = ColumnHash.MaxCapacity >>> 3
+    require(widest <= limit, s"widest partial $widest exceeds $limit")
+    ColumnHash.tableSize(widest << 1)
 
   private def foldSumPartial(
       table: GroupTable,
@@ -617,9 +637,10 @@ object HashAggregate:
       if (aggs.max) new Array[Int](initialCapacity) else Array.emptyIntArray
     private var seen: Array[Byte] = new Array[Byte](initialCapacity)
     private var slots: Array[Int] = new Array[Int](16)
-    // Slots for the last dense key sequence. Valid until grow or release moves or clears groups.
     private var cachedKeys: Array[Int] = Array.emptyIntArray
     private var cachedSlots: Array[Int] = Array.emptyIntArray
+    // Row count of the most recent dense key sequence. Zero after grow and release, which also
+    // drop `cachedKeys` and `cachedSlots`.
     private var cachedRows: Int = 0
     private val hasSum: Boolean = aggs.sum
     private val hasCount: Boolean = aggs.count
@@ -634,7 +655,8 @@ object HashAggregate:
     /**
      * Adds a present value for every row. A key that is already in the table updates its sum in
      * this loop. A new key goes through [[ensure]], which may grow the table. When `remember` is
-     * set, a later call with the same key sequence adds through the slots this probe found.
+     * set, the slots from this probe are kept. Only that most recent dense sequence is cached. A
+     * later partial reuses the slots when its keys match.
      */
     def addPresentSums(
         keyValues: Array[Int],
@@ -642,16 +664,24 @@ object HashAggregate:
         rows: Int,
         remember: Boolean,
     ): Unit =
-      if (remember && rows == cachedRows && sameKeys(cachedKeys, keyValues, rows)) then
-        addCachedSums(valueValues, rows)
+      if (
+          remember && cachedRows > 0 && rows == cachedRows && sameKeys(cachedKeys, keyValues, rows)
+        )
+      then addCachedSums(valueValues, rows)
       else probePresentSums(keyValues, valueValues, rows, remember)
 
     private def addCachedSums(valueValues: Array[Long], rows: Int): Unit =
+      assert(rows > 0, "cached sequence is empty")
       val sumSlots = sums
       val placed = cachedSlots
+      val seenSlots = seen
       var row = 0
       while (row < rows) {
-        sumSlots(placed(row)) += valueValues(row)
+        val slot = placed(row)
+        // The probe that filled the cache noticed this slot. compact drops a sum whose seen bit
+        // is clear, so a slot that was not noticed must not reuse.
+        assert(seenSlots(slot) != 0, "cached slot was not seen")
+        sumSlots(slot) += valueValues(row)
         row += 1
       }
 
@@ -810,6 +840,11 @@ object HashAggregate:
       }
       occupied = 0
       missing = 0
+      dropCachedSequence()
+
+    private def dropCachedSequence(): Unit =
+      cachedKeys = Array.emptyIntArray
+      cachedSlots = Array.emptyIntArray
       cachedRows = 0
 
     private def notice(slot: Int): Unit =
@@ -819,7 +854,7 @@ object HashAggregate:
 
     /** Doubles the table and reinserts `slots(0 until occupied)`, preserving first-seen order. */
     private def grow(): Unit =
-      cachedRows = 0
+      dropCachedSequence()
       if (capacity >= ColumnHash.MaxCapacity) then
         throw new IllegalStateException(
           s"hash aggregate table is already at capacity $capacity",

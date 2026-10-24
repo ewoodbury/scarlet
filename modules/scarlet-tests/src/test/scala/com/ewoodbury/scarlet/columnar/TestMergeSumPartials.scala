@@ -8,20 +8,37 @@ import org.scalatest.matchers.should.Matchers
 class TestMergeSumPartials extends AnyFlatSpec with Matchers:
 
   "merge" should "match concat plus sumInt64 on a mixed fixture" in {
-    val random = new Random(11)
     val dense = partial(Seq((Some(1), Some(4)), (Some(2), Some(5)), (Some(1), Some(6))))
     val sparse = partial(
       Seq((Some(2), None), (Some(3), Some(1)), (Some(4), None), (Some(3), Some(2))),
     )
-    val generated = Vector.fill(8)(generatedPartial(random))
-    val partials = dense +: sparse +: generated :+ partial(Seq.empty)
-    val folded = HashAggregate.mergeSumPartials(partials, keyOrdinal = 0, valueOrdinal = 1)
-    val legacy = HashAggregate.sumInt64(ColumnBatches.concat(partials), keyOrdinal = 0, valueOrdinal = 1)
-
+    // Built as a partial, not as input rows. sumInt32 would have dropped the null key already.
+    val nullKey = directPartial(Seq((None, Some(4L)), (Some(6), Some(1L))))
+    val keptKey = directPartial(Seq((Some(6), Some(1L))))
+    val empty = partial(Seq.empty)
     fullyPresent(dense) shouldBe true
     fullyPresent(sparse) shouldBe false
-    keysOf(folded) shouldBe keysOf(legacy)
-    sums(folded) shouldBe sums(legacy)
+    fullyPresent(nullKey) shouldBe false
+
+    Seq(11, 12, 13, 14, 15, 16, 17, 18).foreach { seed =>
+      val generated = Vector.fill(8)(generatedPartial(new Random(seed)))
+      val partials = dense +: sparse +: nullKey +: generated :+ empty
+      val folded = HashAggregate.mergeSumPartials(partials, keyOrdinal = 0, valueOrdinal = 1)
+      val legacy =
+        HashAggregate.sumInt64(ColumnBatches.concat(partials), keyOrdinal = 0, valueOrdinal = 1)
+      val withoutNull = HashAggregate.mergeSumPartials(
+        dense +: sparse +: keptKey +: generated :+ empty,
+        keyOrdinal = 0,
+        valueOrdinal = 1,
+      )
+
+      keysOf(folded) shouldBe keysOf(legacy)
+      sums(folded) shouldBe sums(legacy)
+      keysOf(folded) shouldBe keysOf(withoutNull)
+      sums(folded) shouldBe sums(withoutNull)
+      nullKeyRows(folded) shouldBe 0
+      nullKeyRows(legacy) shouldBe 0
+    }
   }
 
   it should "keep input batches apart when their keys are disjoint" in {
@@ -106,6 +123,20 @@ class TestMergeSumPartials extends AnyFlatSpec with Matchers:
     sums(merged).values.toSet shouldBe Set(Some(copies.toLong))
   }
 
+  it should "reject a widest partial that would seed the maximum table" in {
+    val limit = ColumnHash.MaxCapacity >>> 3
+    HashAggregate.mergeSeed(limit) should be < ColumnHash.MaxCapacity
+    val overLimit = intercept[IllegalArgumentException] {
+      HashAggregate.mergeSeed(limit + 1)
+    }
+    val oldThreshold = intercept[IllegalArgumentException] {
+      HashAggregate.mergeSeed(ColumnHash.MaxCapacity >>> 2)
+    }
+
+    overLimit.getMessage should include("widest")
+    oldThreshold.getMessage should include("widest")
+  }
+
   it should "grow when later partials add groups the first partial did not have" in {
     val narrow = block(0, 4)
     val wide = 16
@@ -155,7 +186,7 @@ class TestMergeSumPartials extends AnyFlatSpec with Matchers:
     sums(merged) shouldBe Map(1 -> Some(10L), 2 -> Some(20L))
   }
 
-  it should "keep a null key beside a valued key when each row is its own morsel" in {
+  it should "keep a null sum beside a valued sum when each row is its own morsel" in {
     val batch = BatchCodec.nullableIntPairs(Seq((Some(1), None), (Some(2), Some(5))))
     val merged = one(run(Vector(batch), parallelism = 1, batchSize = 1))
 
@@ -189,16 +220,79 @@ class TestMergeSumPartials extends AnyFlatSpec with Matchers:
     sums(group) shouldBe Map(1 -> Some(9L))
   }
 
-  "determinism" should "repeat the same partial at one thread and at four" in {
-    val rows = (0 until 40).map { index =>
-      val value = if (index % 5 == 0) None else Some(index)
-      (Some(index % 7), value)
-    }
-    val batch = BatchCodec.nullableIntPairs(rows)
-    val first = run(Vector(batch), parallelism = 1, batchSize = 8)
+  "determinism" should "repeat per-batch key order and sums at four threads" in {
+    val batches = Vector(
+      BatchCodec.nullableIntPairs((0 until 40).map { index =>
+        val value = if (index % 5 == 0) None else Some(index)
+        (Some(index % 7), value)
+      }),
+      BatchCodec.nullableIntPairs((0 until 36).map { index =>
+        val value = if (index % 4 == 0) None else Some(index + 3)
+        (Some((index * 3) % 5), value)
+      }),
+      BatchCodec.nullableIntPairs((0 until 24).map { index =>
+        (Some(index % 9), Some(index))
+      }),
+    )
+    val (sizes, _) = GroupedSumKernel.partialMorsels(
+      batches,
+      keyOrdinal = 0,
+      valueOrdinal = 1,
+      parallelism = 4,
+      batchSize = 8,
+      steps = Vector.empty[PairStep],
+    )
+    sizes.length should be > 1
+    sizes.foreach(size => size should be > 1)
+
+    val first = run(batches, parallelism = 4, batchSize = 8)
+    first.length shouldBe batches.length
     (0 until 16).foreach { _ =>
-      samePartial(run(Vector(batch), parallelism = 1, batchSize = 8), first)
-      samePartial(run(Vector(batch), parallelism = 4, batchSize = 8), first)
+      samePartial(run(batches, parallelism = 4, batchSize = 8), first)
+    }
+  }
+
+  "footprint" should "publish two batches and two visits when folding two input batches" in {
+    val left = BatchCodec.intPairs((0 until 16).map(row => (row % 5, 1)))
+    val right = BatchCodec.intPairs((0 until 12).map(row => (row % 4, 2)))
+    val (sizes, partials) = GroupedSumKernel.partialMorsels(
+      Vector(left, right),
+      keyOrdinal = 0,
+      valueOrdinal = 1,
+      parallelism = 1,
+      batchSize = 4,
+      steps = Vector.empty[PairStep],
+    )
+    sizes shouldBe Vector(4, 3)
+
+    ColumnMetrics.withSink(new CountingSink) {
+      val merged = GroupedSumKernel.mergePartials(sizes, partials, parallelism = 1)
+      merged.length shouldBe 2
+      ColumnMetrics.batchCount shouldBe 2L
+      ColumnMetrics.visitCount shouldBe 2L
+    }
+  }
+
+  it should "pass a single morsel through with no extra batch" in {
+    val batch = BatchCodec.intPairs(Seq((1, 4), (1, 5), (2, 6)))
+    val (sizes, partials) = GroupedSumKernel.partialMorsels(
+      Vector(batch),
+      keyOrdinal = 0,
+      valueOrdinal = 1,
+      parallelism = 1,
+      batchSize = 8,
+      steps = Vector.empty[PairStep],
+    )
+    sizes shouldBe Vector(1)
+
+    ColumnMetrics.withSink(new CountingSink) {
+      val merged = GroupedSumKernel.mergePartials(sizes, partials, parallelism = 1)
+      merged match
+        case Vector(only) =>
+          only should be theSameInstanceAs one(partials)
+          ColumnMetrics.batchCount shouldBe 0L
+          ColumnMetrics.visitCount shouldBe 1L
+        case other => fail(s"expected one partial, got ${other.length}")
     }
   }
 
@@ -215,6 +309,17 @@ class TestMergeSumPartials extends AnyFlatSpec with Matchers:
 
   private def partial(rows: Seq[(Option[Int], Option[Int])]): ColumnBatch =
     HashAggregate.sumInt32(pairs(rows), keyOrdinal = 0, valueOrdinal = 1)
+
+  /** A partial-sum batch. A null key is still in the column, unlike [[partial]]. */
+  private def directPartial(rows: Seq[(Option[Int], Option[Long])]): ColumnBatch =
+    new ColumnBatch(
+      Vector(LogicalType.Int32, LogicalType.Int64),
+      Vector(
+        Int32Column.fromNullable(rows.map(_._1)),
+        Int64Column.fromNullable(rows.map(_._2)),
+      ),
+      rows.size,
+    )
 
   private def pairs(rows: Seq[(Option[Int], Option[Int])]): ColumnBatch =
     new ColumnBatch(
@@ -254,6 +359,10 @@ class TestMergeSumPartials extends AnyFlatSpec with Matchers:
 
   private def fullyPresent(batch: ColumnBatch): Boolean =
     ColumnHash.fullyPresent(int32(batch, 0)) && ColumnHash.fullyPresent(int64(batch, 1))
+
+  private def nullKeyRows(batch: ColumnBatch): Int =
+    val keys = int32(batch, 0)
+    (0 until batch.length).count(row => !keys.isValid(row))
 
   private def sums(batch: ColumnBatch): Map[Int, Option[Long]] =
     val keys = int32(batch, 0)

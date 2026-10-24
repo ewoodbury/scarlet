@@ -102,12 +102,9 @@ private[scarlet] object GroupedSumKernel:
     MorselScheduler.map(groups, parallelism)((_, group) => combine(group))
 
   private def combine(group: Vector[ColumnBatch]): ColumnBatch =
-    if (group.length > 1) then
-      HashAggregate.mergeSumPartials(group, keyOrdinal = 0, valueOrdinal = 1)
-    else
-      group.headOption.getOrElse {
-        throw new IllegalArgumentException("morsel group is empty")
-      }
+    group match
+      case Vector(only) => only
+      case many => HashAggregate.mergeSumPartials(many, keyOrdinal = 0, valueOrdinal = 1)
 
   /**
    * Runs `body` and then drops this thread's worker table. Ranges inside `body` still share it.
