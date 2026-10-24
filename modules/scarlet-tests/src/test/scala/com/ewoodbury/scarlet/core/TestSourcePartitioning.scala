@@ -87,6 +87,18 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
     dc.collect() shouldEqual Seq(42)
   }
 
+  it should "leave a string iterable on the unknown descriptor" in {
+    val present = DistCollection(Seq("a", "b"), 2)
+    sourceDescriptor(present) shouldEqual Plan.SourceDescriptor.Unknown
+    present.collect() shouldEqual Seq("a", "b")
+
+    val empty = DistCollection(Seq.empty[String], 2)
+    sourceDescriptor(empty) shouldEqual Plan.SourceDescriptor.Unknown
+    partitionSizes(empty) shouldEqual Seq(0, 0)
+    empty.collect() shouldEqual Seq.empty[String]
+    empty.count() shouldEqual 0L
+  }
+
   "DistCollection.ofInts" should "copy contiguous ranges into primitive partitions" in {
     val input = Array(1, 2, 3, 4, 5)
     val dc = DistCollection.ofInts(input, 3)
@@ -251,6 +263,55 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
     owned.values should not be theSameInstanceAs(raw)
     BoolArrays(Array.empty[Boolean]).toList shouldEqual Nil
     BoolArrays(Array.empty[Boolean]).knownSize shouldEqual 0
+  }
+
+  "DistCollection.ofStrings" should "copy contiguous ranges into string partitions" in {
+    val input = Array("a", "bb", "a", "c", "d")
+    val dc = DistCollection.ofStrings(input, 3)
+    input(0) = "z"
+
+    partitionSizes(dc) shouldEqual Seq(2, 2, 1)
+    sourceDescriptor(dc) shouldEqual Plan.SourceDescriptor.Strings
+    dc.collect() shouldEqual Seq("a", "bb", "a", "c", "d")
+    dc.count() shouldEqual 5L
+    sourceData(dc).foreach {
+      case stored: StringArrays =>
+        stored.values should not be theSameInstanceAs(input)
+      case other => fail(s"expected StringArrays, got $other")
+    }
+  }
+
+  it should "produce exactly N empty string partitions" in {
+    val dc = DistCollection.ofStrings(Array.empty[String], 3)
+
+    partitionSizes(dc) shouldEqual Seq(0, 0, 0)
+    sourceDescriptor(dc) shouldEqual Plan.SourceDescriptor.Strings
+    dc.collect() shouldEqual Seq.empty[String]
+    dc.count() shouldEqual 0L
+    sourceData(dc).foreach {
+      case stored: StringArrays => stored.knownSize shouldEqual 0
+      case other => fail(s"expected StringArrays, got $other")
+    }
+  }
+
+  it should "reject a non-positive partition count" in {
+    val caught = intercept[IllegalArgumentException] {
+      DistCollection.ofStrings(Array("a"), 0)
+    }
+    caught.getMessage shouldBe partitionCountMessage
+    an[IllegalArgumentException] should be thrownBy DistCollection.ofStrings(Array("a"), -2)
+  }
+
+  "StringArrays" should "iterate copied strings, including an empty array" in {
+    val raw = Array("a", "b")
+    val owned = StringArrays(raw)
+    raw(0) = "z"
+
+    owned.toList shouldEqual List("a", "b")
+    owned.knownSize shouldEqual 2
+    owned.values should not be theSameInstanceAs(raw)
+    StringArrays(Array.empty[String]).toList shouldEqual Nil
+    StringArrays(Array.empty[String]).knownSize shouldEqual 0
   }
 
   "LongArrays" should "iterate copied longs, including an empty array" in {

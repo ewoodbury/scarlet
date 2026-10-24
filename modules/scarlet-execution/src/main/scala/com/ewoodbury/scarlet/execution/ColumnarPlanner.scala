@@ -70,11 +70,11 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * reports no layout for it.
  *
  * An [[com.ewoodbury.scarlet.core.IntArrays]], [[com.ewoodbury.scarlet.core.LongArrays]],
- * [[com.ewoodbury.scarlet.core.BoolArrays]], [[com.ewoodbury.scarlet.core.DoubleArrays]], or
- * [[com.ewoodbury.scarlet.core.IntPairArrays]] source is copied into the column on the calling
- * thread. The partition stays readable, so the column does not adopt its array. A boxed `Vector`
- * or `List` is still read through its iterator. An `ArraySeq` passed straight to the codec is
- * copied the same way.
+ * [[com.ewoodbury.scarlet.core.BoolArrays]], [[com.ewoodbury.scarlet.core.DoubleArrays]],
+ * [[com.ewoodbury.scarlet.core.StringArrays]], or [[com.ewoodbury.scarlet.core.IntPairArrays]]
+ * source is copied into the column on the calling thread. The partition stays readable, so the
+ * column does not adopt its array. A boxed `Vector` or `List` is still read through its iterator.
+ * An `ArraySeq` passed straight to the codec is copied the same way.
  *
  * A null string is a value. Classification skips a leading null and keeps looking for a `String`.
  * An all-null source stays on the row path, because there is no witness. An accepted string plan
@@ -725,8 +725,8 @@ object ColumnarPlanner:
         case Plan.SourceDescriptor.Unknown => false
 
   /**
-   * Engine-built primitive holders are type-safe by construction. Skipping them avoids a second
-   * scan that would box every element before encode.
+   * Engine-built array holders are type-safe by construction. Skipping them avoids a second scan
+   * that would box every element before encode.
    */
   private def ownedMatches(source: Plan.Source[_], descriptor: Plan.SourceDescriptor): Boolean =
     import com.ewoodbury.scarlet.core.{
@@ -735,6 +735,7 @@ object ColumnarPlanner:
       IntArrays,
       IntPairArrays,
       LongArrays,
+      StringArrays,
     }
 
     descriptor match
@@ -748,7 +749,10 @@ object ColumnarPlanner:
         source.partitions.forall(partition => partition.data.isInstanceOf[IntPairArrays])
       case Plan.SourceDescriptor.Bools =>
         source.partitions.forall(partition => partition.data.isInstanceOf[BoolArrays])
-      case Plan.SourceDescriptor.Strings | Plan.SourceDescriptor.Unknown => false
+      case Plan.SourceDescriptor.Strings =>
+        source.partitions.forall(partition => partition.data.isInstanceOf[StringArrays])
+      // Boundary guard: classify does not call this with Unknown.
+      case Plan.SourceDescriptor.Unknown => false
 
   private def isIntValue(value: Any): Boolean = value match
     case _: Int => true
