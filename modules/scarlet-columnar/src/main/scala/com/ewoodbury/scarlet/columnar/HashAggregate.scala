@@ -18,14 +18,16 @@ import java.util.Arrays
  * Partial sums merge by calling `sumInt64` on the sum column. Partial counts merge by calling
  * `sumInt64` on the count column, not by calling `count` again. Min and max are not merged here.
  *
- * Output order is first-seen order, not sorted. Sums do not wrap at `Int` width. The value map
- * itself is still `Int` arithmetic.
+ * Hash-table output order is first-seen order, not sorted. Sums do not wrap at `Int` width. The
+ * value map itself is still `Int` arithmetic.
  *
  * One open-addressed table serves every measure set. A batch-sized table is at least twice the row
  * count, so one batch does not rehash. The range scans reuse one small table per worker and grow
  * it, and `grow` keeps first-seen order. The kernel drops that table when the action returns. A
- * shorter capacity exists so tests can force `grow`. Loops keep the row index in a `var` so the
- * bodies stay allocation-free, matching `ColumnKernel`.
+ * bounded key range may instead sum into [[DenseSum.Accumulator]] on the same worker. That path
+ * emits ascending keys. The hash table is the fallback and still emits first-seen order. A shorter
+ * capacity exists so tests can force `grow`. Loops keep the row index in a `var` so the bodies
+ * stay allocation-free, matching `ColumnKernel`.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object HashAggregate:
@@ -150,6 +152,76 @@ object HashAggregate:
     }
 
   /**
+   * Sums a present range whose keys may sit in `[0, directLimit)`. Returns `None` when a key is
+   * outside that prefix so the caller can classify. A hit emits ascending keys.
+   */
+  private[columnar] def tryDirectSum(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      denseCap: Int,
+  ): Option[ColumnBatch] =
+    val limit = DenseSum.directLimit(denseCap)
+    if (limit <= 0 || length <= 0) then None
+    else
+      checkRange(keys, values, start, length)
+      val dense = sumWorkers.get().dense
+      dense.prepareDirect(limit)
+      // The prefix loop has no handler. A key outside it fails the array check and is classified.
+      try
+        dense.addDirect(keys, values, start, start + length)
+        Some(dense.compactDirect())
+      catch
+        case _: ArrayIndexOutOfBoundsException =>
+          dense.abandonDirect()
+          None
+
+  /**
+   * Sums `[start, start + length)` into the worker's direct-index table. `minKey` and `keyRange`
+   * are the classified window. A key outside that window fails the scan. The table is cleared for
+   * the next range on this thread, and [[releaseSumWorkers]] drops it.
+   */
+  private[columnar] def indexSumRange(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      minKey: Int,
+      keyRange: Int,
+      columnsPresent: Boolean,
+  ): ColumnBatch =
+    checkRange(keys, values, start, length)
+    val dense = sumWorkers.get().dense
+    dense.prepare(minKey, keyRange)
+    if (length != 0) then
+      val end = start + length
+      // A present column has no nulls in any morsel. Classification already bounded the keys.
+      if (columnsPresent) then dense.addTrusted(keys, values, start, end)
+      else dense.scanPlain(keys, values, start, end)
+    dense.compact()
+
+  /**
+   * Same window as [[indexSumRange]], after `keep` and `map`. A null value is dropped before
+   * `keep`.
+   */
+  private[columnar] def indexSumRange(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      minKey: Int,
+      keyRange: Int,
+      keep: ColumnKernel.Int32Predicate,
+      map: ColumnKernel.Int32Map,
+  ): ColumnBatch =
+    checkRange(keys, values, start, length)
+    val dense = sumWorkers.get().dense
+    dense.prepare(minKey, keyRange)
+    if (length != 0) then dense.scanFiltered(keys, values, start, start + length, keep, map)
+    dense.compact()
+
+  /**
    * Sums an `Int64` column into an `Int64` sum. This is the merge for partial sums, and for
    * partial counts when `valueOrdinal` points at the count column. A null value does not update
    * the sum, and the group still exists.
@@ -244,6 +316,7 @@ object HashAggregate:
   private final class SumWorker:
     val table: GroupTable = new GroupTable(SumTableStart, SumOnly)
     val slot: PairSlot = new PairSlot
+    val dense: DenseSum.Accumulator = new DenseSum.Accumulator
 
   private val sumWorkers: ThreadLocal[SumWorker] = new ThreadLocal[SumWorker]:
     override def initialValue(): SumWorker = new SumWorker

@@ -12,6 +12,13 @@ package com.ewoodbury.scarlet.columnar
  * An empty input returns an empty vector. `numPartitions` is checked here so a direct caller still
  * rejects a non-positive partition count. One scheduler task covers one range, so a morsel still
  * counts as one visit.
+ *
+ * A plain range whose keys are present and lie in `[0, DenseSum.directLimit)` is indexed by the
+ * key. Any other plain or keep/map range whose present keys fit in [[DenseSum.cap]] is summed by
+ * direct index after a min/max pass. Both emit ascending keys. Every other range, including a
+ * [[PairStep]] chain that can rewrite the key, uses the hash table and emits first-seen order.
+ * Grouped sums are compared as maps. Classification reads only `[start, start + length)` and skips
+ * null keys.
  */
 private[scarlet] object GroupedSumKernel:
 
@@ -85,8 +92,19 @@ private[scarlet] object GroupedSumKernel:
 
   private final case class Stepped(steps: Array[PairStep]) extends Shape
 
-  /** Key column, value column, and the row range to scan. Neither column is copied. */
-  private final case class Span(keys: Int32Column, values: Int32Column, start: Int, length: Int)
+  /**
+   * Key column, value column, and the row range to scan. Neither column is copied. `keysPresent`
+   * and `valuesPresent` are the whole column, so every row of this range is present when the flag
+   * is set.
+   */
+  private final case class Span(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      keysPresent: Boolean,
+      valuesPresent: Boolean,
+  )
 
   private val mergeSum: ColumnBatch => ColumnBatch =
     batch => HashAggregate.sumInt64(batch, keyOrdinal = 0, valueOrdinal = 1)
@@ -128,8 +146,9 @@ private[scarlet] object GroupedSumKernel:
       shape: Shape,
   ): (Vector[Int], Vector[ColumnBatch]) =
     val groups = batches.map(batch => spans(batch, keyOrdinal, valueOrdinal, batchSize))
+    val denseCap = DenseSum.cap(parallelism)
     val partials = MorselScheduler.map(groups.flatten, parallelism) { (_, span) =>
-      scan(span, shape)
+      scan(span, shape, denseCap)
     }
     (groups.map(_.length), partials)
 
@@ -143,30 +162,106 @@ private[scarlet] object GroupedSumKernel:
     val values = ColumnHash.int32At(batch, valueOrdinal)
     require(keys.length == values.length, "key and value columns differ in length")
     val rows = keys.length
-    if (rows == 0) then Vector(Span(keys, values, 0, 0))
+    val keysPresent = Validity.livePresent(keys.validity, rows)
+    val valuesPresent = Validity.livePresent(values.validity, rows)
+    if (rows == 0) then Vector(Span(keys, values, 0, 0, keysPresent, valuesPresent))
     else
       val pieces = (rows + batchSize - 1) / batchSize
       Vector.tabulate(pieces) { piece =>
         val start = piece * batchSize
         val length = math.min(batchSize, rows - start)
-        Span(keys, values, start, length)
+        Span(keys, values, start, length, keysPresent, valuesPresent)
       }
 
-  private def scan(span: Span, shape: Shape): ColumnBatch =
+  private def scan(span: Span, shape: Shape, denseCap: Int): ColumnBatch =
     shape match
-      case Plain =>
-        HashAggregate.sumRange(span.keys, span.values, span.start, span.length)
-      case Filtered(keep, map) =>
-        HashAggregate.sumRange(span.keys, span.values, span.start, span.length, keep, map)
       case Stepped(steps) =>
+        // Steps can rewrite the key. Classifying the raw key would index the wrong group.
         HashAggregate.sumRange(span.keys, span.values, span.start, span.length, steps)
+      case Plain =>
+        scanPlain(span, denseCap)
+      case Filtered(keep, map) =>
+        scanFiltered(span, denseCap, keep, map)
+
+  /**
+   * Direct index when the present keys in this range fit. `Stepped` does not call this. An empty
+   * key set still publishes an empty partial through the hash table, which clears that table.
+   */
+  private def scanPlain(span: Span, denseCap: Int): ColumnBatch =
+    if (span.length == 0) then emptyRange(span)
+    else
+      val direct =
+        if (span.keysPresent && span.valuesPresent) then
+          HashAggregate.tryDirectSum(
+            span.keys,
+            span.values,
+            span.start,
+            span.length,
+            denseCap,
+          )
+        else None
+      direct match
+        case Some(batch) => batch
+        case None => scanPlainClassified(span, denseCap)
+
+  private def scanPlainClassified(span: Span, denseCap: Int): ColumnBatch =
+    val fit =
+      if (span.keysPresent) then
+        DenseSum.classifyPresent(span.keys, span.start, span.length, denseCap)
+      else DenseSum.classify(span.keys, span.start, span.length, denseCap)
+    fit match
+      case DenseSum.Window(minKey, keyRange) =>
+        HashAggregate.indexSumRange(
+          span.keys,
+          span.values,
+          span.start,
+          span.length,
+          minKey,
+          keyRange,
+          columnsPresent = span.keysPresent && span.valuesPresent,
+        )
+      case DenseSum.Empty => emptyRange(span)
+      case DenseSum.Wide =>
+        HashAggregate.sumRange(span.keys, span.values, span.start, span.length)
+
+  private def scanFiltered(
+      span: Span,
+      denseCap: Int,
+      keep: ColumnKernel.Int32Predicate,
+      map: ColumnKernel.Int32Map,
+  ): ColumnBatch =
+    if (span.length == 0) then emptyRange(span)
+    else
+      val fit =
+        if (span.keysPresent) then
+          DenseSum.classifyPresent(span.keys, span.start, span.length, denseCap)
+        else DenseSum.classify(span.keys, span.start, span.length, denseCap)
+      fit match
+        case DenseSum.Window(minKey, keyRange) =>
+          HashAggregate.indexSumRange(
+            span.keys,
+            span.values,
+            span.start,
+            span.length,
+            minKey,
+            keyRange,
+            keep,
+            map,
+          )
+        case DenseSum.Empty => emptyRange(span)
+        case DenseSum.Wide =>
+          HashAggregate.sumRange(span.keys, span.values, span.start, span.length, keep, map)
+
+  private def emptyRange(span: Span): ColumnBatch =
+    HashAggregate.sumRange(span.keys, span.values, span.start, 0)
 
   private def shapeOf(steps: Vector[PairStep]): Shape =
     if (steps.isEmpty) then Plain
     else
       // ColumnPipeline.sumByKey rewrites an all-KeepValue chain to the keep/map overload before
       // run(steps), so a production sum does not reach this branch. partialMorsels and a direct
-      // run(steps) still scan that chain with keep and map.
+      // run(steps) still scan that chain with keep and map. Both are eligible for the direct
+      // index. Anything else, including MapPair, stays Stepped and uses the hash table.
       PairStep.valueKeeps(steps) match
         case Some(predicates) => Filtered(PairStep.keepValues(predicates), PairStep.PassValue)
         case None => Stepped(steps.toArray)
