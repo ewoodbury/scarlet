@@ -24,8 +24,31 @@ object BatchCodec:
   def nullableInts(values: Seq[Option[Int]]): ColumnBatch =
     batch(Int32Column.fromNullable(values))
 
-  def longs(values: Seq[Long]): ColumnBatch =
-    batch(Int64Column(values))
+  /**
+   * An `ArraySeq.ofLong` is copied from its primitive array. Any other iterable, including a
+   * `Seq[Long]`, is filled from its iterator. An owned partition array is [[copiedLongs]]: this
+   * module does not see that holder.
+   */
+  def longs(values: Iterable[Long]): ColumnBatch = values match
+    case array: ArraySeq.ofLong => copiedLongs(array.unsafeArray)
+    case other => fromOwnedLongs(fillLongs(other))
+
+  /**
+   * Copies `values` into a long column. The column does not retain `values`. See [[copiedInts]]
+   * for why the column does not adopt the array. The partition that produced `values` stays
+   * readable.
+   */
+  private[scarlet] def copiedLongs(values: Array[Long]): ColumnBatch =
+    ColumnMetrics.primitiveEncode()
+    fromOwnedLongs(Arrays.copyOf(values, values.length))
+
+  /**
+   * Adopts `values`. The caller must not mutate that array and must not retain it. [[copiedLongs]]
+   * is the path that copies first. Private, like [[int32Batch]], so a later caller cannot alias a
+   * published column.
+   */
+  private def fromOwnedLongs(values: Array[Long]): ColumnBatch =
+    int64Batch(values)
 
   def nullableLongs(values: Seq[Option[Long]]): ColumnBatch =
     batch(Int64Column.fromNullable(values))
@@ -157,9 +180,13 @@ object BatchCodec:
       if (column.isValid(row)) Some(column.values(row)) else None
     }
 
-  def decodeLongs(batch: ColumnBatch): Seq[Long] =
+  def decodeLongs(batch: ColumnBatch): Seq[Long] = decodeLongs(batch, batch.length)
+
+  def decodeLongs(batch: ColumnBatch, maxRows: Int): Seq[Long] =
     val column = int64(batch)
-    Seq.tabulate(column.length) { row =>
+    val rows = decodedLength(batch, maxRows)
+    ColumnMetrics.decoded(rows)
+    Seq.tabulate(rows) { row =>
       require(column.isValid(row), s"null Int64 at row $row")
       column.values(row)
     }
@@ -329,6 +356,19 @@ object BatchCodec:
 
   /** Fills from the iterator. `size` then one pass, so a `Seq` is not copied twice. */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def fillLongs(values: Iterable[Long]): Array[Long] =
+    val count = values.size
+    val filled = new Array[Long](count)
+    val rows = values.iterator
+    var row = 0
+    while (row < count) {
+      filled(row) = rows.next()
+      row += 1
+    }
+    filled
+
+  /** Fills from the iterator. `size` then one pass, so a `Seq` is not copied twice. */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def fillDoubles(values: Iterable[Double]): Array[Double] =
     val count = values.size
     val filled = new Array[Double](count)
@@ -407,6 +447,9 @@ object BatchCodec:
 
   private def int32Batch(buffer: Array[Int]): ColumnBatch =
     batch(Int32Column.of(buffer, Validity.allValid(buffer.length), buffer.length))
+
+  private def int64Batch(buffer: Array[Long]): ColumnBatch =
+    batch(Int64Column.of(buffer, Validity.allValid(buffer.length), buffer.length))
 
   private def float64Batch(buffer: Array[Double]): ColumnBatch =
     batch(Float64Column.of(buffer, Validity.allValid(buffer.length), buffer.length))

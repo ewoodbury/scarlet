@@ -38,6 +38,13 @@ class DefaultExecutionService extends ExecutionService {
       }
     }
 
+  def sumLong(plan: Plan[Long]): Long =
+    ColumnarPlanner.trySumLong(plan).getOrElse {
+      rowPartitions(plan).foldLeft(0L) { (total, partition) =>
+        partition.data.foldLeft(total)((acc, value) => acc + value)
+      }
+    }
+
   def sumDouble(plan: Plan[Double]): Double =
     ColumnarPlanner.trySumDouble(plan).getOrElse {
       rowPartitions(plan).foldLeft(0.0) { (total, partition) =>

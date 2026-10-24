@@ -28,6 +28,11 @@ trait ExecutionService {
   def sumInt(plan: Plan[Int]): Long
 
   /**
+   * Sums a `Long` plan. Wraps. Empty input returns zero.
+   */
+  def sumLong(plan: Plan[Long]): Long
+
+  /**
    * Sums a `Double` plan. Empty input returns zero.
    */
   def sumDouble(plan: Plan[Double]): Double
@@ -71,6 +76,12 @@ object ExecutionService {
     }
 
     def sumInt(plan: Plan[Int]): Long = {
+      throw new UnsupportedOperationException(
+        "No execution service registered. Please ensure the execution module is properly initialized.",
+      )
+    }
+
+    def sumLong(plan: Plan[Long]): Long = {
       throw new UnsupportedOperationException(
         "No execution service registered. Please ensure the execution module is properly initialized.",
       )

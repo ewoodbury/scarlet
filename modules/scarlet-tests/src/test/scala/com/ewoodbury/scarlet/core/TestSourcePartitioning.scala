@@ -169,6 +169,54 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
     IntArrays(Array.empty[Int]).knownSize shouldEqual 0
   }
 
+  "DistCollection.ofLongs" should "copy contiguous ranges into primitive partitions" in {
+    val input = Array(1L, 2L, 3L, 4L, 5L)
+    val dc = DistCollection.ofLongs(input, 3)
+    input(0) = 99L
+
+    partitionSizes(dc) shouldEqual Seq(2, 2, 1)
+    sourceDescriptor(dc) shouldEqual Plan.SourceDescriptor.Longs
+    dc.collect() shouldEqual Seq(1L, 2L, 3L, 4L, 5L)
+    dc.sum shouldEqual 15L
+    sourceData(dc).foreach {
+      case stored: LongArrays =>
+        stored.values should not be theSameInstanceAs(input)
+      case other => fail(s"expected LongArrays, got $other")
+    }
+  }
+
+  it should "produce exactly N empty primitive partitions" in {
+    val dc = DistCollection.ofLongs(Array.empty[Long], 3)
+
+    partitionSizes(dc) shouldEqual Seq(0, 0, 0)
+    dc.collect() shouldEqual Seq.empty[Long]
+    dc.sum shouldEqual 0L
+    sourceData(dc).foreach {
+      case stored: LongArrays => stored.knownSize shouldEqual 0
+      case other => fail(s"expected LongArrays, got $other")
+    }
+  }
+
+  it should "reject a non-positive partition count" in {
+    val caught = intercept[IllegalArgumentException] {
+      DistCollection.ofLongs(Array(1L), 0)
+    }
+    caught.getMessage shouldBe partitionCountMessage
+    an[IllegalArgumentException] should be thrownBy DistCollection.ofLongs(Array(1L), -2)
+  }
+
+  "LongArrays" should "iterate copied longs, including an empty array" in {
+    val raw = Array(1L, 2L)
+    val owned = LongArrays(raw)
+    raw(0) = 9L
+
+    owned.toList shouldEqual List(1L, 2L)
+    owned.knownSize shouldEqual 2
+    owned.values should not be theSameInstanceAs(raw)
+    LongArrays(Array.empty[Long]).toList shouldEqual Nil
+    LongArrays(Array.empty[Long]).knownSize shouldEqual 0
+  }
+
   "DoubleArrays" should "iterate copied doubles, including an empty array" in {
     val raw = Array(1.5, -2.0)
     val owned = DoubleArrays(raw)

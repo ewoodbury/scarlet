@@ -62,16 +62,16 @@ asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors
 
 ### Columnar completion contract
 
-The following 122 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. All 28 filter/map orderings of lengths 2–4 are covered for each scalar type.
+The following 156 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. All 28 filter/map orderings of lengths 2–4 are covered for each scalar type.
 `Unknown(2)` denotes the two source partitions in the small contract fixtures; aggregate and join
 outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are exact.
 
 | Accepted plan shape | Layout | `PhysicalOp.shape` |
 |---|---|---|
-| Int and double source | `Columnar` | `Scan` |
-| Int and double single filter / map | `Columnar` | `Filter(Scan)` / `Project(Scan)` |
-| Int, double, and string filter/map runs of 2, 3, or 4 steps | `Columnar` for int/double; `Utf8Dict` for string | `Pipeline2(Scan)`, `Pipeline3(Scan)`, `Pipeline4(Scan)` |
-| Five- and six-step int, double, and string runs | `Columnar` for int/double; `Utf8Dict` for string | `Project(Pipeline4(Scan))`, `Pipeline2(Pipeline4(Scan))` |
+| Int, long, and double source, including an empty long source | `Columnar` | `Scan` |
+| Int, long, and double single filter / map | `Columnar` | `Filter(Scan)` / `Project(Scan)` |
+| Int, long, double, and string filter/map runs of 2, 3, or 4 steps | `Columnar` for int/long/double; `Utf8Dict` for string | `Pipeline2(Scan)`, `Pipeline3(Scan)`, `Pipeline4(Scan)` |
+| Five- and six-step int, long, double, and string runs | `Columnar` for int/long/double; `Utf8Dict` for string | `Project(Pipeline4(Scan))`, `Pipeline2(Pipeline4(Scan))` |
 | String source, scalar filter/map, filter-map run, dictionary equality filter and mapped dictionary result | `Utf8Dict` | `Scan`, `Filter(Scan)`, `Project(Scan)`, `Pipeline2(Scan)`, `Filter(Scan)`, `Project(Filter(Scan))` respectively |
 | Int-pair source and row/key/value filters | `Columnar` | `Scan`, `FilterRow(Scan)`, `FilterKey(Scan)`, `FilterValue(Scan)` |
 | Empty typed int-pair source | `Columnar` | `Scan` |
@@ -82,8 +82,9 @@ outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are 
 | Int join key/left-value/right-value filters | `Columnar` | `FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))`, `FilterTripleLeftValue(HashJoin(Exchange(Scan), Exchange(Scan)))`, `FilterTripleRightValue(HashJoin(Exchange(Scan), Exchange(Scan)))` |
 
 `sum` and `count` of an int column fold a trailing filter/map chain into the action when the
-chain starts at an int scan or at `keys` or `values`, including `mapValues(...).values`. A
-five-step int chain still lowers to a chunk such as `Project(Pipeline4(Scan))`. The action reads
+chain starts at an int scan or at `keys` or `values`, including `mapValues(...).values`. A long
+column folds the same way from a long scan, and the long sum wraps. A
+five-step int or long chain still lowers to a chunk such as `Project(Pipeline4(Scan))`. The action reads
 that base once and applies every step, so the pipeline column and the trailing projection are not
 written. `lower` splits a longer run into chunks of at most four steps, then another `Project`,
 `Filter`, or `Pipeline` on that chunk. The fold walks those chunks. Examples are
@@ -110,7 +111,7 @@ the pair type, such as `(Int, Int) => (Long, Int)`, is excluded: `partitioning`,
 `tryGroupedSum` stay on the row path. The structural peel label is still
 `GroupedSum(MapPair(Scan))`.
 
-These 46 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+These 48 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
 `sortBy`, map on join triples, a general tuple filter on join triples, non-Int `mapValues`,
 string/double pair projection or pair filters, string/double-key `groupByKey`, `reduceByKey`, and
@@ -118,7 +119,8 @@ join, explicit sort-merge and broadcast joins, single-precision `Float` sources/
 strings, empty generic sources without a type descriptor, an unsupported Boolean source, and
 element maps that do not preserve the column type.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then
-`toString`, and a type-changing map inside a three-step chain), a `Double` mapped to `Int`, and a
+`toString`, and a type-changing map inside a three-step chain), a `Long` mapped to `Int` or
+`String`, a `Double` mapped to `Int`, and a
 `String` mapped through `length`, plus a pair map from `(Int, Int)` to `(Long, Int)`. A
 type-changing step refuses the whole element chain, so the plan stays on the row path and reports
 no columnar layout. Primitive source factories carry a descriptor, which supplies the type for
@@ -139,7 +141,7 @@ columnar results as ordinary Scala values at the action boundary. A collected `r
 decodes its aggregate output to boxed rows. This does not change the columnar layout reported for
 the plan itself.
 
-Bounded `take` applies to accepted partition-preserving plans: int, double, and string sources with
+Bounded `take` applies to accepted partition-preserving plans: int, long, double, and string sources with
 their supported element filters/maps; int-pair sources with row/key/value filters, `keys`/`values`,
 and int `mapValues`. It visits those partitions in order and decodes only the remaining requested
 prefix. A reduce, join, or other exchange/aggregate shape stays on the row path because its output

@@ -15,7 +15,7 @@ object Plan {
    * Type information carried by a source for empty partitions and checked against non-empty data.
    */
   enum SourceDescriptor:
-    case Unknown, Ints, Doubles, Pairs, Strings
+    case Unknown, Ints, Longs, Doubles, Pairs, Strings
 
   /**
    * Applies a user function over each input partition using iterators. The function receives an
