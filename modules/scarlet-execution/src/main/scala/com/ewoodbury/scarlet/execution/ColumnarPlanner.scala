@@ -6,6 +6,8 @@ import com.ewoodbury.scarlet.api.{DictionaryStringPredicate, IntJoinTriplePredic
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 
+import ColumnarInterpreter.*
+
 /**
  * Lowers `Int`, `Long`, `Double`, `(Int, Int)`, and `String` plans to [[PhysicalOp]] and runs that
  * tree on the columnar kernels.
@@ -77,6 +79,8 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * source partition at a time in order and decodes only the remaining requested values. Plans with
  * an exchange or aggregate stay on the row path because their output cannot be produced with this
  * narrow short-circuit.
+ *
+ * [[ColumnarInterpreter]] runs that lowered tree and encodes the source partitions.
  */
 @SuppressWarnings(
   Array(
@@ -149,7 +153,7 @@ object ColumnarPlanner:
 
   /** Append chunks in order and stop once `limit` elements are stored. */
   @SuppressWarnings(Array("org.wartremover.warts.MutableDataStructures"))
-  private def takeChunks[A](limit: Int, producers: Iterator[Int => Seq[A]]): Seq[A] =
+  private[execution] def takeChunks[A](limit: Int, producers: Iterator[Int => Seq[A]]): Seq[A] =
     val acc = List.newBuilder[A]
 
     @tailrec
@@ -430,17 +434,6 @@ object ColumnarPlanner:
       ColumnReduce.sumInt32At(batch, ordinal)
     }
 
-  private def pairProjection(
-      source: Plan[_],
-      child: PhysicalOp,
-      ordinal: Int,
-      selectedPartition: Option[Int] = None,
-  ): Columns =
-    val columns = pairsOf(interpret(source, child, selectedPartition)).map { batch =>
-      ColumnBatches.takeColumn(batch, ordinal)
-    }
-    Columns.Ints(columns)
-
   private[execution] def foldInterpreted(plan: Plan[_], op: PhysicalOp)(
       fn: ColumnBatch => Long,
   ): Long =
@@ -460,22 +453,6 @@ object ColumnarPlanner:
       // would not match a scan of the whole column.
       val partials = MorselScheduler.map(parts, parallelism)((_, part) => fn(part))
       partials.foldLeft(0.0)(_ + _)
-
-  private def batchesOf(columns: Columns): Vector[ColumnBatch] = columns match
-    case Columns.Ints(parts) => parts
-    case Columns.Longs(parts) => parts
-    case Columns.Floats(parts) => parts
-    case Columns.Pairs(parts) => parts
-    case Columns.Triples(parts) => parts
-    case Columns.Strings(parts) => parts
-
-  private enum Columns:
-    case Ints(parts: Vector[ColumnBatch])
-    case Longs(parts: Vector[ColumnBatch])
-    case Floats(parts: Vector[ColumnBatch])
-    case Pairs(parts: Vector[ColumnBatch])
-    case Triples(parts: Vector[ColumnBatch])
-    case Strings(parts: Vector[ColumnBatch])
 
   private[execution] enum ElementStep:
     case Filter(predicate: Any)
@@ -497,50 +474,13 @@ object ColumnarPlanner:
     case PhysicalOp.MapValue(child) => preservedPartitions(child)
     case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.Exchange => None
 
-  private def selectPartition[A](
-      partitions: Seq[Partition[A]],
-      selectedPartition: Option[Int],
-  ): Seq[Partition[A]] = selectedPartition match
-    case None => partitions
-    case Some(index) => partitions.slice(index, index + 1)
-
-  private def decodePrefix(columns: Columns, limit: Int): Seq[Any] =
-    if (limit <= 0) then Seq.empty
-    else
-      columns match
-        case Columns.Ints(parts) =>
-          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeInts(batch, rows))
-        case Columns.Longs(parts) =>
-          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeLongs(batch, rows))
-        case Columns.Floats(parts) =>
-          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeFloat64s(batch, rows))
-        case Columns.Pairs(parts) =>
-          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeIntPairs(batch, rows))
-        case Columns.Triples(parts) =>
-          // Joins are not partition-preserving, so `take` does not reach this arm.
-          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeIntTriples(batch, rows))
-        case Columns.Strings(parts) =>
-          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeStrings(batch, rows))
-
-  private def prefixRows[A](
-      parts: Vector[ColumnBatch],
-      limit: Int,
-      decode: (ColumnBatch, Int) => Seq[A],
-  ): Seq[Any] =
-    takeChunks(
-      limit,
-      parts.iterator.map { batch => (remaining: Int) =>
-        decode(batch, remaining)
-      },
-    )
-
   private def lowerPlan(plan: Plan[_]): Option[PhysicalOp] =
     val (base, steps) = elementSteps(plan, Int.MaxValue)
     if (steps.isEmpty) then lowerPlanNode(base)
     else lowerPlan(base).flatMap(child => lowerElementSteps(child, steps))
 
   /** Columnar joins are hash joins. No hint and an explicit shuffle-hash hint both qualify. */
-  private def acceptsHashJoin(strategy: Option[Plan.JoinStrategy]): Boolean =
+  private[execution] def acceptsHashJoin(strategy: Option[Plan.JoinStrategy]): Boolean =
     strategy match
       case None | Some(Plan.JoinStrategy.ShuffleHash) => true
       case Some(_) => false
@@ -655,15 +595,16 @@ object ColumnarPlanner:
 
   private val MaxDictionaryStringLiterals = 8
 
-  private def dictionaryStringLiterals(predicate: Any): Option[Vector[String]] = predicate match
-    case recognized: DictionaryStringPredicate[?] =>
-      val literals = recognized.literals
-      Option.when(
-        literals.nonEmpty &&
-          literals.length <= MaxDictionaryStringLiterals &&
-          literals.forall(presentLiteral),
-      )(literals)
-    case _ => None
+  private[execution] def dictionaryStringLiterals(predicate: Any): Option[Vector[String]] =
+    predicate match
+      case recognized: DictionaryStringPredicate[?] =>
+        val literals = recognized.literals
+        Option.when(
+          literals.nonEmpty &&
+            literals.length <= MaxDictionaryStringLiterals &&
+            literals.forall(presentLiteral),
+        )(literals)
+      case _ => None
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def presentLiteral(value: String): Boolean = value match
@@ -827,303 +768,6 @@ object ColumnarPlanner:
     case PhysicalOp.Scan(kind, partitions) =>
       narrow(Distribution.Unknown(partitions.length), layoutOf(kind))
 
-  private def interpret(
-      plan: Plan[_],
-      op: PhysicalOp,
-      selectedPartition: Option[Int] = None,
-  ): Columns = (plan, op) match
-    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) =>
-      Columns.Ints(encodeInts(selectPartition(partitions, selectedPartition)))
-    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Longs, _)) =>
-      Columns.Longs(encodeLongs(selectPartition(partitions, selectedPartition)))
-    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Floats, _)) =>
-      Columns.Floats(encodeFloats(selectPartition(partitions, selectedPartition)))
-    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Pairs, _)) =>
-      Columns.Pairs(encodePairs(selectPartition(partitions, selectedPartition)))
-    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Strings, _)) =>
-      Columns.Strings(encodeStrings(selectPartition(partitions, selectedPartition)))
-    case (Plan.FilterOp(source, predicate), PhysicalOp.Filter(child, slot)) =>
-      applyFilter(interpret(source, child, selectedPartition), predicate, slot)
-    case (Plan.MapOp(source, mapper), PhysicalOp.Project(child)) =>
-      project(interpret(source, child, selectedPartition), mapper)
-    case (logical, PhysicalOp.Pipeline(child, length)) =>
-      interpretPipeline(logical, child, length, selectedPartition)
-    case (Plan.FilterKeysOp(source, predicate), PhysicalOp.Filter(child, PhysicalOp.Slot.Key)) =>
-      applyFilter(interpret(source, child, selectedPartition), predicate, PhysicalOp.Slot.Key)
-    case (
-          Plan.FilterValuesOp(source, predicate),
-          PhysicalOp.Filter(child, PhysicalOp.Slot.Value),
-        ) =>
-      applyFilter(interpret(source, child, selectedPartition), predicate, PhysicalOp.Slot.Value)
-    case (Plan.KeysOp(source), PhysicalOp.Column(child, 0)) =>
-      pairProjection(source, child, ordinal = 0, selectedPartition = selectedPartition)
-    case (Plan.ValuesOp(source), PhysicalOp.Column(child, 1)) =>
-      pairProjection(source, child, ordinal = 1, selectedPartition = selectedPartition)
-    case (Plan.MapValuesOp(source, mapper), PhysicalOp.MapValue(child)) =>
-      // Named erasure boundary. The descriptor check verified the declared `Int => Int` shape
-      // before lowering, so this cast is safe.
-      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
-      val fn = mapper.asInstanceOf[Int => Int]
-      Columns.Pairs(onEach(pairsOf(interpret(source, child, selectedPartition))) { batch =>
-        ColumnKernel.projectInt32(batch, 1, value => fn(value))
-      })
-    case (
-          Plan.ReduceByKeyOp(source, reduceFunc),
-          PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)),
-        ) =>
-      // Boundary guard: take refuses an aggregate, so a selector never reaches this arm.
-      require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
-      val op = reduceFunc.asInstanceOf[(Int, Int) => Int]
-      Columns.Pairs(
-        HashReduce.byKey(
-          pairsOf(interpret(source, child, selectedPartition)),
-          shuffleWidth,
-          parallelism,
-          batchSize,
-          (left, right) => op(left, right),
-        ),
-      )
-    case (
-          Plan.JoinOp(left, right, strategy),
-          PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
-        ) if acceptsHashJoin(strategy) =>
-      // Boundary guard: take refuses a join, so a selector never reaches this arm.
-      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      Columns.Triples(
-        ColumnPipeline.innerJoin(
-          pairsOf(interpret(left, leftOp, selectedPartition)),
-          pairsOf(interpret(right, rightOp, selectedPartition)),
-          shuffleWidth,
-          parallelism,
-          batchSize,
-        ),
-      )
-    case _ =>
-      throw new IllegalStateException(
-        s"physical tree does not match ${plan.getClass.getSimpleName}",
-      )
-
-  private def interpretPipeline(
-      plan: Plan[_],
-      child: PhysicalOp,
-      length: Int,
-      selectedPartition: Option[Int],
-  ): Columns =
-    val (source, steps) = elementSteps(plan, length)
-    if (steps.length < length) then
-      // Lowering uses this same collector, so this only guards a malformed physical tree.
-      throw new IllegalStateException("pipeline does not match logical element steps")
-    pipeline(interpret(source, child, selectedPartition), steps)
-
-  private def pipeline(columns: Columns, steps: List[ElementStep]): Columns = columns match
-    case Columns.Ints(parts) =>
-      Columns.Ints(onEach(parts)(batch => ElementPipeline.ints(batch, steps)))
-    case Columns.Longs(parts) =>
-      Columns.Longs(onEach(parts)(batch => ElementPipeline.longs(batch, steps)))
-    case Columns.Floats(parts) =>
-      Columns.Floats(onEach(parts)(batch => ElementPipeline.floats(batch, steps)))
-    case Columns.Strings(parts) =>
-      Columns.Strings(onEach(parts)(batch => ElementPipeline.strings(batch, steps)))
-    case _ =>
-      throw new IllegalStateException("pipeline expects an int, long, float, or string column")
-
-  private def triplePredicate(
-      slot: PhysicalOp.Slot,
-      keep: IntJoinTriplePredicate[?],
-  ): PairKernel.IntTriplePredicate = slot match
-    case PhysicalOp.Slot.TripleKey => (key, _, _) => keep.keep(key)
-    case PhysicalOp.Slot.TripleLeftValue => (_, left, _) => keep.keep(left)
-    case PhysicalOp.Slot.TripleRightValue => (_, _, right) => keep.keep(right)
-    case _ => throw new IllegalStateException("triple filter has a non-triple slot")
-
-  private def applyFilter(columns: Columns, predicate: Any, slot: PhysicalOp.Slot): Columns =
-    slot match
-      case PhysicalOp.Slot.Element =>
-        columns match
-          case Columns.Ints(parts) =>
-            val keep = predicate.asInstanceOf[Int => Boolean]
-            Columns.Ints(onEach(parts) { batch =>
-              ColumnKernel.filterInt32(batch, 0, value => keep(value))
-            })
-          case Columns.Longs(parts) =>
-            val keep = predicate.asInstanceOf[Long => Boolean]
-            Columns.Longs(onEach(parts) { batch =>
-              ColumnKernel.filterInt64(batch, 0, value => keep(value))
-            })
-          case Columns.Floats(parts) =>
-            val keep = predicate.asInstanceOf[Double => Boolean]
-            Columns.Floats(onEach(parts) { batch =>
-              ColumnKernel.filterFloat64(batch, 0, value => keep(value))
-            })
-          case Columns.Strings(parts) =>
-            dictionaryStringLiterals(predicate) match
-              case Some(literals) =>
-                Columns.Strings(onEach(parts) { batch =>
-                  ColumnKernel.filterUtf8ByValues(batch, 0, literals)
-                })
-              case None =>
-                val keep = predicate.asInstanceOf[String => Boolean]
-                Columns.Strings(onEach(parts) { batch =>
-                  ColumnKernel.filterUtf8(batch, 0, value => keep(value))
-                })
-          case _ =>
-            throw new IllegalStateException(
-              "columnar element filter expects ints, longs, floats, or strings",
-            )
-      case PhysicalOp.Slot.Row =>
-        val keep = predicate.asInstanceOf[((Int, Int)) => Boolean]
-        // `keep` is `(Int, Int) => Boolean`, so the pair is boxed for the call.
-        Columns.Pairs(onEach(pairsOf(columns)) { batch =>
-          PairKernel.filter(batch, (key, value) => keep((key, value)))
-        })
-      case PhysicalOp.Slot.Key =>
-        val keep = predicate.asInstanceOf[Int => Boolean]
-        Columns.Pairs(onEach(pairsOf(columns)) { batch =>
-          ColumnKernel.filterInt32(batch, 0, value => keep(value))
-        })
-      case PhysicalOp.Slot.Value =>
-        val keep = predicate.asInstanceOf[Int => Boolean]
-        Columns.Pairs(onEach(pairsOf(columns)) { batch =>
-          ColumnKernel.filterInt32(batch, 1, value => keep(value))
-        })
-      case PhysicalOp.Slot.TripleKey | PhysicalOp.Slot.TripleLeftValue |
-          PhysicalOp.Slot.TripleRightValue =>
-        val keep = predicate match
-          case recognized: IntJoinTriplePredicate[?] => recognized
-          case _ => throw new IllegalStateException("triple filter lost its slot predicate")
-        val select = triplePredicate(slot, keep)
-        Columns.Triples(onEach(triplesOf(columns)) { batch =>
-          PairKernel.filterTriple(batch, select)
-        })
-
-  private def project(columns: Columns, mapper: Any): Columns = columns match
-    case Columns.Ints(parts) =>
-      val fn = mapper.asInstanceOf[Int => Int]
-      Columns.Ints(onEach(parts) { batch =>
-        ColumnKernel.projectInt32(batch, 0, value => fn(value))
-      })
-    case Columns.Longs(parts) =>
-      val fn = mapper.asInstanceOf[Long => Long]
-      Columns.Longs(onEach(parts) { batch =>
-        ColumnKernel.projectInt64(batch, 0, value => fn(value))
-      })
-    case Columns.Floats(parts) =>
-      val fn = mapper.asInstanceOf[Double => Double]
-      Columns.Floats(onEach(parts) { batch =>
-        ColumnKernel.projectFloat64(batch, 0, value => fn(value))
-      })
-    case Columns.Strings(parts) =>
-      val fn = mapper.asInstanceOf[String => Any]
-      Columns.Strings(onEach(parts) { batch =>
-        ColumnKernel.projectUtf8(batch, 0, value => stringResult(fn(value)))
-      })
-    case _ =>
-      throw new IllegalStateException("columnar map expects ints, longs, floats, or strings")
-
-  private def pairsOf(columns: Columns): Vector[ColumnBatch] = columns match
-    case Columns.Pairs(parts) if parts.nonEmpty => parts
-    case Columns.Pairs(_) =>
-      throw new IllegalStateException("columnar pairs have no partitions")
-    case _ =>
-      throw new IllegalStateException("columnar op expected int pairs")
-
-  private def triplesOf(columns: Columns): Vector[ColumnBatch] = columns match
-    case Columns.Triples(parts) if parts.nonEmpty => parts
-    case Columns.Triples(_) =>
-      throw new IllegalStateException("columnar triples have no partitions")
-    case _ =>
-      throw new IllegalStateException("columnar op expected int triples")
-
-  private def onEach(
-      parts: Vector[ColumnBatch],
-  )(fn: ColumnBatch => ColumnBatch): Vector[ColumnBatch] =
-    if (parts.isEmpty) then parts
-    else
-      val sliced = parts.map(part => ColumnBatches.slice(part, batchSize))
-      val flat = sliced.flatten
-      val mapped = MorselScheduler.map(flat, parallelism)((_, morsel) => fn(morsel))
-      regroup(sliced.map(_.length), mapped)
-
-  private def regroup(counts: Vector[Int], flat: Vector[ColumnBatch]): Vector[ColumnBatch] =
-    val seed: (Vector[ColumnBatch], Vector[ColumnBatch]) = (flat, Vector.empty[ColumnBatch])
-    val (_, grouped) = counts.foldLeft(seed) { (state, count) =>
-      val (rest, acc) = state
-      val (group, tail) = rest.splitAt(count)
-      (tail, acc :+ ColumnBatches.concat(group))
-    }
-    grouped
-
-  private def encodeFloats(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
-    import com.ewoodbury.scarlet.core.DoubleArrays
-
-    partitions.map { partition =>
-      partition.data match
-        case owned: DoubleArrays => BatchCodec.copiedFloat64s(owned.values)
-        case other =>
-          // Named erasure boundary. Classification already selected double elements.
-          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
-          val rows = other.asInstanceOf[Iterable[Double]]
-          BatchCodec.float64s(rows)
-    }.toVector
-
-  private def encodeLongs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
-    import com.ewoodbury.scarlet.core.LongArrays
-
-    partitions.map { partition =>
-      partition.data match
-        case owned: LongArrays => BatchCodec.copiedLongs(owned.values)
-        case other =>
-          // Named erasure boundary. Classification already selected long elements.
-          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
-          val rows = other.asInstanceOf[Iterable[Long]]
-          BatchCodec.longs(rows)
-    }.toVector
-
-  private def encodeInts(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
-    import com.ewoodbury.scarlet.core.IntArrays
-
-    partitions.map { partition =>
-      partition.data match
-        case owned: IntArrays => BatchCodec.copiedInts(owned.values)
-        case other =>
-          // Named erasure boundary. Classification already selected int elements.
-          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
-          val rows = other.asInstanceOf[Iterable[Int]]
-          BatchCodec.ints(rows)
-    }.toVector
-
-  private def encodePairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
-    encodePairPartitions(partitions, rows => BatchCodec.intPairs(rows))
-
-  /**
-   * Pair encode for grouped sum. [[BatchCodec.intPairsPreservingAbsence]] keeps a null component
-   * absent and rejects any other non-int cell. An owned pair array has no nulls and is copied like
-   * [[encodePairs]].
-   */
-  private def encodeGroupedPairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
-    encodePairPartitions(partitions, rows => BatchCodec.intPairsPreservingAbsence(rows))
-
-  private def encodePairPartitions(
-      partitions: Seq[Partition[_]],
-      encodeBoxed: Iterable[(Int, Int)] => ColumnBatch,
-  ): Vector[ColumnBatch] =
-    import com.ewoodbury.scarlet.core.IntPairArrays
-
-    partitions.map { partition =>
-      partition.data match
-        case pairs: IntPairArrays => BatchCodec.copiedIntPairs(pairs.keys, pairs.values)
-        case other =>
-          // Named erasure boundary. Classification already selected `(Int, Int)` elements.
-          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
-          val rows = other.asInstanceOf[Iterable[(Int, Int)]]
-          encodeBoxed(rows)
-    }.toVector
-
-  private def encodeStrings(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
-    partitions.map { partition =>
-      BatchCodec.strings(partition.data.asInstanceOf[Iterable[String]])
-    }.toVector
-
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private[execution] def stringResult(value: Any): String = value match
     case null => null
@@ -1132,20 +776,6 @@ object ColumnarPlanner:
       throw new ClassCastException(
         s"columnar string map expected a String, found ${other.getClass.getName}",
       )
-
-  private def decode(columns: Columns): Seq[Partition[_]] = columns match
-    case Columns.Ints(parts) =>
-      parts.map(batch => Partition(BatchCodec.decodeInts(batch)))
-    case Columns.Longs(parts) =>
-      parts.map(batch => Partition(BatchCodec.decodeLongs(batch)))
-    case Columns.Floats(parts) =>
-      parts.map(batch => Partition(BatchCodec.decodeFloat64s(batch)))
-    case Columns.Pairs(parts) =>
-      parts.map(batch => Partition(BatchCodec.decodeIntPairs(batch)))
-    case Columns.Triples(parts) =>
-      parts.map(batch => Partition(BatchCodec.decodeIntTriples(batch)))
-    case Columns.Strings(parts) =>
-      parts.map(batch => Partition(BatchCodec.decodeStrings(batch)))
 
   private def narrow(distribution: Distribution, chosen: Layout): PartitioningInfo =
     PartitioningInfo(distribution, OrderingTag.Unsorted, chosen)
@@ -1164,17 +794,17 @@ object ColumnarPlanner:
         PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples =>
       Layout.Columnar(ScarletConf.get.columnarBatchSize)
 
-  private def batchSize: Int =
+  private[execution] def batchSize: Int =
     val size = ScarletConf.get.columnarBatchSize
     require(size > 0, s"columnar batch size must be positive, got $size")
     size
 
-  private def parallelism: Int =
+  private[execution] def parallelism: Int =
     val workers = ScarletConf.get.threadPoolSize
     require(workers > 0, s"thread pool size must be positive, got $workers")
     workers
 
-  private def shuffleWidth: Int =
+  private[execution] def shuffleWidth: Int =
     val width = ScarletConf.get.defaultShufflePartitions
     require(width > 0, s"shuffle partitions must be positive, got $width")
     width
