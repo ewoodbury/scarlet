@@ -104,10 +104,11 @@ and decodes only the requested prefix. The contract checks an int `Pipeline2(Sca
 
 Boolean columns support filter, count, and take. A filter chain is one `Filter` node per step, in
 source order, for any number of filters. Boolean has no arithmetic and no `sum`. A Boolean map is
-refused, including `Boolean => Boolean` and a map after a filter: `Function1` has no
-`apply$mcZZ$sp`, so that map cannot be distinguished from `Boolean => Int` without calling the
-function. The planner does not call it. `partitioning` is `None`. The row path runs a map on the
-source once per element, and a map after a filter once per element the filter keeps.
+refused, including `Boolean => Boolean` and a map after a filter. `Function1` has no
+`apply$mcZZ$sp`, so `Boolean => Boolean` cannot be distinguished from `Boolean => Int` by declared
+signature. Refusing is the honest contract. The planner does not call the function. `partitioning`
+is `None`. The row path runs a map on the source once per element, and a map after a filter once
+per element the filter keeps.
 
 | Operation | Columnar |
 |---|---|
@@ -120,20 +121,32 @@ source once per element, and a map after a filter once per element the filter ke
 ### Type and operation matrix
 
 `TestTypeCoverage` builds one `DistCollection` per cell and compares it with the row path
-(`columnarExecution = false`). For an accepted cell, `partitioning`, `tryRun`, `tryCount`, and
-`tryTake` are defined and match that row result. `trySumInt`, `trySumLong`, and `trySumDouble` are
-defined only for an accepted `Int`, `Long`, or `Double` result, and only the matching sum is
-defined. A refused map keeps every gate `None`; `collect` still returns the row result. Boolean
-and string sources are accepted, and every sum gate on them is `None`. There is no Boolean or
-string `sum` in the API. `Sum` in this table is the source plan, not a separate logical node.
+(`columnarExecution = false`). The cell set is the product of the types and operations. For an
+accepted cell, `partitioning`, `tryRun`, `tryCount`, and `tryTake` are defined and match that row
+result. `trySumInt`, `trySumLong`, and `trySumDouble` are defined only for an accepted `Int`,
+`Long`, or `Double` result, and only the matching sum is defined. A refused map keeps every gate
+`None`; `collect` still returns the row result. Boolean and string sources are accepted, and every
+sum gate on them is `None`. There is no Boolean or string `sum` in the API. `Sum` in this table is
+the source plan, not a separate logical node, so those cells repeat `Source`. `Count` and `Take`
+follow a filter. `MapCount` and `MapTake` follow a same-type map and use that map's gates.
 
-| Type | Source | Filter | Map, same type | Map, other type | Count | Sum | Take |
-|---|---|---|---|---|---|---|---|
-| Int | yes | yes | yes | no (`Int => Long`) | yes | yes, as `Long` | yes |
-| Long | yes | yes | yes | no (`Long => Int`) | yes | yes, wrapping | yes |
-| Double | yes | yes | yes | no (`Double => Int`) | yes | yes | yes |
-| Boolean | yes | yes | no | no | yes | no | yes |
-| String | yes | yes | yes | no (`String => Int`) | yes | no | yes |
+Int, Long, Double, and String same-type maps are accepted. A Boolean same-type map is refused, and
+so are Boolean `MapCount` and `MapTake`. `Function1` has no `apply$mcZZ$sp`, so `Boolean =>
+Boolean` cannot be distinguished from `Boolean => Int` by declared signature. Refusing is the
+honest contract.
+
+The long rows are `1, 2, 3, 4` and sum to 10, so the matrix cannot show overflow. Wrapping is
+covered by `TestLongColumnar` (`wrap Long.MaxValue + 1 and sum an empty collection to 0`).
+`TestTypeCoverage` asserts the same two-element sum outside the matrix: both paths return
+`Long.MinValue`.
+
+| Type | Source | Filter | Map, same type | Map, other type | Count | MapCount | Sum | Take | MapTake |
+|---|---|---|---|---|---|---|---|---|---|
+| Int | yes | yes | yes | no (`Int => Long`) | yes | yes | yes, as `Long` | yes | yes |
+| Long | yes | yes | yes | no (`Long => Int`) | yes | yes | yes, wrapping | yes | yes |
+| Double | yes | yes | yes | no (`Double => Int`) | yes | yes | yes | yes | yes |
+| Boolean | yes | yes | no | no | yes | no | no | yes | no |
+| String | yes | yes | yes | no (`String => Int`) | yes | yes | no | yes | yes |
 
 `DistCollection.ofStrings` stores a `StringArrays` copy of each range and records
 `SourceDescriptor.Strings`. An empty array is therefore columnar. `DistCollection.apply` on an

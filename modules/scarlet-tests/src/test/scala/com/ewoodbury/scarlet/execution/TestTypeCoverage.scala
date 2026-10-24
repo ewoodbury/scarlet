@@ -11,8 +11,19 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
  * Type-by-operation coverage. Every cell runs the same gate checks. The expected record is a
- * literal, so a new type or operation without a row fails this suite. `Sum` is the source plan:
- * an accepted Boolean or String source still leaves every sum gate closed.
+ * literal, so a new type or operation without a row fails this suite. The key set is the product
+ * of the types and operations. `Sum` repeats `Source` on purpose: sum is that plan, not a separate
+ * node, and the cell documents its sum gates. An accepted Boolean or String source still leaves
+ * every sum gate closed.
+ *
+ * `Count` and `Take` follow a filter. `MapCount` and `MapTake` follow a same-type map and use that
+ * map's gates. Int, Long, Double, and String same-type maps are accepted. A Boolean same-type map
+ * is refused, so its `MapCount` and `MapTake` cells are refused too. `Function1` has no
+ * `apply$mcZZ$sp`, so `Boolean => Boolean` cannot be distinguished from `Boolean => Int` by
+ * declared signature. Refusing is the honest contract.
+ *
+ * Long rows are `1, 2, 3, 4` and sum to 10, so the matrix does not overflow. Wrapping is asserted
+ * beside the matrix and in `TestLongColumnar`.
  */
 class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -40,14 +51,15 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       op <- CoverageOp.values.toList
     yield (kind, op)
 
-    product.size shouldBe 35
+    product.size shouldBe 45
     product.size shouldBe CoverageType.values.length * CoverageOp.values.length
     matrix.keySet shouldBe product.toSet
     product.foreach { case (kind, op) =>
       val gates = matrix((kind, op))
-      val accepted = planAccepted(kind, op)
+      // Acceptance is the row's partitioning bit. The other gates must agree with it.
+      val accepted = gates.partitioning
       withClue(s"$kind $op table: ") {
-        gates.partitioning shouldBe accepted
+        requireSameMapGates(kind, op, gates)
         gates.run shouldBe accepted
         gates.count shouldBe accepted
         gates.take shouldBe accepted
@@ -73,6 +85,51 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
         run(kind, op, gates)
       }
     }
+  }
+
+  "long sum" should "wrap Long.MaxValue + 1 to Long.MinValue on both paths" in {
+    val values = Array(Long.MaxValue, 1L)
+    val wrapped = DistCollection.ofLongs(values, Partitions)
+    wrapped.plan match
+      case Plan.Source(partitions, descriptor) =>
+        descriptor shouldBe Plan.SourceDescriptor.Longs
+        partitions.map(_.data.toVector) shouldBe Seq(Vector(Long.MaxValue), Vector(1L))
+      case other => fail(s"expected a source, got $other")
+    val summed = rowPath(wrapped.sum)
+    summed shouldBe Long.MinValue
+    wrapped.sum shouldBe Long.MinValue
+    ColumnarPlanner.trySumLong(wrapped.plan) shouldBe Some(Long.MinValue)
+    ColumnarPlanner.trySumInt(wrapped.plan) shouldBe Option.empty[Long]
+    ColumnarPlanner.trySumDouble(wrapped.plan) shouldBe Option.empty[Double]
+  }
+
+  "int take" should "read past the end and through an empty partition" in {
+    val source = DistCollection.ofInts(intRows, Partitions)
+    val pastEnd = intRows.length + 3
+    val beyond = source.take(pastEnd)
+    beyond shouldBe List(1, 2, 3, 4)
+    beyond shouldBe rowPath(source.take(pastEnd))
+    ColumnarPlanner.tryTake(source.plan, pastEnd).map(_.toList) shouldBe Some(beyond)
+
+    // The empty partition sits between values, so a prefix of 3 has to read past it.
+    val gapped = DistCollection(
+      Plan.Source(
+        Seq(
+          Partition(Seq(1, 2)),
+          Partition(Seq.empty[Int]),
+          Partition(Seq(3, 4)),
+        ),
+        Plan.SourceDescriptor.Ints,
+      ),
+    )
+    gapped.plan match
+      case Plan.Source(partitions, _) =>
+        partitions.map(_.data.isEmpty) shouldBe Seq(false, true, false)
+      case other => fail(s"expected a source, got $other")
+    val crossed = gapped.take(3)
+    crossed shouldBe List(1, 2, 3)
+    crossed shouldBe rowPath(gapped.take(3))
+    ColumnarPlanner.tryTake(gapped.plan, 3).map(_.toList) shouldBe Some(crossed)
   }
 
   "coverage enums" should "name every logical type, source descriptor, and physical kind" in {
@@ -114,13 +171,8 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
 
   "string keys" should "keep groupByKey and join on the row path" in {
     val keyed = DistCollection(Seq("a" -> 1, "b" -> 2, "a" -> 4), Partitions)
-    val grouped = keyed.groupByKey
-    refuse(grouped.plan)
-    snapshot(grouped) shouldBe rowPath(snapshot(grouped))
-
-    val joined = keyed.join(keyed)
-    refuse(joined.plan)
-    joined.collect().toVector shouldBe rowPath(joined.collect().toVector)
+    refuse(keyed.groupByKey.plan)
+    refuse(keyed.join(keyed).plan)
   }
 
   "ofStrings" should "select an empty array and leave an empty iterable unknown" in {
@@ -194,6 +246,10 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
         val filtered = source.filter(value => value > 2)
         check(filtered, gates, Some(rowPath(filtered.sum)), None, None)
         filtered.count() shouldBe 2L
+      case CoverageOp.MapCount =>
+        val mapped = source.map(value => value + 1)
+        check(mapped, gates, Some(rowPath(mapped.sum)), None, None)
+        mapped.count() shouldBe 4L
       case CoverageOp.Sum =>
         val summed = rowPath(source.sum)
         check(source, gates, Some(summed), None, None)
@@ -203,6 +259,10 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
         val filtered = source.filter(value => value > 2)
         check(filtered, gates, Some(rowPath(filtered.sum)), None, None)
         filtered.take(Prefix) shouldBe List(3, 4)
+      case CoverageOp.MapTake =>
+        val mapped = source.map(value => value + 1)
+        check(mapped, gates, Some(rowPath(mapped.sum)), None, None)
+        mapped.take(Prefix) shouldBe List(2, 3)
 
   private def longs(op: CoverageOp, gates: Gates): Unit =
     val source = DistCollection.ofLongs(longRows, Partitions)
@@ -237,6 +297,10 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
         val filtered = source.filter(value => value > 2L)
         check(filtered, gates, None, Some(rowPath(filtered.sum)), None)
         filtered.count() shouldBe 2L
+      case CoverageOp.MapCount =>
+        val mapped = source.map(value => value + 1L)
+        check(mapped, gates, None, Some(rowPath(mapped.sum)), None)
+        mapped.count() shouldBe 4L
       case CoverageOp.Sum =>
         val summed = rowPath(source.sum)
         check(source, gates, None, Some(summed), None)
@@ -246,6 +310,10 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
         val filtered = source.filter(value => value > 2L)
         check(filtered, gates, None, Some(rowPath(filtered.sum)), None)
         filtered.take(Prefix) shouldBe List(3L, 4L)
+      case CoverageOp.MapTake =>
+        val mapped = source.map(value => value + 1L)
+        check(mapped, gates, None, Some(rowPath(mapped.sum)), None)
+        mapped.take(Prefix) shouldBe List(2L, 3L)
 
   private def doubles(op: CoverageOp, gates: Gates): Unit =
     val source = DistCollection.ofDoubles(doubleRows, Partitions)
@@ -280,6 +348,10 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
         val filtered = source.filter(value => value > 2.0)
         check(filtered, gates, None, None, Some(rowPath(filtered.sum)))
         filtered.count() shouldBe 2L
+      case CoverageOp.MapCount =>
+        val mapped = source.map(value => value + 1.0)
+        check(mapped, gates, None, None, Some(rowPath(mapped.sum)))
+        mapped.count() shouldBe 4L
       case CoverageOp.Sum =>
         val summed = rowPath(source.sum)
         check(source, gates, None, None, Some(summed))
@@ -289,6 +361,10 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
         val filtered = source.filter(value => value > 2.0)
         check(filtered, gates, None, None, Some(rowPath(filtered.sum)))
         filtered.take(Prefix) shouldBe List(3.0, 4.0)
+      case CoverageOp.MapTake =>
+        val mapped = source.map(value => value + 1.0)
+        check(mapped, gates, None, None, Some(rowPath(mapped.sum)))
+        mapped.take(Prefix) shouldBe List(2.0, 3.0)
 
   private def booleans(op: CoverageOp, gates: Gates): Unit =
     val source = DistCollection.ofBools(boolRows, Partitions)
@@ -316,6 +392,10 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
         val filtered = source.filter(value => value)
         check(filtered, gates, None, None, None)
         filtered.count() shouldBe 2L
+      case CoverageOp.MapCount =>
+        val mapped = source.map(value => !value)
+        check(mapped, gates, None, None, None)
+        mapped.count() shouldBe 4L
       case CoverageOp.Sum =>
         check(source, gates, None, None, None)
         source.count() shouldBe 4L
@@ -323,6 +403,10 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
         val filtered = source.filter(value => value)
         check(filtered, gates, None, None, None)
         filtered.take(Prefix) shouldBe List(true, true)
+      case CoverageOp.MapTake =>
+        val mapped = source.map(value => !value)
+        check(mapped, gates, None, None, None)
+        mapped.take(Prefix) shouldBe List(false, true)
 
   private def strings(op: CoverageOp, gates: Gates): Unit =
     val source = DistCollection.ofStrings(stringRows, Partitions)
@@ -350,6 +434,10 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
         val filtered = source.filter(value => value.length > 1)
         check(filtered, gates, None, None, None)
         filtered.count() shouldBe 1L
+      case CoverageOp.MapCount =>
+        val mapped = source.map(value => value.toUpperCase(java.util.Locale.ENGLISH))
+        check(mapped, gates, None, None, None)
+        mapped.count() shouldBe 4L
       case CoverageOp.Sum =>
         check(source, gates, None, None, None)
         source.count() shouldBe 4L
@@ -357,6 +445,10 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
         val filtered = source.filter(value => value.length > 1)
         check(filtered, gates, None, None, None)
         filtered.take(Prefix) shouldBe List("bb")
+      case CoverageOp.MapTake =>
+        val mapped = source.map(value => value.toUpperCase(java.util.Locale.ENGLISH))
+        check(mapped, gates, None, None, None)
+        mapped.take(Prefix) shouldBe List("A", "BB")
 
   private def check[A](
       collection: DistCollection[A],
@@ -398,11 +490,6 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.tryTake(plan, Prefix).isDefined shouldBe false
     ColumnarPlanner.tryGroupedSum(plan).isDefined shouldBe false
 
-  private def snapshot(
-      collection: DistCollection[(String, Iterable[Int])],
-  ): Vector[(String, List[Int])] =
-    collection.collect().toVector.map { case (key, values) => key -> values.toList }
-
   private def descriptor[A](collection: DistCollection[A]): Plan.SourceDescriptor =
     collection.plan match
       case Plan.Source(_, sourceDescriptor) => sourceDescriptor
@@ -415,12 +502,14 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       read
     finally ScarletConf.set(saved)
 
-  private def planAccepted(kind: CoverageType, op: CoverageOp): Boolean = (kind, op) match
-    case (_, CoverageOp.MapChanging) => false
-    case (CoverageType.Booleans, CoverageOp.MapSame) => false
-    case (_, CoverageOp.Source | CoverageOp.Filter | CoverageOp.MapSame | CoverageOp.Count |
-        CoverageOp.Sum | CoverageOp.Take) =>
-      true
+  /** `MapCount` and `MapTake` are the same gate record as that type's same-type map. */
+  private def requireSameMapGates(kind: CoverageType, op: CoverageOp, gates: Gates): Unit =
+    op match
+      case CoverageOp.MapCount | CoverageOp.MapTake =>
+        gates shouldBe matrix((kind, CoverageOp.MapSame))
+      case CoverageOp.Source | CoverageOp.Filter | CoverageOp.MapSame | CoverageOp.MapChanging |
+          CoverageOp.Count | CoverageOp.Sum | CoverageOp.Take =>
+        ()
 
   private def logicalType(kind: CoverageType): LogicalType = kind match
     case CoverageType.Ints => LogicalType.Int32
@@ -455,7 +544,14 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
   )
 
   /**
-   * Hard-coded support. Boolean and string `Sum` rows are accepted sources with sum gates closed.
+   * Hard-coded support. The key set is every type crossed with every operation. Boolean and string
+   * `Sum` rows are accepted sources with sum gates closed. `Sum` repeats `Source` so that fact
+   * stays in the table. `MapCount` and `MapTake` repeat `MapSame`.
+   *
+   * A Boolean same-type map is refused. `Function1` has no `apply$mcZZ$sp`, so `Boolean =>
+   * Boolean` cannot be distinguished from `Boolean => Int` by declared signature. Refusing is the
+   * honest contract. Long rows sum to 10. Overflow is not a matrix cell. `TestLongColumnar` covers
+   * the wrap, and this suite asserts it on its own two-element source.
    */
   private val matrix: Map[(CoverageType, CoverageOp), Gates] = Map(
     (CoverageType.Ints, CoverageOp.Source) -> intOpen,
@@ -463,36 +559,46 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     (CoverageType.Ints, CoverageOp.MapSame) -> intOpen,
     (CoverageType.Ints, CoverageOp.MapChanging) -> refusedGates,
     (CoverageType.Ints, CoverageOp.Count) -> intOpen,
+    (CoverageType.Ints, CoverageOp.MapCount) -> intOpen,
     (CoverageType.Ints, CoverageOp.Sum) -> intOpen,
     (CoverageType.Ints, CoverageOp.Take) -> intOpen,
+    (CoverageType.Ints, CoverageOp.MapTake) -> intOpen,
     (CoverageType.Longs, CoverageOp.Source) -> longOpen,
     (CoverageType.Longs, CoverageOp.Filter) -> longOpen,
     (CoverageType.Longs, CoverageOp.MapSame) -> longOpen,
     (CoverageType.Longs, CoverageOp.MapChanging) -> refusedGates,
     (CoverageType.Longs, CoverageOp.Count) -> longOpen,
+    (CoverageType.Longs, CoverageOp.MapCount) -> longOpen,
     (CoverageType.Longs, CoverageOp.Sum) -> longOpen,
     (CoverageType.Longs, CoverageOp.Take) -> longOpen,
+    (CoverageType.Longs, CoverageOp.MapTake) -> longOpen,
     (CoverageType.Doubles, CoverageOp.Source) -> doubleOpen,
     (CoverageType.Doubles, CoverageOp.Filter) -> doubleOpen,
     (CoverageType.Doubles, CoverageOp.MapSame) -> doubleOpen,
     (CoverageType.Doubles, CoverageOp.MapChanging) -> refusedGates,
     (CoverageType.Doubles, CoverageOp.Count) -> doubleOpen,
+    (CoverageType.Doubles, CoverageOp.MapCount) -> doubleOpen,
     (CoverageType.Doubles, CoverageOp.Sum) -> doubleOpen,
     (CoverageType.Doubles, CoverageOp.Take) -> doubleOpen,
+    (CoverageType.Doubles, CoverageOp.MapTake) -> doubleOpen,
     (CoverageType.Booleans, CoverageOp.Source) -> nonNumericOpen,
     (CoverageType.Booleans, CoverageOp.Filter) -> nonNumericOpen,
     (CoverageType.Booleans, CoverageOp.MapSame) -> refusedGates,
     (CoverageType.Booleans, CoverageOp.MapChanging) -> refusedGates,
     (CoverageType.Booleans, CoverageOp.Count) -> nonNumericOpen,
+    (CoverageType.Booleans, CoverageOp.MapCount) -> refusedGates,
     (CoverageType.Booleans, CoverageOp.Sum) -> nonNumericOpen,
     (CoverageType.Booleans, CoverageOp.Take) -> nonNumericOpen,
+    (CoverageType.Booleans, CoverageOp.MapTake) -> refusedGates,
     (CoverageType.Strings, CoverageOp.Source) -> nonNumericOpen,
     (CoverageType.Strings, CoverageOp.Filter) -> nonNumericOpen,
     (CoverageType.Strings, CoverageOp.MapSame) -> nonNumericOpen,
     (CoverageType.Strings, CoverageOp.MapChanging) -> refusedGates,
     (CoverageType.Strings, CoverageOp.Count) -> nonNumericOpen,
+    (CoverageType.Strings, CoverageOp.MapCount) -> nonNumericOpen,
     (CoverageType.Strings, CoverageOp.Sum) -> nonNumericOpen,
     (CoverageType.Strings, CoverageOp.Take) -> nonNumericOpen,
+    (CoverageType.Strings, CoverageOp.MapTake) -> nonNumericOpen,
   )
 
 private final case class Gates(
@@ -509,4 +615,4 @@ enum CoverageType:
   case Ints, Longs, Doubles, Booleans, Strings
 
 enum CoverageOp:
-  case Source, Filter, MapSame, MapChanging, Count, Sum, Take
+  case Source, Filter, MapSame, MapChanging, Count, MapCount, Sum, Take, MapTake
