@@ -6,11 +6,11 @@ import com.ewoodbury.scarlet.core.Partition
  * One columnar operator, lowered from a logical [[com.ewoodbury.scarlet.core.Plan]].
  *
  * User functions stay on the logical plan, so lowering and interpretation have to agree node for
- * node. A straight int, float, or string filter/project chain can be one [[PhysicalOp.Pipeline]]
- * node. Other filters and projects remain one node per step. [[PhysicalOp.Project]] and `Pipeline`
- * keep the child kind. [[PhysicalOp.Column]] narrows a pair to one int column and shares its
- * arrays. [[PhysicalOp.MapValue]] rewrites an int value and keeps the pair.
- * [[PhysicalOp.Exchange]] sits under [[PhysicalOp.HashAggregate]] and on each side of
+ * node. A straight int, long, float, or string filter/project chain can be one
+ * [[PhysicalOp.Pipeline]] node. Other filters and projects remain one node per step.
+ * [[PhysicalOp.Project]] and `Pipeline` keep the child kind. [[PhysicalOp.Column]] narrows a pair
+ * to one int column and shares its arrays. [[PhysicalOp.MapValue]] rewrites an int value and keeps
+ * the pair. [[PhysicalOp.Exchange]] sits under [[PhysicalOp.HashAggregate]] and on each side of
  * [[PhysicalOp.HashJoin]]. Those kernels perform the shuffle. Interpreting the boundary on its own
  * does not.
  */
@@ -64,10 +64,10 @@ enum PhysicalOp:
 
 object PhysicalOp:
   enum Kind:
-    case Ints, Floats, Pairs, Triples, Strings
+    case Ints, Longs, Floats, Pairs, Triples, Strings
 
   /**
-   * `Element` is the single column, an int, a double, or a string, and its shape label is
+   * `Element` is the single column, an int, a long, a double, or a string, and its shape label is
    * `Filter`. `Row` is a predicate on both columns of a pair. `Key` and `Value` name which pair
    * column. The triple slots select one of the three int columns in a join result.
    */

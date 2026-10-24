@@ -4,7 +4,9 @@ package com.ewoodbury.scarlet.execution
  * Declared-apply witness for an element function.
  *
  * [[ColumnarPlanner]] uses [[declaredElement]] when a project or `mapValues` must declare the
- * column's signature. The check reads method descriptors and does not call the function.
+ * column's signature. `Int => Int` is `apply$mcII$sp`, `Long => Long` is `apply$mcJJ$sp`,
+ * `Double => Double` is `apply$mcDD$sp`, and `String => String` is `apply`. The check reads method
+ * descriptors and does not call the function. A primitive specialized apply is not a bridge.
  */
 private[execution] object FunctionWitness:
 
@@ -12,6 +14,14 @@ private[execution] object FunctionWitness:
   def declaredElement(kind: PhysicalOp.Kind, function: Any): Boolean = kind match
     case PhysicalOp.Kind.Ints =>
       declaredSignature(function, "apply$mcII$sp", classOf[Int], classOf[Int], allowBridge = false)
+    case PhysicalOp.Kind.Longs =>
+      declaredSignature(
+        function,
+        "apply$mcJJ$sp",
+        classOf[Long],
+        classOf[Long],
+        allowBridge = false,
+      )
     case PhysicalOp.Kind.Floats =>
       declaredSignature(
         function,
@@ -22,7 +32,7 @@ private[execution] object FunctionWitness:
       )
     case PhysicalOp.Kind.Strings =>
       declaredSignature(function, "apply", classOf[String], classOf[String], allowBridge = true)
-    case _ => false
+    case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples => false
 
   /**
    * True when `function` declares `apply` or `specialized` from `argument` to `result`, and every

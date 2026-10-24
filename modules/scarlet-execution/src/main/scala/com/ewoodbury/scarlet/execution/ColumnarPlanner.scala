@@ -7,22 +7,22 @@ import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 
 /**
- * Lowers `Int`, `Double`, `(Int, Int)`, and `String` plans to [[PhysicalOp]] and runs that tree on
- * the columnar kernels.
+ * Lowers `Int`, `Long`, `Double`, `(Int, Int)`, and `String` plans to [[PhysicalOp]] and runs that
+ * tree on the columnar kernels.
  *
  * Named erasure boundary. `Plan` is invariant and its element type is erased, so non-empty sources
  * are classified by their values and checked against any descriptor, while empty sources use their
  * descriptor. An element map lowers only when it declares the column's signature and every other
  * `apply` is an erasure bridge: `apply` or `apply$mcII$sp` for `Int => Int`, `apply` or
- * `apply$mcDD$sp` for `Double => Double`, and `apply` for `String => String`. The check reads
- * method descriptors and does not call the function. One failing project refuses the whole element
- * chain, so a type-changing map stays on the row path and is not run before that fallback.
- * `getDeclaredMethods` misses an inherited `apply`, so that function stays on the row path too.
- * Other user functions are cast to the selected operation. A result that is not that type throws
- * `ClassCastException`. [[tryRun]] catches it and returns `None`, and the row path runs the whole
- * plan. Any unsupported node (union, flatMap, distinct, sort, a map that is not fed by `Int`,
- * `Double`, or `String`, and the rest) makes the whole plan ineligible, so a supported prefix is
- * not executed on its own.
+ * `apply$mcJJ$sp` for `Long => Long`, `apply` or `apply$mcDD$sp` for `Double => Double`, and
+ * `apply` for `String => String`. The check reads method descriptors and does not call the
+ * function. One failing project refuses the whole element chain, so a type-changing map stays on
+ * the row path and is not run before that fallback. `getDeclaredMethods` misses an inherited
+ * `apply`, so that function stays on the row path too. Other user functions are cast to the
+ * selected operation. A result that is not that type throws `ClassCastException`. [[tryRun]]
+ * catches it and returns `None`, and the row path runs the whole plan. Any unsupported node
+ * (union, flatMap, distinct, sort, a map that is not fed by `Int`, `Long`, `Double`, or `String`,
+ * and the rest) makes the whole plan ineligible, so a supported prefix is not executed on its own.
  *
  * [[lower]] and interpretation walk the same logical plan. The physical node records the operator
  * and not the function, so each logical node is matched to the node [[lower]] built for it. A
@@ -31,28 +31,29 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * map that declares `String` and returns another value, is still a fallback, and that function may
  * already have run.
  *
- * [[lower]] does not call user functions. A straight `Int`, `Double`, or `String` filter/project
- * run of two to four steps is one [[PhysicalOp.Pipeline]]. A longer run is cut into those chunks,
- * source order first. One step stays a [[PhysicalOp.Filter]] or [[PhysicalOp.Project]]. Pair
- * filters, aggregates, and joins stay one node per operator. Narrow map and filter keep input
- * order and the input partition count. `Double` and `String` select filter and map only. A filter
- * over an int join result is columnar only for explicit key, left-value, and right-value filters;
- * general tuple predicates stay on the row path. `keys` and `values` of an int pair are that
- * column. The arrays are shared: a published column is not mutated, so a view is cheaper than a
- * copy and still correct. `mapValues` lowers only when the function declares an unboxed `Int`
- * result and every other `apply` is an erasure bridge. A wider primitive, a reference result, or
- * an overloaded `apply` stays on the row path. That check reads the method descriptor and does not
- * call the function. `getDeclaredMethods` does not see an inherited `apply`, so that function
- * stays on the row path too. `reduceByKey` applies the user's function and wraps at `Int`. A
- * `join` with no hint, or with an explicit shuffle-hash hint, hash-partitions both sides and
- * probes one bucket at a time. Sort-merge and broadcast are not implemented: those hints make
- * `lower` return `None`, so the plan stays on the row path. Output width for an accepted join or
- * aggregate is `defaultShufflePartitions`. [[tryCount]] and [[trySumInt]] fold an int filter/map
- * chain that starts at a scan or at `keys` or `values`, including an int `mapValues`, and do not
- * write that chain. Sum folds one trailing project and chains longer than four. Count folds those
- * and chains of two to four steps. [[trySumDouble]] folds at most four steps. Sum of `keys`,
- * `values`, or an int `mapValues` with no further element chain reads the pair column in that
- * morsel loop and does not build the projection. [[tryGroupedSum]] runs
+ * [[lower]] does not call user functions. A straight `Int`, `Long`, `Double`, or `String`
+ * filter/project run of two to four steps is one [[PhysicalOp.Pipeline]]. A longer run is cut into
+ * those chunks, source order first. One step stays a [[PhysicalOp.Filter]] or
+ * [[PhysicalOp.Project]]. Pair filters, aggregates, and joins stay one node per operator. Narrow
+ * map and filter keep input order and the input partition count. `Double` and `String` select
+ * filter and map only. A filter over an int join result is columnar only for explicit key,
+ * left-value, and right-value filters; general tuple predicates stay on the row path. `keys` and
+ * `values` of an int pair are that column. The arrays are shared: a published column is not
+ * mutated, so a view is cheaper than a copy and still correct. `mapValues` lowers only when the
+ * function declares an unboxed `Int` result and every other `apply` is an erasure bridge. A wider
+ * primitive, a reference result, or an overloaded `apply` stays on the row path. That check reads
+ * the method descriptor and does not call the function. `getDeclaredMethods` does not see an
+ * inherited `apply`, so that function stays on the row path too. `reduceByKey` applies the user's
+ * function and wraps at `Int`. A `join` with no hint, or with an explicit shuffle-hash hint,
+ * hash-partitions both sides and probes one bucket at a time. Sort-merge and broadcast are not
+ * implemented: those hints make `lower` return `None`, so the plan stays on the row path. Output
+ * width for an accepted join or aggregate is `defaultShufflePartitions`. [[tryCount]] and
+ * [[trySumInt]] fold an int filter/map chain that starts at a scan or at `keys` or `values`,
+ * including an int `mapValues`, and do not write that chain. Sum folds one trailing project and
+ * chains longer than four. Count folds those and chains of two to four steps. [[trySumLong]] folds
+ * a long filter/map chain the same way, and the sum wraps. [[trySumDouble]] folds at most four
+ * steps. Sum of `keys`, `values`, or an int `mapValues` with no further element chain reads the
+ * pair column in that morsel loop and does not build the projection. [[tryGroupedSum]] runs
  * [[ColumnPipeline.sumByKey]] on a typed pair source and folds the `Int64` group sums. A preceding
  * `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that partial scan,
  * so the action does not build those pairs. [[groupedSumPeel]] labels those walked steps. It is
@@ -60,17 +61,17 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * partitions are empty. It does not decode. `collect` still does. A pair `MapOp` stays on the row
  * path for `collect` and `reduceByKey`, and [[partitioning]] reports no layout for it.
  *
- * An [[com.ewoodbury.scarlet.core.IntArrays]], [[com.ewoodbury.scarlet.core.DoubleArrays]], or
- * [[com.ewoodbury.scarlet.core.IntPairArrays]] source is copied into the column on the calling
- * thread. The partition stays readable, so the column does not adopt its array. A boxed `Vector`
- * or `List` is still read through its iterator. An `ArraySeq` passed straight to the codec is
- * copied the same way.
+ * An [[com.ewoodbury.scarlet.core.IntArrays]], [[com.ewoodbury.scarlet.core.LongArrays]],
+ * [[com.ewoodbury.scarlet.core.DoubleArrays]], or [[com.ewoodbury.scarlet.core.IntPairArrays]]
+ * source is copied into the column on the calling thread. The partition stays readable, so the
+ * column does not adopt its array. A boxed `Vector` or `List` is still read through its iterator.
+ * An `ArraySeq` passed straight to the codec is copied the same way.
  *
  * A null string is a value. Classification skips a leading null and keeps looking for a `String`.
  * An all-null source stays on the row path, because there is no witness. An accepted string plan
  * records [[Layout.Utf8Dict]]: that dictionary plus codes, one dictionary per batch. The string
- * lambda stays scalar over the decoded string. Int, double, int-pair, and int-triple plans stay
- * [[Layout.Columnar]].
+ * lambda stays scalar over the decoded string. Int, long, double, int-pair, and int-triple plans
+ * stay [[Layout.Columnar]].
  *
  * `take` has a separate bounded path for accepted partition-preserving shapes: it interprets one
  * source partition at a time in order and decodes only the remaining requested values. Plans with
@@ -90,9 +91,9 @@ object ColumnarPlanner:
    * Layout of an accepted plan, without running it. A plan is accepted when [[lower]] returns a
    * physical tree and that tree's layout is valid. `None` means the plan is not accepted, which is
    * the row path. There is no second layout source. A string filter or map reports
-   * [[Layout.Utf8Dict]]. An int, double, or int-pair plan reports [[Layout.Columnar]]. A pair map,
-   * including one that [[tryGroupedSum]] fuses and one that changes `(Int, Int)` to another pair
-   * type, is not accepted, so this is `None`.
+   * [[Layout.Utf8Dict]]. An int, long, double, or int-pair plan reports [[Layout.Columnar]]. A
+   * pair map, including one that [[tryGroupedSum]] fuses and one that changes `(Int, Int)` to
+   * another pair type, is not accepted, so this is `None`.
    */
   def partitioning[A](plan: Plan[A]): Option[PartitioningInfo] =
     accepted(plan).map(infoOf)
@@ -200,6 +201,18 @@ object ColumnarPlanner:
       case _ => None
 
   /**
+   * Wide sum of a finished long column. `None` means the row path, including a plan whose result
+   * is not a long column. The sum wraps. Null slots are skipped. A filter/project chain adds in
+   * the fused walk and does not write that chain's output column.
+   */
+  def trySumLong(plan: Plan[_]): Option[Long] =
+    accepted(plan) match
+      case Some(op) if isLong(op) =>
+        try Some(sumLong(plan, op))
+        catch case _: ClassCastException => None
+      case _ => None
+
+  /**
    * Folded wide sum of int pairs. `None` means the row path. A typed pair source runs
    * [[ColumnPipeline.sumByKey]]. A preceding row, key, or value filter, or a map that stays a
    * pair, is compiled into `keep`/`map` or [[com.ewoodbury.scarlet.columnar.PairStep]]s and
@@ -258,6 +271,27 @@ object ColumnarPlanner:
       sumPairColumn(source, child, ordinal = 1)
     case _ =>
       ColumnReduce.sumInt32(batchesOf(interpret(plan, op)))
+
+  private def sumLong(plan: Plan[_], op: PhysicalOp): Long =
+    TrailingProject.sumLong(plan, op).getOrElse(matchedSumLong(plan, op))
+
+  private def matchedSumLong(plan: Plan[_], op: PhysicalOp): Long = (plan, op) match
+    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Longs, _)) =>
+      ColumnReduce.sumInt64(encodeLongs(partitions), 0)
+    case (Plan.FilterOp(source, predicate), PhysicalOp.Filter(child, PhysicalOp.Slot.Element))
+        if isLong(child) =>
+      foldLong(batchesOf(interpret(source, child))) { batch =>
+        ElementSum.sumLongs(batch, List(ElementStep.Filter(predicate)))
+      }
+    case (logical, PhysicalOp.Pipeline(child, length)) if isLong(child) =>
+      val (source, steps) = elementSteps(logical, length)
+      if (steps.length < length) then
+        throw new IllegalStateException("pipeline does not match logical element steps")
+      foldLong(batchesOf(interpret(source, child))) { batch =>
+        ElementSum.sumLongs(batch, steps)
+      }
+    case _ =>
+      ColumnReduce.sumInt64(batchesOf(interpret(plan, op)), 0)
 
   private def sumDouble(plan: Plan[_], op: PhysicalOp): Double = (plan, op) match
     case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Floats, _)) =>
@@ -357,8 +391,8 @@ object ColumnarPlanner:
         values.nextOption() match
           case None => false
           case Some(first) => isNullableIntPair(first) && values.forall(isNullableIntPair)
-      case Plan.SourceDescriptor.Ints | Plan.SourceDescriptor.Doubles |
-          Plan.SourceDescriptor.Strings =>
+      case Plan.SourceDescriptor.Ints | Plan.SourceDescriptor.Longs |
+          Plan.SourceDescriptor.Doubles | Plan.SourceDescriptor.Strings =>
         false
 
   /**
@@ -384,6 +418,10 @@ object ColumnarPlanner:
 
   private def isFloat(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Floats => true
+    case _ => false
+
+  private[execution] def isLong(op: PhysicalOp): Boolean = op.kind match
+    case PhysicalOp.Kind.Longs => true
     case _ => false
 
   /** Read one int column of a pair plan. Does not allocate a projection batch. */
@@ -425,6 +463,7 @@ object ColumnarPlanner:
 
   private def batchesOf(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.Ints(parts) => parts
+    case Columns.Longs(parts) => parts
     case Columns.Floats(parts) => parts
     case Columns.Pairs(parts) => parts
     case Columns.Triples(parts) => parts
@@ -432,6 +471,7 @@ object ColumnarPlanner:
 
   private enum Columns:
     case Ints(parts: Vector[ColumnBatch])
+    case Longs(parts: Vector[ColumnBatch])
     case Floats(parts: Vector[ColumnBatch])
     case Pairs(parts: Vector[ColumnBatch])
     case Triples(parts: Vector[ColumnBatch])
@@ -470,6 +510,8 @@ object ColumnarPlanner:
       columns match
         case Columns.Ints(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeInts(batch, rows))
+        case Columns.Longs(parts) =>
+          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeLongs(batch, rows))
         case Columns.Floats(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeFloat64s(batch, rows))
         case Columns.Pairs(parts) =>
@@ -558,7 +600,8 @@ object ColumnarPlanner:
       child: PhysicalOp,
       steps: List[ElementStep],
   ): Option[PhysicalOp] = child.kind match
-    case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Strings =>
+    case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
+        PhysicalOp.Kind.Strings =>
       if (elementProjectsMatch(child.kind, steps)) then Some(lowerElementPipeline(child, steps))
       else None
     case _ =>
@@ -680,6 +723,7 @@ object ColumnarPlanner:
     // Boundary guard: classify returns on Unknown before this match.
     case Plan.SourceDescriptor.Unknown => None
     case Plan.SourceDescriptor.Ints => Some(PhysicalOp.Kind.Ints)
+    case Plan.SourceDescriptor.Longs => Some(PhysicalOp.Kind.Longs)
     case Plan.SourceDescriptor.Doubles => Some(PhysicalOp.Kind.Floats)
     case Plan.SourceDescriptor.Pairs => Some(PhysicalOp.Kind.Pairs)
     case Plan.SourceDescriptor.Strings => Some(PhysicalOp.Kind.Strings)
@@ -693,6 +737,7 @@ object ColumnarPlanner:
       val rows = source.partitions.iterator.flatMap(_.data.iterator)
       descriptor match
         case Plan.SourceDescriptor.Ints => rows.forall(isIntValue)
+        case Plan.SourceDescriptor.Longs => rows.forall(isLongValue)
         case Plan.SourceDescriptor.Doubles => rows.forall(isDoubleValue)
         case Plan.SourceDescriptor.Pairs => rows.forall(isIntPairValue)
         case Plan.SourceDescriptor.Strings => rows.forall(isStringValue)
@@ -704,11 +749,13 @@ object ColumnarPlanner:
    * scan that would box every element before encode.
    */
   private def ownedMatches(source: Plan.Source[_], descriptor: Plan.SourceDescriptor): Boolean =
-    import com.ewoodbury.scarlet.core.{DoubleArrays, IntArrays, IntPairArrays}
+    import com.ewoodbury.scarlet.core.{DoubleArrays, IntArrays, IntPairArrays, LongArrays}
 
     descriptor match
       case Plan.SourceDescriptor.Ints =>
         source.partitions.forall(partition => partition.data.isInstanceOf[IntArrays])
+      case Plan.SourceDescriptor.Longs =>
+        source.partitions.forall(partition => partition.data.isInstanceOf[LongArrays])
       case Plan.SourceDescriptor.Doubles =>
         source.partitions.forall(partition => partition.data.isInstanceOf[DoubleArrays])
       case Plan.SourceDescriptor.Pairs =>
@@ -717,6 +764,10 @@ object ColumnarPlanner:
 
   private def isIntValue(value: Any): Boolean = value match
     case _: Int => true
+    case _ => false
+
+  private def isLongValue(value: Any): Boolean = value match
+    case _: Long => true
     case _ => false
 
   private def isDoubleValue(value: Any): Boolean = value match
@@ -747,6 +798,7 @@ object ColumnarPlanner:
   private def classifyValue(value: Any, rest: Iterator[Any]): Option[PhysicalOp.Kind] =
     Option(value) match
       case Some(_: Int) => Some(PhysicalOp.Kind.Ints)
+      case Some(_: Long) => Some(PhysicalOp.Kind.Longs)
       case Some(_: Double) => Some(PhysicalOp.Kind.Floats)
       case Some((_: Int, _: Int)) => Some(PhysicalOp.Kind.Pairs)
       case Some(_: String) => Some(PhysicalOp.Kind.Strings)
@@ -782,6 +834,8 @@ object ColumnarPlanner:
   ): Columns = (plan, op) match
     case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) =>
       Columns.Ints(encodeInts(selectPartition(partitions, selectedPartition)))
+    case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Longs, _)) =>
+      Columns.Longs(encodeLongs(selectPartition(partitions, selectedPartition)))
     case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Floats, _)) =>
       Columns.Floats(encodeFloats(selectPartition(partitions, selectedPartition)))
     case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Pairs, _)) =>
@@ -864,11 +918,14 @@ object ColumnarPlanner:
   private def pipeline(columns: Columns, steps: List[ElementStep]): Columns = columns match
     case Columns.Ints(parts) =>
       Columns.Ints(onEach(parts)(batch => ElementPipeline.ints(batch, steps)))
+    case Columns.Longs(parts) =>
+      Columns.Longs(onEach(parts)(batch => ElementPipeline.longs(batch, steps)))
     case Columns.Floats(parts) =>
       Columns.Floats(onEach(parts)(batch => ElementPipeline.floats(batch, steps)))
     case Columns.Strings(parts) =>
       Columns.Strings(onEach(parts)(batch => ElementPipeline.strings(batch, steps)))
-    case _ => throw new IllegalStateException("pipeline expects an int, float, or string column")
+    case _ =>
+      throw new IllegalStateException("pipeline expects an int, long, float, or string column")
 
   private def triplePredicate(
       slot: PhysicalOp.Slot,
@@ -888,6 +945,11 @@ object ColumnarPlanner:
             Columns.Ints(onEach(parts) { batch =>
               ColumnKernel.filterInt32(batch, 0, value => keep(value))
             })
+          case Columns.Longs(parts) =>
+            val keep = predicate.asInstanceOf[Long => Boolean]
+            Columns.Longs(onEach(parts) { batch =>
+              ColumnKernel.filterInt64(batch, 0, value => keep(value))
+            })
           case Columns.Floats(parts) =>
             val keep = predicate.asInstanceOf[Double => Boolean]
             Columns.Floats(onEach(parts) { batch =>
@@ -906,7 +968,7 @@ object ColumnarPlanner:
                 })
           case _ =>
             throw new IllegalStateException(
-              "columnar element filter expects ints, floats, or strings",
+              "columnar element filter expects ints, longs, floats, or strings",
             )
       case PhysicalOp.Slot.Row =>
         val keep = predicate.asInstanceOf[((Int, Int)) => Boolean]
@@ -940,6 +1002,11 @@ object ColumnarPlanner:
       Columns.Ints(onEach(parts) { batch =>
         ColumnKernel.projectInt32(batch, 0, value => fn(value))
       })
+    case Columns.Longs(parts) =>
+      val fn = mapper.asInstanceOf[Long => Long]
+      Columns.Longs(onEach(parts) { batch =>
+        ColumnKernel.projectInt64(batch, 0, value => fn(value))
+      })
     case Columns.Floats(parts) =>
       val fn = mapper.asInstanceOf[Double => Double]
       Columns.Floats(onEach(parts) { batch =>
@@ -951,7 +1018,7 @@ object ColumnarPlanner:
         ColumnKernel.projectUtf8(batch, 0, value => stringResult(fn(value)))
       })
     case _ =>
-      throw new IllegalStateException("columnar map expects ints, floats, or strings")
+      throw new IllegalStateException("columnar map expects ints, longs, floats, or strings")
 
   private def pairsOf(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.Pairs(parts) if parts.nonEmpty => parts
@@ -997,6 +1064,19 @@ object ColumnarPlanner:
           @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
           val rows = other.asInstanceOf[Iterable[Double]]
           BatchCodec.float64s(rows)
+    }.toVector
+
+  private def encodeLongs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+    import com.ewoodbury.scarlet.core.LongArrays
+
+    partitions.map { partition =>
+      partition.data match
+        case owned: LongArrays => BatchCodec.copiedLongs(owned.values)
+        case other =>
+          // Named erasure boundary. Classification already selected long elements.
+          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+          val rows = other.asInstanceOf[Iterable[Long]]
+          BatchCodec.longs(rows)
     }.toVector
 
   private def encodeInts(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
@@ -1056,6 +1136,8 @@ object ColumnarPlanner:
   private def decode(columns: Columns): Seq[Partition[_]] = columns match
     case Columns.Ints(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeInts(batch)))
+    case Columns.Longs(parts) =>
+      parts.map(batch => Partition(BatchCodec.decodeLongs(batch)))
     case Columns.Floats(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeFloat64s(batch)))
     case Columns.Pairs(parts) =>
@@ -1078,8 +1160,8 @@ object ColumnarPlanner:
   /** String plans name the dictionary layout. Every other classified kind stays columnar. */
   private def layoutOf(kind: PhysicalOp.Kind): Layout = kind match
     case PhysicalOp.Kind.Strings => Layout.Utf8Dict(ScarletConf.get.columnarBatchSize)
-    case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs |
-        PhysicalOp.Kind.Triples =>
+    case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
+        PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples =>
       Layout.Columnar(ScarletConf.get.columnarBatchSize)
 
   private def batchSize: Int =

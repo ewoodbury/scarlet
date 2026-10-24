@@ -2,13 +2,21 @@ package com.ewoodbury.scarlet.execution
 
 import scala.annotation.tailrec
 
-import com.ewoodbury.scarlet.columnar.{ColumnBatch, ColumnKernel, Float64Pipeline, Int32Pipeline}
+import com.ewoodbury.scarlet.columnar.{
+  ColumnBatch,
+  ColumnKernel,
+  Float64Pipeline,
+  Int32Pipeline,
+  Int64Pipeline,
+}
 
 /**
  * Sum a filter/project chain without writing its output column. The match is outside the row loop.
  * A chain longer than four stays in that fold: five int maps call [[Int32Pipeline.sumPPPPP]], and
  * any other longer int chain walks its steps. [[countLonger]] counts two or more steps the same
  * way. [[countMapped]] counts one trailing int project. Survivors use [[Int32Pipeline.encoded]].
+ * [[sumLongs]] and [[countLongs]] are the long arms of that fold: one encoded walk, no output
+ * column, including a chain of five or six steps.
  */
 @SuppressWarnings(
   Array(
@@ -151,6 +159,27 @@ object ElementSum:
         val encoded = stage(value)
         if ((encoded & 1L) == 0L) then 0L
         else runSteps(rest, (encoded >> 1).toInt)
+
+  /** Wrapping long sum. Does not write the chain. Any length uses the same walk. */
+  def sumLongs(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): Long =
+    Int64Pipeline.sum(batch, longSteps(steps))
+
+  /** Long count without writing the chain. A map-only chain keeps null slots. */
+  def countLongs(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): Long =
+    Int64Pipeline.count(batch, longSteps(steps))
+
+  private def longSteps(steps: List[ColumnarPlanner.ElementStep]): List[Int64Pipeline.Step] =
+    steps.map {
+      case ColumnarPlanner.ElementStep.Filter(fn) =>
+        // Named erasure boundary. A long filter is a runtime cast. A mistyped predicate throws
+        // ClassCastException when the action runs, and the planner refuses that plan.
+        val predicate = fn.asInstanceOf[Long => Boolean]
+        Int64Pipeline.Step.Filter(value => predicate(value))
+      case ColumnarPlanner.ElementStep.Project(fn) =>
+        // Named erasure boundary. declaredElement required apply$mcJJ$sp before this plan lowered.
+        val mapper = fn.asInstanceOf[Long => Long]
+        Int64Pipeline.Step.Project(value => mapper(value))
+    }
 
   def sumFloats(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): Double =
     import ColumnarPlanner.ElementStep.*
