@@ -62,13 +62,14 @@ asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors
 
 ### Columnar completion contract
 
-The following 156 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. All 28 filter/map orderings of lengths 2–4 are covered for each scalar type.
+The following 160 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
 `Unknown(2)` denotes the two source partitions in the small contract fixtures; aggregate and join
 outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are exact.
 
 | Accepted plan shape | Layout | `PhysicalOp.shape` |
 |---|---|---|
 | Int, long, and double source, including an empty long source | `Columnar` | `Scan` |
+| Boolean source, including an empty source, one filter, and a two-filter chain | `Columnar` | `Scan`, `Filter(Scan)`, `Filter(Filter(Scan))` |
 | Int, long, and double single filter / map | `Columnar` | `Filter(Scan)` / `Project(Scan)` |
 | Int, long, double, and string filter/map runs of 2, 3, or 4 steps | `Columnar` for int/long/double; `Utf8Dict` for string | `Pipeline2(Scan)`, `Pipeline3(Scan)`, `Pipeline4(Scan)` |
 | Five- and six-step int, long, double, and string runs | `Columnar` for int/long/double; `Utf8Dict` for string | `Project(Pipeline4(Scan))`, `Pipeline2(Pipeline4(Scan))` |
@@ -96,7 +97,23 @@ runs on the row path. Double and string chains still write the pipeline column.
 
 `take` uses these same physical shapes for partition-preserving plans; it scans in partition order
 and decodes only the requested prefix. The contract checks an int `Pipeline2(Scan)` and pair
-`FilterValue(Scan)` with `tryTake`.
+`FilterValue(Scan)` with `tryTake`. A boolean filter chain uses the same prefix decode.
+
+### Boolean support
+
+Boolean columns support filter, count, and take. A filter chain is one `Filter` node per step, in
+source order, for any number of filters. Boolean has no arithmetic and no `sum`. A Boolean map is
+refused, including `Boolean => Boolean`: `Function1` has no `apply$mcZZ$sp`, so that map cannot be
+distinguished from `Boolean => Int` without calling the function. The planner does not call it.
+`partitioning` is `None`, and the row path runs the function once per element.
+
+| Operation | Columnar |
+|---|---|
+| filter, including a chain | accepted |
+| count | accepted, from batch lengths |
+| take | accepted, prefix decode |
+| map | refused |
+| sum | not in the API |
 
 Fused `groupedSum` is action-level. It is not a `Plan` node and not a `PhysicalOp`.
 `ColumnarPlanner.groupedSumPeel` is the structural peel label of the pair steps that scan walks.
@@ -111,16 +128,16 @@ the pair type, such as `(Int, Int) => (Long, Int)`, is excluded: `partitioning`,
 `tryGroupedSum` stay on the row path. The structural peel label is still
 `GroupedSum(MapPair(Scan))`.
 
-These 48 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+These 49 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
 `sortBy`, map on join triples, a general tuple filter on join triples, non-Int `mapValues`,
 string/double pair projection or pair filters, string/double-key `groupByKey`, `reduceByKey`, and
 join, explicit sort-merge and broadcast joins, single-precision `Float` sources/maps, all-null
-strings, empty generic sources without a type descriptor, an unsupported Boolean source, and
+strings, empty generic sources without a type descriptor, and
 element maps that do not preserve the column type.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then
 `toString`, and a type-changing map inside a three-step chain), a `Long` mapped to `Int` or
-`String`, a `Double` mapped to `Int`, and a
+`String`, a `Double` mapped to `Int`, a `Boolean` mapped to `Boolean` or to `Int`, and a
 `String` mapped through `length`, plus a pair map from `(Int, Int)` to `(Long, Int)`. A
 type-changing step refuses the whole element chain, so the plan stays on the row path and reports
 no columnar layout. Primitive source factories carry a descriptor, which supplies the type for
@@ -141,9 +158,9 @@ columnar results as ordinary Scala values at the action boundary. A collected `r
 decodes its aggregate output to boxed rows. This does not change the columnar layout reported for
 the plan itself.
 
-Bounded `take` applies to accepted partition-preserving plans: int, long, double, and string sources with
-their supported element filters/maps; int-pair sources with row/key/value filters, `keys`/`values`,
-and int `mapValues`. It visits those partitions in order and decodes only the remaining requested
+Bounded `take` applies to accepted partition-preserving plans: int, long, double, boolean, and string sources with
+their supported element filters or maps; int-pair sources with row/key/value filters, `keys`/`values`,
+and int `mapValues`. Boolean take is filter and scan only. It visits those partitions in order and decodes only the remaining requested
 prefix. A reduce, join, or other exchange/aggregate shape stays on the row path because its output
 requires processing the complete upstream input before the first result is known.
 

@@ -28,8 +28,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    accepted.size shouldBe 156
-    excluded.size shouldBe 48
+    accepted.size shouldBe 160
+    excluded.size shouldBe 49
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -208,6 +208,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val emptyStringCollection = DistCollection(emptyStrings)
 
     val emptyLongs = DistCollection.ofLongs(Array.empty[Long], 2)
+    val emptyBools = DistCollection.ofBools(Array.empty[Boolean], 2)
     ColumnarPlanner.partitioning(emptyInts.plan).map(_.layout) shouldBe Some(columnarLayout)
     emptyInts.sum shouldBe 0L
     emptyInts.count() shouldBe 0L
@@ -215,6 +216,9 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     ColumnarPlanner.lower(emptyLongs.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.Longs)
     emptyLongs.sum shouldBe 0L
     emptyLongs.count() shouldBe 0L
+    ColumnarPlanner.partitioning(emptyBools.plan).map(_.layout) shouldBe Some(columnarLayout)
+    ColumnarPlanner.lower(emptyBools.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.Bools)
+    emptyBools.count() shouldBe 0L
     ColumnarPlanner.partitioning(emptyDoubles.plan).map(_.layout) shouldBe Some(columnarLayout)
     emptyDoubles.sum shouldBe 0.0
     ColumnarPlanner.partitioning(emptyStringCollection.plan).map(_.layout) shouldBe Some(utf8Layout)
@@ -223,6 +227,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     emptyInts.take(3) shouldBe empty
     emptyLongs.collect() shouldBe empty
     emptyLongs.take(3) shouldBe empty
+    emptyBools.collect() shouldBe empty
+    emptyBools.take(3) shouldBe empty
     emptyDoubles.collect() shouldBe empty
     emptyDoubles.take(3) shouldBe empty
     emptyStringCollection.collect() shouldBe empty
@@ -284,6 +290,10 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 2).plan
   private val emptyIntSource: Plan[Int] = Plan.Source(Seq(Partition(Seq.empty[Int])))
   private val emptyLongSource: Plan[Long] = DistCollection.ofLongs(Array.empty[Long], 2).plan
+  private val boolSource: Plan[Boolean] = Plan.Source(
+    Seq(Partition(Seq(true, false)), Partition(Seq(false, true))),
+  )
+  private val emptyBoolSource: Plan[Boolean] = DistCollection.ofBools(Array.empty[Boolean], 2).plan
   private val nullText: String = BatchCodec.stringElement(None)
   private val allNullStringSource: Plan[String] = Plan.Source(
     Seq(Partition(Seq(nullText, nullText))),
@@ -298,6 +308,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val intMap = Plan.MapOp(intSource, (value: Int) => value + 1)
     val longFilter = Plan.FilterOp(longSource, (value: Long) => value > 1L)
     val longMap = Plan.MapOp(longSource, (value: Long) => value + 1L)
+    val boolFilter = Plan.FilterOp(boolSource, (value: Boolean) => value)
+    val boolFilters = Plan.FilterOp(boolFilter, (value: Boolean) => !value)
     val doubleFilter = Plan.FilterOp(doubleSource, (value: Double) => value > 0.0)
     val doubleMap = Plan.MapOp(doubleSource, (value: Double) => value * 2.0)
     val stringFilter = Plan.FilterOp(stringSource, (value: String) => value.nonEmpty)
@@ -349,6 +361,15 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       acceptedLong("empty long source", emptyLongSource, narrowInfo(2, layout), Some("Scan")),
       acceptedLong("long filter", longFilter, narrowInfo(2, layout), Some("Filter(Scan)")),
       acceptedLong("long map", longMap, narrowInfo(2, layout), Some("Project(Scan)")),
+      AcceptedCase("boolean source", boolSource, narrowInfo(2, layout), Some("Scan")),
+      AcceptedCase("empty boolean source", emptyBoolSource, narrowInfo(2, layout), Some("Scan")),
+      AcceptedCase("boolean filter", boolFilter, narrowInfo(2, layout), Some("Filter(Scan)")),
+      AcceptedCase(
+        "boolean filter chain",
+        boolFilters,
+        narrowInfo(2, layout),
+        Some("Filter(Filter(Scan))"),
+      ),
       AcceptedCase("double source", doubleSource, narrowInfo(2, layout), Some("Scan")),
       AcceptedCase("double filter", doubleFilter, narrowInfo(2, layout), Some("Filter(Scan)")),
       AcceptedCase("double map", doubleMap, narrowInfo(2, layout), Some("Project(Scan)")),
@@ -513,7 +534,11 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ExcludedCase("single-precision Float map", floatMap),
       ExcludedCase("all-null string source", allNullStringSource),
       ExcludedCase("empty int source without a witness", emptyIntSource),
-      ExcludedCase("unsupported Boolean source", Plan.Source(Seq(Partition(Seq(true, false))))),
+      ExcludedCase("boolean map to boolean", Plan.MapOp(boolSource, (value: Boolean) => value)),
+      ExcludedCase(
+        "boolean map to int",
+        Plan.MapOp(boolSource, (value: Boolean) => if (value) 1 else 0),
+      ),
       ExcludedCase("int map to long", Plan.MapOp(intSource, (value: Int) => value.toLong)),
       ExcludedCase("long map to int", Plan.MapOp(longSource, (value: Long) => value.toInt)),
       ExcludedCase("long map to string", Plan.MapOp(longSource, (value: Long) => value.toString)),
@@ -583,19 +608,19 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
   private def sumsInts(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Ints => true
     case PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs |
-        PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings =>
+        PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools =>
       false
 
   private def sumsLongs(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Longs => true
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs |
-        PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings =>
+        PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools =>
       false
 
   private def sumsFloats(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Floats => true
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Pairs |
-        PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings =>
+        PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools =>
       false
 
   private def preservesPartitions(op: PhysicalOp): Boolean = op match

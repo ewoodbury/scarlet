@@ -82,8 +82,32 @@ object BatchCodec:
   def nullableFloat64s(values: Seq[Option[Double]]): ColumnBatch =
     batch(Float64Column.fromNullable(values))
 
-  def bools(values: Seq[Boolean]): ColumnBatch =
-    batch(BoolColumn(values))
+  /**
+   * An `ArraySeq.ofBoolean` is copied from its primitive array. Any other iterable, including a
+   * `Seq[Boolean]`, is filled from its iterator. An owned partition array is [[copiedBools]]: this
+   * module does not see that holder. The column stores bytes and does not retain `values`.
+   */
+  def bools(values: Iterable[Boolean]): ColumnBatch = values match
+    case array: ArraySeq.ofBoolean => copiedBools(array.unsafeArray)
+    case other => boolBatch(fillBoolBytes(other))
+
+  /**
+   * Copies `values` into a boolean column. The column does not retain `values`. See [[copiedInts]]
+   * for why the column does not adopt the array. The partition that produced `values` stays
+   * readable.
+   */
+  private[scarlet] def copiedBools(values: Array[Boolean]): ColumnBatch =
+    ColumnMetrics.primitiveEncode()
+    boolBatch(boolBytes(values))
+
+  private def boolBatch(bytes: Array[Byte]): ColumnBatch =
+    batch(BoolColumn.of(bytes, Validity.allValid(bytes.length), bytes.length))
+
+  /** Copies `values` into a new byte buffer. The boolean array is not retained. */
+  private def boolBytes(values: Array[Boolean]): Array[Byte] =
+    Array.tabulate(values.length) { row =>
+      if (values(row)) 1.toByte else 0.toByte
+    }
 
   def nullableBools(values: Seq[Option[Boolean]]): ColumnBatch =
     batch(BoolColumn.fromNullable(values))
@@ -214,9 +238,13 @@ object BatchCodec:
       if (column.isValid(row)) Some(column.values(row)) else None
     }
 
-  def decodeBools(batch: ColumnBatch): Seq[Boolean] =
+  def decodeBools(batch: ColumnBatch): Seq[Boolean] = decodeBools(batch, batch.length)
+
+  def decodeBools(batch: ColumnBatch, maxRows: Int): Seq[Boolean] =
     val column = bool(batch)
-    Seq.tabulate(column.length) { row =>
+    val rows = decodedLength(batch, maxRows)
+    ColumnMetrics.decoded(rows)
+    Seq.tabulate(rows) { row =>
       require(column.isValid(row), s"null Bool at row $row")
       column.values(row) != 0
     }
@@ -363,6 +391,19 @@ object BatchCodec:
     var row = 0
     while (row < count) {
       filled(row) = rows.next()
+      row += 1
+    }
+    filled
+
+  /** Fills from the iterator. `size` then one pass, so a `Seq` is not copied twice. */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def fillBoolBytes(values: Iterable[Boolean]): Array[Byte] =
+    val count = values.size
+    val filled = new Array[Byte](count)
+    val rows = values.iterator
+    var row = 0
+    while (row < count) {
+      filled(row) = if (rows.next()) 1.toByte else 0.toByte
       row += 1
     }
     filled
