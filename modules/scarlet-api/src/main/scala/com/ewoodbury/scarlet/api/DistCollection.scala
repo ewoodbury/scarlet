@@ -505,6 +505,21 @@ object DistCollection:
     }
 
   /**
+   * Partitions a `String` array. Each partition is a [[com.ewoodbury.scarlet.core.StringArrays]]
+   * copy of its range. The caller's array is not retained, and the partition array is not publicly
+   * mutable. The source descriptor is
+   * [[com.ewoodbury.scarlet.core.Plan.SourceDescriptor.Strings]], including when the array is
+   * empty. [[apply]] on an `Iterable[String]` stays
+   * [[com.ewoodbury.scarlet.core.Plan.SourceDescriptor.Unknown]].
+   */
+  def ofStrings(values: Array[String], numPartitions: Int): DistCollection[String] =
+    import com.ewoodbury.scarlet.core.StringArrays
+
+    splitSource(values.length, numPartitions, Plan.SourceDescriptor.Strings) { (start, end) =>
+      StringArrays.fromOwned(values.slice(start, end))
+    }
+
+  /**
    * Partitions a primitive `Double` array. Each partition is a
    * [[com.ewoodbury.scarlet.core.DoubleArrays]] copy of its range. The caller's array is not
    * retained, and the partition array is not publicly mutable.

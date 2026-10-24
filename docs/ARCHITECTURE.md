@@ -58,6 +58,7 @@ The columnar planner accepts only supported typed plan shapes when
 `ScarletConf.columnarExecution` is enabled. `TestColumnarContract` is the executable inventory:
 its `Plan` match has no default case, so adding a logical node requires classifying it. The suite
 asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors that contract.
+`TestTypeCoverage` is a separate type-by-operation matrix. It does not replace that inventory.
 `columnarBatchSize` (default 8192) sets the morsel width.
 
 ### Columnar completion contract
@@ -116,6 +117,35 @@ source once per element, and a map after a filter once per element the filter ke
 | map | refused |
 | sum | not in the API |
 
+### Type and operation matrix
+
+`TestTypeCoverage` builds one `DistCollection` per cell and compares it with the row path
+(`columnarExecution = false`). For an accepted cell, `partitioning`, `tryRun`, `tryCount`, and
+`tryTake` are defined and match that row result. `trySumInt`, `trySumLong`, and `trySumDouble` are
+defined only for an accepted `Int`, `Long`, or `Double` result, and only the matching sum is
+defined. A refused map keeps every gate `None`; `collect` still returns the row result. Boolean
+and string sources are accepted, and every sum gate on them is `None`. There is no Boolean or
+string `sum` in the API. `Sum` in this table is the source plan, not a separate logical node.
+
+| Type | Source | Filter | Map, same type | Map, other type | Count | Sum | Take |
+|---|---|---|---|---|---|---|---|
+| Int | yes | yes | yes | no (`Int => Long`) | yes | yes, as `Long` | yes |
+| Long | yes | yes | yes | no (`Long => Int`) | yes | yes, wrapping | yes |
+| Double | yes | yes | yes | no (`Double => Int`) | yes | yes | yes |
+| Boolean | yes | yes | no | no | yes | no | yes |
+| String | yes | yes | yes | no (`String => Int`) | yes | no | yes |
+
+`DistCollection.ofStrings` stores a `StringArrays` copy of each range and records
+`SourceDescriptor.Strings`. An empty array is therefore columnar. `DistCollection.apply` on an
+`Iterable[String]` keeps `SourceDescriptor.Unknown`: a non-empty iterable is classified from its
+first string, and an empty iterable has no witness and stays on the row path.
+
+`groupedSum` is columnar for an `(Int, Int)` source. A long pair source is not. String
+`groupByKey` and string `join` are refused. Also refused, and already listed with the contract
+fixtures: `distinct`, `partitionBy`, `sortBy`, `groupByKey`, and joins on any key that is not an
+int column. `min` and `max` are not in the API. Nullable long and boolean sources have no
+descriptor.
+
 Fused `groupedSum` is action-level. It is not a `Plan` node and not a `PhysicalOp`.
 `ColumnarPlanner.groupedSumPeel` is the structural peel label of the pair steps that scan walks.
 It is not an action shape. A typed int-pair source's label is `GroupedSum(Scan)`. A preceding
@@ -142,9 +172,11 @@ That last group is an `Int` mapped to `Long`, to a pair, or to `String` (includi
 filter followed by a map, and a `String` mapped through `length`, plus a pair map from
 `(Int, Int)` to `(Long, Int)`. A
 type-changing step refuses the whole element chain, so the plan stays on the row path and reports
-no columnar layout. Primitive source factories carry a descriptor, which supplies the type for
-empty partitions; when values are present, the planner still requires data inference to agree with
-that descriptor. A map of a pair that stays `(Int, Int)` is also excluded from `lower` and
+no columnar layout. Primitive source factories, and `ofStrings`, carry a descriptor, which supplies
+the type for empty partitions; when values are present, the planner still requires data inference
+to agree with that descriptor. `ofStrings` is what makes an empty string array columnar. An empty
+`Iterable[String]` passed to `DistCollection.apply` stays `Unknown` and on the row path. A map of
+a pair that stays `(Int, Int)` is also excluded from `lower` and
 `tryRun`. `lower` refuses it and `tryGroupedSum` succeeds. The peel label for that map is
 `GroupedSum(MapPair(Scan))`, which names the walked steps and is not an action shape. No covered
 fixture reports a layout when `lower` refuses the plan. `partitioning` is defined exactly when
