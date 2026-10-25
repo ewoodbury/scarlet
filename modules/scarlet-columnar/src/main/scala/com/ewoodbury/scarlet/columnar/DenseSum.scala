@@ -341,8 +341,8 @@ private[columnar] object DenseSum:
 
     /**
      * One pass over the window. Slots the open sum marked are appended in ascending order. The
-     * window width is bounded by [[denseLimit]], so this sweep stays proportional to the row count
-     * rather than to the key range.
+     * sweep runs over `keyRange`, which the fit check caps at a fixed multiple of the row count,
+     * so it stays O(rows) rather than unbounded in the key range.
      */
     private def recordTouched(seenLocal: Array[Byte]): Unit =
       val touchedLocal = touched
