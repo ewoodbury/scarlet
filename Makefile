@@ -12,6 +12,10 @@ test-lint: ## Run linting without fixing
 test: ## Run tests
 	sbt test
 
+.PHONY: hygiene
+hygiene: ## Fail if tracked files are review scratch or build artifacts
+	bash scripts/check-hygiene.sh
+
 .PHONY: test-one
 test-one: ## Run a single suite: make test-one T=com.ewoodbury.scarlet.core.TestLocalActions
 	sbt "scarlet-tests/testOnly $(T)"
