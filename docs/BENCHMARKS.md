@@ -69,8 +69,10 @@ for the run and shut down at the end. This is not a fresh-JVM isolation.
 | `double` | `Filter(Scan)` | `ofDoubles.filter(_ > 0.0).sum` |
 | `string` | `Filter(Scan)` | dictionary `filterStringEquals("k42")`, then `count`, on `ofStrings` |
 | `boolean` | `Filter(Scan)` | `ofBools.filter(identity)`, then `count` |
-| `grouped-repeat` | `GroupedSum(Scan)` | `groupedSum` on keys `row % 1024`. Sequential keys, the current best case |
+| `grouped-repeat` | `GroupedSum(Scan)` | `groupedSum` on keys `row % 1024`, in order |
 | `grouped-shuffled` | `GroupedSum(Scan)` | the same key multiset per morsel, in shuffled order |
+| `grouped-sparse` | `GroupedSum(Scan)` | 1024 groups spread over `0` until `300000` |
+| `grouped-shifting` | `GroupedSum(Scan)` | that spread, plus 7 on every odd morsel |
 
 Int, long, and double inputs share one linear-congruential generator (seed `0x12345678`). Each
 value is in `-1000000` until `1000000`. The long and double queries widen those ints. The double
@@ -89,6 +91,13 @@ scan slices a partition. The key multiset of each range is unchanged. Values sta
 so both grouped queries have the same checksum. The tail morsel of each partition is shorter
 than a full batch and is shuffled on its own.
 
+`grouped-sparse` assigns 1024 slots across `0` until `300000`, reversed inside each morsel so the
+first key is `300000`. `grouped-shifting` adds 7 on every odd morsel, so the minimum moves and
+the span stays wide. Both fail the density test. The harness compares one partial with first-seen
+order before timing and fails the run if that partial is sorted. A repeating or shuffled morsel
+of keys `0` until `1023` has span 1024, which is inside `4 * 8192`, so those queries stay on the
+direct index.
+
 The harness checks the physical shape before timing. It also rejects a sample whose published
 batches disagree with the layout it is about to record.
 
@@ -100,47 +109,67 @@ that matters is within this run.
 
 | query | layout | threads | rows | p50 ms | p95 ms | max ms | alloc mb |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| int-narrow | columnar | 1 | 1000000 | 5.408 | 5.524 | 5.610 | 8.319 |
-| int-narrow | columnar | 4 | 1000000 | 2.219 | 2.326 | 2.349 | 8.330 |
-| int-narrow | row | 1 | 1000000 | 34.936 | 35.623 | 50.823 | 100.044 |
-| int-narrow | row | 4 | 1000000 | 34.982 | 61.353 | 63.246 | 100.043 |
-| int-chain | columnar | 1 | 1000000 | 6.204 | 6.393 | 6.405 | 8.329 |
-| int-chain | columnar | 4 | 1000000 | 2.281 | 2.402 | 2.475 | 8.340 |
-| int-chain | row | 1 | 1000000 | 92.994 | 162.717 | 165.168 | 360.026 |
-| int-chain | row | 4 | 1000000 | 92.950 | 159.582 | 161.007 | 360.024 |
-| long-chain | columnar | 1 | 1000000 | 16.962 | 18.164 | 33.770 | 16.363 |
-| long-chain | columnar | 4 | 1000000 | 5.433 | 5.638 | 5.898 | 16.373 |
-| long-chain | row | 1 | 1000000 | 99.921 | 167.118 | 170.266 | 400.034 |
-| long-chain | row | 4 | 1000000 | 100.020 | 168.361 | 170.616 | 400.032 |
-| double | columnar | 1 | 1000000 | 2.108 | 2.245 | 2.487 | 8.129 |
-| double | columnar | 4 | 1000000 | 1.505 | 1.599 | 1.731 | 8.131 |
-| double | row | 1 | 1000000 | 22.355 | 23.348 | 40.085 | 68.041 |
-| double | row | 4 | 1000000 | 22.373 | 23.630 | 38.687 | 68.039 |
-| string | columnar | 1 | 1000000 | 7.558 | 7.899 | 8.097 | 29.827 |
-| string | columnar | 4 | 1000000 | 7.161 | 7.521 | 7.539 | 25.641 |
-| string | row | 1 | 1000000 | 10.363 | 10.698 | 10.785 | 0.098 |
-| string | row | 4 | 1000000 | 10.276 | 10.520 | 10.722 | 0.097 |
-| boolean | columnar | 1 | 1000000 | 5.246 | 5.474 | 5.487 | 20.096 |
-| boolean | columnar | 4 | 1000000 | 4.794 | 5.027 | 5.194 | 18.910 |
-| boolean | row | 1 | 1000000 | 25.490 | 36.643 | 37.321 | 32.033 |
-| boolean | row | 4 | 1000000 | 25.250 | 34.776 | 49.661 | 32.033 |
-| grouped-repeat | columnar | 1 | 10000000 | 43.782 | 48.145 | 56.476 | 99.914 |
-| grouped-repeat | columnar | 4 | 10000000 | 15.025 | 16.046 | 44.128 | 99.976 |
-| grouped-repeat | row | 1 | 10000000 | 127.657 | 171.374 | 175.887 | 1259.992 |
-| grouped-repeat | row | 4 | 10000000 | 126.375 | 130.669 | 133.810 | 1260.014 |
-| grouped-shuffled | columnar | 1 | 10000000 | 108.615 | 160.235 | 163.506 | 109.946 |
-| grouped-shuffled | columnar | 4 | 10000000 | 33.193 | 34.464 | 34.699 | 109.538 |
-| grouped-shuffled | row | 1 | 10000000 | 136.749 | 153.944 | 180.577 | 1260.014 |
-| grouped-shuffled | row | 4 | 10000000 | 121.289 | 142.368 | 142.721 | 1260.004 |
+| int-narrow | columnar | 1 | 1000000 | 5.666 | 7.198 | 9.862 | 8.344 |
+| int-narrow | columnar | 4 | 1000000 | 2.356 | 17.202 | 22.863 | 8.355 |
+| int-narrow | row | 1 | 1000000 | 34.964 | 62.328 | 64.714 | 100.044 |
+| int-narrow | row | 4 | 1000000 | 34.618 | 48.408 | 53.598 | 100.043 |
+| int-chain | columnar | 1 | 1000000 | 6.269 | 6.533 | 6.588 | 8.329 |
+| int-chain | columnar | 4 | 1000000 | 2.431 | 2.856 | 7.050 | 8.341 |
+| int-chain | row | 1 | 1000000 | 93.852 | 167.971 | 184.356 | 360.026 |
+| int-chain | row | 4 | 1000000 | 93.422 | 159.615 | 212.559 | 360.024 |
+| long-chain | columnar | 1 | 1000000 | 17.317 | 17.615 | 21.364 | 16.363 |
+| long-chain | columnar | 4 | 1000000 | 6.136 | 6.461 | 8.745 | 16.373 |
+| long-chain | row | 1 | 1000000 | 100.725 | 157.549 | 229.151 | 400.021 |
+| long-chain | row | 4 | 1000000 | 100.721 | 227.131 | 229.918 | 400.019 |
+| double | columnar | 1 | 1000000 | 2.173 | 2.242 | 2.316 | 8.129 |
+| double | columnar | 4 | 1000000 | 1.551 | 1.693 | 5.667 | 8.131 |
+| double | row | 1 | 1000000 | 23.701 | 50.436 | 94.857 | 68.041 |
+| double | row | 4 | 1000000 | 23.718 | 51.169 | 52.515 | 68.039 |
+| string | columnar | 1 | 1000000 | 7.885 | 8.106 | 12.089 | 29.827 |
+| string | columnar | 4 | 1000000 | 7.378 | 8.048 | 11.490 | 26.848 |
+| string | row | 1 | 1000000 | 10.542 | 10.822 | 10.911 | 0.098 |
+| string | row | 4 | 1000000 | 10.504 | 10.759 | 11.026 | 0.097 |
+| boolean | columnar | 1 | 1000000 | 5.417 | 5.562 | 6.072 | 20.096 |
+| boolean | columnar | 4 | 1000000 | 4.979 | 6.171 | 8.747 | 18.948 |
+| boolean | row | 1 | 1000000 | 25.575 | 35.644 | 71.687 | 32.033 |
+| boolean | row | 4 | 1000000 | 24.898 | 34.834 | 38.237 | 32.032 |
+| grouped-repeat | columnar | 1 | 10000000 | 20.865 | 25.098 | 74.387 | 99.186 |
+| grouped-repeat | columnar | 4 | 10000000 | 9.692 | 14.761 | 26.961 | 98.589 |
+| grouped-repeat | row | 1 | 10000000 | 144.679 | 186.862 | 243.628 | 1260.042 |
+| grouped-repeat | row | 4 | 10000000 | 145.845 | 164.991 | 187.661 | 1260.043 |
+| grouped-shuffled | columnar | 1 | 10000000 | 27.160 | 31.355 | 134.015 | 99.185 |
+| grouped-shuffled | columnar | 4 | 10000000 | 11.297 | 30.637 | 66.788 | 98.634 |
+| grouped-shuffled | row | 1 | 10000000 | 123.545 | 178.675 | 199.703 | 1260.018 |
+| grouped-shuffled | row | 4 | 10000000 | 123.002 | 165.653 | 185.803 | 1260.018 |
+| grouped-sparse | columnar | 1 | 10000000 | 59.641 | 61.127 | 115.340 | 99.909 |
+| grouped-sparse | columnar | 4 | 10000000 | 20.313 | 54.016 | 124.731 | 99.642 |
+| grouped-sparse | row | 1 | 10000000 | 111.155 | 149.036 | 173.367 | 1279.862 |
+| grouped-sparse | row | 4 | 10000000 | 111.286 | 148.374 | 165.135 | 1279.836 |
+| grouped-shifting | columnar | 1 | 10000000 | 66.659 | 68.774 | 72.362 | 110.169 |
+| grouped-shifting | columnar | 4 | 10000000 | 24.278 | 63.483 | 91.360 | 109.088 |
+| grouped-shifting | row | 1 | 10000000 | 111.349 | 168.691 | 231.926 | 1279.862 |
+| grouped-shifting | row | 4 | 10000000 | 111.323 | 168.777 | 180.535 | 1279.863 |
 
-Columnar p50 was at or below the row p50 on every query and width.
+Columnar p50 was at or below the row p50 on every query and width. Two samples sit above p95, so
+the tail is not a stable ranking. The non-grouped rows moved with this run because the sparse
+queries share the JVM.
 
 `grouped-repeat` and `grouped-shuffled` disagree on the per-group checksum
-(`49999995039680` and `49999995026112`). Each checksum matches across both layouts and both
+(`49999995039680` and `49999995026112`). `grouped-sparse` is `49999624077338` and
+`grouped-shifting` is `50000486424568`. Each checksum matches across both layouts and both
 widths. The string row estimate stays near 0.1 MB. That action walks strings that already exist,
 and the same process-wide probe reports about 30 MB for the columnar dictionary encode.
 
-At p95, `grouped-shuffled` at one thread is slower on the columnar path (160.235 ms) than on the
-row path (153.944 ms). The columnar max is 163.506 ms and the row max is 180.577 ms. Two samples
-sit above p95, so this is not a stable tail ranking. Every other query has a columnar p95 below
-the row p95.
+A slot is 17 bytes: the sum, the flag, the touched-key list, and the zero-origin key cache. The
+budget is 4 MiB across the workers, so one worker caps at 246723 slots and four workers cap at
+61680 slots, 4194240 bytes. A 65536-slot prefix does not fit at four workers. The table is the
+observed window, and only when that span is also at most four times the morsel length. On this
+run, columnar `grouped-repeat` is 20.865 ms at one thread and 9.692 ms at four, where p95 is
+14.761 ms. `grouped-shuffled` is 27.160 ms at one thread. The row engine is unchanged. Row p50
+is 144.679 ms and 145.845 ms for `grouped-repeat`, and 123.545 ms and 123.002 ms for
+`grouped-shuffled`.
+
+The stage study on the same machine, in a separate process, times the partial alone. Repeating
+keys: one thread p50 16.207 ms, p95 16.492, max 17.802; four threads p50 4.783, p95 6.946, max
+8.288. Shuffled keys: one thread p50 23.113, p95 26.148, max 26.675; four threads p50 6.453,
+p95 11.415, max 11.926.

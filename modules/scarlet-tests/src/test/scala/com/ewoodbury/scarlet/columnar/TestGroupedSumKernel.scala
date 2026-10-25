@@ -244,8 +244,11 @@ class TestGroupedSumKernel extends AnyFlatSpec with Matchers:
 
     merged match
       case Vector(only) =>
-        keysOf(partial) shouldBe keysOf(direct)
-        keysOf(only) shouldBe keysOf(direct)
+        // Keys arrive as 4 then 1. The direct index emits ascending order. The hash aggregate
+        // still emits first-seen order. Grouped sums are compared as maps.
+        keysOf(direct) shouldBe Seq(4, 1)
+        keysOf(partial) shouldBe Seq(1, 4)
+        keysOf(only) shouldBe Seq(1, 4)
         sums(merged) shouldBe sums(Vector(direct))
       case other => fail(s"expected one merged batch, got ${other.length}")
   }
