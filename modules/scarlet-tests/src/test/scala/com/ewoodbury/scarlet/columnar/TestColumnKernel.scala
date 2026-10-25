@@ -239,6 +239,40 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
     utf8(kept).codes(1) shouldBe 0
   }
 
+  it should "count literal codes without publishing a column" in {
+    val rows = Seq(Some("a"), None, Some("b"), Some("a"), Some("c"))
+    val input = BatchCodec.nullableStrings(rows)
+    val absent = DictUtf8Column.of(
+      Array("a", "b"),
+      Array(-1, 0, -1, 1),
+      Validity.allValid(4),
+      4,
+    )
+    val absentBatch = single(absent)
+    val empty = BatchCodec.strings(Seq.empty)
+
+    ColumnMetrics.withSink(new CountingSink) {
+      ColumnKernel.countByValues(input, 0, Seq("a", "c")) shouldBe 3L
+      ColumnKernel.countByValues(input, 0, Seq("missing")) shouldBe 0L
+      ColumnKernel.countByValues(input, 0, Seq("a", "b", "c")) shouldBe 4L
+      ColumnKernel.countByValues(input, 0, Seq.empty[String]) shouldBe 0L
+      ColumnKernel.countByValues(absentBatch, 0, Seq("a")) shouldBe 1L
+      ColumnKernel.countByValues(absentBatch, 0, Seq("b")) shouldBe 1L
+      ColumnKernel.countByValues(empty, 0, Seq("a")) shouldBe 0L
+      ColumnMetrics.batchCount shouldBe 0L
+    }
+    input.length shouldBe 5
+
+    val forward = Seq(Seq("a", "b"), Seq("b", "c"))
+    val reverse = Seq(Seq("c", "b"), Seq("b", "a"))
+    ColumnKernel.countByGroups(input, 0, forward) shouldBe 1L
+    ColumnKernel.countByGroups(input, 0, reverse) shouldBe 1L
+    ColumnKernel.countByGroups(input, 0, Seq(Seq("a"), Seq("b"))) shouldBe 0L
+    ColumnKernel.countByGroups(absentBatch, 0, Seq(Seq("a", "b"))) shouldBe
+      ColumnKernel.filterUtf8ByValues(absentBatch, 0, Seq("a", "b")).length.toLong
+    ColumnKernel.countByGroups(input, 0, Seq.empty) shouldBe 0L
+  }
+
   it should "compact a string column beside the predicate and keep its null" in {
     val keys = Int32Column.of(Array(1, 2, 3), Validity.allValid(3), 3)
     val texts = DictUtf8Column.fromNullable(Seq(Some("a"), None, Some("b")))
