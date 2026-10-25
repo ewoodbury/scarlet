@@ -7,9 +7,10 @@ package com.ewoodbury.scarlet.columnar
  * floats, and bools, nulls are dropped and the predicate is not called. A string filter calls the
  * predicate on every row, including an empty cell, and an empty cell may survive. Survivors stay
  * in input order. Every column is compacted. The output length is the survivor count. A
- * whole-batch scan sizes its output to the input live length. A range scan sizes the filtered
- * column to the range length and records absolute row indexes, so the other columns are still
- * compacted from the source batch. A string filter keeps the input dictionary.
+ * whole-batch scan sizes its output to the input live length. A range scan reads
+ * `[start, start + length)`; the filtered column holds its survivors, and a multi-column batch
+ * records absolute row indexes so the other columns compact from the source batch. A string filter
+ * keeps the input dictionary.
  *
  * Project maps one column and shares the others. For the primitive columns, a null stays null, the
  * new slot stores `0`, and the function is not called. A whole-column project reuses the input
@@ -63,7 +64,7 @@ object ColumnKernel:
   def filterInt32(batch: ColumnBatch, ordinal: Int, predicate: Int32Predicate): ColumnBatch =
     filterInt32(batch, ordinal, 0, batch.length, predicate)
 
-  /** Scans `[start, start + length)` and records absolute row indexes. */
+  /** Scans `[start, start + length)`. A multi-column batch records absolute row indexes. */
   def filterInt32(
       batch: ColumnBatch,
       ordinal: Int,
@@ -86,7 +87,7 @@ object ColumnKernel:
   def filterInt64(batch: ColumnBatch, ordinal: Int, predicate: Int64Predicate): ColumnBatch =
     filterInt64(batch, ordinal, 0, batch.length, predicate)
 
-  /** Scans `[start, start + length)` and records absolute row indexes. */
+  /** Scans `[start, start + length)`. A multi-column batch records absolute row indexes. */
   def filterInt64(
       batch: ColumnBatch,
       ordinal: Int,
@@ -113,7 +114,7 @@ object ColumnKernel:
   ): ColumnBatch =
     filterFloat64(batch, ordinal, 0, batch.length, predicate)
 
-  /** Scans `[start, start + length)` and records absolute row indexes. */
+  /** Scans `[start, start + length)`. A multi-column batch records absolute row indexes. */
   def filterFloat64(
       batch: ColumnBatch,
       ordinal: Int,
@@ -136,7 +137,7 @@ object ColumnKernel:
   def filterUtf8(batch: ColumnBatch, ordinal: Int, predicate: Utf8Predicate): ColumnBatch =
     filterUtf8(batch, ordinal, 0, batch.length, predicate)
 
-  /** Scans `[start, start + length)` and records absolute row indexes. */
+  /** Scans `[start, start + length)`. A multi-column batch records absolute row indexes. */
   def filterUtf8(
       batch: ColumnBatch,
       ordinal: Int,
@@ -169,8 +170,8 @@ object ColumnKernel:
     filterUtf8ByValues(batch, ordinal, 0, batch.length, values)
 
   /**
-   * Scans codes on `[start, start + length)`. The mask is the same one [[filterUtf8ByValues]]
-   * builds for the whole batch. Survivors keep that dictionary, and a multi-column batch records
+   * Scans codes on `[start, start + length)`. The mask is built from the whole dictionary, as in
+   * the whole-batch overload. Survivors keep that dictionary, and a multi-column batch records
    * absolute row indexes.
    */
   def filterUtf8ByValues(
@@ -311,7 +312,7 @@ object ColumnKernel:
   def filterBool(batch: ColumnBatch, ordinal: Int, predicate: BoolPredicate): ColumnBatch =
     filterBool(batch, ordinal, 0, batch.length, predicate)
 
-  /** Scans `[start, start + length)` and records absolute row indexes. */
+  /** Scans `[start, start + length)`. A multi-column batch records absolute row indexes. */
   def filterBool(
       batch: ColumnBatch,
       ordinal: Int,
