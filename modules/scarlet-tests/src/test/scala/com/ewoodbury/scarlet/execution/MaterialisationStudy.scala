@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import scala.util.Random
+
 import com.sun.management.ThreadMXBean
 
 import com.ewoodbury.scarlet.api.DistCollection
@@ -23,12 +25,12 @@ import MaterialisationStudySupport.*
  *
  * RAW is four dependent `+1` adds, a folded-loop floor. RAWD is four data-dependent updates.
  * Both create and join their workers inside the sample when the width is above one. GROUPED is
- * `tryGroupedSum` on keys `row % groups`. The batch size is a multiple of the group count, so
- * every dense partial repeats one key sequence and the merge adds through cached slots. That is
- * a best case. PERMUTED is `tryGroupedSum` on a fixed-seed shuffle of the same key multiset.
- * GROUPED p50 is the query-level result for the repeating keys. REPLAY times the five stage
- * calls as one harness action. It is a synthetic stage replay, not a query result. REPLAY-PERM
- * is that replay on the shuffled keys. Stage percentiles are not added together.
+ * `tryGroupedSum` on keys `row % groups`. PERMUTED is the same pairs with each morsel permuted
+ * by a fixed seed. A morsel is one batch-size range from the start of a source partition. The
+ * per-group sums are checked before timing. GROUPED p50 is the query-level result for the
+ * repeating keys. REPLAY times the five stage calls as one harness action. It is a synthetic
+ * stage replay, not a query result. REPLAY-PERM is that replay on the permuted pairs. Stage
+ * percentiles are not added together.
  *
  * Timed F4, P5, and GROUPED fail if the planner returns `None`, so a row-path fallback is not
  * recorded as a columnar result. `tryRun` is asserted in `prepare` for the int source, F4, and P5.
@@ -178,12 +180,11 @@ object MaterialisationStudy:
     val fused = (0 until 4).foldLeft(element)((current, _) => current.map(_ + 1))
     val projected = fused.map(_ + 1)
     val keys = Array.tabulate(groupedRows)(row => row % groups)
-    val shuffled = shuffleKeys(keys, permutedSeed)
-    require(sumInts(keys) == sumInts(shuffled), "shuffled keys changed the multiset")
-    require(!keys.sameElements(shuffled), "shuffled keys kept the sequential order")
     val groupValues = Array.tabulate(groupedRows)(row => row)
+    val (shuffledKeys, shuffledValues) = permutePairsWithinMorsels(keys, groupValues, permutedSeed)
+    requireSameGroupSums(keys, groupValues, shuffledKeys, shuffledValues)
     val grouped = DistCollection.ofIntPairs(keys, groupValues, sourcePartitions)
-    val permuted = DistCollection.ofIntPairs(shuffled, groupValues, sourcePartitions)
+    val permuted = DistCollection.ofIntPairs(shuffledKeys, shuffledValues, sourcePartitions)
     val fusedSum = expectPlus(values, steps = 4)
     val projectedSum = expectPlus(values, steps = 5)
     val dependentSum = rawDependent(values, 0, values.length)
@@ -444,7 +445,6 @@ object MaterialisationStudy:
     }
     // Two input batches, each with many morsels. The fold publishes one partial per batch: 2
     // batches and 2 visits. Concatenation used to add one batch per input batch (4 batches).
-    // Repeating keys take the cached-slot path. The shuffled chain probes. Both publish 2/2.
     val (merged, mergeMark) = meter {
       GroupedSumKernel.mergePartials(split._1, split._2, threads)
     }
@@ -748,28 +748,118 @@ object MaterialisationStudy:
     val perPartition = rows / parts
     parts * ((perPartition + size - 1) / size)
 
-  private def shuffleKeys(keys: Array[Int], seed: Long): Array[Int] =
-    val copy = keys.clone()
-    val random = new scala.util.Random(seed)
-    var index = copy.length
-    while (index > 1) {
-      index -= 1
-      val swap = random.nextInt(index + 1)
-      val held = copy(index)
-      copy(index) = copy(swap)
-      copy(swap) = held
+  /**
+   * Reorders pairs inside each morsel. Source partitions are equal contiguous splits, and each
+   * morsel is a `batchSize` range from the start of its partition, matching the grouped scan.
+   * The pair multiset of every morsel is unchanged, so the per-group sums stay put.
+   */
+  private def permutePairsWithinMorsels(
+      keys: Array[Int],
+      values: Array[Int],
+      seed: Long,
+  ): (Array[Int], Array[Int]) =
+    require(keys.length == values.length, "grouped key and value lengths differ")
+    val permutedKeys = keys.clone()
+    val permutedValues = values.clone()
+    val random = new Random(seed)
+    val partRows = keys.length / sourcePartitions
+    require(partRows * sourcePartitions == keys.length, "grouped rows do not split evenly")
+    var part = 0
+    while (part < sourcePartitions) {
+      val origin = part * partRows
+      var start = 0
+      while (start < partRows) {
+        val length = math.min(batchSize, partRows - start)
+        val at = origin + start
+        permuteRange(permutedKeys, permutedValues, at, length, random)
+        require(!sameRange(keys, permutedKeys, at, length), s"morsel at $at kept key order")
+        require(
+          java.util.Arrays.equals(
+            pairSignature(keys, values, at, length),
+            pairSignature(permutedKeys, permutedValues, at, length),
+          ),
+          s"morsel at $at changed the pair multiset",
+        )
+        start += length
+      }
+      part += 1
     }
-    copy
+    (permutedKeys, permutedValues)
 
-  private def sumInts(values: Array[Int]): Long =
+  private def permuteRange(
+      keys: Array[Int],
+      values: Array[Int],
+      start: Int,
+      length: Int,
+      random: Random,
+  ): Unit =
+    var offset = length - 1
+    while (offset > 0) {
+      val swap = random.nextInt(offset + 1)
+      swapAt(keys, start + offset, start + swap)
+      swapAt(values, start + offset, start + swap)
+      offset -= 1
+    }
+
+  private def swapAt(values: Array[Int], left: Int, right: Int): Unit =
+    val held = values(left)
+    values(left) = values(right)
+    values(right) = held
+
+  private def sameRange(left: Array[Int], right: Array[Int], start: Int, length: Int): Boolean =
     var index = 0
-    var total = 0L
-    val rows = values.length
-    while (index < rows) {
-      total += values(index)
+    var matched = true
+    while (index < length && matched) {
+      if (left(start + index) != right(start + index)) then matched = false
       index += 1
     }
-    total
+    matched
+
+  /** Order-independent pair encoding. Values are non-negative row indexes and fit in 32 bits. */
+  private def pairSignature(
+      keys: Array[Int],
+      values: Array[Int],
+      start: Int,
+      length: Int,
+  ): Array[Long] =
+    val packed = new Array[Long](length)
+    var index = 0
+    while (index < length) {
+      val at = start + index
+      val value = values(at).toLong & 0xffffffffL
+      packed(index) = (keys(at).toLong << 32) | value
+      index += 1
+    }
+    java.util.Arrays.sort(packed)
+    packed
+
+  private def requireSameGroupSums(
+      leftKeys: Array[Int],
+      leftValues: Array[Int],
+      rightKeys: Array[Int],
+      rightValues: Array[Int],
+  ): Unit =
+    val left = groupSums(leftKeys, leftValues)
+    val right = groupSums(rightKeys, rightValues)
+    var key = 0
+    while (key < groups) {
+      require(
+        left(key) == right(key),
+        s"group $key sum ${left(key)} != ${right(key)}",
+      )
+      key += 1
+    }
+
+  private def groupSums(keys: Array[Int], values: Array[Int]): Array[Long] =
+    val sums = new Array[Long](groups)
+    var index = 0
+    while (index < keys.length) {
+      val key = keys(index)
+      require(key >= 0 && key < groups, s"grouped key $key outside 0 until $groups")
+      sums(key) += values(index).toLong
+      index += 1
+    }
+    sums
 
   private def widthSlot(threads: Int): Int =
     val index = threadCounts.indexOf(threads)
