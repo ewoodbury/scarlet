@@ -274,7 +274,7 @@ object ColumnarPlanner:
     case (Plan.FilterOp(source, predicate), PhysicalOp.Filter(child, PhysicalOp.Slot.Element))
         if isInt(child) =>
       val keep = predicate.asInstanceOf[Int => Boolean]
-      foldLong(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
+      foldMorsels(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
         morsel =>
           val column = Int32Pipeline.singleInt(morsel.batch)
           Int32Pipeline.sumFiltered(column, morsel.start, morsel.length, value => keep(value))
@@ -283,7 +283,7 @@ object ColumnarPlanner:
       val (source, steps) = elementSteps(logical, length)
       if (steps.length < length) then
         throw new IllegalStateException("pipeline does not match logical element steps")
-      foldLong(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
+      foldMorsels(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
         morsel =>
           ElementSum.sumInts(morsel, steps)
       }
@@ -314,7 +314,7 @@ object ColumnarPlanner:
       ColumnReduce.sumInt64(ColumnarInterpreter.encodeLongs(partitions), 0)
     case (Plan.FilterOp(source, predicate), PhysicalOp.Filter(child, PhysicalOp.Slot.Element))
         if isLong(child) =>
-      foldLong(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
+      foldMorsels(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
         morsel =>
           ElementSum.sumLongs(morsel, List(ElementStep.Filter(predicate)))
       }
@@ -322,7 +322,7 @@ object ColumnarPlanner:
       val (source, steps) = elementSteps(logical, length)
       if (steps.length < length) then
         throw new IllegalStateException("pipeline does not match logical element steps")
-      foldLong(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
+      foldMorsels(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
         morsel =>
           ElementSum.sumLongs(morsel, steps)
       }
@@ -478,23 +478,23 @@ object ColumnarPlanner:
 
   /**
    * Fold `fn` over the batches `op` produces. The default cuts each batch into [[Morsel]]s that
-   * share the batch and runs those on the scheduler. `morsels = false` reads each batch from row 0
-   * for its whole length on the caller. A dictionary code count uses that: slicing would copy the
-   * code array, and the count reads the array in place.
+   * share the batch and runs those on the scheduler. `cut = false` reads each batch from row 0 for
+   * its whole length on the caller. A dictionary code count uses that: slicing would copy the code
+   * array, and the count reads the array in place.
    */
   private[execution] def foldInterpreted(
       plan: Plan[_],
       op: PhysicalOp,
-      morsels: Boolean = true,
+      cut: Boolean = true,
   )(fn: Morsel => Long): Long =
     val parts = ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op))
-    if (morsels) then foldLong(parts)(fn) else foldWhole(parts)(fn)
+    if (cut) then foldMorsels(parts)(fn) else foldWhole(parts)(fn)
 
   private def foldWhole(parts: Vector[ColumnBatch])(fn: Morsel => Long): Long =
     parts.foldLeft(0L)((total, batch) => total + fn(Morsel(batch, 0, batch.length)))
 
   /** Int and long element folds. Each morsel shares its batch. */
-  private def foldLong(parts: Vector[ColumnBatch])(fn: Morsel => Long): Long =
+  private def foldMorsels(parts: Vector[ColumnBatch])(fn: Morsel => Long): Long =
     if (parts.isEmpty) then 0L
     else
       val morsels = parts.flatMap(part => Morsels.of(part, batchSize))
@@ -503,7 +503,7 @@ object ColumnarPlanner:
 
   /**
    * Copied slices. Pair-column sums still use this, including [[ColumnReduce.sumMappedInt32]]. Int
-   * and long element folds use [[foldLong]].
+   * and long element folds use [[foldMorsels]].
    */
   private def foldSliced(parts: Vector[ColumnBatch])(fn: ColumnBatch => Long): Long =
     if (parts.isEmpty) then 0L

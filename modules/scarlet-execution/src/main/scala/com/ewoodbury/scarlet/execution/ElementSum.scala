@@ -19,7 +19,7 @@ import com.ewoodbury.scarlet.columnar.*
     "org.wartremover.warts.Throw",
   ),
 )
-object ElementSum:
+private[execution] object ElementSum:
 
   def sumInts(morsel: Morsel, steps: List[ColumnarPlanner.ElementStep]): Long =
     val column = Int32Pipeline.singleInt(morsel.batch)
