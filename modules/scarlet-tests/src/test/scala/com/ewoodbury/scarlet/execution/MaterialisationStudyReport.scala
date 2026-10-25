@@ -1,6 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
 import java.lang.management.ManagementFactory
+import java.util.Locale
 
 import MaterialisationStudySupport.*
 
@@ -42,6 +43,7 @@ private[execution] object MaterialisationStudyReport:
     keyOrder()
     table("Grouped stages and replay", groupedTable(queries, stages))
     table("Permuted keys", permutedTable(queries, permuted))
+    orderComparison(queries, stages, permuted)
     replayGap(queries, stages)
     table("Caller probes", probes)
     batches(queries, probes, facts)
@@ -65,8 +67,8 @@ private[execution] object MaterialisationStudyReport:
       s"S5 checksum=${facts.projectedSum} P5 checksum=${facts.projectedSum} " +
       s"RAW checksum=${facts.fusedSum} RAWD checksum=${facts.dependentSum}\n" +
       s"GROUPED rows=$groupedRows groups=$groups checksum=${facts.groupedSum} " +
-      "keys=row%groups batch_multiple_of_groups cached_slot_merge " +
-      s"PERMUTED seed=$permutedSeed shuffled_same_multiset " +
+      "keys=row%groups " +
+      s"PERMUTED seed=$permutedSeed pairs_permuted_within_morsels per_group_sums_match " +
       s"element_morsels=${facts.morsels} grouped_morsels=${facts.groupedMorsels}\n" +
       s"java=${runtime.getVmName} ${runtime.getVmVersion} args=${runtime.getInputArguments}"
 
@@ -130,15 +132,14 @@ private[execution] object MaterialisationStudyReport:
       val described = stageRows.map(row => s"${row.name} ${ms(row.p50Ns)} ms").mkString(", ")
       val stageSum = stageRows.map(_.p50Ns).sum
       val gap = replay.p50Ns - grouped.p50Ns
-      val permuted = findRow(queries, "query", "PERMUTED", threads)
+      val permutedQuery = findRow(queries, "query", "PERMUTED", threads)
       println(
         s"threads=$threads stage p50: $described. Sum of those p50 values is ${ms(stageSum)} ms. " +
-          "That sum is not a measurement. Those stages use repeating keys, so the merge p50 is " +
-          "the cached-slot path. REPLAY times encode, partial, merge, exchange, and final in one " +
-          s"harness call: ${ms(replay.p50Ns)} ms. It is a synthetic stage replay, not a query " +
-          s"result. GROUPED p50 is ${ms(grouped.p50Ns)} ms, the query-level result from " +
-          s"tryGroupedSum on the repeating keys. PERMUTED p50 is ${ms(permuted.p50Ns)} ms, " +
-          s"tryGroupedSum on the shuffled keys. Gap replay-minus-GROUPED is ${signedMs(gap)} ms. " +
+          "That sum is not a measurement. REPLAY times encode, partial, merge, exchange, and " +
+          s"final in one harness call: ${ms(replay.p50Ns)} ms. It is a synthetic stage replay, " +
+          s"not a query result. GROUPED p50 is ${ms(grouped.p50Ns)} ms, the query-level result " +
+          s"from tryGroupedSum on the repeating keys. PERMUTED p50 is ${ms(permutedQuery.p50Ns)} ms, " +
+          s"tryGroupedSum on the permuted pairs. Gap replay-minus-GROUPED is ${signedMs(gap)} ms. " +
           s"Spread replay ${spreadText(replay.spreadNs)}.",
       )
     }
@@ -268,19 +269,150 @@ private[execution] object MaterialisationStudyReport:
 
   private def keyOrder(): Unit =
     println(
-      "Sequential grouped keys are row % group count. The batch size is a multiple of that " +
-        "count, so every morsel repeats one key sequence and every dense partial shares it. " +
-        "The merge then adds through cached slots. That is a best case.",
-    )
-    println(
-      s"PERMUTED shuffles that key multiset with seed $permutedSeed. Values stay in row order, " +
-        "so the checksum matches GROUPED. Partials do not share a key sequence, and the merge " +
-        "probes. The partial scan is faster on the repeating keys too, because each morsel " +
-        "probes one key order. Most of the query gap is that scan. REPLAY and REPLAY-PERM call " +
-        "the five stages from the harness. They are synthetic stage replays, not query results. " +
-        "GROUPED p50 is the query-level result for the repeating keys.",
+      "Sequential grouped keys are row % group count. PERMUTED reorders each (key, value) pair " +
+        "inside its morsel with a fixed seed. A morsel is one batch-size range from the start of " +
+        "a source partition, which is how the grouped scan slices a partition. Each morsel keeps " +
+        "its pair multiset. The per-group sums match the repeating keys, and that check runs " +
+        "before timing. REPLAY and REPLAY-PERM call the five stages from the harness. They are " +
+        "synthetic stage replays, not query results. GROUPED p50 is the query-level result for " +
+        "the repeating keys.",
     )
     println()
+
+  private val jsonSchema: String = "materialisation-grouped-1"
+
+  /**
+   * Shuffled p50 minus repeating p50, for the query, the five stages, and the replay. The
+   * sentence names a stage only when that stage's gap is larger than the absolute sum of the
+   * other stage gaps. Otherwise the split does not isolate the difference.
+   */
+  private def orderComparison(
+      queries: Vector[Row],
+      stages: Vector[Row],
+      permuted: Vector[Row],
+  ): Unit =
+    println("Grouped order")
+    println(
+      "Gap is shuffled p50 minus repeating p50. Stage gaps are separate samples. They are not a " +
+        "partition of the query gap or the replay gap. Allocation is the same process-wide " +
+        "estimate as the other tables.",
+    )
+    println(
+      "| stage | threads | repeat p50 | shuffled p50 | gap | repeat alloc | shuffled alloc |",
+    )
+    println("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+    val lines = orderLines(queries, stages, permuted)
+    lines.foreach { line =>
+      println(
+        s"| ${line.stage} | ${line.threads} | ${ms(line.repeat.p50Ns)} ms | " +
+          s"${ms(line.shuffled.p50Ns)} ms | ${signedMs(line.gapNs)} ms | " +
+          s"${bytes(line.repeat.allocBytes)} | ${bytes(line.shuffled.allocBytes)} |",
+      )
+    }
+    println()
+    println("Order gap")
+    threadCounts.foreach { threads =>
+      val stageGaps = lines.filter(line => line.threads == threads && line.stageGap)
+      println(gapSentence(threads, lines, stageGaps))
+    }
+    println()
+    println(s"jsonl schema=$jsonSchema")
+    lines.foreach(line => println(jsonLine(line, "repeat")))
+    lines.foreach(line => println(jsonLine(line, "shuffled")))
+    println()
+
+  private final case class OrderLine(
+      stage: String,
+      threads: Int,
+      repeat: Row,
+      shuffled: Row,
+      stageGap: Boolean,
+  ):
+    def gapNs: Long = shuffled.p50Ns - repeat.p50Ns
+
+  private def orderLines(
+      queries: Vector[Row],
+      stages: Vector[Row],
+      permuted: Vector[Row],
+  ): Vector[OrderLine] =
+    val names = Vector("query") ++ stageNames :+ "REPLAY"
+    names.flatMap { stage =>
+      threadCounts.map { threads =>
+        val (left, right, counted) =
+          if (sameText(stage, "query")) then
+            (
+              findRow(queries, "query", "GROUPED", threads),
+              findRow(queries, "query", "PERMUTED", threads),
+              false,
+            )
+          else if (sameText(stage, "REPLAY")) then
+            (
+              findRow(queries, "replay", "REPLAY", threads),
+              findRow(queries, "permuted", "REPLAY-PERM", threads),
+              false,
+            )
+          else
+            (
+              findRow(stages, "stage", stage, threads),
+              findRow(permuted, "permuted", stage, threads),
+              true,
+            )
+        OrderLine(stage, threads, left, right, counted)
+      }
+    }
+
+  private def gapSentence(
+      threads: Int,
+      lines: Vector[OrderLine],
+      stageGaps: Vector[OrderLine],
+  ): String =
+    val query = orderLine(lines, "query", threads)
+    val replay = orderLine(lines, "REPLAY", threads)
+    val listed = stageGaps.map(line => s"${line.stage} ${signedMs(line.gapNs)} ms").mkString(", ")
+    val sum = stageGaps.map(_.gapNs).sum
+    val measured =
+      s"threads=$threads shuffled minus repeat: $listed. " +
+        s"Sum of stage gaps ${signedMs(sum)} ms. " +
+        s"REPLAY gap ${signedMs(replay.gapNs)} ms. Query gap ${signedMs(query.gapNs)} ms."
+    val lead = stageGaps.foldLeft(stageGaps(0)) { (best, line) =>
+      if (line.gapNs > best.gapNs) then line else best
+    }
+    val rest = stageGaps.filterNot(line => sameText(line.stage, lead.stage)).map { line =>
+      math.abs(line.gapNs)
+    }.sum
+    val verdict =
+      if (lead.gapNs > 0L && lead.gapNs > rest) then
+        s" ${lead.stage} carries the difference: ${signedMs(lead.gapNs)} ms, " +
+          s"against a query gap of ${signedMs(query.gapNs)} ms " +
+          s"and a replay gap of ${signedMs(replay.gapNs)} ms."
+      else
+        " No stage gap is larger than the absolute sum of the other stage gaps, " +
+          "so the split does not isolate the difference."
+    measured + verdict
+
+  private def orderLine(lines: Vector[OrderLine], stage: String, threads: Int): OrderLine =
+    lines
+      .find(line => sameText(line.stage, stage) && line.threads == threads)
+      .getOrElse {
+        throw new IllegalStateException(s"missing order line $stage threads=$threads")
+      }
+
+  private def jsonLine(line: OrderLine, order: String): String =
+    val row = if (sameText(order, "repeat")) then line.repeat else line.shuffled
+    "{" +
+      s""""schema":"$jsonSchema",""" +
+      s""""stage":"${line.stage}",""" +
+      s""""order":"$order",""" +
+      s""""threads":${line.threads},""" +
+      s""""rows":${row.rowCount},""" +
+      s""""rounds":$measure,""" +
+      s""""p50_ms":${ms(row.p50Ns)},""" +
+      s""""alloc_mb":${jsonMb(row.allocBytes)},""" +
+      s""""checksum":${row.checksum}}"""
+
+  private def jsonMb(bytes: Long): String =
+    if (bytes < 0L) then "null"
+    else String.format(Locale.ENGLISH, "%.3f", bytes.toDouble / 1000000.0)
 
   private def permutedTable(queries: Vector[Row], stages: Vector[Row]): Vector[Row] =
     val names = stageNames :+ "REPLAY-PERM"
