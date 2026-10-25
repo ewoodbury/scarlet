@@ -32,5 +32,9 @@ private[execution] object BoolPipeline:
    * `None`.
    */
   def filter(batch: ColumnBatch, predicate: Any): ColumnBatch =
+    filter(batch, 0, batch.length, predicate)
+
+  /** One boolean filter over `[start, start + length)`. The cast is the same erasure boundary. */
+  def filter(batch: ColumnBatch, start: Int, length: Int, predicate: Any): ColumnBatch =
     val keep = predicate.asInstanceOf[Boolean => Boolean]
-    ColumnKernel.filterBool(batch, 0, value => keep(value))
+    ColumnKernel.filterBool(batch, 0, start, length, value => keep(value))

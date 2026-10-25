@@ -242,22 +242,42 @@ private[execution] object ColumnarInterpreter:
             })
           case Columns.Floats(parts) =>
             val keep = predicate.asInstanceOf[Double => Boolean]
-            Columns.Floats(onEachSliced(parts) { batch =>
-              ColumnKernel.filterFloat64(batch, 0, value => keep(value))
+            Columns.Floats(onEachMorsel(parts) { morsel =>
+              ColumnKernel.filterFloat64(
+                morsel.batch,
+                0,
+                morsel.start,
+                morsel.length,
+                value => keep(value),
+              )
             })
           case Columns.Strings(parts) =>
             ColumnarPlanner.dictionaryStringLiterals(predicate) match
               case Some(literals) =>
-                Columns.Strings(onEachSliced(parts) { batch =>
-                  ColumnKernel.filterUtf8ByValues(batch, 0, literals)
+                Columns.Strings(onEachMorsel(parts) { morsel =>
+                  ColumnKernel.filterUtf8ByValues(
+                    morsel.batch,
+                    0,
+                    morsel.start,
+                    morsel.length,
+                    literals,
+                  )
                 })
               case None =>
                 val keep = predicate.asInstanceOf[String => Boolean]
-                Columns.Strings(onEachSliced(parts) { batch =>
-                  ColumnKernel.filterUtf8(batch, 0, value => keep(value))
+                Columns.Strings(onEachMorsel(parts) { morsel =>
+                  ColumnKernel.filterUtf8(
+                    morsel.batch,
+                    0,
+                    morsel.start,
+                    morsel.length,
+                    value => keep(value),
+                  )
                 })
           case Columns.Bools(parts) =>
-            Columns.Bools(onEachSliced(parts)(batch => BoolPipeline.filter(batch, predicate)))
+            Columns.Bools(onEachMorsel(parts) { morsel =>
+              BoolPipeline.filter(morsel.batch, morsel.start, morsel.length, predicate)
+            })
           case Columns.Pairs(_) | Columns.Triples(_) =>
             throw new IllegalStateException(
               s"columnar element filter expects ${elementColumnList(includeBooleans = true)}",
