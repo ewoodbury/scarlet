@@ -20,7 +20,8 @@ package com.ewoodbury.scarlet.columnar
  * are [[Int32Pipeline]], [[Int64Pipeline]], [[Float64Pipeline]], and [[Utf8Pipeline]].
  *
  * [[countByValues]] resolves the same literal mask as [[filterUtf8ByValues]] and counts codes in
- * place. It does not build a selection or publish a column.
+ * place. [[countByGroups]] intersects one mask per literal group and counts the same way. Neither
+ * builds a selection or publishes a column.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object ColumnKernel:
@@ -110,7 +111,7 @@ object ColumnKernel:
   ): ColumnBatch =
     val column = asUtf8(columnAt(batch, ordinal), ordinal)
     val mask = literalCodes(column, values)
-    val keep: Int32Predicate = code => code >= 0 && code < mask.length && mask(code)
+    val keep: Int32Predicate = code => selected(mask, code)
     val codeColumn = Int32Column.of(column.codes, column.validity, column.length)
     if (batch.columns.length == 1) then
       val scanned = scanInt32(codeColumn, keep, record = false, selection = noSelection)
@@ -126,13 +127,14 @@ object ColumnKernel:
    * counted. A literal that is not in the dictionary adds no hit.
    */
   def countByValues(batch: ColumnBatch, ordinal: Int, values: Iterable[String]): Long =
-    countByValues(batch, ordinal, Seq(values))
+    countByGroups(batch, ordinal, Seq(values))
 
   /**
    * Counts rows selected by every literal group. The masks are intersected, so group order does
-   * not change the count. An empty group selects nothing. The scan stays on the caller thread.
+   * not change the count. An empty group selects nothing. An empty sequence of groups selects
+   * nothing. The scan stays on the caller thread.
    */
-  private[scarlet] def countByValues(
+  private[scarlet] def countByGroups(
       batch: ColumnBatch,
       ordinal: Int,
       groups: Seq[Iterable[String]],
@@ -151,22 +153,32 @@ object ColumnKernel:
     }
     mask
 
-  /** `groups` is non-empty. Each mask has one bit per dictionary entry. */
+  /**
+   * Intersects one mask per group. An empty sequence selects nothing. When `groups` is non-empty,
+   * the first mask is reused as the accumulator and is caller-local: nothing else retains it.
+   */
   private def intersectedCodes(
       column: DictUtf8Column,
       groups: Seq[Iterable[String]],
   ): Array[Boolean] =
-    val pending = groups.iterator
-    val mask = literalCodes(column, pending.next())
-    while (pending.hasNext) {
-      val next = literalCodes(column, pending.next())
-      var code = 0
-      while (code < mask.length) {
-        if (mask(code) && !next(code)) then mask(code) = false
-        code += 1
-      }
+    groups.headOption match
+      case None => Array.emptyBooleanArray
+      case Some(first) =>
+        val mask = literalCodes(column, first)
+        groups.drop(1).foreach(group => intersectInto(mask, literalCodes(column, group)))
+        mask
+
+  /** Clears bits in `mask` that `next` does not set. `mask` is the caller-local accumulator. */
+  private def intersectInto(mask: Array[Boolean], next: Array[Boolean]): Unit =
+    var code = 0
+    while (code < mask.length) {
+      if (mask(code) && !next(code)) then mask(code) = false
+      code += 1
     }
-    mask
+
+  /** A code of `-1`, or any code outside the dictionary, is not selected. */
+  private inline def selected(mask: Array[Boolean], code: Int): Boolean =
+    code >= 0 && code < mask.length && mask(code)
 
   private def selectsAny(mask: Array[Boolean]): Boolean =
     var index = 0
@@ -190,14 +202,13 @@ object ColumnKernel:
       length: Int,
   ): Long =
     val codes = column.codes
-    val limit = mask.length
     val end = start + length
     var total = 0L
     var row = start
     if (dense) then
       while (row < end) {
         val code = codes(row)
-        if (code >= 0 && code < limit && mask(code)) then total += 1L
+        if (selected(mask, code)) then total += 1L
         row += 1
       }
     else
@@ -205,7 +216,7 @@ object ColumnKernel:
       while (row < end) {
         if (Validity.isSet(words, row)) then
           val code = codes(row)
-          if (code >= 0 && code < limit && mask(code)) then total += 1L
+          if (selected(mask, code)) then total += 1L
         row += 1
       }
     total

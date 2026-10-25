@@ -170,9 +170,6 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     ColumnarPlanner.tryCount(nothing.plan) shouldBe Some(0L)
     ColumnarPlanner.tryCount(everything.plan) shouldBe Some(5L)
 
-    ScarletConf.set(
-      originalConf.copy(columnarExecution = true, columnarBatchSize = 2, threadPoolSize = 4),
-    )
     ColumnMetrics.withSink(new CountingSink) {
       single.count() shouldBe 3L
       ColumnMetrics.batchCount shouldBe 1L
@@ -884,9 +881,11 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     }
   }
 
-  @SuppressWarnings(Array("org.wartremover.warts.Equals", "org.wartremover.warts.Null"))
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def keepsLongOrNull(value: String): Boolean =
-    (value eq null) || value.length > 2
+    value match
+      case null => true
+      case text => text.length > 2
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def stringsWithNull(): Seq[String] =

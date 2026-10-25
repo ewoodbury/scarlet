@@ -265,11 +265,12 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
 
     val forward = Seq(Seq("a", "b"), Seq("b", "c"))
     val reverse = Seq(Seq("c", "b"), Seq("b", "a"))
-    ColumnKernel.countByValues(input, 0, forward) shouldBe 1L
-    ColumnKernel.countByValues(input, 0, reverse) shouldBe 1L
-    ColumnKernel.countByValues(input, 0, Seq(Seq("a"), Seq("b"))) shouldBe 0L
-    ColumnKernel.countByValues(absentBatch, 0, Seq(Seq("a", "b"))) shouldBe
+    ColumnKernel.countByGroups(input, 0, forward) shouldBe 1L
+    ColumnKernel.countByGroups(input, 0, reverse) shouldBe 1L
+    ColumnKernel.countByGroups(input, 0, Seq(Seq("a"), Seq("b"))) shouldBe 0L
+    ColumnKernel.countByGroups(absentBatch, 0, Seq(Seq("a", "b"))) shouldBe
       ColumnKernel.filterUtf8ByValues(absentBatch, 0, Seq("a", "b")).length.toLong
+    ColumnKernel.countByGroups(input, 0, Seq.empty) shouldBe 0L
   }
 
   it should "compact a string column beside the predicate and keep its null" in {

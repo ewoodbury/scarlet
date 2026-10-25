@@ -59,10 +59,12 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * Output width for an accepted join or aggregate is `defaultShufflePartitions`. [[tryCount]] and
  * [[trySumInt]] fold an int filter/map chain that starts at a scan or at `keys` or `values`,
  * including an int `mapValues`, and do not write that chain. Sum folds one trailing project and
- * chains longer than four. Count folds those and chains of two to four steps. [[trySumLong]] folds
- * a long filter/map chain the same way, and the sum wraps. [[trySumDouble]] folds at most four
- * steps. Sum of `keys`, `values`, or an int `mapValues` with no further element chain reads the
- * pair column in that morsel loop and does not build the projection. [[tryGroupedSum]] runs
+ * chains longer than four. Count folds those, chains of two to four steps, and a string scan under
+ * only dictionary literal filters. That string fold reads the scan `lower` built. A string shape
+ * that is not that chain reads the finished batches. [[trySumLong]] folds a long filter/map chain
+ * the same way, and the sum wraps. [[trySumDouble]] folds at most four steps. Sum of `keys`,
+ * `values`, or an int `mapValues` with no further element chain reads the pair column in that
+ * morsel loop and does not build the projection. [[tryGroupedSum]] runs
  * [[ColumnPipeline.sumByKey]] on a typed pair source and folds the `Int64` group sums. A preceding
  * `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that partial scan,
  * so the action does not build those pairs. [[groupedSumPeel]] labels those walked steps. It is
@@ -188,76 +190,17 @@ object ColumnarPlanner:
     acc.result()
 
   /**
-   * Row count of a columnar plan. `None` means the row path. This reads batch lengths and does not
-   * decode. A string scan followed only by dictionary literal filters counts codes against the
-   * intersected mask and does not write a column. A map, or a filter that is not a recognized
-   * literal list, still uses the finished batches.
+   * Row count of a columnar plan. `None` means the row path. This does not decode.
+   * [[TrailingProject.count]] folds an int, long, or dictionary-literal string chain without
+   * writing it. Any other accepted plan reads finished batch lengths. A string shape that is not
+   * the literal chain is that second strategy.
    */
   def tryCount(plan: Plan[_]): Option[Long] =
     accepted(plan) match
       case None => None
       case Some(op) =>
-        try
-          TrailingProject
-            .count(plan, op)
-            .orElse(stringLiteralCount(plan, op))
-            .orElse(finishedCount(plan, op))
+        try TrailingProject.count(plan, op).orElse(finishedCount(plan, op))
         catch case _: ClassCastException => None
-
-  /**
-   * String source, then one or more `filterStringEquals` / `filterStringIn` filters, then count.
-   * `None` means some other step is present and the caller should read finished batch lengths.
-   * Masks are intersected per batch, so filter order does not change the count. A null code is not
-   * a hit.
-   */
-  private def stringLiteralCount(plan: Plan[_], op: PhysicalOp): Option[Long] =
-    literalStringFilters(plan) match
-      case None => None
-      case Some((source, groups)) =>
-        if (!stringLiteralTree(op, groups.length)) then
-          throw new IllegalStateException(
-            "dictionary string count does not match the physical tree",
-          )
-        else Some(countLiteralStrings(source, groups))
-
-  private def literalStringFilters(plan: Plan[_]): Option[(Plan.Source[_], List[Vector[String]])] =
-    val (base, steps) = elementSteps(plan, Int.MaxValue)
-    base match
-      case source: Plan.Source[_] if steps.nonEmpty =>
-        gatherLiteralFilters(steps).map(groups => (source, groups))
-      case _ => None
-
-  private def gatherLiteralFilters(steps: List[ElementStep]): Option[List[Vector[String]]] =
-    def gather(
-        remaining: List[ElementStep],
-        acc: List[Vector[String]],
-    ): Option[List[Vector[String]]] =
-      remaining match
-        case Nil => Some(acc.reverse)
-        case ElementStep.Filter(predicate) :: tail =>
-          dictionaryStringLiterals(predicate) match
-            case Some(literals) => gather(tail, literals :: acc)
-            case None => None
-        case ElementStep.Project(_) :: _ => None
-
-    gather(steps, Nil)
-
-  private def stringLiteralTree(op: PhysicalOp, expected: Int): Boolean =
-    @tailrec
-    def nested(current: PhysicalOp, seen: Int): Boolean =
-      current match
-        case PhysicalOp.Filter(child, PhysicalOp.Slot.Element) => nested(child, seen + 1)
-        case PhysicalOp.Scan(PhysicalOp.Kind.Strings, _) => seen == expected
-        case _ => false
-
-    nested(op, 0)
-
-  private def countLiteralStrings(source: Plan.Source[_], groups: List[Vector[String]]): Long =
-    val scan = PhysicalOp.Scan(PhysicalOp.Kind.Strings, source.partitions)
-    val batches = ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, scan))
-    batches.foldLeft(0L) { (total, batch) =>
-      total + ColumnKernel.countByValues(batch, 0, groups)
-    }
 
   private def finishedCount(plan: Plan[_], op: PhysicalOp): Option[Long] =
     Some(
@@ -531,10 +474,21 @@ object ColumnarPlanner:
       ColumnReduce.sumInt32At(batch, ordinal)
     }
 
-  private[execution] def foldInterpreted(plan: Plan[_], op: PhysicalOp)(
-      fn: ColumnBatch => Long,
-  ): Long =
-    foldLong(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op)))(fn)
+  /**
+   * Fold `fn` over the batches `op` produces. The default cuts each batch into morsels and runs
+   * those on the scheduler. `morsels = false` reduces the batches on the caller. A dictionary code
+   * count uses that: slicing would copy the code array, and the count reads the array in place.
+   */
+  private[execution] def foldInterpreted(
+      plan: Plan[_],
+      op: PhysicalOp,
+      morsels: Boolean = true,
+  )(fn: ColumnBatch => Long): Long =
+    val parts = ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op))
+    if (morsels) then foldLong(parts)(fn) else foldInPlace(parts)(fn)
+
+  private def foldInPlace(parts: Vector[ColumnBatch])(fn: ColumnBatch => Long): Long =
+    parts.foldLeft(0L)((total, batch) => total + fn(batch))
 
   private def foldLong(parts: Vector[ColumnBatch])(fn: ColumnBatch => Long): Long =
     if (parts.isEmpty) then 0L
