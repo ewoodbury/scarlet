@@ -194,7 +194,7 @@ private[execution] object ColumnarInterpreter:
 
     columns match
       case Columns.Ints(parts) =>
-        Columns.Ints(onEachSliced(parts)(batch => ElementPipeline.ints(batch, steps)))
+        Columns.Ints(onEachMorsel(parts)(morsel => ElementPipeline.ints(morsel, steps)))
       case Columns.Longs(parts) =>
         Columns.Longs(onEachSliced(parts)(batch => ElementPipeline.longs(batch, steps)))
       case Columns.Floats(parts) =>

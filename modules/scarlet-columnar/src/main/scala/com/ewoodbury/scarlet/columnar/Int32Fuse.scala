@@ -3,44 +3,44 @@ package com.ewoodbury.scarlet.columnar
 import ColumnKernel.{Int32Map, Int32Predicate}
 
 /**
- * Writes one int filter/project pattern of length 2–4.
+ * Writes one int filter/project pattern of length 2–4 over a morsel range.
  *
- * [[Int32Pipeline]] forwards these names. A filter drops a null without calling the predicate. A
- * project skips a null and stores 0. When every live row is present, the loop does not test the
- * validity bit. The written column is the only allocation.
+ * [[Int32Pipeline]] forwards these names. The scan is `[start, start + length)`. The output covers
+ * only that range. A filter drops a null without calling the predicate. A project skips a null and
+ * stores 0. When every row of the range is present, the loop does not test the validity bit.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[scarlet] object Int32Fuse:
 
   def FF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Predicate,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value => if (first(value) && second(value)) then Int32Pipeline.encoded(value) else 0L,
     )
 
   def FP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Map,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value => if (first(value)) then Int32Pipeline.encoded(second(value)) else 0L,
     )
 
   def PF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Predicate,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         val mapped = first(value)
@@ -48,19 +48,19 @@ private[scarlet] object Int32Fuse:
     )
 
   def PP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Map,
-  ): ColumnBatch = fuseInt32(batch, false, value => Int32Pipeline.encoded(second(first(value))))
+  ): ColumnBatch = fuseInt32(morsel, false, value => Int32Pipeline.encoded(second(first(value))))
 
   def FFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Predicate,
       third: Int32Predicate,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         if (first(value) && second(value) && third(value)) then Int32Pipeline.encoded(value)
@@ -68,25 +68,25 @@ private[scarlet] object Int32Fuse:
     )
 
   def FFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Predicate,
       third: Int32Map,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value => if (first(value) && second(value)) then Int32Pipeline.encoded(third(value)) else 0L,
     )
 
   def FPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Map,
       third: Int32Predicate,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         if (first(value)) then
@@ -96,25 +96,25 @@ private[scarlet] object Int32Fuse:
     )
 
   def FPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Map,
       third: Int32Map,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value => if (first(value)) then Int32Pipeline.encoded(third(second(value))) else 0L,
     )
 
   def PFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Predicate,
       third: Int32Predicate,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         val mapped = first(value)
@@ -122,13 +122,13 @@ private[scarlet] object Int32Fuse:
     )
 
   def PFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Predicate,
       third: Int32Map,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         val mapped = first(value)
@@ -136,13 +136,13 @@ private[scarlet] object Int32Fuse:
     )
 
   def PPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Map,
       third: Int32Predicate,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         val mapped = second(first(value))
@@ -150,22 +150,22 @@ private[scarlet] object Int32Fuse:
     )
 
   def PPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Map,
       third: Int32Map,
   ): ColumnBatch =
-    fuseInt32(batch, false, value => Int32Pipeline.encoded(third(second(first(value)))))
+    fuseInt32(morsel, false, value => Int32Pipeline.encoded(third(second(first(value)))))
 
   def FFFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Predicate,
       third: Int32Predicate,
       fourth: Int32Predicate,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         if (first(value) && second(value) && third(value) && fourth(value)) then
@@ -174,14 +174,14 @@ private[scarlet] object Int32Fuse:
     )
 
   def FFFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Predicate,
       third: Int32Predicate,
       fourth: Int32Map,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         if (first(value) && second(value) && third(value)) then
@@ -190,14 +190,14 @@ private[scarlet] object Int32Fuse:
     )
 
   def FFPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Predicate,
       third: Int32Map,
       fourth: Int32Predicate,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         if (first(value) && second(value)) then
@@ -207,28 +207,28 @@ private[scarlet] object Int32Fuse:
     )
 
   def FFPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Predicate,
       third: Int32Map,
       fourth: Int32Map,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         if (first(value) && second(value)) then Int32Pipeline.encoded(fourth(third(value))) else 0L,
     )
 
   def FPFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Map,
       third: Int32Predicate,
       fourth: Int32Predicate,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         if (first(value)) then
@@ -238,14 +238,14 @@ private[scarlet] object Int32Fuse:
     )
 
   def FPFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Map,
       third: Int32Predicate,
       fourth: Int32Map,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         if (first(value)) then
@@ -255,14 +255,14 @@ private[scarlet] object Int32Fuse:
     )
 
   def FPPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Map,
       third: Int32Map,
       fourth: Int32Predicate,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         if (first(value)) then
@@ -272,27 +272,27 @@ private[scarlet] object Int32Fuse:
     )
 
   def FPPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Map,
       third: Int32Map,
       fourth: Int32Map,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value => if (first(value)) then Int32Pipeline.encoded(fourth(third(second(value)))) else 0L,
     )
 
   def PFFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Predicate,
       third: Int32Predicate,
       fourth: Int32Predicate,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         val mapped = first(value)
@@ -301,14 +301,14 @@ private[scarlet] object Int32Fuse:
     )
 
   def PFFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Predicate,
       third: Int32Predicate,
       fourth: Int32Map,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         val mapped = first(value)
@@ -316,14 +316,14 @@ private[scarlet] object Int32Fuse:
     )
 
   def PFPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Predicate,
       third: Int32Map,
       fourth: Int32Predicate,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         val mapped = first(value)
@@ -334,14 +334,14 @@ private[scarlet] object Int32Fuse:
     )
 
   def PFPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Predicate,
       third: Int32Map,
       fourth: Int32Map,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         val mapped = first(value)
@@ -349,14 +349,14 @@ private[scarlet] object Int32Fuse:
     )
 
   def PPFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Map,
       third: Int32Predicate,
       fourth: Int32Predicate,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         val mapped = second(first(value))
@@ -364,14 +364,14 @@ private[scarlet] object Int32Fuse:
     )
 
   def PPFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Map,
       third: Int32Predicate,
       fourth: Int32Map,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         val mapped = second(first(value))
@@ -379,14 +379,14 @@ private[scarlet] object Int32Fuse:
     )
 
   def PPPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Map,
       third: Int32Map,
       fourth: Int32Predicate,
   ): ColumnBatch =
     fuseInt32(
-      batch,
+      morsel,
       true,
       value =>
         val mapped = third(second(first(value)))
@@ -394,56 +394,93 @@ private[scarlet] object Int32Fuse:
     )
 
   def PPPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Map,
       third: Int32Map,
       fourth: Int32Map,
   ): ColumnBatch =
-    fuseInt32(batch, false, value => Int32Pipeline.encoded(fourth(third(second(first(value))))))
+    fuseInt32(morsel, false, value => Int32Pipeline.encoded(fourth(third(second(first(value))))))
 
   private inline def fuseInt32(
-      batch: ColumnBatch,
+      morsel: Morsel,
       inline compact: Boolean,
       inline process: Int => Long,
   ): ColumnBatch =
+    val batch = morsel.batch
     require(
       batch.columns.length == 1,
       s"int pipeline expects a single-column batch, got ${batch.columns.length}",
     )
     val column = ColumnKernel.asInt32(ColumnKernel.columnAt(batch, 0), 0)
-    val live = column.length
+    val start = morsel.start
+    val length = morsel.length
+    requireRange(start, length, column.length)
     val in = column.values
     val words = column.validity.words
-    // Compaction only needs live-row capacity; map-only pipelines preserve input capacity.
-    val capacity = inline if (compact) then live else in.length
+    // The output is the range. Compaction and map-only both size to that length.
+    val capacity = length
     val out = new Array[Int](capacity)
-    var written = 0
-    var row = 0
-    if (Validity.livePresent(column.validity, live)) then
-      while (row < live) {
+    val end = start + length
+    if (Validity.rangePresent(column.validity, start, length)) then
+      var written = 0
+      var row = start
+      while (row < end) {
         val result = process(in(row))
         inline if (compact) then
           if ((result & 1L) != 0L) then
             out(written) = (result >> 1).toInt
             written += 1
-        else out(row) = (result >> 1).toInt
+        else
+          out(written) = (result >> 1).toInt
+          written += 1
         row += 1
       }
-    else
-      while (row < live) {
+      val outLength = inline if (compact) then written else length
+      val validity =
+        inline if (compact) then Validity.prefixValid(capacity, written)
+        else Validity.allValid(capacity)
+      finish(batch, out, validity, outLength)
+    else inline if (compact) then
+      var written = 0
+      var row = start
+      while (row < end) {
         if (Validity.isSet(words, row)) then
           val result = process(in(row))
-          inline if (compact) then
-            if ((result & 1L) != 0L) then
-              out(written) = (result >> 1).toInt
-              written += 1
-          else out(row) = (result >> 1).toInt
+          if ((result & 1L) != 0L) then
+            out(written) = (result >> 1).toInt
+            written += 1
         row += 1
       }
-    val length = inline if (compact) then written else live
-    val validity =
-      inline if (compact) then Validity.prefixValid(capacity, written)
-      else column.validity
-    val result = Int32Column.of(out, validity, length)
-    new ColumnBatch(batch.schema, Vector(result), length)
+      finish(batch, out, Validity.prefixValid(capacity, written), written)
+    else
+      val dstWords = Validity.allocate(capacity)
+      var written = 0
+      var row = start
+      while (row < end) {
+        if (Validity.isSet(words, row)) then
+          val result = process(in(row))
+          out(written) = (result >> 1).toInt
+          Validity.setBit(dstWords, written)
+        else out(written) = 0
+        written += 1
+        row += 1
+      }
+      finish(batch, out, Validity.fromWords(dstWords, capacity), length)
+
+  private def finish(
+      batch: ColumnBatch,
+      out: Array[Int],
+      validity: Validity,
+      length: Int,
+  ): ColumnBatch =
+    val column = Int32Column.of(out, validity, length)
+    new ColumnBatch(batch.schema, Vector(column), length)
+
+  private def requireRange(start: Int, length: Int, rows: Int): Unit =
+    require(start >= 0, s"pipeline start must be >= 0, got $start")
+    require(length >= 0, s"pipeline length must be >= 0, got $length")
+    require(
+      start.toLong + length.toLong <= rows.toLong,
+      s"pipeline [$start, ${start.toLong + length.toLong}) outside column length $rows",
+    )
