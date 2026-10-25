@@ -348,18 +348,27 @@ private[execution] object ColumnarInterpreter:
     else "ints, longs, floats, or strings"
 
   /**
+   * Cuts each partition, visits every piece, and regroups one batch per input partition. An empty
+   * `parts` returns unchanged and does not call the scheduler. Results keep the flatten order of
+   * the cuts, which is what `regroup` depends on.
+   */
+  private def fanOut[A](
+      parts: Vector[ColumnBatch],
+  )(cuts: ColumnBatch => Vector[A])(fn: A => ColumnBatch): Vector[ColumnBatch] =
+    if (parts.isEmpty) then parts
+    else
+      val cut = parts.map(cuts)
+      val mapped =
+        MorselScheduler.map(cut.flatten, ColumnarPlanner.parallelism)((_, piece) => fn(piece))
+      regroup(cut.map(_.length), mapped)
+
+  /**
    * One visit per copied slice. The function sees a batch whose rows start at zero.
    */
   private def onEachSliced(
       parts: Vector[ColumnBatch],
   )(fn: ColumnBatch => ColumnBatch): Vector[ColumnBatch] =
-    if (parts.isEmpty) then parts
-    else
-      val sliced = parts.map(part => ColumnBatches.slice(part, ColumnarPlanner.batchSize))
-      val flat = sliced.flatten
-      val mapped =
-        MorselScheduler.map(flat, ColumnarPlanner.parallelism)((_, morsel) => fn(morsel))
-      regroup(sliced.map(_.length), mapped)
+    fanOut(parts)(part => ColumnBatches.slice(part, ColumnarPlanner.batchSize))(fn)
 
   /**
    * One visit per morsel of the shared batch. The function owns its output. Regroup uses the same
@@ -368,13 +377,7 @@ private[execution] object ColumnarInterpreter:
   private def onEachMorsel(
       parts: Vector[ColumnBatch],
   )(fn: Morsel => ColumnBatch): Vector[ColumnBatch] =
-    if (parts.isEmpty) then parts
-    else
-      val morsels = parts.map(part => Morsels.of(part, ColumnarPlanner.batchSize))
-      val flat = morsels.flatten
-      val mapped =
-        MorselScheduler.map(flat, ColumnarPlanner.parallelism)((_, morsel) => fn(morsel))
-      regroup(morsels.map(_.length), mapped)
+    fanOut(parts)(part => Morsels.of(part, ColumnarPlanner.batchSize))(fn)
 
   private def regroup(counts: Vector[Int], flat: Vector[ColumnBatch]): Vector[ColumnBatch] =
     val seed: (Vector[ColumnBatch], Vector[ColumnBatch]) = (flat, Vector.empty[ColumnBatch])
