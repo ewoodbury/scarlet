@@ -422,11 +422,11 @@ object ColumnKernel:
   private final case class Scanned(column: Column, count: Int)
 
   private def requireRange(start: Int, length: Int, rows: Int): Unit =
-    require(start >= 0, s"filter start must be >= 0, got $start")
+    require(start >= 0, s"range start must be >= 0, got $start")
     require(length >= 0, s"filter length must be >= 0, got $length")
     require(
       start.toLong + length.toLong <= rows.toLong,
-      s"filter [$start, ${start.toLong + length.toLong}) outside column length $rows",
+      s"range [$start, ${start.toLong + length.toLong}) outside column length $rows",
     )
 
   private inline def scanInt32(
