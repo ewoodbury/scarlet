@@ -63,7 +63,7 @@ class TestElementShapes extends AnyFlatSpec with Matchers:
   private val stringFilters: Vector[String => Boolean] = Vector(
     text => text.nonEmpty,
     text => text.length % 2 == 0,
-    text => text.compareTo("no") != 0,
+    text => text.compareTo("b") != 0,
     text => !text.contains("x"),
   )
 
@@ -114,6 +114,8 @@ class TestElementShapes extends AnyFlatSpec with Matchers:
     shapes.count(_.length == 3) shouldBe 8
     shapes.count(_.length == 4) shouldBe 16
     shapes.map(shapeName).distinct should have size shapes.length
+    shapes.forall(_.size <= intFilters.size) shouldBe true
+    windowStart % windowLength shouldBe 0
     intValues.length should be > windowStart + windowLength
     floatValues.length shouldBe intValues.length
     stringValues.length shouldBe intValues.length
