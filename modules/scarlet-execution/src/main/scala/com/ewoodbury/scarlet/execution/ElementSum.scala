@@ -5,12 +5,12 @@ import scala.annotation.tailrec
 import com.ewoodbury.scarlet.columnar.*
 
 /**
- * Sum a filter/project chain without writing its output column. The match is outside the row loop.
- * A chain longer than four stays in that fold: five int maps call [[Int32Pipeline.sumPPPPP]], and
- * any other longer int chain walks its steps. [[countLonger]] counts two or more steps the same
- * way. [[countMapped]] counts one trailing int project. Survivors use [[Int32Pipeline.encoded]].
- * [[sumLongs]] and [[countLongs]] are the long arms of that fold: one encoded walk, no output
- * column, including a chain of five or six steps.
+ * Sum a filter/project chain without writing its output column. [[Shape.of]] matches outside the
+ * row loop. A chain longer than four stays in that fold: five int maps call
+ * [[Int32Pipeline.sumPPPPP]], and any other longer int chain walks its steps. [[countLonger]]
+ * counts two or more steps the same way. [[countMapped]] counts one trailing int project.
+ * Survivors use [[Int32Pipeline.encoded]]. [[sumLongs]] and [[countLongs]] are the long arms of
+ * that fold: one encoded walk, no output column, including a chain of five or six steps.
  */
 @SuppressWarnings(
   Array(
@@ -25,71 +25,70 @@ private[execution] object ElementSum:
     val column = Int32Pipeline.singleInt(morsel.batch)
     val start = morsel.start
     val length = morsel.length
-    import ColumnarPlanner.ElementStep.*
 
     def pred(fn: Any): ColumnKernel.Int32Predicate =
       val function = fn.asInstanceOf[Int => Boolean]
       value => function(value)
 
-    steps match
-      case List(Filter(a), Filter(b)) =>
+    Shape.of(steps) match
+      case Some(Shape.FF(a, b)) =>
         Int32Pipeline.sumFF(column, start, length, pred(a), pred(b))
-      case List(Project(a), Filter(b)) =>
+      case Some(Shape.PF(a, b)) =>
         Int32Pipeline.sumPF(column, start, length, proj(a), pred(b))
-      case List(Filter(a), Project(b)) =>
+      case Some(Shape.FP(a, b)) =>
         Int32Pipeline.sumFP(column, start, length, pred(a), proj(b))
-      case List(Project(a), Project(b)) =>
+      case Some(Shape.PP(a, b)) =>
         Int32Pipeline.sumPP(column, start, length, proj(a), proj(b))
-      case List(Filter(a), Filter(b), Filter(c)) =>
+      case Some(Shape.FFF(a, b, c)) =>
         Int32Pipeline.sumFFF(column, start, length, pred(a), pred(b), pred(c))
-      case List(Project(a), Filter(b), Filter(c)) =>
+      case Some(Shape.PFF(a, b, c)) =>
         Int32Pipeline.sumPFF(column, start, length, proj(a), pred(b), pred(c))
-      case List(Filter(a), Project(b), Filter(c)) =>
+      case Some(Shape.FPF(a, b, c)) =>
         Int32Pipeline.sumFPF(column, start, length, pred(a), proj(b), pred(c))
-      case List(Project(a), Project(b), Filter(c)) =>
+      case Some(Shape.PPF(a, b, c)) =>
         Int32Pipeline.sumPPF(column, start, length, proj(a), proj(b), pred(c))
-      case List(Filter(a), Filter(b), Project(c)) =>
+      case Some(Shape.FFP(a, b, c)) =>
         Int32Pipeline.sumFFP(column, start, length, pred(a), pred(b), proj(c))
-      case List(Project(a), Filter(b), Project(c)) =>
+      case Some(Shape.PFP(a, b, c)) =>
         Int32Pipeline.sumPFP(column, start, length, proj(a), pred(b), proj(c))
-      case List(Filter(a), Project(b), Project(c)) =>
+      case Some(Shape.FPP(a, b, c)) =>
         Int32Pipeline.sumFPP(column, start, length, pred(a), proj(b), proj(c))
-      case List(Project(a), Project(b), Project(c)) =>
+      case Some(Shape.PPP(a, b, c)) =>
         Int32Pipeline.sumPPP(column, start, length, proj(a), proj(b), proj(c))
-      case List(Filter(a), Filter(b), Filter(c), Filter(d)) =>
+      case Some(Shape.FFFF(a, b, c, d)) =>
         Int32Pipeline.sumFFFF(column, start, length, pred(a), pred(b), pred(c), pred(d))
-      case List(Project(a), Filter(b), Filter(c), Filter(d)) =>
+      case Some(Shape.PFFF(a, b, c, d)) =>
         Int32Pipeline.sumPFFF(column, start, length, proj(a), pred(b), pred(c), pred(d))
-      case List(Filter(a), Project(b), Filter(c), Filter(d)) =>
+      case Some(Shape.FPFF(a, b, c, d)) =>
         Int32Pipeline.sumFPFF(column, start, length, pred(a), proj(b), pred(c), pred(d))
-      case List(Project(a), Project(b), Filter(c), Filter(d)) =>
+      case Some(Shape.PPFF(a, b, c, d)) =>
         Int32Pipeline.sumPPFF(column, start, length, proj(a), proj(b), pred(c), pred(d))
-      case List(Filter(a), Filter(b), Project(c), Filter(d)) =>
+      case Some(Shape.FFPF(a, b, c, d)) =>
         Int32Pipeline.sumFFPF(column, start, length, pred(a), pred(b), proj(c), pred(d))
-      case List(Project(a), Filter(b), Project(c), Filter(d)) =>
+      case Some(Shape.PFPF(a, b, c, d)) =>
         Int32Pipeline.sumPFPF(column, start, length, proj(a), pred(b), proj(c), pred(d))
-      case List(Filter(a), Project(b), Project(c), Filter(d)) =>
+      case Some(Shape.FPPF(a, b, c, d)) =>
         Int32Pipeline.sumFPPF(column, start, length, pred(a), proj(b), proj(c), pred(d))
-      case List(Project(a), Project(b), Project(c), Filter(d)) =>
+      case Some(Shape.PPPF(a, b, c, d)) =>
         Int32Pipeline.sumPPPF(column, start, length, proj(a), proj(b), proj(c), pred(d))
-      case List(Filter(a), Filter(b), Filter(c), Project(d)) =>
+      case Some(Shape.FFFP(a, b, c, d)) =>
         Int32Pipeline.sumFFFP(column, start, length, pred(a), pred(b), pred(c), proj(d))
-      case List(Project(a), Filter(b), Filter(c), Project(d)) =>
+      case Some(Shape.PFFP(a, b, c, d)) =>
         Int32Pipeline.sumPFFP(column, start, length, proj(a), pred(b), pred(c), proj(d))
-      case List(Filter(a), Project(b), Filter(c), Project(d)) =>
+      case Some(Shape.FPFP(a, b, c, d)) =>
         Int32Pipeline.sumFPFP(column, start, length, pred(a), proj(b), pred(c), proj(d))
-      case List(Project(a), Project(b), Filter(c), Project(d)) =>
+      case Some(Shape.PPFP(a, b, c, d)) =>
         Int32Pipeline.sumPPFP(column, start, length, proj(a), proj(b), pred(c), proj(d))
-      case List(Filter(a), Filter(b), Project(c), Project(d)) =>
+      case Some(Shape.FFPP(a, b, c, d)) =>
         Int32Pipeline.sumFFPP(column, start, length, pred(a), pred(b), proj(c), proj(d))
-      case List(Project(a), Filter(b), Project(c), Project(d)) =>
+      case Some(Shape.PFPP(a, b, c, d)) =>
         Int32Pipeline.sumPFPP(column, start, length, proj(a), pred(b), proj(c), proj(d))
-      case List(Filter(a), Project(b), Project(c), Project(d)) =>
+      case Some(Shape.FPPP(a, b, c, d)) =>
         Int32Pipeline.sumFPPP(column, start, length, pred(a), proj(b), proj(c), proj(d))
-      case List(Project(a), Project(b), Project(c), Project(d)) =>
+      case Some(Shape.PPPP(a, b, c, d)) =>
         Int32Pipeline.sumPPPP(column, start, length, proj(a), proj(b), proj(c), proj(d))
-      case _ =>
-        throw new IllegalStateException(s"unsupported ints pipeline of length ${steps.length}")
+      case None =>
+        Shape.unsupported("ints", steps.length)
 
   /**
    * Sum an int chain that `lower` split after four steps. Five projects use the specialized loop.
@@ -207,8 +206,6 @@ private[execution] object ElementSum:
     }
 
   def sumFloats(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): Double =
-    import ColumnarPlanner.ElementStep.*
-
     def pred(fn: Any): ColumnKernel.Float64Predicate =
       val function = fn.asInstanceOf[Double => Boolean]
       value => function(value)
@@ -217,62 +214,62 @@ private[execution] object ElementSum:
       val function = fn.asInstanceOf[Double => Double]
       value => function(value)
 
-    steps match
-      case List(Filter(a), Filter(b)) =>
+    Shape.of(steps) match
+      case Some(Shape.FF(a, b)) =>
         Float64Pipeline.sumFF(batch, pred(a), pred(b))
-      case List(Project(a), Filter(b)) =>
+      case Some(Shape.PF(a, b)) =>
         Float64Pipeline.sumPF(batch, proj(a), pred(b))
-      case List(Filter(a), Project(b)) =>
+      case Some(Shape.FP(a, b)) =>
         Float64Pipeline.sumFP(batch, pred(a), proj(b))
-      case List(Project(a), Project(b)) =>
+      case Some(Shape.PP(a, b)) =>
         Float64Pipeline.sumPP(batch, proj(a), proj(b))
-      case List(Filter(a), Filter(b), Filter(c)) =>
+      case Some(Shape.FFF(a, b, c)) =>
         Float64Pipeline.sumFFF(batch, pred(a), pred(b), pred(c))
-      case List(Project(a), Filter(b), Filter(c)) =>
+      case Some(Shape.PFF(a, b, c)) =>
         Float64Pipeline.sumPFF(batch, proj(a), pred(b), pred(c))
-      case List(Filter(a), Project(b), Filter(c)) =>
+      case Some(Shape.FPF(a, b, c)) =>
         Float64Pipeline.sumFPF(batch, pred(a), proj(b), pred(c))
-      case List(Project(a), Project(b), Filter(c)) =>
+      case Some(Shape.PPF(a, b, c)) =>
         Float64Pipeline.sumPPF(batch, proj(a), proj(b), pred(c))
-      case List(Filter(a), Filter(b), Project(c)) =>
+      case Some(Shape.FFP(a, b, c)) =>
         Float64Pipeline.sumFFP(batch, pred(a), pred(b), proj(c))
-      case List(Project(a), Filter(b), Project(c)) =>
+      case Some(Shape.PFP(a, b, c)) =>
         Float64Pipeline.sumPFP(batch, proj(a), pred(b), proj(c))
-      case List(Filter(a), Project(b), Project(c)) =>
+      case Some(Shape.FPP(a, b, c)) =>
         Float64Pipeline.sumFPP(batch, pred(a), proj(b), proj(c))
-      case List(Project(a), Project(b), Project(c)) =>
+      case Some(Shape.PPP(a, b, c)) =>
         Float64Pipeline.sumPPP(batch, proj(a), proj(b), proj(c))
-      case List(Filter(a), Filter(b), Filter(c), Filter(d)) =>
+      case Some(Shape.FFFF(a, b, c, d)) =>
         Float64Pipeline.sumFFFF(batch, pred(a), pred(b), pred(c), pred(d))
-      case List(Project(a), Filter(b), Filter(c), Filter(d)) =>
+      case Some(Shape.PFFF(a, b, c, d)) =>
         Float64Pipeline.sumPFFF(batch, proj(a), pred(b), pred(c), pred(d))
-      case List(Filter(a), Project(b), Filter(c), Filter(d)) =>
+      case Some(Shape.FPFF(a, b, c, d)) =>
         Float64Pipeline.sumFPFF(batch, pred(a), proj(b), pred(c), pred(d))
-      case List(Project(a), Project(b), Filter(c), Filter(d)) =>
+      case Some(Shape.PPFF(a, b, c, d)) =>
         Float64Pipeline.sumPPFF(batch, proj(a), proj(b), pred(c), pred(d))
-      case List(Filter(a), Filter(b), Project(c), Filter(d)) =>
+      case Some(Shape.FFPF(a, b, c, d)) =>
         Float64Pipeline.sumFFPF(batch, pred(a), pred(b), proj(c), pred(d))
-      case List(Project(a), Filter(b), Project(c), Filter(d)) =>
+      case Some(Shape.PFPF(a, b, c, d)) =>
         Float64Pipeline.sumPFPF(batch, proj(a), pred(b), proj(c), pred(d))
-      case List(Filter(a), Project(b), Project(c), Filter(d)) =>
+      case Some(Shape.FPPF(a, b, c, d)) =>
         Float64Pipeline.sumFPPF(batch, pred(a), proj(b), proj(c), pred(d))
-      case List(Project(a), Project(b), Project(c), Filter(d)) =>
+      case Some(Shape.PPPF(a, b, c, d)) =>
         Float64Pipeline.sumPPPF(batch, proj(a), proj(b), proj(c), pred(d))
-      case List(Filter(a), Filter(b), Filter(c), Project(d)) =>
+      case Some(Shape.FFFP(a, b, c, d)) =>
         Float64Pipeline.sumFFFP(batch, pred(a), pred(b), pred(c), proj(d))
-      case List(Project(a), Filter(b), Filter(c), Project(d)) =>
+      case Some(Shape.PFFP(a, b, c, d)) =>
         Float64Pipeline.sumPFFP(batch, proj(a), pred(b), pred(c), proj(d))
-      case List(Filter(a), Project(b), Filter(c), Project(d)) =>
+      case Some(Shape.FPFP(a, b, c, d)) =>
         Float64Pipeline.sumFPFP(batch, pred(a), proj(b), pred(c), proj(d))
-      case List(Project(a), Project(b), Filter(c), Project(d)) =>
+      case Some(Shape.PPFP(a, b, c, d)) =>
         Float64Pipeline.sumPPFP(batch, proj(a), proj(b), pred(c), proj(d))
-      case List(Filter(a), Filter(b), Project(c), Project(d)) =>
+      case Some(Shape.FFPP(a, b, c, d)) =>
         Float64Pipeline.sumFFPP(batch, pred(a), pred(b), proj(c), proj(d))
-      case List(Project(a), Filter(b), Project(c), Project(d)) =>
+      case Some(Shape.PFPP(a, b, c, d)) =>
         Float64Pipeline.sumPFPP(batch, proj(a), pred(b), proj(c), proj(d))
-      case List(Filter(a), Project(b), Project(c), Project(d)) =>
+      case Some(Shape.FPPP(a, b, c, d)) =>
         Float64Pipeline.sumFPPP(batch, pred(a), proj(b), proj(c), proj(d))
-      case List(Project(a), Project(b), Project(c), Project(d)) =>
+      case Some(Shape.PPPP(a, b, c, d)) =>
         Float64Pipeline.sumPPPP(batch, proj(a), proj(b), proj(c), proj(d))
-      case _ =>
-        throw new IllegalStateException(s"unsupported floats pipeline of length ${steps.length}")
+      case None =>
+        Shape.unsupported("floats", steps.length)
