@@ -679,6 +679,221 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
     shortened.length shouldBe 2
   }
 
+  "project range" should "map a window past row 0 and leave nulls uncalled" in {
+    val poison = 999L
+    val stored = Array(poison, 1L, poison, 4L, poison, 8L, poison, -3L, 7L)
+    val present = Array(false, true, false, true, false, true, false, true, true)
+    val start = 3
+    val length = 3
+    val longs = nullableLongs(stored, present)
+    val calls = new AtomicInteger
+    val mapped = ColumnKernel.projectInt64(
+      longs,
+      0,
+      start,
+      length,
+      value => {
+        calls.incrementAndGet()
+        if (value == poison) then throw new IllegalStateException("mapper saw a null slot")
+        value + 1L
+      },
+    )
+
+    calls.get() shouldBe 2
+    mapped.length shouldBe length
+    BatchCodec.decodeNullableLongs(mapped) shouldBe Seq(Some(5L), None, Some(9L))
+    long64(mapped).values.length shouldBe length
+    long64(mapped).validity.capacity shouldBe length
+    long64(mapped).values(1) shouldBe 0L
+    long64(mapped).isValid(1) shouldBe false
+    long64(mapped).values should not be theSameInstanceAs(stored)
+    long64(mapped).validity should not be theSameInstanceAs(long64(longs).validity)
+    stored shouldBe Array(poison, 1L, poison, 4L, poison, 8L, poison, -3L, 7L)
+
+    val nullCalls = new AtomicInteger
+    val nullOnly = ColumnKernel.projectInt64(
+      longs,
+      0,
+      2,
+      1,
+      value => {
+        nullCalls.incrementAndGet()
+        value
+      },
+    )
+    nullCalls.get() shouldBe 0
+    nullOnly.length shouldBe 1
+    BatchCodec.decodeNullableLongs(nullOnly) shouldBe Seq(None)
+    long64(nullOnly).values(0) shouldBe 0L
+  }
+
+  it should "scan a tail shorter than the batch" in {
+    val longs = BatchCodec.longs((1 to 10).map(_.toLong))
+    val calls = new AtomicInteger
+    val mapped = ColumnKernel.projectInt64(
+      longs,
+      0,
+      8,
+      2,
+      value => {
+        calls.incrementAndGet()
+        value + 1L
+      },
+    )
+
+    calls.get() shouldBe 2
+    mapped.length shouldBe 2
+    BatchCodec.decodeLongs(mapped) shouldBe Seq(10L, 11L)
+    long64(mapped).values.length shouldBe 2
+    long64(mapped).validity.capacity shouldBe 2
+    long64(mapped).values should not be theSameInstanceAs(long64(longs).values)
+  }
+
+  it should "return an empty batch for an empty range and call nothing" in {
+    val longs = BatchCodec.longs(Seq(1L, 2L, 3L))
+    val calls = new AtomicInteger
+    val mapped = ColumnKernel.projectInt64(
+      longs,
+      0,
+      1,
+      0,
+      _ => {
+        calls.incrementAndGet()
+        0L
+      },
+    )
+
+    calls.get() shouldBe 0
+    mapped.length shouldBe 0
+    BatchCodec.decodeLongs(mapped) shouldBe Seq.empty[Long]
+    mapped.schema shouldBe longs.schema
+    long64(mapped).values should not be theSameInstanceAs(long64(longs).values)
+  }
+
+  it should "match the whole-batch project when the range is the whole batch" in {
+    val rows = Seq(Some(1L), None, Some(-2L), Some(4L))
+    val batch = BatchCodec.nullableLongs(rows)
+    val calls = new AtomicInteger
+    val mapper: ColumnKernel.Int64Map = value =>
+      calls.incrementAndGet()
+      value + 1L
+    val whole = ColumnKernel.projectInt64(batch, 0, mapper)
+    val ranged = ColumnKernel.projectInt64(batch, 0, 0, batch.length, mapper)
+
+    calls.get() shouldBe 6
+    BatchCodec.decodeNullableLongs(whole) shouldBe Seq(Some(2L), None, Some(-1L), Some(5L))
+    sameLongBatch(whole, ranged)
+    long64(whole).validity should be theSameInstanceAs long64(batch).validity
+    long64(ranged).validity should be theSameInstanceAs long64(batch).validity
+    long64(whole).values should not be theSameInstanceAs(long64(batch).values)
+
+    val raw = Array(1L, -2L, 8L, 99L)
+    val validity = Validity.allValid(raw.length)
+    val shortened = single(Int64Column.of(raw, validity, length = 3))
+    val wholeShort = ColumnKernel.projectInt64(
+      shortened,
+      0,
+      value => if (value == 99L) then throw new IllegalStateException("read past length") else value + 1L,
+    )
+    val rangedShort = ColumnKernel.projectInt64(
+      shortened,
+      0,
+      0,
+      shortened.length,
+      value => if (value == 99L) then throw new IllegalStateException("read past length") else value + 1L,
+    )
+
+    BatchCodec.decodeLongs(wholeShort) shouldBe Seq(2L, -1L, 9L)
+    sameLongBatch(wholeShort, rangedShort)
+    long64(wholeShort).values.length shouldBe raw.length
+    long64(wholeShort).validity should be theSameInstanceAs validity
+    raw shouldBe Array(1L, -2L, 8L, 99L)
+  }
+
+  it should "filter then map a range with nulls before, inside, and after it" in {
+    val poison = 999L
+    val stored = Array(poison, 1L, poison, 4L, poison, 8L, poison, -3L, 7L)
+    val present = Array(false, true, false, true, false, true, false, true, true)
+    val start = 3
+    val length = 3
+    val longs = nullableLongs(stored, present)
+    val predicates = new AtomicInteger
+    val mappers = new AtomicInteger
+    val keep: ColumnKernel.Int64Predicate = value =>
+      predicates.incrementAndGet()
+      if (value == poison) then throw new IllegalStateException("predicate saw a null slot")
+      value > 0L
+    val project: ColumnKernel.Int64Map = value =>
+      mappers.incrementAndGet()
+      if (value == poison) then throw new IllegalStateException("mapper saw a null slot")
+      value * 2L
+    val piped = Int64Pipeline(
+      Morsel(longs, start, length),
+      List(Int64Pipeline.Step.Filter(keep), Int64Pipeline.Step.Project(project)),
+    )
+    val stepwise = ColumnKernel.projectInt64(
+      ColumnKernel.filterInt64(longs, 0, start, length, keep),
+      0,
+      project,
+    )
+
+    predicates.get() shouldBe 4
+    mappers.get() shouldBe 4
+    BatchCodec.decodeNullableLongs(piped) shouldBe Seq(Some(8L), Some(16L))
+    sameLongBatch(piped, stepwise)
+    stored shouldBe Array(poison, 1L, poison, 4L, poison, 8L, poison, -3L, 7L)
+  }
+
+  it should "copy the other columns of the scanned range" in {
+    val width = 5
+    val keys = Array(99L, 10L, 20L, 30L, 40L)
+    val keyPresent = Array(false, true, true, true, true)
+    val sides = Array(100, 200, 300, 400, 500)
+    val sidePresent = Array(true, true, false, true, true)
+    val batch = new ColumnBatch(
+      Vector(LogicalType.Int64, LogicalType.Int32),
+      Vector(
+        Int64Column.of(keys, Validity.pack(width, row => keyPresent(row)), width),
+        Int32Column.of(sides, Validity.pack(width, row => sidePresent(row)), width),
+      ),
+      width,
+    )
+    val calls = new AtomicInteger
+    val mapped = ColumnKernel.projectInt64(
+      batch,
+      0,
+      1,
+      3,
+      value => {
+        calls.incrementAndGet()
+        if (value == 99L) then throw new IllegalStateException("mapper saw a null slot")
+        value + 1L
+      },
+    )
+
+    calls.get() shouldBe 3
+    mapped.length shouldBe 3
+    at(mapped, 0) match
+      case column: Int64Column =>
+        column.values.length shouldBe 3
+        column.values(0) shouldBe 11L
+        column.values(1) shouldBe 21L
+        column.values(2) shouldBe 31L
+        column.values should not be theSameInstanceAs(keys)
+      case other => fail(s"expected Int64, got $other")
+    at(mapped, 1) match
+      case column: Int32Column =>
+        column.length shouldBe 3
+        column.values.length shouldBe width
+        column.isValid(0) shouldBe true
+        column.values(0) shouldBe 200
+        column.isValid(1) shouldBe false
+        column.values(1) shouldBe 0
+        column.isValid(2) shouldBe true
+        column.values(2) shouldBe 400
+      case other => fail(s"expected Int32, got $other")
+  }
+
   "filter then project" should "match the same functions on a Seq" in {
     val values = Seq(Some(-1), None, Some(3), Some(0), Some(4))
     val batch = ColumnKernel.projectInt32(

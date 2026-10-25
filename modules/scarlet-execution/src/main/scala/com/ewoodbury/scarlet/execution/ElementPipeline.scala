@@ -84,11 +84,12 @@ object ElementPipeline:
       case _ =>
         throw new IllegalStateException(s"unsupported ints pipeline of length ${steps.length}")
 
-  def longs(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): ColumnBatch =
+  /** Scans the morsel. The first step reads that range. Later steps read the owned batch. */
+  def longs(morsel: Morsel, steps: List[ColumnarPlanner.ElementStep]): ColumnBatch =
     import ColumnarPlanner.ElementStep.*
 
     Int64Pipeline(
-      batch,
+      morsel,
       steps.map {
         case Filter(fn) =>
           // Named erasure boundary. A long filter is a runtime cast.

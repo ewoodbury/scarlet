@@ -8,15 +8,15 @@ import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
-import com.ewoodbury.scarlet.core.ScarletConf
+import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
  * Int and long action folds scan morsels in place. An empty batch is one zero-length morsel. A
  * tail shorter than the batch size is its own morsel. Null slots stay in a map-only count and stay
- * out of a filtered count. An int or long element filter, and an int element map, collect those
- * morsels without copying the input batch. A float filter or map still copies slices, so its batch
- * count is the comparison.
+ * out of a filtered count. An int or long element filter, and an int or long element map, collect
+ * those morsels without copying the input batch. A float filter or map still copies slices, so its
+ * batch count is the comparison.
  */
 class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -370,6 +370,195 @@ class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     collected.visits shouldBe 4L
   }
 
+  "a long element map" should "project a range that starts past zero" in {
+    val calls = new AtomicInteger
+    val mapped = ElementPipeline.longs(
+      Morsel(sparseLongBatch, 3, 3),
+      List(projectLongStep(calls), projectLongStep(calls)),
+    )
+
+    BatchCodec.decodeNullableLongs(mapped) shouldBe Seq(Some(32L), None, Some(52L))
+    mapped.length shouldBe 3
+    // Two present rows in the range, two maps each. Six present rows sit in the batch.
+    calls.get() shouldBe 4
+  }
+
+  it should "filter then map a range with nulls before, inside, and after it" in {
+    val predicates = new AtomicInteger
+    val mappers = new AtomicInteger
+    val mapped = ElementPipeline.longs(
+      Morsel(sparseLongBatch, 3, 3),
+      List(filterLongStep(predicates), projectLongStep(mappers, value => value * 2L)),
+    )
+
+    BatchCodec.decodeNullableLongs(mapped) shouldBe Seq(Some(60L), Some(100L))
+    predicates.get() shouldBe 2
+    mappers.get() shouldBe 2
+  }
+
+  it should "scan a tail shorter than the source batch" in {
+    val calls = new AtomicInteger
+    val batch = sparseLongBatch
+    val mapped = ElementPipeline.longs(
+      Morsel(batch, 7, 2),
+      List(projectLongStep(calls), projectLongStep(calls)),
+    )
+
+    batch.length should be > 2
+    BatchCodec.decodeNullableLongs(mapped) shouldBe Seq(None, Some(82L))
+    mapped.length shouldBe 2
+    calls.get() shouldBe 2
+  }
+
+  it should "return an empty batch for an empty range and call nothing" in {
+    val calls = new AtomicInteger
+    val mapped = ElementPipeline.longs(
+      Morsel(sparseLongBatch, 4, 0),
+      List(filterLongStep(calls), projectLongStep(calls)),
+    )
+
+    mapped.length shouldBe 0
+    BatchCodec.decodeNullableLongs(mapped) shouldBe Seq.empty[Option[Long]]
+    calls.get() shouldBe 0
+  }
+
+  it should "match a full-range scan to the whole-batch kernels" in {
+    val batch = sparseLongBatch
+    val morsel = Morsel(batch, 0, batch.length)
+    val fusedProjects = ElementPipeline.longs(
+      morsel,
+      List(
+        ColumnarPlanner.ElementStep.Project((value: Long) => value + 1L),
+        ColumnarPlanner.ElementStep.Project((value: Long) => value * 2L),
+      ),
+    )
+    val stepwiseProjects = ColumnKernel.projectInt64(
+      ColumnKernel.projectInt64(batch, 0, _ + 1L),
+      0,
+      _ * 2L,
+    )
+    sameLongColumn(fusedProjects, stepwiseProjects)
+
+    val fusedFilter = ElementPipeline.longs(
+      morsel,
+      List(
+        ColumnarPlanner.ElementStep.Filter((value: Long) => value > 20L),
+        ColumnarPlanner.ElementStep.Project((value: Long) => value * 2L),
+      ),
+    )
+    val stepwiseFilter = ColumnKernel.projectInt64(
+      ColumnKernel.filterInt64(batch, 0, _ > 20L),
+      0,
+      _ * 2L,
+    )
+    sameLongColumn(fusedFilter, stepwiseFilter)
+  }
+
+  it should "leave rows outside the range uncalled" in {
+    val predicates = new AtomicInteger
+    val mappers = new AtomicInteger
+    val seen = new AtomicInteger
+    val keep: Long => Boolean = value =>
+      predicates.incrementAndGet()
+      if (value == poison.toLong || value < 30L || value > 50L) then
+        seen.incrementAndGet()
+        ()
+      value > 0L
+    val project: Long => Long = value =>
+      mappers.incrementAndGet()
+      if (value == poison.toLong || value < 30L || value > 50L) then
+        seen.incrementAndGet()
+        ()
+      value
+    val mapped = ElementPipeline.longs(
+      Morsel(sparseLongBatch, 3, 3),
+      List(
+        ColumnarPlanner.ElementStep.Filter(keep),
+        ColumnarPlanner.ElementStep.Project(project),
+      ),
+    )
+
+    BatchCodec.decodeNullableLongs(mapped) shouldBe Seq(Some(30L), Some(50L))
+    predicates.get() shouldBe 2
+    mappers.get() shouldBe 2
+    seen.get() shouldBe 0
+  }
+
+  it should "visit each morsel of a map chain and publish no slice batch" in {
+    val values = Array(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+    val ints = DistCollection.ofInts(values, 1).map(_ + 1).map(_ + 1)
+    val longs = DistCollection.ofLongs(values.map(_.toLong), 1).map(_ + 1L).map(_ + 1L)
+    val floats = DistCollection.ofDoubles(values.map(_.toDouble), 1).map(_ + 1.0).map(_ + 1.0)
+
+    arm(batchSize = 4)
+    val collected = measure(ints.collect().toSeq)
+    val longCollected = measure(longs.collect().toSeq)
+    val floatCollected = measure(floats.collect().iterator.map(_.toInt).toSeq)
+
+    collected.result shouldBe values.map(_ + 2).toSeq
+    longCollected.result shouldBe values.map(value => (value + 2).toLong).toSeq
+    collected.visits shouldBe 3L
+    longCollected.visits shouldBe collected.visits
+    floatCollected.visits shouldBe collected.visits
+    // The int chain fuses to one output column per morsel. The long chain publishes one column
+    // per step, so two maps add one batch per visit, and neither publishes a copied input slice.
+    longCollected.batches shouldBe collected.batches + collected.visits
+    collected.batches shouldBe floatCollected.batches - floatCollected.visits
+  }
+
+  it should "visit one zero-length morsel when a mapped partition is empty" in {
+    val ints = DistCollection.ofInts(Array.empty[Int], 1).map(_ + 1).map(_ + 1)
+    val longs = DistCollection.ofLongs(Array.empty[Long], 1).map(_ + 1L).map(_ + 1L)
+
+    arm(batchSize = 4)
+    val collected = measure(ints.collect().toSeq)
+    val longCollected = measure(longs.collect().toSeq)
+
+    collected.result shouldBe Seq.empty[Int]
+    longCollected.result shouldBe Seq.empty[Long]
+    collected.visits shouldBe 1L
+    longCollected.visits shouldBe 1L
+    // A batch no longer than the batch size was never copied. Two long maps still publish twice.
+    longCollected.batches shouldBe collected.batches + longCollected.visits
+  }
+
+  it should "keep partition order when morsels split a long map" in {
+    val values = Array(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+    val longs = DistCollection.ofLongs(values.map(_.toLong), 2).map(_ + 1L).filter(_ % 2L == 0L)
+
+    arm(batchSize = 4, threads = 4)
+    val collected = measure(longs.collect().toSeq)
+
+    collected.result shouldBe Seq(2L, 4L, 6L, 8L, 10L)
+    collected.visits shouldBe 4L
+  }
+
+  "a six-step collect" should "keep order after regroup and the next morsel cut" in {
+    // Batch size 4. Partition 0 has three morsels and the middle one is entirely rejected.
+    // Partition 1 is entirely rejected and is longer than one morsel. Partition 2 keeps rows on
+    // both sides of a morsel cut. The filter sits in the first four-step chunk, so the second
+    // chunk morsels the survivors.
+    val width = 4
+    val first = Seq(1, 2, 3, 4, -1, -2, -3, -4, 5, 6)
+    val rejected = Seq(-8, -7, -6, -5, -4)
+    val third = Seq(7, 8, 9, -5, 10, 11)
+    val partitions = Seq(first, rejected, third)
+    val expected = partitions.map(rows => rows.filter(_ > 0).map(value => value * 10 + 4))
+    val sourceVisits = partitions.map(rows => morselCuts(rows.length, width)).sum
+    val survivorVisits = expected.map(rows => morselCuts(rows.length, width)).sum
+
+    first.slice(4, 8).forall(_ < 0) shouldBe true
+    rejected.forall(_ < 0) shouldBe true
+    rejected.length should be > width
+    third.length should be > width
+
+    arm(batchSize = width, threads = 4)
+    val visits = sourceVisits + survivorVisits
+    visits shouldBe 12
+    checkRegroup(sixInts(intSource(partitions)), expected, visits)
+    checkRegroup(sixLongs(longSource(partitions)), expected.map(_.map(_.toLong)), visits)
+  }
+
   // Rows [0, 4) are present, so a prefix check of that width looks dense. The morsel starts at 6.
   // Row 4 is a null before the morsel and row 7 is a null inside it. Both store `poison`.
   private def ranged(build: (Array[Long], Array[Boolean]) => ColumnBatch): Morsel =
@@ -433,6 +622,37 @@ class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
         leftColumn.validity.words.toSeq shouldBe rightColumn.validity.words.toSeq
       case _ => fail("expected Int32 columns")
 
+  private def sparseLongBatch: ColumnBatch =
+    val values = Array(10L, 11L, poison.toLong, 30L, poison.toLong, 50L, 60L, poison.toLong, 80L)
+    val present = Array(true, true, false, true, false, true, true, false, true)
+    longColumn(values, present)
+
+  private def sameLongColumn(left: ColumnBatch, right: ColumnBatch): Unit =
+    left.length shouldBe right.length
+    (left.columns.headOption, right.columns.headOption) match
+      case (Some(leftColumn: Int64Column), Some(rightColumn: Int64Column)) =>
+        leftColumn.length shouldBe rightColumn.length
+        leftColumn.values.toSeq shouldBe rightColumn.values.toSeq
+        leftColumn.validity.capacity shouldBe rightColumn.validity.capacity
+        leftColumn.validity.words.toSeq shouldBe rightColumn.validity.words.toSeq
+      case _ => fail("expected Int64 columns")
+
+  private def projectLongStep(
+      calls: AtomicInteger,
+      fn: Long => Long = value => value + 1L,
+  ): ColumnarPlanner.ElementStep =
+    ColumnarPlanner.ElementStep.Project(countLongMap(calls, fn))
+
+  private def filterLongStep(calls: AtomicInteger): ColumnarPlanner.ElementStep =
+    ColumnarPlanner.ElementStep.Filter(keepLongs(calls))
+
+  private def countLongMap(calls: AtomicInteger, fn: Long => Long): Long => Long =
+    value =>
+      calls.incrementAndGet()
+      if (value == poison.toLong) then
+        throw new IllegalStateException("long map saw a null slot")
+      fn(value)
+
   private def projectLongs(calls: AtomicInteger): Long => Long =
     value =>
       calls.incrementAndGet()
@@ -446,6 +666,54 @@ class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       if (value == poison.toLong) then
         throw new IllegalStateException("long kernel saw a null slot")
       value > 0L
+
+  private def checkRegroup[A](
+      collection: DistCollection[A],
+      expected: Seq[Seq[A]],
+      visits: Int,
+  ): Unit =
+    ColumnarPlanner.lower(collection.plan).map(_.shape) shouldBe Some(
+      "Pipeline2(Pipeline4(Scan))",
+    )
+    val ran = ColumnarPlanner.tryRun(collection.plan).getOrElse(fail("chain was refused"))
+    ran.map(_.data.toSeq) shouldBe expected
+    ran.lift(1).getOrElse(fail("missing regrouped partition")).data shouldBe empty
+    val collected = measure(collection.collect().toSeq)
+    collected.result shouldBe expected.flatten
+    collected.visits shouldBe visits.toLong
+    collected.result shouldBe rowCollect(collection)
+
+  private def rowCollect[A](collection: DistCollection[A]): Seq[A] =
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(saved.copy(columnarExecution = false))
+      ScarletRuntime.get.shuffle.clear()
+      collection.collect().toSeq
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
+
+  private def morselCuts(rows: Int, batchSize: Int): Int =
+    if (rows <= batchSize) then 1 else (rows + batchSize - 1) / batchSize
+
+  private def intSource(partitions: Seq[Seq[Int]]): DistCollection[Int] =
+    DistCollection(
+      Plan.Source(partitions.map(rows => Partition(rows)), Plan.SourceDescriptor.Ints),
+    )
+
+  private def longSource(partitions: Seq[Seq[Int]]): DistCollection[Long] =
+    DistCollection(
+      Plan.Source(
+        partitions.map(rows => Partition(rows.map(_.toLong))),
+        Plan.SourceDescriptor.Longs,
+      ),
+    )
+
+  private def sixInts(source: DistCollection[Int]): DistCollection[Int] =
+    source.filter(_ > 0).map(_ * 10).map(_ + 1).map(_ + 1).map(_ + 1).map(_ + 1)
+
+  private def sixLongs(source: DistCollection[Long]): DistCollection[Long] =
+    source.filter(_ > 0L).map(_ * 10L).map(_ + 1L).map(_ + 1L).map(_ + 1L).map(_ + 1L)
 
   private def arm(batchSize: Int, threads: Int = 1): Unit =
     ScarletRuntime.get.shuffle.clear()

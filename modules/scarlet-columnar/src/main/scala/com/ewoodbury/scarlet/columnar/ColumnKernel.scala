@@ -12,10 +12,12 @@ package com.ewoodbury.scarlet.columnar
  * still compacted from the source batch. A string filter keeps the input dictionary.
  *
  * Project maps one column and shares the others. For the primitive columns, a null stays null, the
- * new slot stores `0`, and the function is not called. The mapped column reuses the input validity
- * bitmap, so null positions do not change. A string project calls the function on every row,
- * stores an empty result as an empty cell, and builds a new dictionary. Callers do not mutate a
- * published bitmap.
+ * new slot stores `0`, and the function is not called. A whole-column project reuses the input
+ * validity bitmap, so null positions do not change. A long project over `[start, start + length)`
+ * reads validity at those absolute rows and writes `length` rows from index 0. The whole-column
+ * entry is that scan with start 0 and the batch length. A string project calls the function on
+ * every row, stores an empty result as an empty cell, and builds a new dictionary. Callers do not
+ * mutate a published bitmap.
  *
  * Primitive loops keep the row index in a `var` so the bodies stay allocation-free. Each primitive
  * has its own loop so the copy stays monomorphic. Fused runs of two to four filters and projects
@@ -278,7 +280,30 @@ object ColumnKernel:
     replace(batch, ordinal, mapInt32(asInt32(columnAt(batch, ordinal), ordinal), mapper))
 
   def projectInt64(batch: ColumnBatch, ordinal: Int, mapper: Int64Map): ColumnBatch =
-    replace(batch, ordinal, mapInt64(asInt64(columnAt(batch, ordinal), ordinal), mapper))
+    projectInt64(batch, ordinal, 0, batch.length, mapper)
+
+  /**
+   * Maps `[start, start + length)`. Output row 0 is source row `start`. The output length is
+   * `length`, including nulls. A null stays null and the mapper is not called. The whole-column
+   * scan still reuses the input validity bitmap.
+   */
+  def projectInt64(
+      batch: ColumnBatch,
+      ordinal: Int,
+      start: Int,
+      length: Int,
+      mapper: Int64Map,
+  ): ColumnBatch =
+    val column = asInt64(columnAt(batch, ordinal), ordinal)
+    requireRange(start, length, column.length)
+    val mapped =
+      if (start == 0 && length == column.length) then mapInt64(column, mapper)
+      else mapInt64Range(column, start, length, mapper)
+    if (batch.columns.length == 1) then publish(batch, mapped, mapped.length)
+    else if (start == 0 && length == batch.length) then replace(batch, ordinal, mapped)
+    else
+      val selection = Array.tabulate(length)(offset => start + offset)
+      assemble(batch, ordinal, mapped, selection, length)
 
   def projectFloat64(batch: ColumnBatch, ordinal: Int, mapper: Float64Map): ColumnBatch =
     replace(batch, ordinal, mapFloat64(asFloat64(columnAt(batch, ordinal), ordinal), mapper))
@@ -454,6 +479,30 @@ object ColumnKernel:
       row += 1
     }
     Int64Column.of(out, column.validity, live)
+
+  /** Writes the range at indexes `[0, length)`. Null slots stay 0 and are left invalid. */
+  private def mapInt64Range(
+      column: Int64Column,
+      start: Int,
+      length: Int,
+      mapper: Int64Map,
+  ): Int64Column =
+    val in = column.values
+    val words = column.validity.words
+    val out = new Array[Long](length)
+    val dstWords = Validity.allocate(length)
+    val end = start + length
+    var row = start
+    var written = 0
+    while (row < end) {
+      if (Validity.isSet(words, row)) then
+        out(written) = mapper(in(row))
+        Validity.setBit(dstWords, written)
+      else out(written) = 0
+      written += 1
+      row += 1
+    }
+    Int64Column.of(out, Validity.fromWords(dstWords, length), length)
 
   private def mapFloat64(column: Float64Column, mapper: Float64Map): Float64Column =
     val live = column.length
