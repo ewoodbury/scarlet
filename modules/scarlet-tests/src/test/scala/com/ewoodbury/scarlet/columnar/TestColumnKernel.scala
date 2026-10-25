@@ -946,7 +946,7 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
       Float64Column.of(Array(-1.0, 42.0, 2.0, 0.0), Validity.pack(4, row => row != 1), 4),
     )
     val fusedFilter = Float64Pipeline.FP(
-      input,
+      fullMorsel(input),
       _ > 0.0,
       value =>
         if (value == 42.0) then throw new IllegalStateException("mapper saw a null slot")
@@ -958,7 +958,7 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
       _ * 10.0,
     )
     val fusedProject = Float64Pipeline.PF(
-      input,
+      fullMorsel(input),
       value =>
         if (value == 42.0) then throw new IllegalStateException("mapper saw a null slot")
         else value + 1.0,
@@ -978,7 +978,7 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
       _ > 0.0,
     )
     val fusedMaps = Float64Pipeline.PP(
-      input,
+      fullMorsel(input),
       value =>
         if (value == 42.0) then throw new IllegalStateException("mapper saw a null slot")
         else value + 1.0,
@@ -1014,14 +1014,14 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
       length = 2,
     )
     val projected = Float64Pipeline.PP(
-      single(input),
+      fullMorsel(single(input)),
       value =>
         if (value == 99.0) then throw new IllegalStateException("read past length")
         else value,
       value => value,
     )
     val filtered = Float64Pipeline.FP(
-      single(input),
+      fullMorsel(single(input)),
       value => java.lang.Double.doubleToRawLongBits(value) < 0,
       value => value,
     )
@@ -1039,7 +1039,7 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
     val rows = Seq(Some("a"), None, Some("bb"), Some("a"))
     val input = BatchCodec.nullableStrings(rows)
     val fused = Utf8Pipeline.FF(
-      input,
+      fullMorsel(input),
       value =>
         Option(value) match
           case None | Some("a") => true
@@ -1074,7 +1074,7 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
     val rows = Seq(Some("a"), None, Some("bb"))
     val input = BatchCodec.nullableStrings(rows)
     val fused = Utf8Pipeline.FF(
-      input,
+      fullMorsel(input),
       value => Option(value).exists(_.length > 1),
       value =>
         if (Option(value).isEmpty) then
@@ -1082,7 +1082,7 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
         else true,
     )
     val projected = Utf8Pipeline.FP(
-      input,
+      fullMorsel(input),
       value => Option(value).nonEmpty,
       value =>
         if (Option(value).isEmpty) then
@@ -1098,7 +1098,7 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
     val rows = Seq(Some("a"), None, Some("bb"), Some("a"))
     val input = BatchCodec.nullableStrings(rows)
     val fusedMaps = Utf8Pipeline.PP(
-      input,
+      fullMorsel(input),
       value =>
         Option(value) match
           case None => "n"
@@ -1126,7 +1126,7 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
           case None => BatchCodec.stringElement(None),
     )
     val fusedDrop = Utf8Pipeline.PF(
-      input,
+      fullMorsel(input),
       value =>
         Option(value) match
           case None => "n"
@@ -1157,9 +1157,9 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
       _ + 1,
     )
     an[IllegalArgumentException] should be thrownBy
-      Float64Pipeline.PP(pairs, _ + 1.0, _ + 1.0)
+      Float64Pipeline.PP(fullMorsel(pairs), _ + 1.0, _ + 1.0)
     an[IllegalArgumentException] should be thrownBy
-      Utf8Pipeline.PP(pairs, (value: String) => value, (value: String) => value)
+      Utf8Pipeline.PP(fullMorsel(pairs), (value: String) => value, (value: String) => value)
   }
 
   "triple filter" should "name the null component and keep dense survivors in order" in {

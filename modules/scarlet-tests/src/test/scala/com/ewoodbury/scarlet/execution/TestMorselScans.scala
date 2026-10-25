@@ -16,8 +16,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * tail shorter than the batch size is its own morsel. Null slots stay in a map-only count and stay
  * out of a filtered count. Element filters for ints, longs, floats, strings, and bools collect
  * morsels without copying the input batch. A single-step element map still copies slices, and
- * that batch count is the comparison for a filter. Float and string collect chains scan the
- * morsel range.
+ * that batch count is the comparison for a filter. A float or string chain of 2–4 steps scans
+ * each morsel once. The published batch count is that pass.
  */
 class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -367,20 +367,33 @@ class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   }
 
   it should "visit each morsel of a map chain and publish no slice batch" in {
-    val values = Array(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-    val ints = DistCollection.ofInts(values, 1).map(_ + 1).map(_ + 1)
-    val floats = DistCollection.ofDoubles(values.map(_.toDouble), 1).map(_ + 1.0).map(_ + 1.0)
-
+    val rows = Array(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+    val texts = rows.map(row => ('a' + row - 1).toChar.toString)
+    val upper = (text: String) => text.toUpperCase(java.util.Locale.ENGLISH)
     arm(batchSize = 4)
-    val collected = measure(ints.collect().toSeq)
-    val floatCollected = measure(floats.collect().iterator.map(_.toInt).toSeq)
-
-    collected.result shouldBe values.map(_ + 2).toSeq
-    collected.visits shouldBe 3L
-    floatCollected.visits shouldBe collected.visits
-    // Int fuses both maps into one column. Float publishes one column per map and does not copy
-    // the input slice, so the chain adds one batch per visit.
-    collected.batches shouldBe floatCollected.batches - floatCollected.visits
+    List(2, 4).foreach { steps =>
+      val ints = (1 to steps).foldLeft(DistCollection.ofInts(rows, 1)) { (chain, _) =>
+        chain.map(_ + 1)
+      }
+      val floats = (1 to steps).foldLeft(DistCollection.ofDoubles(rows.map(_.toDouble), 1)) {
+        (chain, _) => chain.map(_ + 1.0)
+      }
+      val strings = (1 to steps).foldLeft(DistCollection.ofStrings(texts, 1)) { (chain, _) =>
+        chain.map(upper)
+      }
+      val collected = measure(ints.collect().toSeq)
+      val floatCollected = measure(floats.collect().iterator.map(_.toInt).toSeq)
+      val textCollected = measure(strings.collect().toSeq)
+      collected.result shouldBe rows.map(_ + steps).toSeq
+      floatCollected.result shouldBe collected.result
+      textCollected.result shouldBe texts.map(upper).toSeq
+      collected.visits shouldBe 3L
+      floatCollected.visits shouldBe collected.visits
+      textCollected.visits shouldBe collected.visits
+      // One fused column per morsel. A step-1 split adds one batch per visit.
+      floatCollected.batches shouldBe collected.batches
+      textCollected.batches shouldBe collected.batches
+    }
   }
 
   it should "visit one zero-length morsel when a mapped partition is empty" in {
@@ -394,9 +407,8 @@ class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     collected.result shouldBe Seq.empty[Int]
     collected.visits shouldBe 1L
     floatCollected.visits shouldBe 1L
-    // An empty batch is not sliced. Int fuses both maps into one column. Float count runs the
-    // chain and publishes one column per map.
-    floatCollected.batches shouldBe collected.batches + floatCollected.visits
+    // An empty batch is not sliced. The two float maps fuse into one column, as the int chain does.
+    floatCollected.batches shouldBe collected.batches
   }
 
   it should "keep partition order when morsels split an int map" in {
@@ -540,10 +552,9 @@ class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     collected.visits shouldBe 3L
     longCollected.visits shouldBe collected.visits
     floatCollected.visits shouldBe collected.visits
-    // The int chain fuses to one output column per morsel. Long and float each publish one column
-    // per map and do not copy the input slice, so two maps add one batch per visit.
+    // Int and float fuse both maps into one column per morsel. Long still publishes one per map.
     longCollected.batches shouldBe collected.batches + collected.visits
-    floatCollected.batches shouldBe longCollected.batches
+    floatCollected.batches shouldBe collected.batches
   }
 
   it should "visit one zero-length morsel when a mapped partition is empty" in {
@@ -777,7 +788,7 @@ class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
         else value.toUpperCase(java.util.Locale.ENGLISH),
     )
     val fused = Utf8Pipeline.PP(
-      batch,
+      morsel,
       value =>
         if (BatchCodec.isAbsent(value)) then BatchCodec.stringElement(None)
         else value.toUpperCase(java.util.Locale.ENGLISH),
