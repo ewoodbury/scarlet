@@ -132,7 +132,7 @@ private[execution] object ColumnarInterpreter:
       // before lowering, so this cast is safe.
       @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Int => Int]
-      Columns.Pairs(onEach(pairsOf(interpret(source, child, selectedPartition))) { batch =>
+      Columns.Pairs(onEachSliced(pairsOf(interpret(source, child, selectedPartition))) { batch =>
         ColumnKernel.projectInt32(batch, 1, value => fn(value))
       })
     case (
@@ -194,13 +194,13 @@ private[execution] object ColumnarInterpreter:
 
     columns match
       case Columns.Ints(parts) =>
-        Columns.Ints(onEach(parts)(batch => ElementPipeline.ints(batch, steps)))
+        Columns.Ints(onEachSliced(parts)(batch => ElementPipeline.ints(batch, steps)))
       case Columns.Longs(parts) =>
-        Columns.Longs(onEach(parts)(batch => ElementPipeline.longs(batch, steps)))
+        Columns.Longs(onEachSliced(parts)(batch => ElementPipeline.longs(batch, steps)))
       case Columns.Floats(parts) =>
-        Columns.Floats(onEach(parts)(batch => ElementPipeline.floats(batch, steps)))
+        Columns.Floats(onEachSliced(parts)(batch => ElementPipeline.floats(batch, steps)))
       case Columns.Strings(parts) =>
-        Columns.Strings(onEach(parts)(batch => ElementPipeline.strings(batch, steps)))
+        Columns.Strings(onEachSliced(parts)(batch => ElementPipeline.strings(batch, steps)))
       case Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) => rejected
 
   private def triplePredicate(
@@ -220,32 +220,44 @@ private[execution] object ColumnarInterpreter:
         columns match
           case Columns.Ints(parts) =>
             val keep = predicate.asInstanceOf[Int => Boolean]
-            Columns.Ints(onEach(parts) { batch =>
-              ColumnKernel.filterInt32(batch, 0, value => keep(value))
+            Columns.Ints(onEachMorsel(parts) { morsel =>
+              ColumnKernel.filterInt32(
+                morsel.batch,
+                0,
+                morsel.start,
+                morsel.length,
+                value => keep(value),
+              )
             })
           case Columns.Longs(parts) =>
             val keep = predicate.asInstanceOf[Long => Boolean]
-            Columns.Longs(onEach(parts) { batch =>
-              ColumnKernel.filterInt64(batch, 0, value => keep(value))
+            Columns.Longs(onEachMorsel(parts) { morsel =>
+              ColumnKernel.filterInt64(
+                morsel.batch,
+                0,
+                morsel.start,
+                morsel.length,
+                value => keep(value),
+              )
             })
           case Columns.Floats(parts) =>
             val keep = predicate.asInstanceOf[Double => Boolean]
-            Columns.Floats(onEach(parts) { batch =>
+            Columns.Floats(onEachSliced(parts) { batch =>
               ColumnKernel.filterFloat64(batch, 0, value => keep(value))
             })
           case Columns.Strings(parts) =>
             ColumnarPlanner.dictionaryStringLiterals(predicate) match
               case Some(literals) =>
-                Columns.Strings(onEach(parts) { batch =>
+                Columns.Strings(onEachSliced(parts) { batch =>
                   ColumnKernel.filterUtf8ByValues(batch, 0, literals)
                 })
               case None =>
                 val keep = predicate.asInstanceOf[String => Boolean]
-                Columns.Strings(onEach(parts) { batch =>
+                Columns.Strings(onEachSliced(parts) { batch =>
                   ColumnKernel.filterUtf8(batch, 0, value => keep(value))
                 })
           case Columns.Bools(parts) =>
-            Columns.Bools(onEach(parts)(batch => BoolPipeline.filter(batch, predicate)))
+            Columns.Bools(onEachSliced(parts)(batch => BoolPipeline.filter(batch, predicate)))
           case Columns.Pairs(_) | Columns.Triples(_) =>
             throw new IllegalStateException(
               s"columnar element filter expects ${elementColumnList(includeBooleans = true)}",
@@ -253,17 +265,17 @@ private[execution] object ColumnarInterpreter:
       case PhysicalOp.Slot.Row =>
         val keep = predicate.asInstanceOf[((Int, Int)) => Boolean]
         // `keep` is `(Int, Int) => Boolean`, so the pair is boxed for the call.
-        Columns.Pairs(onEach(pairsOf(columns)) { batch =>
+        Columns.Pairs(onEachSliced(pairsOf(columns)) { batch =>
           PairKernel.filter(batch, (key, value) => keep((key, value)))
         })
       case PhysicalOp.Slot.Key =>
         val keep = predicate.asInstanceOf[Int => Boolean]
-        Columns.Pairs(onEach(pairsOf(columns)) { batch =>
+        Columns.Pairs(onEachSliced(pairsOf(columns)) { batch =>
           ColumnKernel.filterInt32(batch, 0, value => keep(value))
         })
       case PhysicalOp.Slot.Value =>
         val keep = predicate.asInstanceOf[Int => Boolean]
-        Columns.Pairs(onEach(pairsOf(columns)) { batch =>
+        Columns.Pairs(onEachSliced(pairsOf(columns)) { batch =>
           ColumnKernel.filterInt32(batch, 1, value => keep(value))
         })
       case PhysicalOp.Slot.TripleKey | PhysicalOp.Slot.TripleLeftValue |
@@ -272,7 +284,7 @@ private[execution] object ColumnarInterpreter:
           case recognized: IntJoinTriplePredicate[?] => recognized
           case _ => throw new IllegalStateException("triple filter lost its slot predicate")
         val select = triplePredicate(slot, keep)
-        Columns.Triples(onEach(triplesOf(columns)) { batch =>
+        Columns.Triples(onEachSliced(triplesOf(columns)) { batch =>
           PairKernel.filterTriple(batch, select)
         })
 
@@ -281,21 +293,21 @@ private[execution] object ColumnarInterpreter:
       // Named erasure boundary. Lowering already checked the declared `Int => Int` shape.
       @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Int => Int]
-      Columns.Ints(onEach(parts) { batch =>
+      Columns.Ints(onEachSliced(parts) { batch =>
         ColumnKernel.projectInt32(batch, 0, value => fn(value))
       })
     case Columns.Longs(parts) =>
       // Named erasure boundary. Lowering already checked the declared `Long => Long` shape.
       @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Long => Long]
-      Columns.Longs(onEach(parts) { batch =>
+      Columns.Longs(onEachSliced(parts) { batch =>
         ColumnKernel.projectInt64(batch, 0, value => fn(value))
       })
     case Columns.Floats(parts) =>
       // Named erasure boundary. Lowering already checked the declared `Double => Double` shape.
       @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Double => Double]
-      Columns.Floats(onEach(parts) { batch =>
+      Columns.Floats(onEachSliced(parts) { batch =>
         ColumnKernel.projectFloat64(batch, 0, value => fn(value))
       })
     case Columns.Strings(parts) =>
@@ -303,7 +315,7 @@ private[execution] object ColumnarInterpreter:
       // turns that into `ClassCastException`, which is the row-path fallback.
       @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Any"))
       val fn = mapper.asInstanceOf[String => Any]
-      Columns.Strings(onEach(parts) { batch =>
+      Columns.Strings(onEachSliced(parts) { batch =>
         ColumnKernel.projectUtf8(batch, 0, value => ColumnarPlanner.stringResult(fn(value)))
       })
     case Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) =>
@@ -335,7 +347,10 @@ private[execution] object ColumnarInterpreter:
     if (includeBooleans) then "ints, longs, floats, booleans, or strings"
     else "ints, longs, floats, or strings"
 
-  private def onEach(
+  /**
+   * One visit per copied slice. The function sees a batch whose rows start at zero.
+   */
+  private def onEachSliced(
       parts: Vector[ColumnBatch],
   )(fn: ColumnBatch => ColumnBatch): Vector[ColumnBatch] =
     if (parts.isEmpty) then parts
@@ -345,6 +360,21 @@ private[execution] object ColumnarInterpreter:
       val mapped =
         MorselScheduler.map(flat, ColumnarPlanner.parallelism)((_, morsel) => fn(morsel))
       regroup(sliced.map(_.length), mapped)
+
+  /**
+   * One visit per morsel of the shared batch. The function owns its output. Regroup uses the same
+   * per-part visit counts as [[onEachSliced]].
+   */
+  private def onEachMorsel(
+      parts: Vector[ColumnBatch],
+  )(fn: Morsel => ColumnBatch): Vector[ColumnBatch] =
+    if (parts.isEmpty) then parts
+    else
+      val morsels = parts.map(part => Morsels.of(part, ColumnarPlanner.batchSize))
+      val flat = morsels.flatten
+      val mapped =
+        MorselScheduler.map(flat, ColumnarPlanner.parallelism)((_, morsel) => fn(morsel))
+      regroup(morsels.map(_.length), mapped)
 
   private def regroup(counts: Vector[Int], flat: Vector[ColumnBatch]): Vector[ColumnBatch] =
     val seed: (Vector[ColumnBatch], Vector[ColumnBatch]) = (flat, Vector.empty[ColumnBatch])

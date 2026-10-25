@@ -14,7 +14,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * Int and long action folds scan morsels in place. An empty batch is one zero-length morsel. A
  * tail shorter than the batch size is its own morsel. Null slots stay in a map-only count and stay
- * out of a filtered count.
+ * out of a filtered count. An int or long element filter collects those morsels without copying
+ * the input batch. A float filter still copies slices, so its batch count is the comparison.
  */
 class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -98,6 +99,72 @@ class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     summed.batches shouldBe 1L
     measure(longs.sum).result shouldBe 18L
     measure(longs.count()).result shouldBe 3L
+  }
+
+  "an element filter" should "visit each morsel and publish no slice batch" in {
+    val values = Array(1, -2, 3, 4, -5, 6, 7, 8, 9, -10)
+    val expected = values.filter(_ > 0).toSeq
+    val ints = DistCollection.ofInts(values, 1).filter(_ > 0)
+    val longs = DistCollection.ofLongs(values.map(_.toLong), 1).filter(_ > 0L)
+    val floats = DistCollection.ofDoubles(values.map(_.toDouble), 1).filter(_ > 0.0)
+
+    arm(batchSize = 4)
+    val collected = measure(ints.collect().toSeq)
+    val counted = measure(ints.count())
+    val longCollected = measure(longs.collect().toSeq)
+    val floatCollected = measure(floats.collect().iterator.map(_.toInt).toSeq)
+
+    collected.result shouldBe expected
+    counted.result shouldBe expected.length.toLong
+    counted.visits shouldBe collected.visits
+    counted.batches shouldBe collected.batches
+    longCollected.result shouldBe expected.map(_.toLong)
+    longCollected.visits shouldBe collected.visits
+    longCollected.batches shouldBe collected.batches
+    floatCollected.result shouldBe expected
+    floatCollected.visits shouldBe collected.visits
+    collected.visits shouldBe 3L
+    // Each sliced visit publishes one copied input batch. The range scan does not.
+    collected.batches shouldBe floatCollected.batches - floatCollected.visits
+  }
+
+  it should "visit one zero-length morsel when the partition is empty" in {
+    val ints = DistCollection.ofInts(Array.empty[Int], 1).filter(_ > 0)
+    val longs = DistCollection.ofLongs(Array.empty[Long], 1).filter(_ > 0L)
+    val floats = DistCollection.ofDoubles(Array.empty[Double], 1).filter(_ > 0.0)
+
+    arm(batchSize = 4)
+    val collected = measure(ints.collect().toSeq)
+    val counted = measure(ints.count())
+    val longCollected = measure(longs.collect().toSeq)
+    val floatCollected = measure(floats.count())
+
+    collected.result shouldBe Seq.empty[Int]
+    counted.result shouldBe 0L
+    counted.visits shouldBe 1L
+    collected.visits shouldBe 1L
+    longCollected.result shouldBe Seq.empty[Long]
+    longCollected.visits shouldBe 1L
+    floatCollected.visits shouldBe 1L
+    collected.batches shouldBe floatCollected.batches
+    longCollected.batches shouldBe collected.batches
+  }
+
+  it should "keep partition order when morsels split an int or long filter" in {
+    val values = Array(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+    val ints = DistCollection.ofInts(values, 2).filter(_ % 2 == 0)
+    val longs = DistCollection.ofLongs(values.map(_.toLong), 2).filter(_ % 2L == 0L)
+
+    arm(batchSize = 4, threads = 4)
+    val collected = measure(ints.collect().toSeq)
+    val longCollected = measure(longs.collect().toSeq)
+
+    collected.result shouldBe Seq(2, 4, 6, 8, 10)
+    longCollected.result shouldBe Seq(2L, 4L, 6L, 8L, 10L)
+    collected.visits shouldBe 4L
+    longCollected.visits shouldBe 4L
+    measure(ints.count()).result shouldBe 5L
+    measure(longs.count()).result shouldBe 5L
   }
 
   "null slots" should "stay in a map-only count and out of a filtered count" in {
@@ -195,19 +262,19 @@ class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
         throw new IllegalStateException("long kernel saw a null slot")
       value > 0L
 
-  private def arm(batchSize: Int): Unit =
+  private def arm(batchSize: Int, threads: Int = 1): Unit =
     ScarletRuntime.get.shuffle.clear()
     ScarletConf.set(
       originalConf.copy(
         columnarExecution = true,
         columnarBatchSize = batchSize,
-        threadPoolSize = 1,
+        threadPoolSize = threads,
       ),
     )
 
-  private final case class Footprint(result: Long, batches: Long, visits: Long)
+  private final case class Footprint[A](result: A, batches: Long, visits: Long)
 
-  private def measure(body: => Long): Footprint =
+  private def measure[A](body: => A): Footprint[A] =
     ScarletRuntime.get.shuffle.clear()
     ColumnMetrics.withSink(new CountingSink) {
       Footprint(body, ColumnMetrics.batchCount, ColumnMetrics.visitCount)

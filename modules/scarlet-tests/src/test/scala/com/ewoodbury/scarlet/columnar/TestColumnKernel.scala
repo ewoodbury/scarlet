@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -14,6 +16,43 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
     at(batch, 0) match
       case column: Int32Column => column
       case other => fail(s"expected Int32, got $other")
+
+  private def long64(batch: ColumnBatch): Int64Column =
+    at(batch, 0) match
+      case column: Int64Column => column
+      case other => fail(s"expected Int64, got $other")
+
+  private def nullableInts(values: Array[Int], present: Array[Boolean]): ColumnBatch =
+    val column =
+      Int32Column.of(values, Validity.pack(values.length, row => present(row)), values.length)
+    single(column)
+
+  private def nullableLongs(values: Array[Long], present: Array[Boolean]): ColumnBatch =
+    val column =
+      Int64Column.of(values, Validity.pack(values.length, row => present(row)), values.length)
+    single(column)
+
+  private def sameIntBatch(left: ColumnBatch, right: ColumnBatch): Unit =
+    left.length shouldBe right.length
+    left.schema shouldBe right.schema
+    left.columns.length shouldBe right.columns.length
+    left.columns.indices.foreach { ordinal =>
+      (at(left, ordinal), at(right, ordinal)) match
+        case (leftColumn: Int32Column, rightColumn: Int32Column) =>
+          leftColumn.length shouldBe rightColumn.length
+          leftColumn.values.toSeq shouldBe rightColumn.values.toSeq
+          leftColumn.validity.capacity shouldBe rightColumn.validity.capacity
+          leftColumn.validity.words.toSeq shouldBe rightColumn.validity.words.toSeq
+        case _ => fail(s"column $ordinal is not a pair of Int32 columns")
+    }
+
+  private def sameLongBatch(left: ColumnBatch, right: ColumnBatch): Unit =
+    left.length shouldBe right.length
+    left.schema shouldBe right.schema
+    long64(left).length shouldBe long64(right).length
+    long64(left).values.toSeq shouldBe long64(right).values.toSeq
+    long64(left).validity.capacity shouldBe long64(right).validity.capacity
+    long64(left).validity.words.toSeq shouldBe long64(right).validity.words.toSeq
 
   private def float64(batch: ColumnBatch): Float64Column =
     at(batch, 0) match
@@ -291,6 +330,263 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
     column.codes(0) shouldBe 0
     column.isValid(1) shouldBe true
     column.dictionary(column.codes(1)) shouldBe "b"
+  }
+
+  "filter range" should "skip nulls before, inside, and after a range past row 0" in {
+    val poison = 999
+    val stored = Array(poison, 1, poison, 4, poison, 8, poison, -3, 7)
+    val present = Array(false, true, false, true, false, true, false, true, true)
+    val start = 3
+    val length = 3
+    val ints = nullableInts(stored, present)
+
+    val intCalls = new AtomicInteger
+    val filteredInts = ColumnKernel.filterInt32(
+      ints,
+      0,
+      start,
+      length,
+      value => {
+        intCalls.incrementAndGet()
+        if (value == poison) then throw new IllegalStateException("predicate saw a null slot")
+        value > 0
+      },
+    )
+
+    intCalls.get() shouldBe 2
+    filteredInts.length shouldBe 2
+    BatchCodec.decodeInts(filteredInts) shouldBe Seq(4, 8)
+    int32(filteredInts).values.length shouldBe length
+    int32(filteredInts).validity.capacity shouldBe length
+    int32(filteredInts).values should not be theSameInstanceAs(stored)
+    stored shouldBe Array(poison, 1, poison, 4, poison, 8, poison, -3, 7)
+
+    val nullOnly = ColumnKernel.filterInt32(
+      ints,
+      0,
+      2,
+      1,
+      value => throw new IllegalStateException(s"predicate saw $value"),
+    )
+    nullOnly.length shouldBe 0
+    int32(nullOnly).values.length shouldBe 1
+
+    val longStored = stored.map(_.toLong)
+    val longs = nullableLongs(longStored, present)
+    val longCalls = new AtomicInteger
+    val filteredLongs = ColumnKernel.filterInt64(
+      longs,
+      0,
+      start,
+      length,
+      value => {
+        longCalls.incrementAndGet()
+        if (value == poison.toLong) then
+          throw new IllegalStateException("predicate saw a null slot")
+        value > 0L
+      },
+    )
+
+    longCalls.get() shouldBe 2
+    filteredLongs.length shouldBe 2
+    BatchCodec.decodeLongs(filteredLongs) shouldBe Seq(4L, 8L)
+    long64(filteredLongs).values.length shouldBe length
+    long64(filteredLongs).values should not be theSameInstanceAs(longStored)
+  }
+
+  it should "scan a tail shorter than the batch" in {
+    val ints = BatchCodec.ints(1 to 10)
+    val filteredInts = ColumnKernel.filterInt32(ints, 0, 8, 2, value => value % 2 == 0)
+
+    BatchCodec.decodeInts(filteredInts) shouldBe Seq(10)
+    filteredInts.length shouldBe 1
+    int32(filteredInts).values.length shouldBe 2
+    int32(filteredInts).validity.capacity shouldBe 2
+    int32(filteredInts).values should not be theSameInstanceAs(int32(ints).values)
+
+    val longs = BatchCodec.longs((1 to 10).map(_.toLong))
+    val filteredLongs = ColumnKernel.filterInt64(longs, 0, 8, 2, value => value % 2L == 0L)
+
+    BatchCodec.decodeLongs(filteredLongs) shouldBe Seq(10L)
+    filteredLongs.length shouldBe 1
+    long64(filteredLongs).values.length shouldBe 2
+    long64(filteredLongs).validity.capacity shouldBe 2
+  }
+
+  it should "compact other columns by absolute index" in {
+    val width = 5
+    val keys = Array(7, 1, 2, 3, 4)
+    val keyPresent = Array(true, true, true, false, true)
+    val values = Array(99, 10, 20, 30, 40)
+    val valuePresent = Array(true, true, true, true, true)
+    val batch = new ColumnBatch(
+      Vector(LogicalType.Int32, LogicalType.Int32),
+      Vector(
+        Int32Column.of(keys, Validity.pack(width, row => keyPresent(row)), width),
+        Int32Column.of(values, Validity.pack(width, row => valuePresent(row)), width),
+      ),
+      width,
+    )
+    val calls = new AtomicInteger
+    val filtered = ColumnKernel.filterInt32(
+      batch,
+      1,
+      1,
+      3,
+      value => {
+        calls.incrementAndGet()
+        if (value == 99) then
+          throw new IllegalStateException("predicate saw a row outside the range")
+        value >= 20
+      },
+    )
+
+    calls.get() shouldBe 3
+    filtered.length shouldBe 2
+    BatchCodec.decodeNullableIntPairs(filtered) shouldBe Seq(
+      (Some(2), Some(20)),
+      (None, Some(30)),
+    )
+    at(filtered, 0) match
+      case column: Int32Column =>
+        column.values.length shouldBe width
+        column.validity.capacity shouldBe width
+        column.values(0) shouldBe 2
+        column.isValid(1) shouldBe false
+        column.values(1) shouldBe 0
+      case other => fail(s"expected Int32, got $other")
+    at(filtered, 1) match
+      case column: Int32Column =>
+        column.values.length shouldBe 3
+        column.values should not be theSameInstanceAs(values)
+      case other => fail(s"expected Int32, got $other")
+
+    val longKeys = Array(99L, 10L, 20L, 30L, 40L)
+    val longPresent = Array(false, true, true, true, true)
+    val sides = Array(100, 200, 300, 400, 500)
+    val sidePresent = Array(true, true, false, true, true)
+    val longBatch = new ColumnBatch(
+      Vector(LogicalType.Int64, LogicalType.Int32),
+      Vector(
+        Int64Column.of(longKeys, Validity.pack(width, row => longPresent(row)), width),
+        Int32Column.of(sides, Validity.pack(width, row => sidePresent(row)), width),
+      ),
+      width,
+    )
+    val longCalls = new AtomicInteger
+    val filteredLongs = ColumnKernel.filterInt64(
+      longBatch,
+      0,
+      1,
+      3,
+      value => {
+        longCalls.incrementAndGet()
+        if (value == 99L) then throw new IllegalStateException("predicate saw a null slot")
+        value >= 20L
+      },
+    )
+
+    longCalls.get() shouldBe 3
+    filteredLongs.length shouldBe 2
+    at(filteredLongs, 0) match
+      case column: Int64Column =>
+        column.values.length shouldBe 3
+        column.values(0) shouldBe 20L
+        column.values(1) shouldBe 30L
+        column.values should not be theSameInstanceAs(longKeys)
+      case other => fail(s"expected Int64, got $other")
+    at(filteredLongs, 1) match
+      case column: Int32Column =>
+        column.values.length shouldBe width
+        column.validity.capacity shouldBe width
+        column.isValid(0) shouldBe false
+        column.values(0) shouldBe 0
+        column.isValid(1) shouldBe true
+        column.values(1) shouldBe 400
+      case other => fail(s"expected Int32, got $other")
+  }
+
+  it should "match the whole-batch filter when the range is the whole batch" in {
+    val rows = Seq(Some(1), None, Some(-2), Some(4), Some(0))
+    val ints = BatchCodec.nullableInts(rows)
+    val whole = ColumnKernel.filterInt32(ints, 0, value => value >= 0)
+    val ranged = ColumnKernel.filterInt32(ints, 0, 0, ints.length, value => value >= 0)
+
+    BatchCodec.decodeNullableInts(whole) shouldBe Seq(Some(1), Some(4), Some(0))
+    sameIntBatch(whole, ranged)
+    int32(ranged).values should not be theSameInstanceAs(int32(ints).values)
+    int32(whole).values.length shouldBe ints.length
+
+    val raw = Array(1, -2, 8, 99)
+    val shortened = single(Int32Column.of(raw, Validity.allValid(raw.length), length = 3))
+    val wholeShort = ColumnKernel.filterInt32(shortened, 0, value => value > 0)
+    val rangedShort =
+      ColumnKernel.filterInt32(shortened, 0, 0, shortened.length, value => value > 0)
+
+    BatchCodec.decodeInts(wholeShort) shouldBe Seq(1, 8)
+    sameIntBatch(wholeShort, rangedShort)
+    int32(wholeShort).values.length shouldBe shortened.length
+    raw shouldBe Array(1, -2, 8, 99)
+
+    val pairs = BatchCodec.nullableIntPairs(
+      Seq((Some(0), Some(1)), (None, Some(9)), (Some(2), None), (Some(3), Some(4))),
+    )
+    val wholePairs = ColumnKernel.filterInt32(pairs, 0, value => value % 2 == 0)
+    val rangedPairs =
+      ColumnKernel.filterInt32(pairs, 0, 0, pairs.length, value => value % 2 == 0)
+
+    BatchCodec.decodeNullableIntPairs(wholePairs) shouldBe Seq(
+      (Some(0), Some(1)),
+      (Some(2), None),
+    )
+    sameIntBatch(wholePairs, rangedPairs)
+    at(wholePairs, 1) match
+      case column: Int32Column => column.values.length shouldBe pairs.length
+      case other => fail(s"expected Int32, got $other")
+
+    val longRows = Seq(Some(1L), None, Some(-2L), Some(4L))
+    val longBatch = BatchCodec.nullableLongs(longRows)
+    val wholeLongs = ColumnKernel.filterInt64(longBatch, 0, value => value > 0L)
+    val rangedLongs =
+      ColumnKernel.filterInt64(longBatch, 0, 0, longBatch.length, value => value > 0L)
+
+    BatchCodec.decodeNullableLongs(wholeLongs) shouldBe Seq(Some(1L), Some(4L))
+    sameLongBatch(wholeLongs, rangedLongs)
+    long64(wholeLongs).values.length shouldBe longBatch.length
+  }
+
+  it should "return an empty batch for an empty range" in {
+    val batch = BatchCodec.ints(Seq(1, 2, 3, 4))
+    val calls = new AtomicInteger
+    val filtered = ColumnKernel.filterInt32(
+      batch,
+      0,
+      2,
+      0,
+      _ => {
+        calls.incrementAndGet()
+        true
+      },
+    )
+
+    calls.get() shouldBe 0
+    filtered.length shouldBe 0
+    BatchCodec.decodeInts(filtered) shouldBe Seq.empty[Int]
+    filtered.schema shouldBe batch.schema
+    int32(filtered).values should not be theSameInstanceAs(int32(batch).values)
+
+    val pairs = BatchCodec.intPairs(Seq((1, 10), (2, 20), (3, 30)))
+    val dropped = ColumnKernel.filterInt32(pairs, 0, 1, 0, _ => true)
+    dropped.length shouldBe 0
+    dropped.schema shouldBe pairs.schema
+    at(dropped, 1) match
+      case column: Int32Column => column.values.length shouldBe pairs.length
+      case other => fail(s"expected Int32, got $other")
+
+    val longs = BatchCodec.longs(Seq(1L, 2L))
+    val emptyLongs = ColumnKernel.filterInt64(longs, 0, 0, 0, _ => true)
+    emptyLongs.length shouldBe 0
+    BatchCodec.decodeLongs(emptyLongs) shouldBe Seq.empty[Long]
   }
 
   "project" should "map present values and keep nulls as zero" in {
