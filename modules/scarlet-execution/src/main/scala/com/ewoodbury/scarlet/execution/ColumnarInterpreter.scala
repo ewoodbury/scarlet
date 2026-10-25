@@ -349,8 +349,8 @@ private[execution] object ColumnarInterpreter:
 
   /**
    * Cuts each partition, visits every piece, and regroups one batch per input partition. An empty
-   * `parts` returns unchanged and does not call the scheduler. Visit order is the flatten order of
-   * the cuts.
+   * `parts` returns unchanged and does not call the scheduler. Results keep the flatten order of
+   * the cuts, which is what `regroup` depends on.
    */
   private def fanOut[A](
       parts: Vector[ColumnBatch],
