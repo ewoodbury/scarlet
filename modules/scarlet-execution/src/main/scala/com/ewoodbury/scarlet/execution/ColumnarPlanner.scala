@@ -477,21 +477,27 @@ object ColumnarPlanner:
     }
 
   /**
-   * Fold `fn` over the batches `op` produces. The default cuts each batch into [[Morsel]]s that
-   * share the batch and runs those on the scheduler. `cut = false` reads each batch from row 0 for
-   * its whole length on the caller, for kernels that read a whole column in place. The dictionary
-   * code count uses that: it counts the code array in place and needs the full range.
+   * Fold `fn` over morsels of the batches `op` produces. Each batch is cut with [[Morsels.of]] and
+   * those morsels run on the scheduler, one visit each. An empty batch is one zero-length morsel.
+   * A kernel that must see the whole batch uses [[foldWholeBatches]].
    */
   private[execution] def foldInterpreted(
       plan: Plan[_],
       op: PhysicalOp,
-      cut: Boolean = true,
   )(fn: Morsel => Long): Long =
     val parts = ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op))
-    if (cut) then foldMorsels(parts)(fn) else foldWhole(parts)(fn)
+    foldMorsels(parts)(fn)
 
-  private def foldWhole(parts: Vector[ColumnBatch])(fn: Morsel => Long): Long =
-    parts.foldLeft(0L)((total, batch) => total + fn(Morsel(batch, 0, batch.length)))
+  /**
+   * Fold `fn` over the batches `op` produces, on the caller. The kernel sees each whole batch and
+   * owns any per-batch work. Nothing is cut into morsels.
+   */
+  private[execution] def foldWholeBatches(
+      plan: Plan[_],
+      op: PhysicalOp,
+  )(fn: ColumnBatch => Long): Long =
+    val parts = ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op))
+    parts.foldLeft(0L)((total, batch) => total + fn(batch))
 
   /** Int and long element folds. Each morsel shares its batch. */
   private def foldMorsels(parts: Vector[ColumnBatch])(fn: Morsel => Long): Long =
