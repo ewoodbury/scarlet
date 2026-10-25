@@ -183,10 +183,10 @@ class TestLongColumnar extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     fiveCount.result shouldBe row(five.count())
 
     partials shouldBe 124L
-    fourSum.batches shouldBe encodes + partials
-    fiveSum.batches shouldBe 126L
+    fourSum.batches shouldBe encodes
+    fiveSum.batches shouldBe encodes
     fiveSum.batches shouldBe fourSum.batches
-    fiveCount.batches shouldBe 126L
+    fiveCount.batches shouldBe encodes
     fourSum.visits shouldBe partials
     fiveSum.visits shouldBe 124L
     fiveCount.visits shouldBe 124L

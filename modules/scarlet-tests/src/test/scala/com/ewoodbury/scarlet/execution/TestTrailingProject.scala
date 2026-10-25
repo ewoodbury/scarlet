@@ -52,8 +52,8 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
     fiveFoot.result shouldBe row(five.sum)
 
     partials shouldBe 124L
-    fourFoot.batches shouldBe encodes + partials
-    fiveFoot.batches shouldBe 126L
+    fourFoot.batches shouldBe encodes
+    fiveFoot.batches shouldBe encodes
     fiveFoot.batches shouldBe fourFoot.batches
     fiveFoot.batches shouldNot be(fourFoot.batches + partials)
     fourFoot.visits shouldBe partials
@@ -87,9 +87,8 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
     counted.result shouldBe elementRows.toLong
     counted.result shouldBe row(five.count())
-    counted.batches shouldBe 126L
-    counted.batches shouldBe sourcePartitions.toLong + partials
-    counted.batches shouldNot be(sourcePartitions.toLong + partials + partials)
+    counted.batches shouldBe sourcePartitions.toLong
+    counted.batches shouldNot be(sourcePartitions.toLong + partials)
     counted.visits shouldBe 124L
     counted.encodes shouldBe sourcePartitions.toLong
   }
@@ -136,9 +135,9 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
     summed.result shouldBe row(chained.sum)
     counted.result shouldBe filteredSurvivors
     counted.result shouldBe row(chained.count())
-    summed.batches shouldBe 126L
-    summed.batches shouldBe sourcePartitions.toLong + partials
-    counted.batches shouldBe 126L
+    summed.batches shouldBe sourcePartitions.toLong
+    summed.batches shouldNot be(sourcePartitions.toLong + partials)
+    counted.batches shouldBe sourcePartitions.toLong
     counted.batches shouldBe summed.batches
     summed.visits shouldBe 124L
     counted.visits shouldBe 124L
@@ -148,28 +147,28 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
   "a filter that rejects every row after five maps" should
     "sum and count zero without an output column" in {
-    val values = generate(elementRows)
-    val chained = plus(DistCollection.ofInts(values, sourcePartitions), 5).filter(_ => false)
-    val partials = morselCount(elementRows, sourcePartitions, batchSize)
+      val values = generate(elementRows)
+      val chained = plus(DistCollection.ofInts(values, sourcePartitions), 5).filter(_ => false)
+      val partials = morselCount(elementRows, sourcePartitions, batchSize)
 
-    armStudy()
-    shape(chained) shouldBe "Pipeline2(Pipeline4(Scan))"
-    val summed = measure(chained.sum)
-    val counted = measure(chained.count())
+      armStudy()
+      shape(chained) shouldBe "Pipeline2(Pipeline4(Scan))"
+      val summed = measure(chained.sum)
+      val counted = measure(chained.count())
 
-    summed.result shouldBe 0L
-    counted.result shouldBe 0L
-    summed.result shouldBe row(chained.sum)
-    counted.result shouldBe row(chained.count())
-    summed.batches shouldBe 126L
-    summed.batches shouldBe sourcePartitions.toLong + partials
-    counted.batches shouldBe 126L
-    counted.batches shouldBe summed.batches
-    summed.visits shouldBe 124L
-    counted.visits shouldBe 124L
-    summed.encodes shouldBe sourcePartitions.toLong
-    counted.encodes shouldBe sourcePartitions.toLong
-  }
+      summed.result shouldBe 0L
+      counted.result shouldBe 0L
+      summed.result shouldBe row(chained.sum)
+      counted.result shouldBe row(chained.count())
+      summed.batches shouldBe sourcePartitions.toLong
+      summed.batches shouldNot be(sourcePartitions.toLong + partials)
+      counted.batches shouldBe sourcePartitions.toLong
+      counted.batches shouldBe summed.batches
+      summed.visits shouldBe 124L
+      counted.visits shouldBe 124L
+      summed.encodes shouldBe sourcePartitions.toLong
+      counted.encodes shouldBe sourcePartitions.toLong
+    }
 
   "a filter inside a long chain" should "run in source order and skip maps after a rejection" in {
     val calls = Array.fill(7)(new AtomicInteger)
@@ -366,7 +365,7 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
     val summed = measure(five.sum)
     val collected = measure(five.collect().toList)
 
-    summed.batches shouldBe 6L
+    summed.batches shouldBe 1L
     summed.visits shouldBe 5L
     collected.result shouldBe (1 to 20).map(_ + 5).toList
     collected.result shouldBe row(five.collect().toList)

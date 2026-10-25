@@ -274,17 +274,18 @@ object ColumnarPlanner:
     case (Plan.FilterOp(source, predicate), PhysicalOp.Filter(child, PhysicalOp.Slot.Element))
         if isInt(child) =>
       val keep = predicate.asInstanceOf[Int => Boolean]
-      foldLong(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
-        batch =>
-          Int32Pipeline.sumFiltered(batch, value => keep(value))
+      foldMorsels(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
+        morsel =>
+          val column = Int32Pipeline.singleInt(morsel.batch)
+          Int32Pipeline.sumFiltered(column, morsel.start, morsel.length, value => keep(value))
       }
     case (logical, PhysicalOp.Pipeline(child, length)) if isInt(child) =>
       val (source, steps) = elementSteps(logical, length)
       if (steps.length < length) then
         throw new IllegalStateException("pipeline does not match logical element steps")
-      foldLong(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
-        batch =>
-          ElementSum.sumInts(batch, steps)
+      foldMorsels(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
+        morsel =>
+          ElementSum.sumInts(morsel, steps)
       }
     case (
           Plan.ValuesOp(Plan.MapValuesOp(source, mapper)),
@@ -294,7 +295,7 @@ object ColumnarPlanner:
       // before lowering, so this cast is safe.
       @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Int => Int]
-      foldLong(ColumnarInterpreter.pairsOf(ColumnarInterpreter.interpret(source, child))) {
+      foldSliced(ColumnarInterpreter.pairsOf(ColumnarInterpreter.interpret(source, child))) {
         batch =>
           ColumnReduce.sumMappedInt32(batch, ordinal = 1, value => fn(value))
       }
@@ -313,17 +314,17 @@ object ColumnarPlanner:
       ColumnReduce.sumInt64(ColumnarInterpreter.encodeLongs(partitions), 0)
     case (Plan.FilterOp(source, predicate), PhysicalOp.Filter(child, PhysicalOp.Slot.Element))
         if isLong(child) =>
-      foldLong(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
-        batch =>
-          ElementSum.sumLongs(batch, List(ElementStep.Filter(predicate)))
+      foldMorsels(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
+        morsel =>
+          ElementSum.sumLongs(morsel, List(ElementStep.Filter(predicate)))
       }
     case (logical, PhysicalOp.Pipeline(child, length)) if isLong(child) =>
       val (source, steps) = elementSteps(logical, length)
       if (steps.length < length) then
         throw new IllegalStateException("pipeline does not match logical element steps")
-      foldLong(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
-        batch =>
-          ElementSum.sumLongs(batch, steps)
+      foldMorsels(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
+        morsel =>
+          ElementSum.sumLongs(morsel, steps)
       }
     case _ =>
       ColumnReduce.sumInt64(
@@ -470,31 +471,45 @@ object ColumnarPlanner:
 
   /** Read one int column of a pair plan. Does not allocate a projection batch. */
   private def sumPairColumn(source: Plan[_], child: PhysicalOp, ordinal: Int): Long =
-    foldLong(ColumnarInterpreter.pairsOf(ColumnarInterpreter.interpret(source, child))) { batch =>
-      ColumnReduce.sumInt32At(batch, ordinal)
+    foldSliced(ColumnarInterpreter.pairsOf(ColumnarInterpreter.interpret(source, child))) {
+      batch =>
+        ColumnReduce.sumInt32At(batch, ordinal)
     }
 
   /**
-   * Fold `fn` over the batches `op` produces. The default cuts each batch into morsels and runs
-   * those on the scheduler. `morsels = false` reduces the batches on the caller. A dictionary code
-   * count uses that: slicing would copy the code array, and the count reads the array in place.
+   * Fold `fn` over the batches `op` produces. The default cuts each batch into [[Morsel]]s that
+   * share the batch and runs those on the scheduler. `cut = false` reads each batch from row 0 for
+   * its whole length on the caller, for kernels that read a whole column in place. The dictionary
+   * code count uses that: it counts the code array in place and needs the full range.
    */
   private[execution] def foldInterpreted(
       plan: Plan[_],
       op: PhysicalOp,
-      morsels: Boolean = true,
-  )(fn: ColumnBatch => Long): Long =
+      cut: Boolean = true,
+  )(fn: Morsel => Long): Long =
     val parts = ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op))
-    if (morsels) then foldLong(parts)(fn) else foldInPlace(parts)(fn)
+    if (cut) then foldMorsels(parts)(fn) else foldWhole(parts)(fn)
 
-  private def foldInPlace(parts: Vector[ColumnBatch])(fn: ColumnBatch => Long): Long =
-    parts.foldLeft(0L)((total, batch) => total + fn(batch))
+  private def foldWhole(parts: Vector[ColumnBatch])(fn: Morsel => Long): Long =
+    parts.foldLeft(0L)((total, batch) => total + fn(Morsel(batch, 0, batch.length)))
 
-  private def foldLong(parts: Vector[ColumnBatch])(fn: ColumnBatch => Long): Long =
+  /** Int and long element folds. Each morsel shares its batch. */
+  private def foldMorsels(parts: Vector[ColumnBatch])(fn: Morsel => Long): Long =
     if (parts.isEmpty) then 0L
     else
-      val morsels = parts.flatMap(part => ColumnBatches.slice(part, batchSize))
+      val morsels = parts.flatMap(part => Morsels.of(part, batchSize))
       val partials = MorselScheduler.map(morsels, parallelism)((_, morsel) => fn(morsel))
+      partials.foldLeft(0L)(_ + _)
+
+  /**
+   * Copied slices. Pair-column sums still use this, including [[ColumnReduce.sumMappedInt32]]. Int
+   * and long element folds use [[foldMorsels]].
+   */
+  private def foldSliced(parts: Vector[ColumnBatch])(fn: ColumnBatch => Long): Long =
+    if (parts.isEmpty) then 0L
+    else
+      val slices = parts.flatMap(part => ColumnBatches.slice(part, batchSize))
+      val partials = MorselScheduler.map(slices, parallelism)((_, slice) => fn(slice))
       partials.foldLeft(0L)(_ + _)
 
   private def foldDouble(parts: Vector[ColumnBatch])(fn: ColumnBatch => Double): Double =

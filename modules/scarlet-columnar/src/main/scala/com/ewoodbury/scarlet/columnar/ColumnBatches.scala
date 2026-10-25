@@ -1,24 +1,58 @@
 package com.ewoodbury.scarlet.columnar
 
 /**
+ * A row range of a shared batch. `start` is the first absolute row and `length` is the row count.
+ * Nothing is copied. An empty range has length zero.
+ */
+private[scarlet] final case class Morsel(batch: ColumnBatch, start: Int, length: Int):
+  require(start >= 0, s"morsel start must be >= 0, got $start")
+  require(length >= 0, s"morsel length must be >= 0, got $length")
+  require(
+    start.toLong + length.toLong <= batch.length.toLong,
+    s"morsel [$start, ${start.toLong + length.toLong}) outside batch length ${batch.length}",
+  )
+
+/**
+ * Cuts a batch the same way [[ColumnBatches.slice]] does, without copying columns.
+ *
+ * `rows == 0` is one zero-length morsel. A batch no longer than `batchSize` is one morsel. A
+ * longer batch is `ceil(rows / batchSize)` morsels. The tail is shorter than `batchSize` when the
+ * length does not divide evenly.
+ */
+private[scarlet] object Morsels:
+
+  def of(batch: ColumnBatch, batchSize: Int): Vector[Morsel] =
+    ColumnBatches.cuts(batch.length, batchSize).map { case (start, length) =>
+      Morsel(batch, start, length)
+    }
+
+/**
  * Slice a batch into morsels and concatenate batches that share a schema.
  *
  * A slice shorter than or equal to `batchSize` is the input batch itself. Concatenation of one
  * batch, or of only empty batches, returns the head batch. Copied ranges keep values and validity.
+ * [[Morsels.of]] uses the same cuts and does not copy.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object ColumnBatches:
 
   def slice(batch: ColumnBatch, batchSize: Int): Vector[ColumnBatch] =
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
-    val rows = batch.length
-    if (rows <= batchSize) then Vector(batch)
+    if (batch.length <= batchSize) then Vector(batch)
+    else cuts(batch.length, batchSize).map { case (start, length) => copy(batch, start, length) }
+
+  /**
+   * Row ranges of `rows` rows cut into pieces of at most `batchSize`. `rows == 0` is one empty
+   * range. The last piece is shorter when the length does not divide evenly.
+   */
+  private[scarlet] def cuts(rows: Int, batchSize: Int): Vector[(Int, Int)] =
+    require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    if (rows <= batchSize) then Vector((0, rows))
     else
-      val pieces = (rows + batchSize - 1) / batchSize
+      val pieces = ((rows.toLong + batchSize - 1) / batchSize).toInt
       Vector.tabulate(pieces) { piece =>
         val start = piece * batchSize
-        val length = math.min(batchSize, rows - start)
-        copy(batch, start, length)
+        (start, math.min(batchSize, rows - start))
       }
 
   /**

@@ -2,7 +2,7 @@ package com.ewoodbury.scarlet.execution
 
 import scala.annotation.tailrec
 
-import com.ewoodbury.scarlet.columnar.{ColumnBatch, ColumnKernel}
+import com.ewoodbury.scarlet.columnar.{ColumnKernel, Morsel}
 import com.ewoodbury.scarlet.core.Plan
 
 /**
@@ -25,14 +25,14 @@ private[execution] object TrailingProject:
   def sum(plan: Plan[_], op: PhysicalOp): Option[Long] =
     chain(plan, op, minSteps = 5)
       .map { case (basePlan, baseOp, steps) =>
-        foldBase(basePlan, baseOp)(batch => ElementSum.sumLonger(batch, steps))
+        foldBase(basePlan, baseOp)(morsel => ElementSum.sumLonger(morsel, steps))
       }
       .orElse(sumProject(plan, op))
 
   def count(plan: Plan[_], op: PhysicalOp): Option[Long] =
     chain(plan, op, minSteps = 2)
       .map { case (basePlan, baseOp, steps) =>
-        foldBase(basePlan, baseOp)(batch => ElementSum.countLonger(batch, steps))
+        foldBase(basePlan, baseOp)(morsel => ElementSum.countLonger(morsel, steps))
       }
       .orElse(countProject(plan, op))
       .orElse(countLong(plan, op))
@@ -42,14 +42,14 @@ private[execution] object TrailingProject:
   def sumLong(plan: Plan[_], op: PhysicalOp): Option[Long] =
     longChain(plan, op, minSteps = 5)
       .map { case (basePlan, baseOp, steps) =>
-        foldBase(basePlan, baseOp)(batch => ElementSum.sumLongs(batch, steps))
+        foldBase(basePlan, baseOp)(morsel => ElementSum.sumLongs(morsel, steps))
       }
       .orElse(foldLongProject(plan, op, ProjectFold.Sum))
 
   private def countLong(plan: Plan[_], op: PhysicalOp): Option[Long] =
     longChain(plan, op, minSteps = 2)
       .map { case (basePlan, baseOp, steps) =>
-        foldBase(basePlan, baseOp)(batch => ElementSum.countLongs(batch, steps))
+        foldBase(basePlan, baseOp)(morsel => ElementSum.countLongs(morsel, steps))
       }
       .orElse(foldLongProject(plan, op, ProjectFold.Count))
 
@@ -92,8 +92,12 @@ private[execution] object TrailingProject:
 
   private def countLiteralStrings(plan: Plan[_], op: PhysicalOp): Option[Long] =
     literalChain(plan, op).map { case (basePlan, baseOp, groups) =>
-      ColumnarPlanner.foldInterpreted(basePlan, baseOp, morsels = false) { batch =>
-        ColumnKernel.countByGroups(batch, 0, groups)
+      ColumnarPlanner.foldInterpreted(basePlan, baseOp, cut = false) { morsel =>
+        require(
+          morsel.start == 0 && morsel.length == morsel.batch.length,
+          "literal count needs the whole batch",
+        )
+        ColumnKernel.countByGroups(morsel.batch, 0, groups)
       }
     }
 
@@ -136,10 +140,10 @@ private[execution] object TrailingProject:
       action: ProjectFold,
   ): Option[Long] = (plan, op) match
     case (Plan.MapOp(source, mapper), PhysicalOp.Project(child)) if ColumnarPlanner.isInt(child) =>
-      val total = ColumnarPlanner.foldInterpreted(source, child) { batch =>
+      val total = ColumnarPlanner.foldInterpreted(source, child) { morsel =>
         action match
-          case ProjectFold.Sum => ElementSum.sumMapped(batch, mapper)
-          case ProjectFold.Count => ElementSum.countMapped(batch, mapper)
+          case ProjectFold.Sum => ElementSum.sumMapped(morsel, mapper)
+          case ProjectFold.Count => ElementSum.countMapped(morsel, mapper)
       }
       Some(total)
     case _ => None
@@ -147,7 +151,7 @@ private[execution] object TrailingProject:
   private enum ProjectFold:
     case Sum, Count
 
-  private def foldBase(plan: Plan[_], op: PhysicalOp)(fn: ColumnBatch => Long): Long =
+  private def foldBase(plan: Plan[_], op: PhysicalOp)(fn: Morsel => Long): Long =
     ColumnarPlanner.foldInterpreted(plan, op)(fn)
 
   private def aligned(plan: Plan[_], op: PhysicalOp): Boolean = (plan, op) match
@@ -178,11 +182,11 @@ private[execution] object TrailingProject:
   ): Option[Long] = (plan, op) match
     case (Plan.MapOp(source, mapper), PhysicalOp.Project(child))
         if ColumnarPlanner.isLong(child) =>
-      val total = ColumnarPlanner.foldInterpreted(source, child) { batch =>
+      val total = ColumnarPlanner.foldInterpreted(source, child) { morsel =>
         val steps = List(ColumnarPlanner.ElementStep.Project(mapper))
         action match
-          case ProjectFold.Sum => ElementSum.sumLongs(batch, steps)
-          case ProjectFold.Count => ElementSum.countLongs(batch, steps)
+          case ProjectFold.Sum => ElementSum.sumLongs(morsel, steps)
+          case ProjectFold.Count => ElementSum.countLongs(morsel, steps)
       }
       Some(total)
     case _ => None

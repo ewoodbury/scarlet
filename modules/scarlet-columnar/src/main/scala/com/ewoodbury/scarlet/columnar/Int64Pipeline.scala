@@ -12,8 +12,9 @@ package com.ewoodbury.scarlet.columnar
  *
  * Sum wraps at `Long`. Null slots are skipped. A filter drops a null and does not call the
  * predicate. A project leaves a null null and does not call the function. A map-only count is the
- * batch length, including null slots, and still calls each mapper on the present rows. A failing
- * filter stops the row, so a later function does not run.
+ * scanned length, including null slots, and still calls each mapper on the present rows. A failing
+ * filter stops the row, so a later function does not run. [[sum]] and [[count]] scan
+ * `[start, start + length)`. The batch entry uses the whole column.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object Int64Pipeline:
@@ -32,32 +33,56 @@ object Int64Pipeline:
 
   /** Wrapping sum of the survivors. Does not allocate an output column. */
   def sum(batch: ColumnBatch, steps: List[Step]): Long =
-    fold(batch, steps, counting = false)
+    val column = single(batch)
+    fold(column, 0, column.length, steps, counting = false)
+
+  private[scarlet] def sum(
+      column: Int64Column,
+      start: Int,
+      length: Int,
+      steps: List[Step],
+  ): Long =
+    fold(column, start, length, steps, counting = false)
 
   /**
-   * Count without writing the chain. A filter counts survivors. A map-only chain returns
-   * `batch.length` after calling the mappers on present rows.
+   * Count without writing the chain. A filter counts survivors. A map-only chain returns the
+   * scanned length after calling the mappers on present rows.
    */
   def count(batch: ColumnBatch, steps: List[Step]): Long =
-    fold(batch, steps, counting = true)
+    val column = single(batch)
+    fold(column, 0, column.length, steps, counting = true)
+
+  private[scarlet] def count(
+      column: Int64Column,
+      start: Int,
+      length: Int,
+      steps: List[Step],
+  ): Long =
+    fold(column, start, length, steps, counting = true)
 
   /**
    * `total` is a local `Long`. The step walk is written in each row loop so nothing closes over
-   * it. A nested function that updated `total` would box that `Long` on every row.
+   * it. A nested function that updated `total` would box that `Long` on every row. Rows are
+   * absolute indexes in `[start, start + length)`.
    */
-  private def fold(batch: ColumnBatch, steps: List[Step], counting: Boolean): Long =
-    val column = single(batch)
+  private def fold(
+      column: Int64Column,
+      start: Int,
+      length: Int,
+      steps: List[Step],
+      counting: Boolean,
+  ): Long =
     val compiled = steps.toArray
     val compact = hasFilter(compiled)
-    val live = column.length
+    val end = start + length
     val values = column.values
     val words = column.validity.words
     val stepCount = compiled.length
     var total = 0L
-    var row = 0
+    var row = start
 
-    if (Validity.livePresent(column.validity, live)) then
-      while (row < live) {
+    if (Validity.rangePresent(column.validity, start, length)) then
+      while (row < end) {
         var kept = true
         var value = values(row)
         var index = 0
@@ -72,7 +97,7 @@ object Int64Pipeline:
         row += 1
       }
     else
-      while (row < live) {
+      while (row < end) {
         if (Validity.isSet(words, row)) then
           var kept = true
           var value = values(row)
@@ -87,7 +112,7 @@ object Int64Pipeline:
           else if (kept && compact) then total += 1L
         row += 1
       }
-    if (!counting || compact) then total else live.toLong
+    if (!counting || compact) then total else length.toLong
 
   private def hasFilter(steps: Array[Step]): Boolean =
     var index = 0
@@ -100,7 +125,7 @@ object Int64Pipeline:
     }
     found
 
-  private def single(batch: ColumnBatch): Int64Column =
+  private[scarlet] def single(batch: ColumnBatch): Int64Column =
     require(
       batch.columns.length == 1,
       s"long pipeline expects a single-column batch, got ${batch.columns.length}",
