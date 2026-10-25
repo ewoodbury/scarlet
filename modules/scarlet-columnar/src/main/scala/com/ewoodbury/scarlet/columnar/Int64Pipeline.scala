@@ -41,6 +41,10 @@ object Int64Pipeline:
   def count(batch: ColumnBatch, steps: List[Step]): Long =
     fold(batch, steps, counting = true)
 
+  /**
+   * `total` is a local `Long`. The step walk is written in each row loop so nothing closes over
+   * it. A nested function that updated `total` would box that `Long` on every row.
+   */
   private def fold(batch: ColumnBatch, steps: List[Step], counting: Boolean): Long =
     val column = single(batch)
     val compiled = steps.toArray
@@ -48,30 +52,39 @@ object Int64Pipeline:
     val live = column.length
     val values = column.values
     val words = column.validity.words
+    val stepCount = compiled.length
     var total = 0L
     var row = 0
 
-    def absorb(start: Long): Unit =
-      var kept = true
-      var value = start
-      var index = 0
-      while (index < compiled.length && kept) {
-        compiled(index) match
-          case Step.Filter(predicate) => kept = predicate(value)
-          case Step.Project(mapper) => value = mapper(value)
-        index += 1
-      }
-      if (kept && !counting) then total += value
-      else if (kept && compact) then total += 1L
-
     if (Validity.livePresent(column.validity, live)) then
       while (row < live) {
-        absorb(values(row))
+        var kept = true
+        var value = values(row)
+        var index = 0
+        while (index < stepCount && kept) {
+          compiled(index) match
+            case Step.Filter(predicate) => kept = predicate(value)
+            case Step.Project(mapper) => value = mapper(value)
+          index += 1
+        }
+        if (kept && !counting) then total += value
+        else if (kept && compact) then total += 1L
         row += 1
       }
     else
       while (row < live) {
-        if (Validity.isSet(words, row)) then absorb(values(row))
+        if (Validity.isSet(words, row)) then
+          var kept = true
+          var value = values(row)
+          var index = 0
+          while (index < stepCount && kept) {
+            compiled(index) match
+              case Step.Filter(predicate) => kept = predicate(value)
+              case Step.Project(mapper) => value = mapper(value)
+            index += 1
+          }
+          if (kept && !counting) then total += value
+          else if (kept && compact) then total += 1L
         row += 1
       }
     if (!counting || compact) then total else live.toLong
