@@ -24,9 +24,12 @@ import java.util.Arrays
  *
  * One open-addressed table serves every measure set. A batch-sized table is at least twice the row
  * count, so one batch does not rehash. The range scans reuse one small table per worker and grow
- * it, and `grow` keeps first-seen order. The kernel drops that table when the action returns. A
- * shorter capacity exists so tests can force `grow`. Loops keep the row index in a `var` so the
- * bodies stay allocation-free, matching `ColumnKernel`.
+ * it, and `grow` keeps first-seen order. [[GroupedSumKernel]] sums a bounded key range through
+ * [[DenseSum]] on this same worker, and leaves this table for a wide range or a pair step that can
+ * rewrite the key. Direct-index partials come out in ascending key order. This table stays
+ * first-seen. The kernel drops both when the action returns. A shorter capacity exists so tests
+ * can force `grow`. Loops keep the row index in a `var` so the bodies stay allocation-free,
+ * matching `ColumnKernel`.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object HashAggregate:
@@ -149,6 +152,79 @@ object HashAggregate:
         if (dense) then scanSumDenseSteps(table, keys, values, steps, slot, start, end)
         else scanSumSparseSteps(table, keys, values, steps, slot, start, end)
     }
+
+  /**
+   * Sums a present range whose keys all lie in `[0, directLimit)`. Returns `None` when a key is
+   * outside that prefix, without publishing, so the caller can classify. A hit emits ascending
+   * keys. An index that passed that check and still falls outside the table is a bug: the slots
+   * already written are cleared and the exception propagates.
+   */
+  private[columnar] def tryDirectSum(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      denseCap: Int,
+  ): Option[ColumnBatch] =
+    val limit = DenseSum.directLimit(denseCap)
+    if (limit <= 0 || length <= 0) then None
+    else
+      checkRange(keys, values, start, length)
+      val dense = sumWorkers.get().dense
+      dense.prepareDirect(limit)
+      val accepted =
+        try dense.addDirect(keys, values, start, start + length)
+        catch
+          case ex: ArrayIndexOutOfBoundsException =>
+            dense.abandonDirect()
+            throw ex
+      if (accepted) then Some(dense.compactDirect())
+      else
+        dense.abandonDirect()
+        None
+
+  /**
+   * Sums `[start, start + length)` into the worker's direct-index table. `minKey` and `keyRange`
+   * are the classified window. A key outside that window fails the scan. The table is cleared for
+   * the next range on this thread, and [[releaseSumWorkers]] drops it.
+   */
+  private[columnar] def indexSumRange(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      minKey: Int,
+      keyRange: Int,
+      columnsPresent: Boolean,
+  ): ColumnBatch =
+    checkRange(keys, values, start, length)
+    val dense = sumWorkers.get().dense
+    dense.prepare(minKey, keyRange)
+    if (length != 0) then
+      val end = start + length
+      if (columnsPresent) then dense.addTrusted(keys, values, start, end)
+      else dense.scanPlain(keys, values, start, end)
+    dense.compact()
+
+  /**
+   * Same window as [[indexSumRange]], after `keep` and `map`. A null value is dropped before
+   * `keep`.
+   */
+  private[columnar] def indexSumRange(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      minKey: Int,
+      keyRange: Int,
+      keep: ColumnKernel.Int32Predicate,
+      map: ColumnKernel.Int32Map,
+  ): ColumnBatch =
+    checkRange(keys, values, start, length)
+    val dense = sumWorkers.get().dense
+    dense.prepare(minKey, keyRange)
+    if (length != 0) then dense.scanFiltered(keys, values, start, start + length, keep, map)
+    dense.compact()
 
   /**
    * Sums an `Int64` column into an `Int64` sum. This merges one batch of partial sums, and partial
@@ -289,6 +365,7 @@ object HashAggregate:
   private final class SumWorker:
     val table: GroupTable = new GroupTable(SumTableStart, SumOnly)
     val slot: PairSlot = new PairSlot
+    val dense: DenseSum.Accumulator = new DenseSum.Accumulator
 
   private val sumWorkers: ThreadLocal[SumWorker] = new ThreadLocal[SumWorker]:
     override def initialValue(): SumWorker = new SumWorker
@@ -338,9 +415,9 @@ object HashAggregate:
       else scanSumLongSparse(table, keys, values)
 
   /**
-   * Drops this thread's reused sum table. [[GroupedSumKernel]] calls this when the action returns.
-   * A range runs on the calling thread when `parallelism` is 1 or there is one morsel, and that
-   * thread outlives the action.
+   * Drops this thread's reused sum table and its direct-index accumulator. [[GroupedSumKernel]]
+   * calls this when the action returns. A range runs on the calling thread when `parallelism` is 1
+   * or there is one morsel, and that thread outlives the action.
    */
   private[columnar] def releaseSumWorkers(): Unit =
     sumWorkers.remove()
