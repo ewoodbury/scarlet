@@ -125,6 +125,69 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     columnar(DistCollection(Seq("a", "bb", "c"), 2).filter(_.length > 1).count()) shouldBe 1L
   }
 
+  it should "count dictionary literal filters from the code mask" in {
+    ScarletConf.set(
+      originalConf.copy(columnarExecution = true, columnarBatchSize = 2, threadPoolSize = 4),
+    )
+    val rows = stringsWithNull()
+
+    def source = DistCollection(rows, 1)
+    def single = source.filterStringEquals("US")
+    def several = source.filterStringIn("US", "CA", "MX")
+    def absent = source.filterStringIn("US", "ZZ")
+    def nothing = source.filterStringEquals("ZZ")
+    def everything = source.filterStringIn("US", "CA", "GB")
+    def contradicted = source.filterStringEquals("US").filterStringEquals("CA")
+    def left = source.filterStringEquals("US").filterStringIn("CA", "US")
+    def right = source.filterStringIn("US", "CA").filterStringEquals("US")
+    def blocked = source.filter(keepsLongOrNull).filterStringEquals("US")
+    def mapped = source.filterStringEquals("US").map((value: String) => value)
+
+    sameCount(single)
+    sameCount(several)
+    sameCount(absent)
+    sameCount(nothing)
+    sameCount(everything)
+    sameCount(contradicted)
+    sameCount(left)
+    sameCount(right)
+    left.count() shouldBe right.count()
+    sameCount(blocked)
+    blocked.count() shouldBe 0L
+    sameCount(mapped)
+
+    val hits = new AtomicInteger
+    val counted = source.filterStringEquals("US").map { (value: String) =>
+      hits.incrementAndGet()
+      value
+    }
+    counted.count() shouldBe 3L
+    hits.get() shouldBe 3
+
+    ColumnarPlanner.partitioning(single.plan).isDefined shouldBe true
+    ColumnarPlanner.tryCount(single.plan) shouldBe Some(3L)
+    ColumnarPlanner.tryCount(several.plan) shouldBe Some(4L)
+    ColumnarPlanner.tryCount(nothing.plan) shouldBe Some(0L)
+    ColumnarPlanner.tryCount(everything.plan) shouldBe Some(5L)
+
+    ScarletConf.set(
+      originalConf.copy(columnarExecution = true, columnarBatchSize = 2, threadPoolSize = 4),
+    )
+    ColumnMetrics.withSink(new CountingSink) {
+      single.count() shouldBe 3L
+      ColumnMetrics.batchCount shouldBe 1L
+    }
+
+    val empty = DistCollection.ofStrings(Array.empty[String], 3).filterStringEquals("US")
+    empty.count() shouldBe 0L
+    ColumnarPlanner.tryCount(empty.plan) shouldBe Some(0L)
+    ColumnarPlanner.partitioning(empty.plan).isDefined shouldBe true
+
+    val gapped = DistCollection.ofStrings(Array("a", "b", "a"), 4).filterStringEquals("a")
+    gapped.count() shouldBe 2L
+    ColumnarPlanner.tryCount(gapped.plan) shouldBe Some(2L)
+  }
+
   it should "filter dictionary codes without intermediate batches" in {
     ScarletConf.set(
       originalConf.copy(columnarExecution = true, columnarBatchSize = 16, threadPoolSize = 1),
@@ -820,6 +883,21 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
       assertColumnar(empty.keys, width = 1)
     }
   }
+
+  @SuppressWarnings(Array("org.wartremover.warts.Equals", "org.wartremover.warts.Null"))
+  private def keepsLongOrNull(value: String): Boolean =
+    (value eq null) || value.length > 2
+
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def stringsWithNull(): Seq[String] =
+    Seq("US", "CA", null, "US", "GB", "US")
+
+  private def sameCount(collection: DistCollection[_]): Unit =
+    val expected = row(collection.count())
+    columnar {
+      collection.count() shouldBe expected
+      ColumnarPlanner.tryCount(collection.plan) shouldBe Some(expected)
+    }
 
   private def assertNoColumnarWork(): Unit =
     ColumnMetrics.batchCount shouldBe 0L

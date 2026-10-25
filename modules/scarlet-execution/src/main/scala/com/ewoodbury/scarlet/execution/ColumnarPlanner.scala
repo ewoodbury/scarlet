@@ -41,33 +41,34 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * column that reaches the element pipeline throws `IllegalStateException`, and [[tryRun]] catches
  * only `ClassCastException`. A `Boolean` map is refused without being called. `Function1` has no
  * `apply$mcZZ$sp`, so `Boolean => Boolean` cannot be distinguished from `Boolean => Int`. Boolean
- * has no sum. Count reads batch lengths. Take decodes a prefix. Pair filters, aggregates, and
- * joins stay one node per operator. Narrow map and filter keep input order and the input partition
- * count. `Double` and `String` select filter and map only. A filter over an int join result is
- * columnar only for explicit key, left-value, and right-value filters; general tuple predicates
- * stay on the row path. `keys` and `values` of an int pair are that column. The arrays are shared:
- * a published column is not mutated, so a view is cheaper than a copy and still correct.
- * `mapValues` lowers only when the function declares an unboxed `Int` result and every other
- * `apply` is an erasure bridge. A wider primitive, a reference result, or an overloaded `apply`
- * stays on the row path. That check reads the method descriptor and does not call the function.
- * `getDeclaredMethods` does not see an inherited `apply`, so that function stays on the row path
- * too. `reduceByKey` applies the user's function and wraps at `Int`. A `join` with no hint, or
- * with an explicit shuffle-hash hint, hash-partitions both sides and probes one bucket at a time.
- * Sort-merge and broadcast are not implemented: those hints make `lower` return `None`, so the
- * plan stays on the row path. Output width for an accepted join or aggregate is
- * `defaultShufflePartitions`. [[tryCount]] and [[trySumInt]] fold an int filter/map chain that
- * starts at a scan or at `keys` or `values`, including an int `mapValues`, and do not write that
- * chain. Sum folds one trailing project and chains longer than four. Count folds those and chains
- * of two to four steps. [[trySumLong]] folds a long filter/map chain the same way, and the sum
- * wraps. [[trySumDouble]] folds at most four steps. Sum of `keys`, `values`, or an int `mapValues`
- * with no further element chain reads the pair column in that morsel loop and does not build the
- * projection. [[tryGroupedSum]] runs [[ColumnPipeline.sumByKey]] on a typed pair source and folds
- * the `Int64` group sums. A preceding `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is
- * applied inside that partial scan, so the action does not build those pairs. [[groupedSumPeel]]
- * labels those walked steps. It is not an action shape and not a physical node. A source
- * descriptor supplies the type when all partitions are empty. It does not decode. `collect` still
- * does. A pair `MapOp` stays on the row path for `collect` and `reduceByKey`, and [[partitioning]]
- * reports no layout for it.
+ * has no sum. Count reads batch lengths. A string scan under only dictionary literal filters
+ * counts codes from that mask and does not write the filtered column. Any other string step still
+ * writes its column. Take decodes a prefix. Pair filters, aggregates, and joins stay one node per
+ * operator. Narrow map and filter keep input order and the input partition count. `Double` and
+ * `String` select filter and map only. A filter over an int join result is columnar only for
+ * explicit key, left-value, and right-value filters; general tuple predicates stay on the row
+ * path. `keys` and `values` of an int pair are that column. The arrays are shared: a published
+ * column is not mutated, so a view is cheaper than a copy and still correct. `mapValues` lowers
+ * only when the function declares an unboxed `Int` result and every other `apply` is an erasure
+ * bridge. A wider primitive, a reference result, or an overloaded `apply` stays on the row path.
+ * That check reads the method descriptor and does not call the function. `getDeclaredMethods` does
+ * not see an inherited `apply`, so that function stays on the row path too. `reduceByKey` applies
+ * the user's function and wraps at `Int`. A `join` with no hint, or with an explicit shuffle-hash
+ * hint, hash-partitions both sides and probes one bucket at a time. Sort-merge and broadcast are
+ * not implemented: those hints make `lower` return `None`, so the plan stays on the row path.
+ * Output width for an accepted join or aggregate is `defaultShufflePartitions`. [[tryCount]] and
+ * [[trySumInt]] fold an int filter/map chain that starts at a scan or at `keys` or `values`,
+ * including an int `mapValues`, and do not write that chain. Sum folds one trailing project and
+ * chains longer than four. Count folds those and chains of two to four steps. [[trySumLong]] folds
+ * a long filter/map chain the same way, and the sum wraps. [[trySumDouble]] folds at most four
+ * steps. Sum of `keys`, `values`, or an int `mapValues` with no further element chain reads the
+ * pair column in that morsel loop and does not build the projection. [[tryGroupedSum]] runs
+ * [[ColumnPipeline.sumByKey]] on a typed pair source and folds the `Int64` group sums. A preceding
+ * `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that partial scan,
+ * so the action does not build those pairs. [[groupedSumPeel]] labels those walked steps. It is
+ * not an action shape and not a physical node. A source descriptor supplies the type when all
+ * partitions are empty. It does not decode. `collect` still does. A pair `MapOp` stays on the row
+ * path for `collect` and `reduceByKey`, and [[partitioning]] reports no layout for it.
  *
  * An [[com.ewoodbury.scarlet.core.IntArrays]], [[com.ewoodbury.scarlet.core.LongArrays]],
  * [[com.ewoodbury.scarlet.core.BoolArrays]], [[com.ewoodbury.scarlet.core.DoubleArrays]],
@@ -188,14 +189,75 @@ object ColumnarPlanner:
 
   /**
    * Row count of a columnar plan. `None` means the row path. This reads batch lengths and does not
-   * decode.
+   * decode. A string scan followed only by dictionary literal filters counts codes against the
+   * intersected mask and does not write a column. A map, or a filter that is not a recognized
+   * literal list, still uses the finished batches.
    */
   def tryCount(plan: Plan[_]): Option[Long] =
     accepted(plan) match
       case None => None
       case Some(op) =>
-        try TrailingProject.count(plan, op).orElse(finishedCount(plan, op))
+        try
+          TrailingProject
+            .count(plan, op)
+            .orElse(stringLiteralCount(plan, op))
+            .orElse(finishedCount(plan, op))
         catch case _: ClassCastException => None
+
+  /**
+   * String source, then one or more `filterStringEquals` / `filterStringIn` filters, then count.
+   * `None` means some other step is present and the caller should read finished batch lengths.
+   * Masks are intersected per batch, so filter order does not change the count. A null code is not
+   * a hit.
+   */
+  private def stringLiteralCount(plan: Plan[_], op: PhysicalOp): Option[Long] =
+    literalStringFilters(plan) match
+      case None => None
+      case Some((source, groups)) =>
+        if (!stringLiteralTree(op, groups.length)) then
+          throw new IllegalStateException(
+            "dictionary string count does not match the physical tree",
+          )
+        else Some(countLiteralStrings(source, groups))
+
+  private def literalStringFilters(plan: Plan[_]): Option[(Plan.Source[_], List[Vector[String]])] =
+    val (base, steps) = elementSteps(plan, Int.MaxValue)
+    base match
+      case source: Plan.Source[_] if steps.nonEmpty =>
+        gatherLiteralFilters(steps).map(groups => (source, groups))
+      case _ => None
+
+  private def gatherLiteralFilters(steps: List[ElementStep]): Option[List[Vector[String]]] =
+    def gather(
+        remaining: List[ElementStep],
+        acc: List[Vector[String]],
+    ): Option[List[Vector[String]]] =
+      remaining match
+        case Nil => Some(acc.reverse)
+        case ElementStep.Filter(predicate) :: tail =>
+          dictionaryStringLiterals(predicate) match
+            case Some(literals) => gather(tail, literals :: acc)
+            case None => None
+        case ElementStep.Project(_) :: _ => None
+
+    gather(steps, Nil)
+
+  private def stringLiteralTree(op: PhysicalOp, expected: Int): Boolean =
+    @tailrec
+    def nested(current: PhysicalOp, seen: Int): Boolean =
+      current match
+        case PhysicalOp.Filter(child, PhysicalOp.Slot.Element) => nested(child, seen + 1)
+        case PhysicalOp.Scan(PhysicalOp.Kind.Strings, _) => seen == expected
+        case _ => false
+
+    nested(op, 0)
+
+  private def countLiteralStrings(source: Plan.Source[_], groups: List[Vector[String]]): Long =
+    val scan = PhysicalOp.Scan(PhysicalOp.Kind.Strings, source.partitions)
+    val batches = ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, scan))
+    batches.foldLeft(0L) { (total, batch) =>
+      total + ColumnKernel.countByValues(batch, 0, groups)
+    }
 
   private def finishedCount(plan: Plan[_], op: PhysicalOp): Option[Long] =
     Some(

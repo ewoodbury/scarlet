@@ -18,6 +18,9 @@ package com.ewoodbury.scarlet.columnar
  * Primitive loops keep the row index in a `var` so the bodies stay allocation-free. Each primitive
  * has its own loop so the copy stays monomorphic. Fused runs of two to four filters and projects
  * are [[Int32Pipeline]], [[Int64Pipeline]], [[Float64Pipeline]], and [[Utf8Pipeline]].
+ *
+ * [[countByValues]] resolves the same literal mask as [[filterUtf8ByValues]] and counts codes in
+ * place. It does not build a selection or publish a column.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object ColumnKernel:
@@ -117,6 +120,29 @@ object ColumnKernel:
       val scanned = scanInt32(codeColumn, keep, record = true, selection = selection)
       assemble(batch, ordinal, filteredUtf8(column, scanned, ordinal), selection, scanned.count)
 
+  /**
+   * Counts rows whose code is selected by `values`. The mask matches [[filterUtf8ByValues]]. A
+   * null slot is skipped. A code of `-1`, or any other code outside the dictionary, is not
+   * counted. A literal that is not in the dictionary adds no hit.
+   */
+  def countByValues(batch: ColumnBatch, ordinal: Int, values: Iterable[String]): Long =
+    countByValues(batch, ordinal, Seq(values))
+
+  /**
+   * Counts rows selected by every literal group. The masks are intersected, so group order does
+   * not change the count. An empty group selects nothing. The scan stays on the caller thread.
+   */
+  private[scarlet] def countByValues(
+      batch: ColumnBatch,
+      ordinal: Int,
+      groups: Seq[Iterable[String]],
+  ): Long =
+    if (groups.isEmpty) then 0L
+    else
+      val column = asUtf8(columnAt(batch, ordinal), ordinal)
+      val mask = intersectedCodes(column, groups)
+      if (selectsAny(mask)) then countMasked(column, mask) else 0L
+
   private def literalCodes(column: DictUtf8Column, values: Iterable[String]): Array[Boolean] =
     val mask = new Array[Boolean](column.dictionary.length)
     values.iterator.foreach { value =>
@@ -124,6 +150,65 @@ object ColumnKernel:
       if (code >= 0) then mask(code) = true
     }
     mask
+
+  /** `groups` is non-empty. Each mask has one bit per dictionary entry. */
+  private def intersectedCodes(
+      column: DictUtf8Column,
+      groups: Seq[Iterable[String]],
+  ): Array[Boolean] =
+    val pending = groups.iterator
+    val mask = literalCodes(column, pending.next())
+    while (pending.hasNext) {
+      val next = literalCodes(column, pending.next())
+      var code = 0
+      while (code < mask.length) {
+        if (mask(code) && !next(code)) then mask(code) = false
+        code += 1
+      }
+    }
+    mask
+
+  private def selectsAny(mask: Array[Boolean]): Boolean =
+    var index = 0
+    var found = false
+    while (index < mask.length && !found) {
+      found = mask(index)
+      index += 1
+    }
+    found
+
+  private def countMasked(column: DictUtf8Column, mask: Array[Boolean]): Long =
+    val live = column.length
+    if (live == 0) then 0L
+    else countRange(column, mask, Validity.livePresent(column.validity, live), 0, live)
+
+  private def countRange(
+      column: DictUtf8Column,
+      mask: Array[Boolean],
+      dense: Boolean,
+      start: Int,
+      length: Int,
+  ): Long =
+    val codes = column.codes
+    val limit = mask.length
+    val end = start + length
+    var total = 0L
+    var row = start
+    if (dense) then
+      while (row < end) {
+        val code = codes(row)
+        if (code >= 0 && code < limit && mask(code)) then total += 1L
+        row += 1
+      }
+    else
+      val words = column.validity.words
+      while (row < end) {
+        if (Validity.isSet(words, row)) then
+          val code = codes(row)
+          if (code >= 0 && code < limit && mask(code)) then total += 1L
+        row += 1
+      }
+    total
 
   private def filteredUtf8(
       column: DictUtf8Column,
