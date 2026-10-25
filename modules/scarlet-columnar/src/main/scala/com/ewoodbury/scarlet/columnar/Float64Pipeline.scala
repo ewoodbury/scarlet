@@ -5,27 +5,29 @@ import ColumnKernel.{Float64Map, Float64Predicate}
 /**
  * One loop per double filter/project pattern of length 2–4.
  *
- * A filter drops a null without calling the predicate. A project skips a null and stores 0. When
- * every live row is present, the loop does not test the validity bit. The step returns whether the
- * row survives, so a missing keep decision does not compile.
+ * The scan is `[start, start + length)`. The output covers that range. A filter drops a null
+ * without calling the predicate. A project skips a null and stores 0. When every row of the range
+ * is present, the loop does not test the validity bit. A whole batch is
+ * [[Morsel]]`(batch, 0, batch.length)`. That map reuses the input validity bitmap. The step
+ * returns whether the row survives, so a missing keep decision does not compile.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object Float64Pipeline:
 
   def FF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Predicate,
       second: Float64Predicate,
   ): ColumnBatch =
-    fuse(batch, true, (value, gate) => first(value) && second(value) && accept(gate, value))
+    fuse(morsel, true, (value, gate) => first(value) && second(value) && accept(gate, value))
 
   def PF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Map,
       second: Float64Predicate,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) => {
         val mapped0 = first(value)
@@ -34,39 +36,39 @@ object Float64Pipeline:
     )
 
   def FP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Predicate,
       second: Float64Map,
   ): ColumnBatch =
-    fuse(batch, true, (value, gate) => first(value) && accept(gate, second(value)))
+    fuse(morsel, true, (value, gate) => first(value) && accept(gate, second(value)))
 
   def PP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Map,
       second: Float64Map,
   ): ColumnBatch =
-    fuse(batch, false, (value, gate) => accept(gate, second(first(value))))
+    fuse(morsel, false, (value, gate) => accept(gate, second(first(value))))
 
   def FFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Predicate,
       second: Float64Predicate,
       third: Float64Predicate,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) => first(value) && second(value) && third(value) && accept(gate, value),
     )
 
   def PFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Map,
       second: Float64Predicate,
       third: Float64Predicate,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) => {
         val mapped0 = first(value)
@@ -75,13 +77,13 @@ object Float64Pipeline:
     )
 
   def FPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Predicate,
       second: Float64Map,
       third: Float64Predicate,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) =>
         first(value) &&
@@ -92,13 +94,13 @@ object Float64Pipeline:
     )
 
   def PPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Map,
       second: Float64Map,
       third: Float64Predicate,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) => {
         val mapped1 = second(first(value))
@@ -107,21 +109,25 @@ object Float64Pipeline:
     )
 
   def FFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Predicate,
       second: Float64Predicate,
       third: Float64Map,
   ): ColumnBatch =
-    fuse(batch, true, (value, gate) => first(value) && second(value) && accept(gate, third(value)))
+    fuse(
+      morsel,
+      true,
+      (value, gate) => first(value) && second(value) && accept(gate, third(value)),
+    )
 
   def PFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Map,
       second: Float64Predicate,
       third: Float64Map,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) => {
         val mapped0 = first(value)
@@ -130,44 +136,44 @@ object Float64Pipeline:
     )
 
   def FPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Predicate,
       second: Float64Map,
       third: Float64Map,
   ): ColumnBatch =
-    fuse(batch, true, (value, gate) => first(value) && accept(gate, third(second(value))))
+    fuse(morsel, true, (value, gate) => first(value) && accept(gate, third(second(value))))
 
   def PPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Map,
       second: Float64Map,
       third: Float64Map,
   ): ColumnBatch =
-    fuse(batch, false, (value, gate) => accept(gate, third(second(first(value)))))
+    fuse(morsel, false, (value, gate) => accept(gate, third(second(first(value)))))
 
   def FFFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Predicate,
       second: Float64Predicate,
       third: Float64Predicate,
       fourth: Float64Predicate,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) =>
         first(value) && second(value) && third(value) && fourth(value) && accept(gate, value),
     )
 
   def PFFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Map,
       second: Float64Predicate,
       third: Float64Predicate,
       fourth: Float64Predicate,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) => {
         val mapped0 = first(value)
@@ -176,14 +182,14 @@ object Float64Pipeline:
     )
 
   def FPFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Predicate,
       second: Float64Map,
       third: Float64Predicate,
       fourth: Float64Predicate,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) =>
         first(value) &&
@@ -194,14 +200,14 @@ object Float64Pipeline:
     )
 
   def PPFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Map,
       second: Float64Map,
       third: Float64Predicate,
       fourth: Float64Predicate,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) => {
         val mapped1 = second(first(value))
@@ -210,14 +216,14 @@ object Float64Pipeline:
     )
 
   def FFPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Predicate,
       second: Float64Predicate,
       third: Float64Map,
       fourth: Float64Predicate,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) =>
         first(value) &&
@@ -229,14 +235,14 @@ object Float64Pipeline:
     )
 
   def PFPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Map,
       second: Float64Predicate,
       third: Float64Map,
       fourth: Float64Predicate,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) => {
         val mapped0 = first(value)
@@ -249,14 +255,14 @@ object Float64Pipeline:
     )
 
   def FPPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Predicate,
       second: Float64Map,
       third: Float64Map,
       fourth: Float64Predicate,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) =>
         first(value) &&
@@ -267,14 +273,14 @@ object Float64Pipeline:
     )
 
   def PPPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Map,
       second: Float64Map,
       third: Float64Map,
       fourth: Float64Predicate,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) => {
         val mapped2 = third(second(first(value)))
@@ -283,27 +289,27 @@ object Float64Pipeline:
     )
 
   def FFFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Predicate,
       second: Float64Predicate,
       third: Float64Predicate,
       fourth: Float64Map,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) => first(value) && second(value) && third(value) && accept(gate, fourth(value)),
     )
 
   def PFFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Map,
       second: Float64Predicate,
       third: Float64Predicate,
       fourth: Float64Map,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) => {
         val mapped0 = first(value)
@@ -312,14 +318,14 @@ object Float64Pipeline:
     )
 
   def FPFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Predicate,
       second: Float64Map,
       third: Float64Predicate,
       fourth: Float64Map,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) =>
         first(value) &&
@@ -330,14 +336,14 @@ object Float64Pipeline:
     )
 
   def PPFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Map,
       second: Float64Map,
       third: Float64Predicate,
       fourth: Float64Map,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) => {
         val mapped1 = second(first(value))
@@ -346,27 +352,27 @@ object Float64Pipeline:
     )
 
   def FFPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Predicate,
       second: Float64Predicate,
       third: Float64Map,
       fourth: Float64Map,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) => first(value) && second(value) && accept(gate, fourth(third(value))),
     )
 
   def PFPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Map,
       second: Float64Predicate,
       third: Float64Map,
       fourth: Float64Map,
   ): ColumnBatch =
     fuse(
-      batch,
+      morsel,
       true,
       (value, gate) => {
         val mapped0 = first(value)
@@ -375,22 +381,22 @@ object Float64Pipeline:
     )
 
   def FPPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Predicate,
       second: Float64Map,
       third: Float64Map,
       fourth: Float64Map,
   ): ColumnBatch =
-    fuse(batch, true, (value, gate) => first(value) && accept(gate, fourth(third(second(value)))))
+    fuse(morsel, true, (value, gate) => first(value) && accept(gate, fourth(third(second(value)))))
 
   def PPPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Float64Map,
       second: Float64Map,
       third: Float64Map,
       fourth: Float64Map,
   ): ColumnBatch =
-    fuse(batch, false, (value, gate) => accept(gate, fourth(third(second(first(value))))))
+    fuse(morsel, false, (value, gate) => accept(gate, fourth(third(second(first(value))))))
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private final class Gate:
@@ -832,46 +838,96 @@ object Float64Pipeline:
     total
 
   private inline def fuse(
-      batch: ColumnBatch,
+      morsel: Morsel,
       inline compact: Boolean,
       inline step: (Double, Gate) => Boolean,
   ): ColumnBatch =
+    val batch = morsel.batch
     require(
       batch.columns.length == 1,
       s"float pipeline expects a single-column batch, got ${batch.columns.length}",
     )
     val column = ColumnKernel.asFloat64(ColumnKernel.columnAt(batch, 0), 0)
-    val live = column.length
+    val start = morsel.start
+    val length = morsel.length
+    Ranges.check(start, length, column.length)
     val in = column.values
     val words = column.validity.words
-    val capacity = inline if (compact) then live else in.length
-    val out = new Array[Double](capacity)
+    val end = start + length
     val gate = new Gate
-    var written = 0
-    var row = 0
-    if (Validity.livePresent(column.validity, live)) then
-      while (row < live) {
-        val kept = step(in(row), gate)
-        inline if (compact) then
+    val dense = Validity.rangePresent(column.validity, start, length)
+    inline if (compact) then
+      val out = new Array[Double](length)
+      var written = 0
+      var row = start
+      if (dense) then
+        while (row < end) {
+          val kept = step(in(row), gate)
           if (kept) then
             out(written) = gate.value
             written += 1
-        else if (kept) then out(row) = gate.value
-        row += 1
-      }
-    else
-      while (row < live) {
-        if (Validity.isSet(words, row)) then
-          val kept = step(in(row), gate)
-          inline if (compact) then
+          row += 1
+        }
+      else
+        while (row < end) {
+          if (Validity.isSet(words, row)) then
+            val kept = step(in(row), gate)
             if (kept) then
               out(written) = gate.value
               written += 1
-          else if (kept) then out(row) = gate.value
-        row += 1
-      }
-    val length = inline if (compact) then written else live
-    val validity =
-      inline if (compact) then Validity.prefixValid(capacity, written) else column.validity
-    val result = Float64Column.of(out, validity, length)
-    new ColumnBatch(batch.schema, Vector(result), length)
+          row += 1
+        }
+      publish(batch, out, Validity.prefixValid(length, written), written)
+    else
+      val wholeColumn = start == 0 && length == column.length
+      val capacity = if (wholeColumn) then in.length else length
+      val out = new Array[Double](capacity)
+      if (wholeColumn) then
+        var row = start
+        if (dense) then
+          while (row < end) {
+            val kept = step(in(row), gate)
+            if (kept) then out(row) = gate.value
+            row += 1
+          }
+        else
+          while (row < end) {
+            if (Validity.isSet(words, row)) then
+              val kept = step(in(row), gate)
+              if (kept) then out(row) = gate.value
+            row += 1
+          }
+        publish(batch, out, column.validity, length)
+      else if (dense) then
+        var offset = 0
+        var row = start
+        while (row < end) {
+          val kept = step(in(row), gate)
+          if (kept) then out(offset) = gate.value
+          offset += 1
+          row += 1
+        }
+        publish(batch, out, Validity.allValid(length), length)
+      else
+        val dstWords = Validity.allocate(length)
+        var offset = 0
+        var row = start
+        while (row < end) {
+          if (Validity.isSet(words, row)) then
+            val kept = step(in(row), gate)
+            if (kept) then
+              out(offset) = gate.value
+              Validity.setBit(dstWords, offset)
+          offset += 1
+          row += 1
+        }
+        publish(batch, out, Validity.fromWords(dstWords, length), length)
+
+  private def publish(
+      batch: ColumnBatch,
+      out: Array[Double],
+      validity: Validity,
+      length: Int,
+  ): ColumnBatch =
+    val column = Float64Column.of(out, validity, length)
+    new ColumnBatch(batch.schema, Vector(column), length)

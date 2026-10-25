@@ -6,11 +6,12 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 /**
- * Range scans for float, string, and boolean filters. A window can start past row 0, and a tail
- * can be shorter than the batch. Nulls before the window are not visited. A float or bool null
- * inside the window is not passed to the predicate. A string predicate sees every cell in the
- * window, including a null and an empty string. The output column is sized to the range. Other
- * columns are compacted by absolute row index. A full-range scan matches the whole-batch call.
+ * Range scans for float, string, and boolean filters, and for float and string projects. A window
+ * can start past row 0, and a tail can be shorter than the batch. Nulls before the window are not
+ * visited. A float or bool null inside the window is not passed to the predicate or the mapper. A
+ * string predicate or project sees every cell in the window, including a null and an empty string.
+ * The output column is sized to the range. Other columns are compacted by absolute row index. A
+ * full-range scan matches the whole-batch call.
  */
 class TestColumnFilterRange extends AnyFlatSpec with Matchers:
 
@@ -597,6 +598,355 @@ class TestColumnFilterRange extends AnyFlatSpec with Matchers:
     BatchCodec.decodeBools(filtered) shouldBe Seq.empty[Boolean]
     filtered.schema shouldBe batch.schema
     bool(filtered).values should not be theSameInstanceAs(bool(batch).values)
+  }
+
+  "a float project range" should "map a window past row 0 and leave nulls uncalled" in {
+    val stored = Array(poison, 1.0, poison, payloadNaN, negativeZero, 4.0, poison, -3.0, 7.0)
+    val present = Array(false, true, false, true, true, true, false, true, true)
+    val start = 3
+    val length = 3
+    val batch = nullableFloats(stored, present)
+    val calls = new AtomicInteger
+    val mapped = ColumnKernel.projectFloat64(
+      batch,
+      0,
+      start,
+      length,
+      value => {
+        calls.incrementAndGet()
+        if (value == poison) then throw new IllegalStateException("mapper saw a null slot")
+        value + 1.0
+      },
+    )
+
+    calls.get() shouldBe 3
+    mapped.length shouldBe length
+    float64(mapped).values.length shouldBe length
+    float64(mapped).validity.capacity shouldBe length
+    float64(mapped).isValid(0) shouldBe true
+    float64(mapped).isValid(1) shouldBe true
+    float64(mapped).isValid(2) shouldBe true
+    bits(float64(mapped).values(0)) shouldBe bits(payloadNaN + 1.0)
+    bits(float64(mapped).values(1)) shouldBe bits(negativeZero + 1.0)
+    float64(mapped).values(2) shouldBe 5.0
+    float64(mapped).values should not be theSameInstanceAs(stored)
+    float64(mapped).validity should not be theSameInstanceAs(float64(batch).validity)
+    stored(0) shouldBe poison
+    bits(stored(3)) shouldBe bits(payloadNaN)
+    bits(stored(4)) shouldBe bits(negativeZero)
+
+    val kept = ColumnKernel.projectFloat64(batch, 0, start, length, value => value)
+    bits(float64(kept).values(0)) shouldBe bits(payloadNaN)
+    bits(float64(kept).values(1)) shouldBe bits(negativeZero)
+    float64(kept).values(2) shouldBe 4.0
+
+    val nullCalls = new AtomicInteger
+    val nullOnly = ColumnKernel.projectFloat64(
+      batch,
+      0,
+      2,
+      1,
+      value => {
+        nullCalls.incrementAndGet()
+        value
+      },
+    )
+    nullCalls.get() shouldBe 0
+    nullOnly.length shouldBe 1
+    float64(nullOnly).isValid(0) shouldBe false
+    float64(nullOnly).values(0) shouldBe 0.0
+  }
+
+  it should "scan a tail shorter than the batch" in {
+    val batch = BatchCodec.float64s((1 to 10).map(_.toDouble))
+    val calls = new AtomicInteger
+    val mapped = ColumnKernel.projectFloat64(
+      batch,
+      0,
+      8,
+      2,
+      value => {
+        calls.incrementAndGet()
+        value + 1.0
+      },
+    )
+
+    calls.get() shouldBe 2
+    mapped.length shouldBe 2
+    BatchCodec.decodeFloat64s(mapped) shouldBe Seq(10.0, 11.0)
+    float64(mapped).values.length shouldBe 2
+    float64(mapped).validity.capacity shouldBe 2
+    float64(mapped).values should not be theSameInstanceAs(float64(batch).values)
+  }
+
+  it should "return an empty batch for an empty range and call nothing" in {
+    val batch = BatchCodec.float64s(Seq(1.0, 2.0, 3.0))
+    val calls = new AtomicInteger
+    val mapped = ColumnKernel.projectFloat64(
+      batch,
+      0,
+      1,
+      0,
+      _ => {
+        calls.incrementAndGet()
+        0.0
+      },
+    )
+
+    calls.get() shouldBe 0
+    mapped.length shouldBe 0
+    BatchCodec.decodeFloat64s(mapped) shouldBe Seq.empty[Double]
+    mapped.schema shouldBe batch.schema
+    float64(mapped).values should not be theSameInstanceAs(float64(batch).values)
+  }
+
+  it should "match the whole-batch project when the range is the whole batch" in {
+    val rows = Seq(Some(1.0), None, Some(negativeZero), Some(payloadNaN))
+    val batch = BatchCodec.nullableFloat64s(rows)
+    val calls = new AtomicInteger
+    val mapper: ColumnKernel.Float64Map = value =>
+      calls.incrementAndGet()
+      value
+    val whole = ColumnKernel.projectFloat64(batch, 0, mapper)
+    val ranged = ColumnKernel.projectFloat64(batch, 0, 0, batch.length, mapper)
+
+    calls.get() shouldBe 6
+    sameFloatBatch(whole, ranged)
+    float64(whole).validity should be theSameInstanceAs float64(batch).validity
+    float64(ranged).validity should be theSameInstanceAs float64(batch).validity
+    float64(whole).length shouldBe batch.length
+    bits(float64(whole).values(2)) shouldBe bits(negativeZero)
+    bits(float64(whole).values(3)) shouldBe bits(payloadNaN)
+    float64(whole).isValid(1) shouldBe false
+    float64(whole).values(1) shouldBe 0.0
+
+    val raw = Array(1.0, negativeZero, payloadNaN, poison)
+    val validity = Validity.allValid(raw.length)
+    val shortened = single(Float64Column.of(raw, validity, length = 3))
+    val wholeShort = ColumnKernel.projectFloat64(
+      shortened,
+      0,
+      value => if (value == poison) then throw new IllegalStateException("read past length") else value,
+    )
+    val rangedShort = ColumnKernel.projectFloat64(
+      shortened,
+      0,
+      0,
+      shortened.length,
+      value => if (value == poison) then throw new IllegalStateException("read past length") else value,
+    )
+
+    sameFloatBatch(wholeShort, rangedShort)
+    float64(wholeShort).values.length shouldBe raw.length
+    float64(wholeShort).validity should be theSameInstanceAs validity
+    bits(float64(wholeShort).values(1)) shouldBe bits(negativeZero)
+    bits(float64(wholeShort).values(2)) shouldBe bits(payloadNaN)
+    raw(3) shouldBe poison
+  }
+
+  it should "copy the other columns of the scanned range" in {
+    val width = 5
+    val keys = Array(poison, 10.0, negativeZero, payloadNaN, 40.0)
+    val keyPresent = Array(false, true, true, true, true)
+    val sides = Array(100, 200, 300, 400, 500)
+    val batch = new ColumnBatch(
+      Vector(LogicalType.Float64, LogicalType.Int32),
+      Vector(
+        Float64Column.of(keys, Validity.pack(width, row => keyPresent(row)), width),
+        Int32Column.of(sides, Validity.pack(width, row => row != 2), width),
+      ),
+      width,
+    )
+    val calls = new AtomicInteger
+    val mapped = ColumnKernel.projectFloat64(
+      batch,
+      0,
+      1,
+      3,
+      value => {
+        calls.incrementAndGet()
+        if (value == poison) then throw new IllegalStateException("mapper saw a null slot")
+        value
+      },
+    )
+
+    calls.get() shouldBe 3
+    mapped.length shouldBe 3
+    at(mapped, 0) match
+      case column: Float64Column =>
+        column.values.length shouldBe 3
+        bits(column.values(0)) shouldBe bits(10.0)
+        bits(column.values(1)) shouldBe bits(negativeZero)
+        bits(column.values(2)) shouldBe bits(payloadNaN)
+        column.values should not be theSameInstanceAs(keys)
+      case other => fail(s"expected Float64, got $other")
+    at(mapped, 1) match
+      case column: Int32Column =>
+        column.length shouldBe 3
+        column.values.length shouldBe width
+        column.isValid(0) shouldBe true
+        column.values(0) shouldBe 200
+        column.isValid(1) shouldBe false
+        column.values(1) shouldBe 0
+        column.isValid(2) shouldBe true
+        column.values(2) shouldBe 400
+      case other => fail(s"expected Int32, got $other")
+  }
+
+  "a string project range" should "map empty cells inside the window and build a new dictionary" in {
+    val dictionary = Array("out", "", "in", "zz")
+    val codes = Array(0, 1, 0, 2, 1, 2, 3)
+    val present = Array(true, true, false, true, true, false, true)
+    val batch = strings(dictionary, codes, present)
+    val start = 3
+    val length = 3
+    val calls = new AtomicInteger
+    val mapped = ColumnKernel.projectUtf8(
+      batch,
+      0,
+      start,
+      length,
+      value => {
+        calls.incrementAndGet()
+        value match
+          case "out" | "zz" => throw new IllegalStateException("mapper saw a row outside the range")
+          case other if BatchCodec.isAbsent(other) => BatchCodec.stringElement(None)
+          case text => text.toUpperCase(java.util.Locale.ENGLISH)
+      },
+    )
+
+    calls.get() shouldBe 3
+    mapped.length shouldBe length
+    BatchCodec.decodeNullableStrings(mapped) shouldBe Seq(Some("IN"), Some(""), None)
+    val column = utf8(mapped)
+    column.dictionary shouldNot be theSameInstanceAs dictionary
+    column.dictionary.toSeq shouldBe Seq("IN", "")
+    column.codes.length shouldBe length
+    column.validity.capacity shouldBe length
+    column.codes.toSeq shouldBe Seq(0, 1, 0)
+    column.isValid(2) shouldBe false
+    column.codes(2) shouldBe 0
+    column.codes should not be theSameInstanceAs(codes)
+    codes shouldBe Array(0, 1, 0, 2, 1, 2, 3)
+  }
+
+  it should "scan a tail shorter than the batch" in {
+    val batch = BatchCodec.strings(Seq("a", "b", "a", "b", "a", "b", "a", "b", "a", "b"))
+    val mapped = ColumnKernel.projectUtf8(batch, 0, 8, 2, _.toUpperCase(java.util.Locale.ENGLISH))
+
+    BatchCodec.decodeStrings(mapped) shouldBe Seq("A", "B")
+    mapped.length shouldBe 2
+    utf8(mapped).codes.length shouldBe 2
+    utf8(mapped).validity.capacity shouldBe 2
+    utf8(mapped).dictionary shouldNot be theSameInstanceAs utf8(batch).dictionary
+    utf8(mapped).dictionary.toSeq shouldBe Seq("A", "B")
+  }
+
+  it should "return an empty batch for an empty range and call nothing" in {
+    val batch = BatchCodec.strings(Seq("in", ""))
+    val calls = new AtomicInteger
+    val mapped = ColumnKernel.projectUtf8(
+      batch,
+      0,
+      1,
+      0,
+      _ => {
+        calls.incrementAndGet()
+        "x"
+      },
+    )
+
+    calls.get() shouldBe 0
+    mapped.length shouldBe 0
+    BatchCodec.decodeStrings(mapped) shouldBe Seq.empty[String]
+    utf8(mapped).dictionary.toSeq shouldBe Seq.empty[String]
+    utf8(mapped).dictionary shouldNot be theSameInstanceAs utf8(batch).dictionary
+    utf8(mapped).codes should not be theSameInstanceAs(utf8(batch).codes)
+  }
+
+  it should "match the whole-batch project and keep the dictionary rule" in {
+    val rows = Seq(Some("in"), None, Some(""), Some("no"), Some("in"))
+    val batch = BatchCodec.nullableStrings(rows)
+    val mapper: ColumnKernel.Utf8Map = value =>
+      if (BatchCodec.isAbsent(value)) then BatchCodec.stringElement(None)
+      else value.toUpperCase(java.util.Locale.ENGLISH)
+    val whole = ColumnKernel.projectUtf8(batch, 0, mapper)
+    val ranged = ColumnKernel.projectUtf8(batch, 0, 0, batch.length, mapper)
+
+    BatchCodec.decodeNullableStrings(whole) shouldBe Seq(Some("IN"), None, Some(""), Some("NO"), Some("IN"))
+    ranged.length shouldBe whole.length
+    utf8(ranged).dictionary.toSeq shouldBe utf8(whole).dictionary.toSeq
+    utf8(ranged).dictionary shouldNot be theSameInstanceAs utf8(batch).dictionary
+    utf8(whole).dictionary shouldNot be theSameInstanceAs utf8(batch).dictionary
+    utf8(ranged).codes.toSeq shouldBe utf8(whole).codes.toSeq
+    utf8(ranged).validity.capacity shouldBe utf8(whole).validity.capacity
+    utf8(ranged).validity.words.toSeq shouldBe utf8(whole).validity.words.toSeq
+    utf8(whole).isValid(1) shouldBe false
+    utf8(whole).codes(1) shouldBe 0
+    utf8(whole).dictionary.toSeq shouldBe Seq("IN", "", "NO")
+
+    val rawCodes = Array(0, 1, 0, 2)
+    val dictionary = Array("in", "", "no")
+    val shortened = single(
+      DictUtf8Column.of(dictionary, rawCodes, Validity.allValid(rawCodes.length), length = 3),
+    )
+    val wholeShort = ColumnKernel.projectUtf8(shortened, 0, mapper)
+    val rangedShort = ColumnKernel.projectUtf8(shortened, 0, 0, shortened.length, mapper)
+
+    BatchCodec.decodeNullableStrings(wholeShort) shouldBe Seq(Some("IN"), Some(""), Some("IN"))
+    utf8(rangedShort).dictionary.toSeq shouldBe utf8(wholeShort).dictionary.toSeq
+    utf8(wholeShort).codes.toSeq shouldBe utf8(rangedShort).codes.toSeq
+    utf8(wholeShort).dictionary shouldNot be theSameInstanceAs dictionary
+    rawCodes shouldBe Array(0, 1, 0, 2)
+  }
+
+  it should "copy the other columns of the scanned range" in {
+    val dictionary = Array("in", "", "no")
+    val codes = Array(0, 0, 1, 2, 0)
+    val present = Array(true, false, true, true, true)
+    val sides = Array(100, 200, 300, 400, 500)
+    val width = 5
+    val batch = new ColumnBatch(
+      Vector(LogicalType.Utf8Dict, LogicalType.Int32),
+      Vector(
+        DictUtf8Column.of(dictionary, codes, Validity.pack(width, row => present(row)), width),
+        Int32Column.of(sides, Validity.pack(width, row => row != 2), width),
+      ),
+      width,
+    )
+    val calls = new AtomicInteger
+    val mapped = ColumnKernel.projectUtf8(
+      batch,
+      0,
+      1,
+      3,
+      value => {
+        calls.incrementAndGet()
+        value match
+          case "in" => throw new IllegalStateException("mapper saw a row outside the range")
+          case other if BatchCodec.isAbsent(other) => "n"
+          case text => text.toUpperCase(java.util.Locale.ENGLISH)
+      },
+    )
+
+    calls.get() shouldBe 3
+    mapped.length shouldBe 3
+    val texts = utf8(mapped)
+    texts.dictionary shouldNot be theSameInstanceAs dictionary
+    texts.dictionary.toSeq shouldBe Seq("n", "", "NO")
+    texts.codes.length shouldBe 3
+    texts.isValid(0) shouldBe true
+    texts.dictionary(texts.codes(0)) shouldBe "n"
+    texts.isValid(1) shouldBe true
+    texts.dictionary(texts.codes(1)) shouldBe ""
+    at(mapped, 1) match
+      case column: Int32Column =>
+        column.values.length shouldBe width
+        column.isValid(0) shouldBe true
+        column.values(0) shouldBe 200
+        column.isValid(1) shouldBe false
+        column.values(1) shouldBe 0
+      case other => fail(s"expected Int32, got $other")
   }
 
   private def keepFloat(value: Double): Boolean =
