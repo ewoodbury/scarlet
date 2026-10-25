@@ -15,6 +15,10 @@ import com.ewoodbury.scarlet.execution.ColumnarPlanner.ElementStep
  * A null is dropped when the chain has a filter, and kept in place when every step is a project.
  * The functions are not called for that null. Ints scan a morsel of a shared batch. Floats and
  * strings read a batch, so their non-zero range is the copied slice of the same window.
+ *
+ * Each filter rejects one witness for every chain that uses that position, including position 3.
+ * The witness peels down to a sentinel. A keeper stays small and is shifted instead, so the
+ * project positions remain visible. The 28 dense survivor sequences are pairwise distinct.
  */
 class TestElementShapes extends AnyFlatSpec with Matchers:
 
@@ -22,57 +26,57 @@ class TestElementShapes extends AnyFlatSpec with Matchers:
   private val windowLength = 4
   private val nullRows = Set(1, 5)
 
+  // A value at or above the floor is a witness layer. A map peels one layer. Anything smaller is
+  // shifted, and the shifts have unique subset sums, so the keeper names the project positions.
+  private val witnessFloor = 5000
+  private val witnessLayer = 10000
+  private val intShifts: Vector[Int] = Vector(1, 10, 100, 1000)
+  private val intSentinels: Vector[Int] = Vector(-1, -2, -3, -4)
+  private val stringMarks: Vector[String] = Vector("A", "B", "C", "D")
+  private val stringSentinels: Vector[String] = Vector("", "s1", "b", "x")
+
+  // Keeper, then a passer on null index 1, then witnesses. The passer on null index 5 sits in the
+  // window. Witnesses stay off the null slots: one row per (filter position, peel count).
   private val intValues: Vector[Int] =
-    Vector(5, 5, -4, 0, 1, 2, 2, 8, -1, 4, 3, -2)
+    val witnesses = intSentinels.zipWithIndex.flatMap { (sentinel, position) =>
+      (0 to position).map(peels => sentinel + peels * witnessLayer)
+    }
+    placeRows(2, 3, 4, witnesses)
 
   private val floatValues: Vector[Double] =
-    Vector(5.0, 5.0, -4.5, 0.0, 1.5, 2.0, 2.0, 8.5, -1.0, 4.0, 3.5, -2.5)
+    intValues.map(_.toDouble)
 
   private val stringValues: Vector[String] =
-    Vector("aa", "b", "", "d", "ee", "b", "x", "ggg", "h", "ee", "i", "jj")
+    val witnesses = stringSentinels.zipWithIndex.flatMap { (sentinel, position) =>
+      (0 to position).map(peels => (">" * peels) + sentinel)
+    }
+    placeRows("k", "m", "n", witnesses)
 
   // Position 0, 1, 2, 3. The same index is a filter or a project, never both in one step.
-  private val intFilters: Vector[Int => Boolean] = Vector(
-    value => value > -3,
-    value => value % 2 == 0,
-    value => value < 7,
-    value => value != 4,
-  )
+  // Each filter rejects its sentinel and nothing else the keeper can become.
+  private val intFilters: Vector[Int => Boolean] =
+    intSentinels.map(sentinel => (value: Int) => value != sentinel)
 
-  private val intMaps: Vector[Int => Int] = Vector(
-    value => value + 1,
-    value => value * 3,
-    value => value - 2,
-    value => value / 2,
-  )
+  private val intMaps: Vector[Int => Int] =
+    intShifts.map(shift => (value: Int) => peelOrShift(value, shift))
 
-  private val floatFilters: Vector[Double => Boolean] = Vector(
-    value => value > -3.0,
-    value => value % 2.0 == 0.0,
-    value => value < 7.0,
-    value => value != 4.0,
-  )
+  private val floatFilters: Vector[Double => Boolean] =
+    intSentinels.map(sentinel => (value: Double) => value != sentinel.toDouble)
 
-  private val floatMaps: Vector[Double => Double] = Vector(
-    value => value + 1.0,
-    value => value * 3.0,
-    value => value - 2.0,
-    value => value / 2.0,
-  )
+  private val floatMaps: Vector[Double => Double] =
+    intShifts.map(shift => (value: Double) => peelOrShiftDouble(value, shift.toDouble))
 
   private val stringFilters: Vector[String => Boolean] = Vector(
     text => text.nonEmpty,
-    text => text.length % 2 == 0,
+    text => text.compareTo("s1") != 0,
     text => text.compareTo("b") != 0,
     text => !text.contains("x"),
   )
 
-  private val stringMaps: Vector[String => String] = Vector(
-    text => text + "!",
-    text => text + text,
-    text => text.take(1),
-    text => text + "#",
-  )
+  private val stringMaps: Vector[String => String] =
+    stringMarks.map { mark => (text: String) =>
+      if text.startsWith(">") then text.drop(1) else text + mark
+    }
 
   private val shapes: List[List[Op]] =
     val filter = Op.Filter
@@ -121,6 +125,14 @@ class TestElementShapes extends AnyFlatSpec with Matchers:
     stringValues.length shouldBe intValues.length
     nullRows.forall(index => index >= 0 && index < intValues.length) shouldBe true
     nullRows.exists(index => index >= windowStart && index < windowStart + windowLength) shouldBe true
+    // Full dense column. Different project positions change the keeper, and a longer chain that
+    // only adds filters drops a witness the shorter chain kept.
+    assertDistinctSurvivors(intValues, intFilters, intMaps)
+    assertDistinctSurvivors(floatValues, floatFilters, floatMaps)
+    assertDistinctSurvivors(stringValues, stringFilters, stringMaps)
+    assertEachFilterRejects(intValues, intFilters, intMaps)
+    assertEachFilterRejects(floatValues, floatFilters, floatMaps)
+    assertEachFilterRejects(stringValues, stringFilters, stringMaps)
 
     val denseInts = intValues.map(value => Some(value))
     val nullableInts = withNulls(intValues)
@@ -290,6 +302,51 @@ class TestElementShapes extends AnyFlatSpec with Matchers:
         piece
       case None =>
         fail(s"no slice at offset $skipped")
+
+  // Three witnesses precede the in-window passer: position 0, and both peels of position 1.
+  private def placeRows[A](
+      keeper: A,
+      earlyPasser: A,
+      latePasser: A,
+      witnesses: Vector[A],
+  ): Vector[A] =
+    Vector(keeper, earlyPasser) ++ witnesses.take(3) ++ Vector(latePasser) ++ witnesses.drop(3)
+
+  private def peelOrShift(value: Int, shift: Int): Int =
+    if value >= witnessFloor then value - witnessLayer else value + shift
+
+  private def peelOrShiftDouble(value: Double, shift: Double): Double =
+    if value >= witnessFloor.toDouble then value - witnessLayer.toDouble else value + shift
+
+  private def assertDistinctSurvivors[A](
+      values: Vector[A],
+      filters: Vector[A => Boolean],
+      maps: Vector[A => A],
+  ): Unit =
+    val rows = values.map(value => Some(value))
+    val survivors = shapes.map(shape => reference(rows, shape, filters, maps))
+    survivors.distinct should have size shapes.length
+
+  private def assertEachFilterRejects[A](
+      values: Vector[A],
+      filters: Vector[A => Boolean],
+      maps: Vector[A => A],
+  ): Unit =
+    shapes.foreach { shape =>
+      shape.zip(filters).zipWithIndex.foreach { (tagged, index) =>
+        val (op, predicate) = tagged
+        op match
+          case Op.Project => ()
+          case Op.Filter =>
+            val prefix = shape.take(index)
+            val rejects = values.exists { value =>
+              foldSteps(value, prefix, filters, maps).exists(seen => !predicate(seen))
+            }
+            withClue(s"${shapeName(shape)} filter $index ") {
+              rejects shouldBe true
+            }
+      }
+    }
 
   private def shapeName(shape: List[Op]): String =
     shape.map {
