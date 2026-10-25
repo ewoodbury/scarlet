@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Pre-commit: block artifacts and scratch files from entering a commit.
+# Enable once per clone: git config core.hooksPath .githooks
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+staged="$(git diff --cached --name-only --diff-filter=ACM)"
+
+if [ -z "$staged" ]; then
+  exit 0
+fi
+
+bad="$(printf '%s\n' "$staged" | grep -Ei '(^|/)\.audit/|\.(diff|log|err|orig|rej|bak)$|(^|/)\.DS_Store$|(^|/)\.(idea|bsp)/|(^|/)target/' || true)"
+
+if [ -n "$bad" ]; then
+  echo "Refusing to commit artifacts:" >&2
+  echo "$bad" | sed 's/^/  /' >&2
+  echo "Unstage them and keep scratch files outside the repository." >&2
+  exit 1
+fi
+
+bash scripts/check-hygiene.sh
