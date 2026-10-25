@@ -379,7 +379,10 @@ private[execution] object ColumnarInterpreter:
   )(fn: Morsel => ColumnBatch): Vector[ColumnBatch] =
     fanOut(parts)(part => Morsels.of(part, ColumnarPlanner.batchSize))(fn)
 
-  private def regroup(counts: Vector[Int], flat: Vector[ColumnBatch]): Vector[ColumnBatch] =
+  private[execution] def regroup(
+      counts: Vector[Int],
+      flat: Vector[ColumnBatch],
+  ): Vector[ColumnBatch] =
     val seed: (Vector[ColumnBatch], Vector[ColumnBatch]) = (flat, Vector.empty[ColumnBatch])
     val (_, grouped) = counts.foldLeft(seed) { (state, count) =>
       val (rest, acc) = state

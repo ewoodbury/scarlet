@@ -693,8 +693,15 @@ class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       ScarletConf.set(saved)
       ScarletRuntime.get.shuffle.clear()
 
+  "the production cut" should "keep its golden shapes" in {
+    ColumnBatches.cuts(0, 4) shouldBe Vector((0, 0))
+    ColumnBatches.cuts(4, 4) shouldBe Vector((0, 4))
+    ColumnBatches.cuts(5, 2) shouldBe Vector((0, 2), (2, 2), (4, 1))
+    ColumnBatches.cuts(10, 3) shouldBe Vector((0, 3), (3, 3), (6, 3), (9, 1))
+  }
+
   private def morselCuts(rows: Int, batchSize: Int): Int =
-    if (rows <= batchSize) then 1 else (rows + batchSize - 1) / batchSize
+    ColumnBatches.cuts(rows, batchSize).length
 
   private def intSource(partitions: Seq[Seq[Int]]): DistCollection[Int] =
     DistCollection(
