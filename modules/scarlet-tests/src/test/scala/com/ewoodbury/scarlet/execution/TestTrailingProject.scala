@@ -7,7 +7,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, NoOpSink}
+import com.ewoodbury.scarlet.columnar.{ColumnBatches, ColumnMetrics, CountingSink, NoOpSink}
 import com.ewoodbury.scarlet.core.{Partition, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -376,8 +376,12 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
     (0 until steps).foldLeft(source)((current, _) => current.map(_ + 1))
 
   private def morselCount(rows: Int, parts: Int, size: Int): Long =
-    val perPartition = rows / parts
-    parts.toLong * ((perPartition + size - 1) / size).toLong
+    val base = rows / parts
+    val remainder = rows % parts
+    Vector.tabulate(parts) { index =>
+      val length = if (index < remainder) base + 1 else base
+      ColumnBatches.cuts(length, size).length.toLong
+    }.sum
 
   private def studyConf: ScarletConf =
     originalConf.copy(

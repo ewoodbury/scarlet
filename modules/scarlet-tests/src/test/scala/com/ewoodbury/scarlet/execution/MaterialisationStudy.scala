@@ -491,7 +491,7 @@ object MaterialisationStudy:
     val written = MorselScheduler.map(sliced.flatten, threads) { (_, batch) =>
       ElementPipeline.ints(Morsel(batch, 0, batch.length), fourSteps)
     }
-    val concatenated = regroup(counts, written)
+    val concatenated = ColumnarInterpreter.regroup(counts, written)
     val resliced = concatenated.flatMap(batch => ColumnBatches.slice(batch, batchSize))
     val partials =
       if (fifth) then
@@ -729,16 +729,6 @@ object MaterialisationStudy:
       case _ =>
         throw new IllegalStateException("ofIntPairs plan was not a source")
 
-  private def regroup(counts: Vector[Int], flat: Vector[ColumnBatch]): Vector[ColumnBatch] =
-    val emptyBatches = Vector.empty[ColumnBatch]
-    val seed: (Vector[ColumnBatch], Vector[ColumnBatch]) = (flat, emptyBatches)
-    val (_, grouped) = counts.foldLeft(seed) { (state, count) =>
-      val (rest, acc) = state
-      val (group, tail) = rest.splitAt(count)
-      (tail, acc :+ ColumnBatches.concat(group))
-    }
-    grouped
-
   private def lengthOf(batches: Vector[ColumnBatch]): Int =
     batches.foldLeft(0)((total, batch) => total + batch.length)
 
@@ -746,8 +736,12 @@ object MaterialisationStudy:
     groupsOf.foldLeft(0)((total, group) => total + lengthOf(group))
 
   private def morselCount(rows: Int, parts: Int, size: Int): Int =
-    val perPartition = rows / parts
-    parts * ((perPartition + size - 1) / size)
+    val base = rows / parts
+    val remainder = rows % parts
+    Vector.tabulate(parts) { index =>
+      val length = if (index < remainder) base + 1 else base
+      ColumnBatches.cuts(length, size).length
+    }.sum
 
   /**
    * Reorders pairs inside each morsel. Source partitions are equal contiguous splits, and each

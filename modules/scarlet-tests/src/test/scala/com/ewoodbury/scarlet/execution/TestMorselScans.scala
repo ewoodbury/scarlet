@@ -694,7 +694,7 @@ class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       ScarletRuntime.get.shuffle.clear()
 
   private def morselCuts(rows: Int, batchSize: Int): Int =
-    if (rows <= batchSize) then 1 else (rows + batchSize - 1) / batchSize
+    ColumnBatches.cuts(rows, batchSize).length
 
   private def intSource(partitions: Seq[Seq[Int]]): DistCollection[Int] =
     DistCollection(

@@ -3,9 +3,8 @@ package com.ewoodbury.scarlet.execution
 import com.ewoodbury.scarlet.core.Plan
 
 /**
- * Internal representation of operations that can be applied to data in a stage. This ADT replaces
- * the nested Stage.ChainedStage approach for better introspection, optimization, and future code
- * generation.
+ * Planner IR for the steps applied inside a stage. [[Stage]] is what runs. [[StageBuilder]] builds
+ * [[Stage.ChainedStage]] from a chain of these operations in `chainOperationUnsafe`.
  *
  * @tparam A
  *   Input type of the operation
