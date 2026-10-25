@@ -339,7 +339,11 @@ private[columnar] object DenseSum:
         row += 1
       }
 
-    /** One pass over the window. Slots the open sum marked are appended in ascending order. */
+    /**
+     * One pass over the window. Slots the open sum marked are appended in ascending order. The
+     * window width is bounded by [[denseLimit]], so this sweep stays proportional to the row count
+     * rather than to the key range.
+     */
     private def recordTouched(seenLocal: Array[Byte]): Unit =
       val touchedLocal = touched
       val limit = keyRange
@@ -397,9 +401,10 @@ private[columnar] object DenseSum:
         else compactWindow(minSeen, maxSeen, rows)
 
     /**
-     * Clears the whole window, not only the touched list. The open sum writes slots before it
-     * rebuilds that list, so a throw in the middle would leave sums the touched list does not
-     * name.
+     * Clears the whole window, not only the touched list. Defence in depth: the open sum has no
+     * throw site between a write and the touched rebuild, but the noting path can throw mid-row,
+     * and any partial write must not leak into the next window. Clearing the window is cheap next
+     * to the rows that follow.
      */
     def abandonDirect(): Unit =
       Arrays.fill(sums, 0L)
