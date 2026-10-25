@@ -485,19 +485,25 @@ object ColumnarPlanner:
       plan: Plan[_],
       op: PhysicalOp,
   )(fn: Morsel => Long): Long =
-    val parts = ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op))
-    foldMorsels(parts)(fn)
+    foldMorsels(batchesFor(plan, op))(fn)
 
   /**
    * Fold `fn` over the batches `op` produces, on the caller. The kernel sees each whole batch and
-   * owns any per-batch work. Nothing is cut into morsels.
+   * must handle any length, including zero. Nothing is cut into morsels. `fn` runs once per batch,
+   * including an empty batch.
    */
   private[execution] def foldWholeBatches(
       plan: Plan[_],
       op: PhysicalOp,
   )(fn: ColumnBatch => Long): Long =
-    val parts = ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op))
-    parts.foldLeft(0L)((total, batch) => total + fn(batch))
+    batchesFor(plan, op).foldLeft(0L)((total, batch) => total + fn(batch))
+
+  /**
+   * The batches `op` produces. Both fold entry points interpret through here, so they cannot
+   * drift.
+   */
+  private def batchesFor(plan: Plan[_], op: PhysicalOp): Vector[ColumnBatch] =
+    ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op))
 
   /** Int and long element folds. Each morsel shares its batch. */
   private def foldMorsels(parts: Vector[ColumnBatch])(fn: Morsel => Long): Long =
