@@ -418,7 +418,7 @@ object Utf8Pipeline:
     val column = ColumnKernel.asUtf8(ColumnKernel.columnAt(batch, 0), 0)
     val start = morsel.start
     val length = morsel.length
-    requireRange(start, length, column.length)
+    Ranges.check(start, length, column.length)
     val codes = column.codes
     val validityWords = column.validity.words
     val out = new Array[Int](length)
@@ -470,7 +470,7 @@ object Utf8Pipeline:
     val column = ColumnKernel.asUtf8(ColumnKernel.columnAt(batch, 0), 0)
     val start = morsel.start
     val length = morsel.length
-    requireRange(start, length, column.length)
+    Ranges.check(start, length, column.length)
     val wholeColumn = start == 0 && length == column.length
     val capacity =
       inline if (compact) then length
@@ -519,11 +519,3 @@ object Utf8Pipeline:
     val result =
       DictUtf8Column.of(stored.toArray, out, Validity.fromWords(dstWords, capacity), outLength)
     new ColumnBatch(batch.schema, Vector(result), outLength)
-
-  private def requireRange(start: Int, length: Int, rows: Int): Unit =
-    require(start >= 0, s"pipeline start must be >= 0, got $start")
-    require(length >= 0, s"pipeline length must be >= 0, got $length")
-    require(
-      start.toLong + length.toLong <= rows.toLong,
-      s"pipeline [$start, ${start.toLong + length.toLong}) outside column length $rows",
-    )

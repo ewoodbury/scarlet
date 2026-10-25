@@ -850,7 +850,7 @@ object Float64Pipeline:
     val column = ColumnKernel.asFloat64(ColumnKernel.columnAt(batch, 0), 0)
     val start = morsel.start
     val length = morsel.length
-    requireRange(start, length, column.length)
+    Ranges.check(start, length, column.length)
     val in = column.values
     val words = column.validity.words
     val end = start + length
@@ -931,11 +931,3 @@ object Float64Pipeline:
   ): ColumnBatch =
     val column = Float64Column.of(out, validity, length)
     new ColumnBatch(batch.schema, Vector(column), length)
-
-  private def requireRange(start: Int, length: Int, rows: Int): Unit =
-    require(start >= 0, s"pipeline start must be >= 0, got $start")
-    require(length >= 0, s"pipeline length must be >= 0, got $length")
-    require(
-      start.toLong + length.toLong <= rows.toLong,
-      s"pipeline [$start, ${start.toLong + length.toLong}) outside column length $rows",
-    )

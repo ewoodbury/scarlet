@@ -73,7 +73,7 @@ object ColumnKernel:
       predicate: Int32Predicate,
   ): ColumnBatch =
     val column = asInt32(columnAt(batch, ordinal), ordinal)
-    requireRange(start, length, column.length)
+    Ranges.check(start, length, column.length)
     if (batch.columns.length == 1) then
       val scanned =
         scanInt32(column, start, length, predicate, record = false, selection = noSelection)
@@ -96,7 +96,7 @@ object ColumnKernel:
       predicate: Int64Predicate,
   ): ColumnBatch =
     val column = asInt64(columnAt(batch, ordinal), ordinal)
-    requireRange(start, length, column.length)
+    Ranges.check(start, length, column.length)
     if (batch.columns.length == 1) then
       val scanned =
         scanInt64(column, start, length, predicate, record = false, selection = noSelection)
@@ -123,7 +123,7 @@ object ColumnKernel:
       predicate: Float64Predicate,
   ): ColumnBatch =
     val column = asFloat64(columnAt(batch, ordinal), ordinal)
-    requireRange(start, length, column.length)
+    Ranges.check(start, length, column.length)
     if (batch.columns.length == 1) then
       val scanned =
         scanFloat64(column, start, length, predicate, record = false, selection = noSelection)
@@ -146,7 +146,7 @@ object ColumnKernel:
       predicate: Utf8Predicate,
   ): ColumnBatch =
     val column = asUtf8(columnAt(batch, ordinal), ordinal)
-    requireRange(start, length, column.length)
+    Ranges.check(start, length, column.length)
     if (batch.columns.length == 1) then
       val scanned =
         scanUtf8(column, start, length, predicate, record = false, selection = noSelection)
@@ -182,7 +182,7 @@ object ColumnKernel:
       values: Iterable[String],
   ): ColumnBatch =
     val column = asUtf8(columnAt(batch, ordinal), ordinal)
-    requireRange(start, length, column.length)
+    Ranges.check(start, length, column.length)
     val mask = literalCodes(column, values)
     val keep: Int32Predicate = code => selected(mask, code)
     val codeColumn = Int32Column.of(column.codes, column.validity, column.length)
@@ -321,7 +321,7 @@ object ColumnKernel:
       predicate: BoolPredicate,
   ): ColumnBatch =
     val column = asBool(columnAt(batch, ordinal), ordinal)
-    requireRange(start, length, column.length)
+    Ranges.check(start, length, column.length)
     if (batch.columns.length == 1) then
       val scanned =
         scanBool(column, start, length, predicate, record = false, selection = noSelection)
@@ -351,12 +351,12 @@ object ColumnKernel:
       mapper: Int64Map,
   ): ColumnBatch =
     val column = asInt64(columnAt(batch, ordinal), ordinal)
-    requireRange(start, length, column.length)
+    Ranges.check(start, length, column.length)
     val mapped =
       if (start == 0 && length == column.length) then mapInt64(column, mapper)
       else mapInt64Range(column, start, length, mapper)
     if (batch.columns.length == 1) then publish(batch, mapped, mapped.length)
-    else if (start == 0 && length == batch.length) then replace(batch, ordinal, mapped)
+    else if (start == 0 && length == column.length) then replace(batch, ordinal, mapped)
     else
       val selection = Array.tabulate(length)(offset => start + offset)
       assemble(batch, ordinal, mapped, selection, length)
@@ -366,8 +366,9 @@ object ColumnKernel:
 
   /**
    * Maps `[start, start + length)`. Output row 0 is source row `start`. The output length is
-   * `length`, including nulls. A null stays null and the mapper is not called. The whole-column
-   * scan still reuses the input validity bitmap. NaN and `-0.0` are copied as bits.
+   * `length`, including nulls. A null stays null and the mapper is not called. A whole-column map
+   * may reuse the input validity bitmap; a range map writes its own. Values pass through the
+   * mapper untouched, so NaN and `-0.0` keep their bits.
    */
   def projectFloat64(
       batch: ColumnBatch,
@@ -377,12 +378,12 @@ object ColumnKernel:
       mapper: Float64Map,
   ): ColumnBatch =
     val column = asFloat64(columnAt(batch, ordinal), ordinal)
-    requireRange(start, length, column.length)
+    Ranges.check(start, length, column.length)
     val mapped =
       if (start == 0 && length == column.length) then mapFloat64(column, mapper)
       else mapFloat64Range(column, start, length, mapper)
     if (batch.columns.length == 1) then publish(batch, mapped, mapped.length)
-    else if (start == 0 && length == batch.length) then replace(batch, ordinal, mapped)
+    else if (start == 0 && length == column.length) then replace(batch, ordinal, mapped)
     else
       val selection = Array.tabulate(length)(offset => start + offset)
       assemble(batch, ordinal, mapped, selection, length)
@@ -407,12 +408,12 @@ object ColumnKernel:
       mapper: Utf8Map,
   ): ColumnBatch =
     val column = asUtf8(columnAt(batch, ordinal), ordinal)
-    requireRange(start, length, column.length)
+    Ranges.check(start, length, column.length)
     val mapped =
       if (start == 0 && length == column.length) then mapUtf8(column, mapper)
       else mapUtf8Range(column, start, length, mapper)
     if (batch.columns.length == 1) then publish(batch, mapped, mapped.length)
-    else if (start == 0 && length == batch.length) then replace(batch, ordinal, mapped)
+    else if (start == 0 && length == column.length) then replace(batch, ordinal, mapped)
     else
       val selection = Array.tabulate(length)(offset => start + offset)
       assemble(batch, ordinal, mapped, selection, length)
@@ -420,14 +421,6 @@ object ColumnKernel:
   private val noSelection: Array[Int] = Array.emptyIntArray
 
   private final case class Scanned(column: Column, count: Int)
-
-  private def requireRange(start: Int, length: Int, rows: Int): Unit =
-    require(start >= 0, s"range start must be >= 0, got $start")
-    require(length >= 0, s"filter length must be >= 0, got $length")
-    require(
-      start.toLong + length.toLong <= rows.toLong,
-      s"range [$start, ${start.toLong + length.toLong}) outside column length $rows",
-    )
 
   private inline def scanInt32(
       column: Int32Column,
