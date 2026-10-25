@@ -196,7 +196,7 @@ private[execution] object ColumnarInterpreter:
       case Columns.Ints(parts) =>
         Columns.Ints(onEachMorsel(parts)(morsel => ElementPipeline.ints(morsel, steps)))
       case Columns.Longs(parts) =>
-        Columns.Longs(onEachSliced(parts)(batch => ElementPipeline.longs(batch, steps)))
+        Columns.Longs(onEachMorsel(parts)(morsel => ElementPipeline.longs(morsel, steps)))
       case Columns.Floats(parts) =>
         Columns.Floats(onEachSliced(parts)(batch => ElementPipeline.floats(batch, steps)))
       case Columns.Strings(parts) =>
