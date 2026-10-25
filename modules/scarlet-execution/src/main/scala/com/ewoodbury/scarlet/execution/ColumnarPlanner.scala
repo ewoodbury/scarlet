@@ -477,21 +477,33 @@ object ColumnarPlanner:
     }
 
   /**
-   * Fold `fn` over the batches `op` produces. The default cuts each batch into [[Morsel]]s that
-   * share the batch and runs those on the scheduler. `cut = false` reads each batch from row 0 for
-   * its whole length on the caller, for kernels that read a whole column in place. The dictionary
-   * code count uses that: it counts the code array in place and needs the full range.
+   * Fold `fn` over morsels of the batches `op` produces. Each batch is cut with [[Morsels.of]] and
+   * those morsels run on the scheduler, one visit each. An empty batch is one zero-length morsel.
+   * A kernel that must see the whole batch uses [[foldWholeBatches]].
    */
   private[execution] def foldInterpreted(
       plan: Plan[_],
       op: PhysicalOp,
-      cut: Boolean = true,
   )(fn: Morsel => Long): Long =
-    val parts = ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op))
-    if (cut) then foldMorsels(parts)(fn) else foldWhole(parts)(fn)
+    foldMorsels(batchesFor(plan, op))(fn)
 
-  private def foldWhole(parts: Vector[ColumnBatch])(fn: Morsel => Long): Long =
-    parts.foldLeft(0L)((total, batch) => total + fn(Morsel(batch, 0, batch.length)))
+  /**
+   * Fold `fn` over the batches `op` produces, on the caller. The kernel sees each whole batch and
+   * must handle any length, including zero. Nothing is cut into morsels. `fn` runs once per batch,
+   * including an empty batch.
+   */
+  private[execution] def foldWholeBatches(
+      plan: Plan[_],
+      op: PhysicalOp,
+  )(fn: ColumnBatch => Long): Long =
+    batchesFor(plan, op).foldLeft(0L)((total, batch) => total + fn(batch))
+
+  /**
+   * The batches `op` produces. Both fold entry points interpret through here, so they cannot
+   * drift.
+   */
+  private def batchesFor(plan: Plan[_], op: PhysicalOp): Vector[ColumnBatch] =
+    ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op))
 
   /** Int and long element folds. Each morsel shares its batch. */
   private def foldMorsels(parts: Vector[ColumnBatch])(fn: Morsel => Long): Long =
