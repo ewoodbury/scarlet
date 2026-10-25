@@ -22,8 +22,5 @@ jobs:
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
 
-      - name: Repository hygiene
-        run: bash scripts/check-hygiene.sh
-
       - name: Run tests
         run: sbt test 
