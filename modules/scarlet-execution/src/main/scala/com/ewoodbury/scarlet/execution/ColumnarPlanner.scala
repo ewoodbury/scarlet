@@ -41,33 +41,36 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * column that reaches the element pipeline throws `IllegalStateException`, and [[tryRun]] catches
  * only `ClassCastException`. A `Boolean` map is refused without being called. `Function1` has no
  * `apply$mcZZ$sp`, so `Boolean => Boolean` cannot be distinguished from `Boolean => Int`. Boolean
- * has no sum. Count reads batch lengths. Take decodes a prefix. Pair filters, aggregates, and
- * joins stay one node per operator. Narrow map and filter keep input order and the input partition
- * count. `Double` and `String` select filter and map only. A filter over an int join result is
- * columnar only for explicit key, left-value, and right-value filters; general tuple predicates
- * stay on the row path. `keys` and `values` of an int pair are that column. The arrays are shared:
- * a published column is not mutated, so a view is cheaper than a copy and still correct.
- * `mapValues` lowers only when the function declares an unboxed `Int` result and every other
- * `apply` is an erasure bridge. A wider primitive, a reference result, or an overloaded `apply`
- * stays on the row path. That check reads the method descriptor and does not call the function.
- * `getDeclaredMethods` does not see an inherited `apply`, so that function stays on the row path
- * too. `reduceByKey` applies the user's function and wraps at `Int`. A `join` with no hint, or
- * with an explicit shuffle-hash hint, hash-partitions both sides and probes one bucket at a time.
- * Sort-merge and broadcast are not implemented: those hints make `lower` return `None`, so the
- * plan stays on the row path. Output width for an accepted join or aggregate is
- * `defaultShufflePartitions`. [[tryCount]] and [[trySumInt]] fold an int filter/map chain that
- * starts at a scan or at `keys` or `values`, including an int `mapValues`, and do not write that
- * chain. Sum folds one trailing project and chains longer than four. Count folds those and chains
- * of two to four steps. [[trySumLong]] folds a long filter/map chain the same way, and the sum
- * wraps. [[trySumDouble]] folds at most four steps. Sum of `keys`, `values`, or an int `mapValues`
- * with no further element chain reads the pair column in that morsel loop and does not build the
- * projection. [[tryGroupedSum]] runs [[ColumnPipeline.sumByKey]] on a typed pair source and folds
- * the `Int64` group sums. A preceding `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is
- * applied inside that partial scan, so the action does not build those pairs. [[groupedSumPeel]]
- * labels those walked steps. It is not an action shape and not a physical node. A source
- * descriptor supplies the type when all partitions are empty. It does not decode. `collect` still
- * does. A pair `MapOp` stays on the row path for `collect` and `reduceByKey`, and [[partitioning]]
- * reports no layout for it.
+ * has no sum. Count reads batch lengths. A string scan under only dictionary literal filters
+ * counts codes from that mask and does not write the filtered column. Any other string step still
+ * writes its column. Take decodes a prefix. Pair filters, aggregates, and joins stay one node per
+ * operator. Narrow map and filter keep input order and the input partition count. `Double` and
+ * `String` select filter and map only. A filter over an int join result is columnar only for
+ * explicit key, left-value, and right-value filters; general tuple predicates stay on the row
+ * path. `keys` and `values` of an int pair are that column. The arrays are shared: a published
+ * column is not mutated, so a view is cheaper than a copy and still correct. `mapValues` lowers
+ * only when the function declares an unboxed `Int` result and every other `apply` is an erasure
+ * bridge. A wider primitive, a reference result, or an overloaded `apply` stays on the row path.
+ * That check reads the method descriptor and does not call the function. `getDeclaredMethods` does
+ * not see an inherited `apply`, so that function stays on the row path too. `reduceByKey` applies
+ * the user's function and wraps at `Int`. A `join` with no hint, or with an explicit shuffle-hash
+ * hint, hash-partitions both sides and probes one bucket at a time. Sort-merge and broadcast are
+ * not implemented: those hints make `lower` return `None`, so the plan stays on the row path.
+ * Output width for an accepted join or aggregate is `defaultShufflePartitions`. [[tryCount]] and
+ * [[trySumInt]] fold an int filter/map chain that starts at a scan or at `keys` or `values`,
+ * including an int `mapValues`, and do not write that chain. Sum folds one trailing project and
+ * chains longer than four. Count folds those, chains of two to four steps, and a string scan under
+ * only dictionary literal filters. That string fold reads the scan `lower` built. A string shape
+ * that is not that chain reads the finished batches. [[trySumLong]] folds a long filter/map chain
+ * the same way, and the sum wraps. [[trySumDouble]] folds at most four steps. Sum of `keys`,
+ * `values`, or an int `mapValues` with no further element chain reads the pair column in that
+ * morsel loop and does not build the projection. [[tryGroupedSum]] runs
+ * [[ColumnPipeline.sumByKey]] on a typed pair source and folds the `Int64` group sums. A preceding
+ * `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that partial scan,
+ * so the action does not build those pairs. [[groupedSumPeel]] labels those walked steps. It is
+ * not an action shape and not a physical node. A source descriptor supplies the type when all
+ * partitions are empty. It does not decode. `collect` still does. A pair `MapOp` stays on the row
+ * path for `collect` and `reduceByKey`, and [[partitioning]] reports no layout for it.
  *
  * An [[com.ewoodbury.scarlet.core.IntArrays]], [[com.ewoodbury.scarlet.core.LongArrays]],
  * [[com.ewoodbury.scarlet.core.BoolArrays]], [[com.ewoodbury.scarlet.core.DoubleArrays]],
@@ -187,8 +190,10 @@ object ColumnarPlanner:
     acc.result()
 
   /**
-   * Row count of a columnar plan. `None` means the row path. This reads batch lengths and does not
-   * decode.
+   * Row count of a columnar plan. `None` means the row path. This does not decode.
+   * [[TrailingProject.count]] folds an int, long, or dictionary-literal string chain without
+   * writing it. Any other accepted plan reads finished batch lengths. A string shape that is not
+   * the literal chain is that second strategy.
    */
   def tryCount(plan: Plan[_]): Option[Long] =
     accepted(plan) match
@@ -469,10 +474,21 @@ object ColumnarPlanner:
       ColumnReduce.sumInt32At(batch, ordinal)
     }
 
-  private[execution] def foldInterpreted(plan: Plan[_], op: PhysicalOp)(
-      fn: ColumnBatch => Long,
-  ): Long =
-    foldLong(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op)))(fn)
+  /**
+   * Fold `fn` over the batches `op` produces. The default cuts each batch into morsels and runs
+   * those on the scheduler. `morsels = false` reduces the batches on the caller. A dictionary code
+   * count uses that: slicing would copy the code array, and the count reads the array in place.
+   */
+  private[execution] def foldInterpreted(
+      plan: Plan[_],
+      op: PhysicalOp,
+      morsels: Boolean = true,
+  )(fn: ColumnBatch => Long): Long =
+    val parts = ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op))
+    if (morsels) then foldLong(parts)(fn) else foldInPlace(parts)(fn)
+
+  private def foldInPlace(parts: Vector[ColumnBatch])(fn: ColumnBatch => Long): Long =
+    parts.foldLeft(0L)((total, batch) => total + fn(batch))
 
   private def foldLong(parts: Vector[ColumnBatch])(fn: ColumnBatch => Long): Long =
     if (parts.isEmpty) then 0L

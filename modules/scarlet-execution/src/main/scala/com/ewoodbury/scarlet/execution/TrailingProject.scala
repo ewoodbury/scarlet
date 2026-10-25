@@ -2,7 +2,7 @@ package com.ewoodbury.scarlet.execution
 
 import scala.annotation.tailrec
 
-import com.ewoodbury.scarlet.columnar.ColumnBatch
+import com.ewoodbury.scarlet.columnar.{ColumnBatch, ColumnKernel}
 import com.ewoodbury.scarlet.core.Plan
 
 /**
@@ -15,7 +15,10 @@ import com.ewoodbury.scarlet.core.Plan
  * including a short chain that ends in a filter. One trailing int project is summed and counted
  * through the same shape gate. `collect` still writes the column. A long chain uses the same
  * split: [[sumLong]] from five steps and one trailing project, [[count]] from two steps. Both call
- * [[ElementSum.sumLongs]] or [[ElementSum.countLongs]] and do not write the chain.
+ * [[ElementSum.sumLongs]] or [[ElementSum.countLongs]] and do not write the chain. A string scan
+ * under only dictionary literal filters is folded the same way. The physical wrappers name the
+ * same number of steps, the base is the scan `lower` built, and the count reads codes from the
+ * intersected mask. A map, or a filter that is not a literal list, is not this chain.
  */
 private[execution] object TrailingProject:
 
@@ -33,6 +36,7 @@ private[execution] object TrailingProject:
       }
       .orElse(countProject(plan, op))
       .orElse(countLong(plan, op))
+      .orElse(countLiteralStrings(plan, op))
 
   /** Long sum past four steps, or one trailing long project. Does not write the chain. */
   def sumLong(plan: Plan[_], op: PhysicalOp): Option[Long] =
@@ -68,6 +72,52 @@ private[execution] object TrailingProject:
           Some((basePlan, baseOp, steps))
         else None
       case None => None
+
+  /**
+   * String scan under only dictionary literal filters, when the physical wrappers name the same
+   * number of steps. `None` means count should read the finished batches. The base op is the scan
+   * [[lower]] built, and the groups are the literals those steps named.
+   */
+  private def literalChain(
+      plan: Plan[_],
+      op: PhysicalOp,
+  ): Option[(Plan[_], PhysicalOp, Vector[Vector[String]])] =
+    stringColumnBase(op).flatMap { baseOp =>
+      val (basePlan, steps) = ColumnarPlanner.elementSteps(plan, Int.MaxValue)
+      val sameShape = elementDepth(op) == steps.length
+      if (sameShape && stringAligned(basePlan, baseOp)) then
+        literalStringGroups(steps).map(groups => (basePlan, baseOp, groups))
+      else None
+    }
+
+  private def countLiteralStrings(plan: Plan[_], op: PhysicalOp): Option[Long] =
+    literalChain(plan, op).map { case (basePlan, baseOp, groups) =>
+      ColumnarPlanner.foldInterpreted(basePlan, baseOp, morsels = false) { batch =>
+        ColumnKernel.countByGroups(batch, 0, groups)
+      }
+    }
+
+  /**
+   * Literal groups in source order. `None` means a step is a project or a filter that is not a
+   * dictionary literal list. An empty step list is not a chain.
+   */
+  private def literalStringGroups(
+      steps: List[ColumnarPlanner.ElementStep],
+  ): Option[Vector[Vector[String]]] =
+    def gather(
+        remaining: List[ColumnarPlanner.ElementStep],
+        acc: List[Vector[String]],
+    ): Option[List[Vector[String]]] =
+      remaining match
+        case Nil => Some(acc.reverse)
+        case ColumnarPlanner.ElementStep.Filter(predicate) :: tail =>
+          ColumnarPlanner.dictionaryStringLiterals(predicate) match
+            case Some(literals) => gather(tail, literals :: acc)
+            case None => None
+        case ColumnarPlanner.ElementStep.Project(_) :: _ => None
+
+    if (steps.isEmpty) then None
+    else gather(steps, Nil).map(_.toVector)
 
   private def sumProject(plan: Plan[_], op: PhysicalOp): Option[Long] =
     foldProject(plan, op, ProjectFold.Sum)
@@ -140,6 +190,18 @@ private[execution] object TrailingProject:
   private def longAligned(plan: Plan[_], op: PhysicalOp): Boolean = (plan, op) match
     case (_: Plan.Source[_], PhysicalOp.Scan(PhysicalOp.Kind.Longs, _)) => true
     case _ => false
+
+  private def stringAligned(plan: Plan[_], op: PhysicalOp): Boolean = (plan, op) match
+    case (_: Plan.Source[_], PhysicalOp.Scan(PhysicalOp.Kind.Strings, _)) => true
+    case _ => false
+
+  @tailrec
+  private def stringColumnBase(op: PhysicalOp): Option[PhysicalOp] = op match
+    case scan @ PhysicalOp.Scan(PhysicalOp.Kind.Strings, _) => Some(scan)
+    case PhysicalOp.Project(child) => stringColumnBase(child)
+    case PhysicalOp.Pipeline(child, _) => stringColumnBase(child)
+    case PhysicalOp.Filter(child, PhysicalOp.Slot.Element) => stringColumnBase(child)
+    case _ => None
 
   @tailrec
   private def longColumnBase(op: PhysicalOp): Option[PhysicalOp] = op match
