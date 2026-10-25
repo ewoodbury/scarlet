@@ -2,13 +2,7 @@ package com.ewoodbury.scarlet.execution
 
 import scala.annotation.tailrec
 
-import com.ewoodbury.scarlet.columnar.{
-  ColumnBatch,
-  ColumnKernel,
-  Float64Pipeline,
-  Int32Pipeline,
-  Int64Pipeline,
-}
+import com.ewoodbury.scarlet.columnar.*
 
 /**
  * Sum a filter/project chain without writing its output column. The match is outside the row loop.
@@ -27,7 +21,10 @@ import com.ewoodbury.scarlet.columnar.{
 )
 object ElementSum:
 
-  def sumInts(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): Long =
+  def sumInts(morsel: Morsel, steps: List[ColumnarPlanner.ElementStep]): Long =
+    val column = Int32Pipeline.singleInt(morsel.batch)
+    val start = morsel.start
+    val length = morsel.length
     import ColumnarPlanner.ElementStep.*
 
     def pred(fn: Any): ColumnKernel.Int32Predicate =
@@ -36,61 +33,61 @@ object ElementSum:
 
     steps match
       case List(Filter(a), Filter(b)) =>
-        Int32Pipeline.sumFF(batch, pred(a), pred(b))
+        Int32Pipeline.sumFF(column, start, length, pred(a), pred(b))
       case List(Project(a), Filter(b)) =>
-        Int32Pipeline.sumPF(batch, proj(a), pred(b))
+        Int32Pipeline.sumPF(column, start, length, proj(a), pred(b))
       case List(Filter(a), Project(b)) =>
-        Int32Pipeline.sumFP(batch, pred(a), proj(b))
+        Int32Pipeline.sumFP(column, start, length, pred(a), proj(b))
       case List(Project(a), Project(b)) =>
-        Int32Pipeline.sumPP(batch, proj(a), proj(b))
+        Int32Pipeline.sumPP(column, start, length, proj(a), proj(b))
       case List(Filter(a), Filter(b), Filter(c)) =>
-        Int32Pipeline.sumFFF(batch, pred(a), pred(b), pred(c))
+        Int32Pipeline.sumFFF(column, start, length, pred(a), pred(b), pred(c))
       case List(Project(a), Filter(b), Filter(c)) =>
-        Int32Pipeline.sumPFF(batch, proj(a), pred(b), pred(c))
+        Int32Pipeline.sumPFF(column, start, length, proj(a), pred(b), pred(c))
       case List(Filter(a), Project(b), Filter(c)) =>
-        Int32Pipeline.sumFPF(batch, pred(a), proj(b), pred(c))
+        Int32Pipeline.sumFPF(column, start, length, pred(a), proj(b), pred(c))
       case List(Project(a), Project(b), Filter(c)) =>
-        Int32Pipeline.sumPPF(batch, proj(a), proj(b), pred(c))
+        Int32Pipeline.sumPPF(column, start, length, proj(a), proj(b), pred(c))
       case List(Filter(a), Filter(b), Project(c)) =>
-        Int32Pipeline.sumFFP(batch, pred(a), pred(b), proj(c))
+        Int32Pipeline.sumFFP(column, start, length, pred(a), pred(b), proj(c))
       case List(Project(a), Filter(b), Project(c)) =>
-        Int32Pipeline.sumPFP(batch, proj(a), pred(b), proj(c))
+        Int32Pipeline.sumPFP(column, start, length, proj(a), pred(b), proj(c))
       case List(Filter(a), Project(b), Project(c)) =>
-        Int32Pipeline.sumFPP(batch, pred(a), proj(b), proj(c))
+        Int32Pipeline.sumFPP(column, start, length, pred(a), proj(b), proj(c))
       case List(Project(a), Project(b), Project(c)) =>
-        Int32Pipeline.sumPPP(batch, proj(a), proj(b), proj(c))
+        Int32Pipeline.sumPPP(column, start, length, proj(a), proj(b), proj(c))
       case List(Filter(a), Filter(b), Filter(c), Filter(d)) =>
-        Int32Pipeline.sumFFFF(batch, pred(a), pred(b), pred(c), pred(d))
+        Int32Pipeline.sumFFFF(column, start, length, pred(a), pred(b), pred(c), pred(d))
       case List(Project(a), Filter(b), Filter(c), Filter(d)) =>
-        Int32Pipeline.sumPFFF(batch, proj(a), pred(b), pred(c), pred(d))
+        Int32Pipeline.sumPFFF(column, start, length, proj(a), pred(b), pred(c), pred(d))
       case List(Filter(a), Project(b), Filter(c), Filter(d)) =>
-        Int32Pipeline.sumFPFF(batch, pred(a), proj(b), pred(c), pred(d))
+        Int32Pipeline.sumFPFF(column, start, length, pred(a), proj(b), pred(c), pred(d))
       case List(Project(a), Project(b), Filter(c), Filter(d)) =>
-        Int32Pipeline.sumPPFF(batch, proj(a), proj(b), pred(c), pred(d))
+        Int32Pipeline.sumPPFF(column, start, length, proj(a), proj(b), pred(c), pred(d))
       case List(Filter(a), Filter(b), Project(c), Filter(d)) =>
-        Int32Pipeline.sumFFPF(batch, pred(a), pred(b), proj(c), pred(d))
+        Int32Pipeline.sumFFPF(column, start, length, pred(a), pred(b), proj(c), pred(d))
       case List(Project(a), Filter(b), Project(c), Filter(d)) =>
-        Int32Pipeline.sumPFPF(batch, proj(a), pred(b), proj(c), pred(d))
+        Int32Pipeline.sumPFPF(column, start, length, proj(a), pred(b), proj(c), pred(d))
       case List(Filter(a), Project(b), Project(c), Filter(d)) =>
-        Int32Pipeline.sumFPPF(batch, pred(a), proj(b), proj(c), pred(d))
+        Int32Pipeline.sumFPPF(column, start, length, pred(a), proj(b), proj(c), pred(d))
       case List(Project(a), Project(b), Project(c), Filter(d)) =>
-        Int32Pipeline.sumPPPF(batch, proj(a), proj(b), proj(c), pred(d))
+        Int32Pipeline.sumPPPF(column, start, length, proj(a), proj(b), proj(c), pred(d))
       case List(Filter(a), Filter(b), Filter(c), Project(d)) =>
-        Int32Pipeline.sumFFFP(batch, pred(a), pred(b), pred(c), proj(d))
+        Int32Pipeline.sumFFFP(column, start, length, pred(a), pred(b), pred(c), proj(d))
       case List(Project(a), Filter(b), Filter(c), Project(d)) =>
-        Int32Pipeline.sumPFFP(batch, proj(a), pred(b), pred(c), proj(d))
+        Int32Pipeline.sumPFFP(column, start, length, proj(a), pred(b), pred(c), proj(d))
       case List(Filter(a), Project(b), Filter(c), Project(d)) =>
-        Int32Pipeline.sumFPFP(batch, pred(a), proj(b), pred(c), proj(d))
+        Int32Pipeline.sumFPFP(column, start, length, pred(a), proj(b), pred(c), proj(d))
       case List(Project(a), Project(b), Filter(c), Project(d)) =>
-        Int32Pipeline.sumPPFP(batch, proj(a), proj(b), pred(c), proj(d))
+        Int32Pipeline.sumPPFP(column, start, length, proj(a), proj(b), pred(c), proj(d))
       case List(Filter(a), Filter(b), Project(c), Project(d)) =>
-        Int32Pipeline.sumFFPP(batch, pred(a), pred(b), proj(c), proj(d))
+        Int32Pipeline.sumFFPP(column, start, length, pred(a), pred(b), proj(c), proj(d))
       case List(Project(a), Filter(b), Project(c), Project(d)) =>
-        Int32Pipeline.sumPFPP(batch, proj(a), pred(b), proj(c), proj(d))
+        Int32Pipeline.sumPFPP(column, start, length, proj(a), pred(b), proj(c), proj(d))
       case List(Filter(a), Project(b), Project(c), Project(d)) =>
-        Int32Pipeline.sumFPPP(batch, pred(a), proj(b), proj(c), proj(d))
+        Int32Pipeline.sumFPPP(column, start, length, pred(a), proj(b), proj(c), proj(d))
       case List(Project(a), Project(b), Project(c), Project(d)) =>
-        Int32Pipeline.sumPPPP(batch, proj(a), proj(b), proj(c), proj(d))
+        Int32Pipeline.sumPPPP(column, start, length, proj(a), proj(b), proj(c), proj(d))
       case _ =>
         throw new IllegalStateException(s"unsupported ints pipeline of length ${steps.length}")
 
@@ -98,35 +95,61 @@ object ElementSum:
    * Sum an int chain that `lower` split after four steps. Five projects use the specialized loop.
    * Any other chain, including a filter among the steps, walks the steps and does not write.
    */
-  def sumLonger(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): Long =
+  def sumLonger(morsel: Morsel, steps: List[ColumnarPlanner.ElementStep]): Long =
+    val column = Int32Pipeline.singleInt(morsel.batch)
+    val start = morsel.start
+    val length = morsel.length
     import ColumnarPlanner.ElementStep.*
 
     steps match
       case List(Project(a), Project(b), Project(c), Project(d), Project(e)) =>
-        Int32Pipeline.sumPPPPP(batch, proj(a), proj(b), proj(c), proj(d), proj(e))
+        Int32Pipeline.sumPPPPP(column, start, length, proj(a), proj(b), proj(c), proj(d), proj(e))
       case _ =>
         val stages = compile(steps)
-        Int32Pipeline.sumEncoded(batch, hasFilter(steps), value => runSteps(stages, value))
+        Int32Pipeline.sumEncoded(
+          column,
+          start,
+          length,
+          hasFilter(steps),
+          value => runSteps(stages, value),
+        )
 
   /**
    * Count without writing the chain, including two to four steps. A filter drops rows. A map-only
    * chain keeps null slots.
    */
-  def countLonger(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): Long =
+  def countLonger(morsel: Morsel, steps: List[ColumnarPlanner.ElementStep]): Long =
+    val column = Int32Pipeline.singleInt(morsel.batch)
+    val start = morsel.start
+    val length = morsel.length
     val stages = compile(steps)
-    Int32Pipeline.countEncoded(batch, hasFilter(steps), value => runSteps(stages, value))
+    Int32Pipeline.countEncoded(
+      column,
+      start,
+      length,
+      hasFilter(steps),
+      value => runSteps(stages, value),
+    )
 
   /** Sum one int projection. The mapped column is not written. */
-  def sumMapped(batch: ColumnBatch, mapper: Any): Long =
-    Int32Pipeline.sumProjected(batch, proj(mapper))
+  def sumMapped(morsel: Morsel, mapper: Any): Long =
+    val column = Int32Pipeline.singleInt(morsel.batch)
+    val start = morsel.start
+    val length = morsel.length
+    Int32Pipeline.sumProjected(column, start, length, proj(mapper))
 
   /**
    * Count a single int projection. The mapped column is not written. Null slots stay in the count.
    */
-  def countMapped(batch: ColumnBatch, mapper: Any): Long =
+  def countMapped(morsel: Morsel, mapper: Any): Long =
+    val column = Int32Pipeline.singleInt(morsel.batch)
+    val start = morsel.start
+    val length = morsel.length
     val project = proj(mapper)
     Int32Pipeline.countEncoded(
-      batch,
+      column,
+      start,
+      length,
       compact = false,
       value => Int32Pipeline.encoded(project(value)),
     )
@@ -161,12 +184,14 @@ object ElementSum:
         else runSteps(rest, (encoded >> 1).toInt)
 
   /** Wrapping long sum. Does not write the chain. Any length uses the same walk. */
-  def sumLongs(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): Long =
-    Int64Pipeline.sum(batch, longSteps(steps))
+  def sumLongs(morsel: Morsel, steps: List[ColumnarPlanner.ElementStep]): Long =
+    val column = Int64Pipeline.single(morsel.batch)
+    Int64Pipeline.sum(column, morsel.start, morsel.length, longSteps(steps))
 
   /** Long count without writing the chain. A map-only chain keeps null slots. */
-  def countLongs(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): Long =
-    Int64Pipeline.count(batch, longSteps(steps))
+  def countLongs(morsel: Morsel, steps: List[ColumnarPlanner.ElementStep]): Long =
+    val column = Int64Pipeline.single(morsel.batch)
+    Int64Pipeline.count(column, morsel.start, morsel.length, longSteps(steps))
 
   private def longSteps(steps: List[ColumnarPlanner.ElementStep]): List[Int64Pipeline.Step] =
     steps.map {
