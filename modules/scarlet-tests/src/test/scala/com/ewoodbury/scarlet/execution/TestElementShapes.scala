@@ -13,8 +13,8 @@ import com.ewoodbury.scarlet.execution.ColumnarPlanner.ElementStep
  * throws.
  *
  * A null is dropped when the chain has a filter, and kept in place when every step is a project.
- * The functions are not called for that null. Ints scan a morsel of a shared batch. Floats and
- * strings read a batch, so their non-zero range is the copied slice of the same window.
+ * The functions are not called for that null. Ints, floats, and strings scan a morsel of a shared
+ * batch. A float sum still reads the copied slice of that window.
  *
  * Each filter rejects one witness for every chain that uses that position, including position 3.
  * The witness peels down to a sentinel. A keeper stays small and is shifted instead, so the
@@ -163,22 +163,40 @@ class TestElementShapes extends AnyFlatSpec with Matchers:
         checkInts(windowOf(nullableInts), rangedMorsel(nullableIntBatch), shape, intPlan)
       }
       withClue(s"$name float full ") {
-        checkFloats(denseFloats, floatBatch, shape, floatPlan)
+        checkFloats(denseFloats, fullMorsel(floatBatch), floatBatch, shape, floatPlan)
       }
       withClue(s"$name float range ") {
-        checkFloats(windowOf(denseFloats), sliceWindow(floatBatch), shape, floatPlan)
+        checkFloats(
+          windowOf(denseFloats),
+          rangedMorsel(floatBatch),
+          sliceWindow(floatBatch),
+          shape,
+          floatPlan,
+        )
       }
       withClue(s"$name nullable float full ") {
-        checkFloats(nullableFloats, nullableFloatBatch, shape, floatPlan)
+        checkFloats(
+          nullableFloats,
+          fullMorsel(nullableFloatBatch),
+          nullableFloatBatch,
+          shape,
+          floatPlan,
+        )
       }
       withClue(s"$name nullable float range ") {
-        checkFloats(windowOf(nullableFloats), sliceWindow(nullableFloatBatch), shape, floatPlan)
+        checkFloats(
+          windowOf(nullableFloats),
+          rangedMorsel(nullableFloatBatch),
+          sliceWindow(nullableFloatBatch),
+          shape,
+          floatPlan,
+        )
       }
       withClue(s"$name string full ") {
-        checkStrings(denseStrings, stringBatch, shape, stringPlan)
+        checkStrings(denseStrings, fullMorsel(stringBatch), shape, stringPlan)
       }
       withClue(s"$name string range ") {
-        checkStrings(windowOf(denseStrings), sliceWindow(stringBatch), shape, stringPlan)
+        checkStrings(windowOf(denseStrings), rangedMorsel(stringBatch), shape, stringPlan)
       }
     }
   }
@@ -197,24 +215,25 @@ class TestElementShapes extends AnyFlatSpec with Matchers:
 
   private def checkFloats(
       rows: Vector[Option[Double]],
-      batch: ColumnBatch,
+      morsel: Morsel,
+      sumBatch: ColumnBatch,
       shape: List[Op],
       plan: List[ElementStep],
   ): Unit =
     val expected = reference(rows, shape, floatFilters, floatMaps)
-    val collected = ElementPipeline.floats(batch, plan)
+    val collected = ElementPipeline.floats(morsel, plan)
     collected.length shouldBe expected.length
     BatchCodec.decodeNullableFloat64s(collected) shouldBe expected
-    ElementSum.sumFloats(batch, plan) shouldBe sumDoubles(expected)
+    ElementSum.sumFloats(sumBatch, plan) shouldBe sumDoubles(expected)
 
   private def checkStrings(
       rows: Vector[Option[String]],
-      batch: ColumnBatch,
+      morsel: Morsel,
       shape: List[Op],
       plan: List[ElementStep],
   ): Unit =
     val expected = reference(rows, shape, stringFilters, stringMaps)
-    val collected = ElementPipeline.strings(batch, plan)
+    val collected = ElementPipeline.strings(morsel, plan)
     collected.length shouldBe expected.length
     BatchCodec.decodeNullableStrings(collected) shouldBe expected
 

@@ -102,18 +102,49 @@ object ElementPipeline:
       },
     )
 
-  def floats(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): ColumnBatch =
+  /**
+   * The first step reads the morsel range. Later steps read the batch that step published.
+   */
+  def floats(morsel: Morsel, steps: List[ColumnarPlanner.ElementStep]): ColumnBatch =
+    steps match
+      case first :: rest if rest.nonEmpty && steps.length <= 4 =>
+        floatChain(floatRange(morsel, first), rest)
+      case _ =>
+        throw new IllegalStateException(s"unsupported floats pipeline of length ${steps.length}")
+
+  private def floatRange(morsel: Morsel, step: ColumnarPlanner.ElementStep): ColumnBatch =
     import ColumnarPlanner.ElementStep.*
 
-    def pred(fn: Any): ColumnKernel.Float64Predicate =
-      val function = fn.asInstanceOf[Double => Boolean]
-      value => function(value)
+    val batch = morsel.batch
+    step match
+      case Filter(fn) =>
+        ColumnKernel.filterFloat64(batch, 0, morsel.start, morsel.length, floatPredicate(fn))
+      case Project(fn) =>
+        ColumnKernel.projectFloat64(batch, 0, morsel.start, morsel.length, floatMapper(fn))
 
-    def proj(fn: Any): ColumnKernel.Float64Map =
-      val function = fn.asInstanceOf[Double => Double]
-      value => function(value)
+  private def floatPredicate(fn: Any): ColumnKernel.Float64Predicate =
+    val function = fn.asInstanceOf[Double => Boolean]
+    value => function(value)
+
+  private def floatMapper(fn: Any): ColumnKernel.Float64Map =
+    val function = fn.asInstanceOf[Double => Double]
+    value => function(value)
+
+  private def floatChain(
+      batch: ColumnBatch,
+      steps: List[ColumnarPlanner.ElementStep],
+  ): ColumnBatch =
+    import ColumnarPlanner.ElementStep.*
+
+    def pred(fn: Any): ColumnKernel.Float64Predicate = floatPredicate(fn)
+
+    def proj(fn: Any): ColumnKernel.Float64Map = floatMapper(fn)
 
     steps match
+      case List(Filter(a)) =>
+        ColumnKernel.filterFloat64(batch, 0, pred(a))
+      case List(Project(a)) =>
+        ColumnKernel.projectFloat64(batch, 0, proj(a))
       case List(Filter(a), Filter(b)) =>
         Float64Pipeline.FF(batch, pred(a), pred(b))
       case List(Project(a), Filter(b)) =>
@@ -173,18 +204,51 @@ object ElementPipeline:
       case _ =>
         throw new IllegalStateException(s"unsupported floats pipeline of length ${steps.length}")
 
-  def strings(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): ColumnBatch =
+  /**
+   * The first step reads the morsel range. Later steps read the batch that step published. A
+   * project still runs on empty cells and builds a new dictionary. A filter-only chain still
+   * shares the input dictionary.
+   */
+  def strings(morsel: Morsel, steps: List[ColumnarPlanner.ElementStep]): ColumnBatch =
+    steps match
+      case first :: rest if rest.nonEmpty && steps.length <= 4 =>
+        stringChain(stringRange(morsel, first), rest)
+      case _ =>
+        throw new IllegalStateException(s"unsupported strings pipeline of length ${steps.length}")
+
+  private def stringRange(morsel: Morsel, step: ColumnarPlanner.ElementStep): ColumnBatch =
     import ColumnarPlanner.ElementStep.*
 
-    def pred(fn: Any): ColumnKernel.Utf8Predicate =
-      val function = fn.asInstanceOf[String => Boolean]
-      value => function(value)
+    val batch = morsel.batch
+    step match
+      case Filter(fn) =>
+        ColumnKernel.filterUtf8(batch, 0, morsel.start, morsel.length, stringPredicate(fn))
+      case Project(fn) =>
+        ColumnKernel.projectUtf8(batch, 0, morsel.start, morsel.length, stringMapper(fn))
 
-    def proj(fn: Any): ColumnKernel.Utf8Map =
-      val function = fn.asInstanceOf[String => Any]
-      value => ColumnarPlanner.stringResult(function(value))
+  private def stringPredicate(fn: Any): ColumnKernel.Utf8Predicate =
+    val function = fn.asInstanceOf[String => Boolean]
+    value => function(value)
+
+  private def stringMapper(fn: Any): ColumnKernel.Utf8Map =
+    val function = fn.asInstanceOf[String => Any]
+    value => ColumnarPlanner.stringResult(function(value))
+
+  private def stringChain(
+      batch: ColumnBatch,
+      steps: List[ColumnarPlanner.ElementStep],
+  ): ColumnBatch =
+    import ColumnarPlanner.ElementStep.*
+
+    def pred(fn: Any): ColumnKernel.Utf8Predicate = stringPredicate(fn)
+
+    def proj(fn: Any): ColumnKernel.Utf8Map = stringMapper(fn)
 
     steps match
+      case List(Filter(a)) =>
+        ColumnKernel.filterUtf8(batch, 0, pred(a))
+      case List(Project(a)) =>
+        ColumnKernel.projectUtf8(batch, 0, proj(a))
       case List(Filter(a), Filter(b)) =>
         Utf8Pipeline.FF(batch, pred(a), pred(b))
       case List(Project(a), Filter(b)) =>

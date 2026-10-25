@@ -198,9 +198,9 @@ private[execution] object ColumnarInterpreter:
       case Columns.Longs(parts) =>
         Columns.Longs(onEachMorsel(parts)(morsel => ElementPipeline.longs(morsel, steps)))
       case Columns.Floats(parts) =>
-        Columns.Floats(onEachSliced(parts)(batch => ElementPipeline.floats(batch, steps)))
+        Columns.Floats(onEachMorsel(parts)(morsel => ElementPipeline.floats(morsel, steps)))
       case Columns.Strings(parts) =>
-        Columns.Strings(onEachSliced(parts)(batch => ElementPipeline.strings(batch, steps)))
+        Columns.Strings(onEachMorsel(parts)(morsel => ElementPipeline.strings(morsel, steps)))
       case Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) => rejected
 
   private def triplePredicate(

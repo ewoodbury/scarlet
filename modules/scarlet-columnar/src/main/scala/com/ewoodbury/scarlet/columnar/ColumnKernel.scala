@@ -14,11 +14,11 @@ package com.ewoodbury.scarlet.columnar
  *
  * Project maps one column and shares the others. For the primitive columns, a null stays null, the
  * new slot stores `0`, and the function is not called. A whole-column project reuses the input
- * validity bitmap, so null positions do not change. A long project over `[start, start + length)`
- * reads validity at those absolute rows and writes `length` rows from index 0. The whole-column
- * entry is that scan with start 0 and the batch length. A string project calls the function on
- * every row, stores an empty result as an empty cell, and builds a new dictionary. Callers do not
- * mutate a published bitmap.
+ * validity bitmap, so null positions do not change. A long or float project over
+ * `[start, start + length)` reads validity at those absolute rows and writes `length` rows from
+ * index 0. The whole-column entry is that scan with start 0 and the batch length. A string project
+ * calls the function on every row of that range, including an empty cell, stores an empty result
+ * as an empty cell, and builds a new dictionary. Callers do not mutate a published bitmap.
  *
  * Primitive loops keep the row index in a `var` so the bodies stay allocation-free. Each primitive
  * has its own loop so the copy stays monomorphic. Fused runs of two to four filters and projects
@@ -362,13 +362,60 @@ object ColumnKernel:
       assemble(batch, ordinal, mapped, selection, length)
 
   def projectFloat64(batch: ColumnBatch, ordinal: Int, mapper: Float64Map): ColumnBatch =
-    replace(batch, ordinal, mapFloat64(asFloat64(columnAt(batch, ordinal), ordinal), mapper))
+    projectFloat64(batch, ordinal, 0, batch.length, mapper)
+
+  /**
+   * Maps `[start, start + length)`. Output row 0 is source row `start`. The output length is
+   * `length`, including nulls. A null stays null and the mapper is not called. The whole-column
+   * scan still reuses the input validity bitmap. NaN and `-0.0` are copied as bits.
+   */
+  def projectFloat64(
+      batch: ColumnBatch,
+      ordinal: Int,
+      start: Int,
+      length: Int,
+      mapper: Float64Map,
+  ): ColumnBatch =
+    val column = asFloat64(columnAt(batch, ordinal), ordinal)
+    requireRange(start, length, column.length)
+    val mapped =
+      if (start == 0 && length == column.length) then mapFloat64(column, mapper)
+      else mapFloat64Range(column, start, length, mapper)
+    if (batch.columns.length == 1) then publish(batch, mapped, mapped.length)
+    else if (start == 0 && length == batch.length) then replace(batch, ordinal, mapped)
+    else
+      val selection = Array.tabulate(length)(offset => start + offset)
+      assemble(batch, ordinal, mapped, selection, length)
 
   def projectBool(batch: ColumnBatch, ordinal: Int, mapper: BoolMap): ColumnBatch =
     replace(batch, ordinal, mapBool(asBool(columnAt(batch, ordinal), ordinal), mapper))
 
   def projectUtf8(batch: ColumnBatch, ordinal: Int, mapper: Utf8Map): ColumnBatch =
-    replace(batch, ordinal, mapUtf8(asUtf8(columnAt(batch, ordinal), ordinal), mapper))
+    projectUtf8(batch, ordinal, 0, batch.length, mapper)
+
+  /**
+   * Maps `[start, start + length)`. Output row 0 is source row `start`. The output length is
+   * `length`. The mapper runs on every row in the range, including an empty cell. An empty result
+   * stays an empty cell. The dictionary is new. The whole-column scan builds that dictionary the
+   * same way.
+   */
+  def projectUtf8(
+      batch: ColumnBatch,
+      ordinal: Int,
+      start: Int,
+      length: Int,
+      mapper: Utf8Map,
+  ): ColumnBatch =
+    val column = asUtf8(columnAt(batch, ordinal), ordinal)
+    requireRange(start, length, column.length)
+    val mapped =
+      if (start == 0 && length == column.length) then mapUtf8(column, mapper)
+      else mapUtf8Range(column, start, length, mapper)
+    if (batch.columns.length == 1) then publish(batch, mapped, mapped.length)
+    else if (start == 0 && length == batch.length) then replace(batch, ordinal, mapped)
+    else
+      val selection = Array.tabulate(length)(offset => start + offset)
+      assemble(batch, ordinal, mapped, selection, length)
 
   private val noSelection: Array[Int] = Array.emptyIntArray
 
@@ -578,6 +625,29 @@ object ColumnKernel:
     }
     Float64Column.of(out, column.validity, live)
 
+  /** Writes the range at indexes `[0, length)`. Null slots stay 0 and are left invalid. */
+  private def mapFloat64Range(
+      column: Float64Column,
+      start: Int,
+      length: Int,
+      mapper: Float64Map,
+  ): Float64Column =
+    val in = column.values
+    val words = column.validity.words
+    val out = new Array[Double](length)
+    val dstWords = Validity.allocate(length)
+    val end = start + length
+    var row = start
+    var written = 0
+    while (row < end) {
+      if (Validity.isSet(words, row)) then
+        out(written) = mapper(in(row))
+        Validity.setBit(dstWords, written)
+      written += 1
+      row += 1
+    }
+    Float64Column.of(out, Validity.fromWords(dstWords, length), length)
+
   private def mapBool(column: BoolColumn, mapper: BoolMap): BoolColumn =
     val live = column.length
     val in = column.values
@@ -606,6 +676,29 @@ object ColumnKernel:
       row += 1
     }
     DictUtf8Column.of(words.toArray, out, Validity.fromWords(dstWords, capacity), live)
+
+  /** Writes the range at indexes `[0, length)`. An empty cell is passed to the mapper. */
+  private def mapUtf8Range(
+      column: DictUtf8Column,
+      start: Int,
+      length: Int,
+      mapper: Utf8Map,
+  ): DictUtf8Column =
+    val out = new Array[Int](length)
+    val dstWords = Validity.allocate(length)
+    val words = DictUtf8Column.Words.empty
+    val end = start + length
+    var row = start
+    var written = 0
+    while (row < end) {
+      val text = mapper(utf8String(column, row))
+      if (!BatchCodec.isAbsent(text)) then
+        out(written) = words.intern(text)
+        Validity.setBit(dstWords, written)
+      written += 1
+      row += 1
+    }
+    DictUtf8Column.of(words.toArray, out, Validity.fromWords(dstWords, length), length)
 
   /** An empty cell does not index the dictionary. */
   private[columnar] def utf8String(column: DictUtf8Column, row: Int): String =
