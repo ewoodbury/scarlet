@@ -77,7 +77,8 @@ object MaterialisationStudy:
     def apply(value: Int): Int = value + 1
 
   private val pipeline: ColumnBatch => ColumnBatch =
-    morsel => Int32Pipeline.PPPP(morsel, PlusOne, PlusOne, PlusOne, PlusOne)
+    batch =>
+      Int32Pipeline.PPPP(Morsel(batch, 0, batch.length), PlusOne, PlusOne, PlusOne, PlusOne)
 
   private final case class Setup(
       values: Array[Int],
@@ -487,8 +488,8 @@ object MaterialisationStudy:
     val encoded = ownedInts(element).map(values => BatchCodec.copiedInts(values))
     val sliced = encoded.map(batch => ColumnBatches.slice(batch, batchSize))
     val counts = sliced.map(_.length)
-    val written = MorselScheduler.map(sliced.flatten, threads) { (_, morsel) =>
-      ElementPipeline.ints(morsel, fourSteps)
+    val written = MorselScheduler.map(sliced.flatten, threads) { (_, batch) =>
+      ElementPipeline.ints(Morsel(batch, 0, batch.length), fourSteps)
     }
     val concatenated = regroup(counts, written)
     val resliced = concatenated.flatMap(batch => ColumnBatches.slice(batch, batchSize))

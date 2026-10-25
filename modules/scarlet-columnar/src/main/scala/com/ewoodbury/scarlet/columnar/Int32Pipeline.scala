@@ -10,218 +10,219 @@ import ColumnKernel.{Int32Map, Int32Predicate}
  * count reads `[start, start + length)` on the column. The batch entry uses the whole column.
  * [[sumPPPPP]] folds one more map into the sum. [[sumEncoded]] and [[countEncoded]] fold a chain
  * that did not get its own pattern. None of those sums or counts allocate an output column.
- * Collect patterns of length 2–4 are [[Int32Fuse]], forwarded here under the same names.
+ * Collect patterns of length 2–4 are [[Int32Fuse]], forwarded here under the same names. Each
+ * collect scans the morsel range. The output batch covers only that range.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object Int32Pipeline:
 
   def FF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Predicate,
-  ): ColumnBatch = Int32Fuse.FF(batch, first, second)
+  ): ColumnBatch = Int32Fuse.FF(morsel, first, second)
 
   def FP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Map,
-  ): ColumnBatch = Int32Fuse.FP(batch, first, second)
+  ): ColumnBatch = Int32Fuse.FP(morsel, first, second)
 
   def PF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Predicate,
-  ): ColumnBatch = Int32Fuse.PF(batch, first, second)
+  ): ColumnBatch = Int32Fuse.PF(morsel, first, second)
 
   def PP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Map,
-  ): ColumnBatch = Int32Fuse.PP(batch, first, second)
+  ): ColumnBatch = Int32Fuse.PP(morsel, first, second)
 
   def FFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Predicate,
       third: Int32Predicate,
-  ): ColumnBatch = Int32Fuse.FFF(batch, first, second, third)
+  ): ColumnBatch = Int32Fuse.FFF(morsel, first, second, third)
 
   def FFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Predicate,
       third: Int32Map,
-  ): ColumnBatch = Int32Fuse.FFP(batch, first, second, third)
+  ): ColumnBatch = Int32Fuse.FFP(morsel, first, second, third)
 
   def FPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Map,
       third: Int32Predicate,
-  ): ColumnBatch = Int32Fuse.FPF(batch, first, second, third)
+  ): ColumnBatch = Int32Fuse.FPF(morsel, first, second, third)
 
   def FPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Map,
       third: Int32Map,
-  ): ColumnBatch = Int32Fuse.FPP(batch, first, second, third)
+  ): ColumnBatch = Int32Fuse.FPP(morsel, first, second, third)
 
   def PFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Predicate,
       third: Int32Predicate,
-  ): ColumnBatch = Int32Fuse.PFF(batch, first, second, third)
+  ): ColumnBatch = Int32Fuse.PFF(morsel, first, second, third)
 
   def PFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Predicate,
       third: Int32Map,
-  ): ColumnBatch = Int32Fuse.PFP(batch, first, second, third)
+  ): ColumnBatch = Int32Fuse.PFP(morsel, first, second, third)
 
   def PPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Map,
       third: Int32Predicate,
-  ): ColumnBatch = Int32Fuse.PPF(batch, first, second, third)
+  ): ColumnBatch = Int32Fuse.PPF(morsel, first, second, third)
 
   def PPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Map,
       third: Int32Map,
-  ): ColumnBatch = Int32Fuse.PPP(batch, first, second, third)
+  ): ColumnBatch = Int32Fuse.PPP(morsel, first, second, third)
 
   def FFFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Predicate,
       third: Int32Predicate,
       fourth: Int32Predicate,
-  ): ColumnBatch = Int32Fuse.FFFF(batch, first, second, third, fourth)
+  ): ColumnBatch = Int32Fuse.FFFF(morsel, first, second, third, fourth)
 
   def FFFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Predicate,
       third: Int32Predicate,
       fourth: Int32Map,
-  ): ColumnBatch = Int32Fuse.FFFP(batch, first, second, third, fourth)
+  ): ColumnBatch = Int32Fuse.FFFP(morsel, first, second, third, fourth)
 
   def FFPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Predicate,
       third: Int32Map,
       fourth: Int32Predicate,
-  ): ColumnBatch = Int32Fuse.FFPF(batch, first, second, third, fourth)
+  ): ColumnBatch = Int32Fuse.FFPF(morsel, first, second, third, fourth)
 
   def FFPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Predicate,
       third: Int32Map,
       fourth: Int32Map,
-  ): ColumnBatch = Int32Fuse.FFPP(batch, first, second, third, fourth)
+  ): ColumnBatch = Int32Fuse.FFPP(morsel, first, second, third, fourth)
 
   def FPFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Map,
       third: Int32Predicate,
       fourth: Int32Predicate,
-  ): ColumnBatch = Int32Fuse.FPFF(batch, first, second, third, fourth)
+  ): ColumnBatch = Int32Fuse.FPFF(morsel, first, second, third, fourth)
 
   def FPFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Map,
       third: Int32Predicate,
       fourth: Int32Map,
-  ): ColumnBatch = Int32Fuse.FPFP(batch, first, second, third, fourth)
+  ): ColumnBatch = Int32Fuse.FPFP(morsel, first, second, third, fourth)
 
   def FPPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Map,
       third: Int32Map,
       fourth: Int32Predicate,
-  ): ColumnBatch = Int32Fuse.FPPF(batch, first, second, third, fourth)
+  ): ColumnBatch = Int32Fuse.FPPF(morsel, first, second, third, fourth)
 
   def FPPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Predicate,
       second: Int32Map,
       third: Int32Map,
       fourth: Int32Map,
-  ): ColumnBatch = Int32Fuse.FPPP(batch, first, second, third, fourth)
+  ): ColumnBatch = Int32Fuse.FPPP(morsel, first, second, third, fourth)
 
   def PFFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Predicate,
       third: Int32Predicate,
       fourth: Int32Predicate,
-  ): ColumnBatch = Int32Fuse.PFFF(batch, first, second, third, fourth)
+  ): ColumnBatch = Int32Fuse.PFFF(morsel, first, second, third, fourth)
 
   def PFFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Predicate,
       third: Int32Predicate,
       fourth: Int32Map,
-  ): ColumnBatch = Int32Fuse.PFFP(batch, first, second, third, fourth)
+  ): ColumnBatch = Int32Fuse.PFFP(morsel, first, second, third, fourth)
 
   def PFPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Predicate,
       third: Int32Map,
       fourth: Int32Predicate,
-  ): ColumnBatch = Int32Fuse.PFPF(batch, first, second, third, fourth)
+  ): ColumnBatch = Int32Fuse.PFPF(morsel, first, second, third, fourth)
 
   def PFPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Predicate,
       third: Int32Map,
       fourth: Int32Map,
-  ): ColumnBatch = Int32Fuse.PFPP(batch, first, second, third, fourth)
+  ): ColumnBatch = Int32Fuse.PFPP(morsel, first, second, third, fourth)
 
   def PPFF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Map,
       third: Int32Predicate,
       fourth: Int32Predicate,
-  ): ColumnBatch = Int32Fuse.PPFF(batch, first, second, third, fourth)
+  ): ColumnBatch = Int32Fuse.PPFF(morsel, first, second, third, fourth)
 
   def PPFP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Map,
       third: Int32Predicate,
       fourth: Int32Map,
-  ): ColumnBatch = Int32Fuse.PPFP(batch, first, second, third, fourth)
+  ): ColumnBatch = Int32Fuse.PPFP(morsel, first, second, third, fourth)
 
   def PPPF(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Map,
       third: Int32Map,
       fourth: Int32Predicate,
-  ): ColumnBatch = Int32Fuse.PPPF(batch, first, second, third, fourth)
+  ): ColumnBatch = Int32Fuse.PPPF(morsel, first, second, third, fourth)
 
   def PPPP(
-      batch: ColumnBatch,
+      morsel: Morsel,
       first: Int32Map,
       second: Int32Map,
       third: Int32Map,
       fourth: Int32Map,
-  ): ColumnBatch = Int32Fuse.PPPP(batch, first, second, third, fourth)
+  ): ColumnBatch = Int32Fuse.PPPP(morsel, first, second, third, fourth)
 
   def sumFF(batch: ColumnBatch, first: Int32Predicate, second: Int32Predicate): Long =
     sumFF(singleInt(batch), 0, batch.length, first, second)

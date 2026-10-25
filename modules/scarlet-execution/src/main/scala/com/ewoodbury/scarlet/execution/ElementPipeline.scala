@@ -12,7 +12,8 @@ import com.ewoodbury.scarlet.columnar.*
 )
 object ElementPipeline:
 
-  def ints(batch: ColumnBatch, steps: List[ColumnarPlanner.ElementStep]): ColumnBatch =
+  /** Scans the morsel. The output batch covers only that range. */
+  def ints(morsel: Morsel, steps: List[ColumnarPlanner.ElementStep]): ColumnBatch =
     import ColumnarPlanner.ElementStep.*
 
     def pred(fn: Any): ColumnKernel.Int32Predicate =
@@ -25,61 +26,61 @@ object ElementPipeline:
 
     steps match
       case List(Filter(a), Filter(b)) =>
-        Int32Pipeline.FF(batch, pred(a), pred(b))
+        Int32Pipeline.FF(morsel, pred(a), pred(b))
       case List(Project(a), Filter(b)) =>
-        Int32Pipeline.PF(batch, proj(a), pred(b))
+        Int32Pipeline.PF(morsel, proj(a), pred(b))
       case List(Filter(a), Project(b)) =>
-        Int32Pipeline.FP(batch, pred(a), proj(b))
+        Int32Pipeline.FP(morsel, pred(a), proj(b))
       case List(Project(a), Project(b)) =>
-        Int32Pipeline.PP(batch, proj(a), proj(b))
+        Int32Pipeline.PP(morsel, proj(a), proj(b))
       case List(Filter(a), Filter(b), Filter(c)) =>
-        Int32Pipeline.FFF(batch, pred(a), pred(b), pred(c))
+        Int32Pipeline.FFF(morsel, pred(a), pred(b), pred(c))
       case List(Project(a), Filter(b), Filter(c)) =>
-        Int32Pipeline.PFF(batch, proj(a), pred(b), pred(c))
+        Int32Pipeline.PFF(morsel, proj(a), pred(b), pred(c))
       case List(Filter(a), Project(b), Filter(c)) =>
-        Int32Pipeline.FPF(batch, pred(a), proj(b), pred(c))
+        Int32Pipeline.FPF(morsel, pred(a), proj(b), pred(c))
       case List(Project(a), Project(b), Filter(c)) =>
-        Int32Pipeline.PPF(batch, proj(a), proj(b), pred(c))
+        Int32Pipeline.PPF(morsel, proj(a), proj(b), pred(c))
       case List(Filter(a), Filter(b), Project(c)) =>
-        Int32Pipeline.FFP(batch, pred(a), pred(b), proj(c))
+        Int32Pipeline.FFP(morsel, pred(a), pred(b), proj(c))
       case List(Project(a), Filter(b), Project(c)) =>
-        Int32Pipeline.PFP(batch, proj(a), pred(b), proj(c))
+        Int32Pipeline.PFP(morsel, proj(a), pred(b), proj(c))
       case List(Filter(a), Project(b), Project(c)) =>
-        Int32Pipeline.FPP(batch, pred(a), proj(b), proj(c))
+        Int32Pipeline.FPP(morsel, pred(a), proj(b), proj(c))
       case List(Project(a), Project(b), Project(c)) =>
-        Int32Pipeline.PPP(batch, proj(a), proj(b), proj(c))
+        Int32Pipeline.PPP(morsel, proj(a), proj(b), proj(c))
       case List(Filter(a), Filter(b), Filter(c), Filter(d)) =>
-        Int32Pipeline.FFFF(batch, pred(a), pred(b), pred(c), pred(d))
+        Int32Pipeline.FFFF(morsel, pred(a), pred(b), pred(c), pred(d))
       case List(Project(a), Filter(b), Filter(c), Filter(d)) =>
-        Int32Pipeline.PFFF(batch, proj(a), pred(b), pred(c), pred(d))
+        Int32Pipeline.PFFF(morsel, proj(a), pred(b), pred(c), pred(d))
       case List(Filter(a), Project(b), Filter(c), Filter(d)) =>
-        Int32Pipeline.FPFF(batch, pred(a), proj(b), pred(c), pred(d))
+        Int32Pipeline.FPFF(morsel, pred(a), proj(b), pred(c), pred(d))
       case List(Project(a), Project(b), Filter(c), Filter(d)) =>
-        Int32Pipeline.PPFF(batch, proj(a), proj(b), pred(c), pred(d))
+        Int32Pipeline.PPFF(morsel, proj(a), proj(b), pred(c), pred(d))
       case List(Filter(a), Filter(b), Project(c), Filter(d)) =>
-        Int32Pipeline.FFPF(batch, pred(a), pred(b), proj(c), pred(d))
+        Int32Pipeline.FFPF(morsel, pred(a), pred(b), proj(c), pred(d))
       case List(Project(a), Filter(b), Project(c), Filter(d)) =>
-        Int32Pipeline.PFPF(batch, proj(a), pred(b), proj(c), pred(d))
+        Int32Pipeline.PFPF(morsel, proj(a), pred(b), proj(c), pred(d))
       case List(Filter(a), Project(b), Project(c), Filter(d)) =>
-        Int32Pipeline.FPPF(batch, pred(a), proj(b), proj(c), pred(d))
+        Int32Pipeline.FPPF(morsel, pred(a), proj(b), proj(c), pred(d))
       case List(Project(a), Project(b), Project(c), Filter(d)) =>
-        Int32Pipeline.PPPF(batch, proj(a), proj(b), proj(c), pred(d))
+        Int32Pipeline.PPPF(morsel, proj(a), proj(b), proj(c), pred(d))
       case List(Filter(a), Filter(b), Filter(c), Project(d)) =>
-        Int32Pipeline.FFFP(batch, pred(a), pred(b), pred(c), proj(d))
+        Int32Pipeline.FFFP(morsel, pred(a), pred(b), pred(c), proj(d))
       case List(Project(a), Filter(b), Filter(c), Project(d)) =>
-        Int32Pipeline.PFFP(batch, proj(a), pred(b), pred(c), proj(d))
+        Int32Pipeline.PFFP(morsel, proj(a), pred(b), pred(c), proj(d))
       case List(Filter(a), Project(b), Filter(c), Project(d)) =>
-        Int32Pipeline.FPFP(batch, pred(a), proj(b), pred(c), proj(d))
+        Int32Pipeline.FPFP(morsel, pred(a), proj(b), pred(c), proj(d))
       case List(Project(a), Project(b), Filter(c), Project(d)) =>
-        Int32Pipeline.PPFP(batch, proj(a), proj(b), pred(c), proj(d))
+        Int32Pipeline.PPFP(morsel, proj(a), proj(b), pred(c), proj(d))
       case List(Filter(a), Filter(b), Project(c), Project(d)) =>
-        Int32Pipeline.FFPP(batch, pred(a), pred(b), proj(c), proj(d))
+        Int32Pipeline.FFPP(morsel, pred(a), pred(b), proj(c), proj(d))
       case List(Project(a), Filter(b), Project(c), Project(d)) =>
-        Int32Pipeline.PFPP(batch, proj(a), pred(b), proj(c), proj(d))
+        Int32Pipeline.PFPP(morsel, proj(a), pred(b), proj(c), proj(d))
       case List(Filter(a), Project(b), Project(c), Project(d)) =>
-        Int32Pipeline.FPPP(batch, pred(a), proj(b), proj(c), proj(d))
+        Int32Pipeline.FPPP(morsel, pred(a), proj(b), proj(c), proj(d))
       case List(Project(a), Project(b), Project(c), Project(d)) =>
-        Int32Pipeline.PPPP(batch, proj(a), proj(b), proj(c), proj(d))
+        Int32Pipeline.PPPP(morsel, proj(a), proj(b), proj(c), proj(d))
       case _ =>
         throw new IllegalStateException(s"unsupported ints pipeline of length ${steps.length}")
 

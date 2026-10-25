@@ -10,6 +10,8 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
   private def single(column: Column): ColumnBatch =
     new ColumnBatch(Vector(column.logicalType), Vector(column), column.length)
 
+  private def fullMorsel(batch: ColumnBatch): Morsel = Morsel(batch, 0, batch.length)
+
   private def utf8(batch: ColumnBatch): DictUtf8Column = utf8At(batch, 0)
 
   private def int32(batch: ColumnBatch): Int32Column =
@@ -693,14 +695,14 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
     val column = Int32Column.of(Array(2, 42, 3), Validity.pack(3, row => row != 1), 3)
     val batch = single(column)
     val fusedFilter = Int32Pipeline.FP(
-      batch,
+      fullMorsel(batch),
       _ > 0,
       value =>
         if (value == 42) then throw new IllegalStateException("mapper saw a null slot")
         else value * 10,
     )
     val fusedProjects = Int32Pipeline.PP(
-      batch,
+      fullMorsel(batch),
       _ + 1,
       value =>
         if (value == 42) then throw new IllegalStateException("mapper saw a null slot")
@@ -713,8 +715,8 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
 
   it should "size compacted int buffers to the live rows" in {
     val input = Int32Column.of(Array(1, 2, 3, 99, 100), Validity.allValid(5), length = 3)
-    val first = Int32Pipeline.FP(single(input), _ > 1, value => value)
-    val second = Int32Pipeline.FP(first, _ > 2, _ + 1)
+    val first = Int32Pipeline.FP(fullMorsel(single(input)), _ > 1, value => value)
+    val second = Int32Pipeline.FP(fullMorsel(first), _ > 2, _ + 1)
 
     BatchCodec.decodeInts(first) shouldBe Seq(2, 3)
     BatchCodec.decodeInts(second) shouldBe Seq(4)
@@ -934,7 +936,11 @@ class TestColumnKernel extends AnyFlatSpec with Matchers:
     an[IllegalArgumentException] should be thrownBy ColumnKernel.filterInt64(ints, 0, _ > 0L)
     an[IllegalArgumentException] should be thrownBy ColumnKernel.projectFloat64(pairs, 0, _ * 2.0)
     an[IllegalArgumentException] should be thrownBy ColumnKernel.projectBool(ints, 0, value => value)
-    an[IllegalArgumentException] should be thrownBy Int32Pipeline.PP(pairs, _ + 1, _ + 1)
+    an[IllegalArgumentException] should be thrownBy Int32Pipeline.PP(
+      fullMorsel(pairs),
+      _ + 1,
+      _ + 1,
+    )
     an[IllegalArgumentException] should be thrownBy
       Float64Pipeline.PP(pairs, _ + 1.0, _ + 1.0)
     an[IllegalArgumentException] should be thrownBy
