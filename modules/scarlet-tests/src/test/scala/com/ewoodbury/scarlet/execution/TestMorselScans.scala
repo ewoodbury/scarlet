@@ -14,9 +14,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * Int and long action folds scan morsels in place. An empty batch is one zero-length morsel. A
  * tail shorter than the batch size is its own morsel. Null slots stay in a map-only count and stay
- * out of a filtered count. An int or long element filter, and an int or long element map, collect
- * those morsels without copying the input batch. A float filter or map still copies slices, so its
- * batch count is the comparison.
+ * out of a filtered count. Element filters for ints, longs, floats, strings, and bools collect
+ * morsels without copying the input batch. An element map still copies slices, and that batch
+ * count is the comparison for a filter.
  */
 class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -108,12 +108,21 @@ class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val ints = DistCollection.ofInts(values, 1).filter(_ > 0)
     val longs = DistCollection.ofLongs(values.map(_.toLong), 1).filter(_ > 0L)
     val floats = DistCollection.ofDoubles(values.map(_.toDouble), 1).filter(_ > 0.0)
+    val texts = values.map(value => if (value > 0) "k" else "x")
+    val strings = DistCollection.ofStrings(texts, 1).filter(_.startsWith("k"))
+    val dictionary = DistCollection.ofStrings(texts, 1).filterStringEquals("k")
+    val bools = DistCollection.ofBools(values.map(_ > 0), 1).filter(identity)
+    val floatMaps = DistCollection.ofDoubles(values.map(_.toDouble), 1).map(value => value)
 
     arm(batchSize = 4)
     val collected = measure(ints.collect().toSeq)
     val counted = measure(ints.count())
     val longCollected = measure(longs.collect().toSeq)
     val floatCollected = measure(floats.collect().iterator.map(_.toInt).toSeq)
+    val stringCollected = measure(strings.collect().toSeq)
+    val dictionaryCollected = measure(dictionary.collect().toSeq)
+    val boolCollected = measure(bools.collect().toSeq)
+    val floatMapped = measure(floatMaps.collect().iterator.map(_.toInt).toSeq)
 
     collected.result shouldBe expected
     counted.result shouldBe expected.length.toLong
@@ -124,21 +133,38 @@ class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     longCollected.batches shouldBe collected.batches
     floatCollected.result shouldBe expected
     floatCollected.visits shouldBe collected.visits
+    floatCollected.batches shouldBe collected.batches
+    stringCollected.result shouldBe Seq.fill(expected.length)("k")
+    stringCollected.visits shouldBe collected.visits
+    stringCollected.batches shouldBe collected.batches
+    dictionaryCollected.result shouldBe stringCollected.result
+    dictionaryCollected.visits shouldBe collected.visits
+    dictionaryCollected.batches shouldBe collected.batches
+    boolCollected.result shouldBe Seq.fill(expected.length)(true)
+    boolCollected.visits shouldBe collected.visits
+    boolCollected.batches shouldBe collected.batches
     collected.visits shouldBe 3L
-    // Each sliced visit publishes one copied input batch. The range scan does not.
-    collected.batches shouldBe floatCollected.batches - floatCollected.visits
+    floatMapped.visits shouldBe collected.visits
+    // Each sliced map visit publishes one copied input batch. The range filter does not.
+    collected.batches shouldBe floatMapped.batches - collected.visits
   }
 
   it should "visit one zero-length morsel when the partition is empty" in {
     val ints = DistCollection.ofInts(Array.empty[Int], 1).filter(_ > 0)
     val longs = DistCollection.ofLongs(Array.empty[Long], 1).filter(_ > 0L)
     val floats = DistCollection.ofDoubles(Array.empty[Double], 1).filter(_ > 0.0)
+    val strings = DistCollection.ofStrings(Array.empty[String], 1).filter(_ => true)
+    val dictionary = DistCollection.ofStrings(Array.empty[String], 1).filterStringEquals("k")
+    val bools = DistCollection.ofBools(Array.empty[Boolean], 1).filter(identity)
 
     arm(batchSize = 4)
     val collected = measure(ints.collect().toSeq)
     val counted = measure(ints.count())
     val longCollected = measure(longs.collect().toSeq)
-    val floatCollected = measure(floats.count())
+    val floatCollected = measure(floats.collect().toSeq)
+    val stringCollected = measure(strings.collect().toSeq)
+    val dictionaryCollected = measure(dictionary.collect().toSeq)
+    val boolCollected = measure(bools.collect().toSeq)
 
     collected.result shouldBe Seq.empty[Int]
     counted.result shouldBe 0L
@@ -146,9 +172,19 @@ class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     collected.visits shouldBe 1L
     longCollected.result shouldBe Seq.empty[Long]
     longCollected.visits shouldBe 1L
+    floatCollected.result shouldBe Seq.empty[Double]
     floatCollected.visits shouldBe 1L
+    stringCollected.result shouldBe Seq.empty[String]
+    stringCollected.visits shouldBe 1L
+    dictionaryCollected.result shouldBe Seq.empty[String]
+    dictionaryCollected.visits shouldBe 1L
+    boolCollected.result shouldBe Seq.empty[Boolean]
+    boolCollected.visits shouldBe 1L
     collected.batches shouldBe floatCollected.batches
     longCollected.batches shouldBe collected.batches
+    stringCollected.batches shouldBe collected.batches
+    dictionaryCollected.batches shouldBe collected.batches
+    boolCollected.batches shouldBe collected.batches
   }
 
   it should "keep partition order when morsels split an int or long filter" in {
