@@ -13,13 +13,14 @@ package com.ewoodbury.scarlet.columnar
  * rejects a non-positive partition count. One scheduler task covers one range, so a morsel still
  * counts as one visit.
  *
- * A plain range whose keys and values are present and whose keys lie in
- * `[0, DenseSum.directLimit)` is indexed by the key. Any other plain or keep/map range whose
- * present keys fit in [[DenseSum.cap]] is summed by direct index after a min/max pass. The span is
- * `max.toLong - min.toLong + 1`. Both emit ascending keys. Every other range, including a
- * [[PairStep]] chain that can rewrite the key, uses the hash table and emits first-seen order.
- * Grouped sums are compared as maps. Classification reads only `[start, start + length)` and skips
- * null keys.
+ * A plain range is classified in one pass. That pass reads presence and the key bounds together.
+ * The window is used when its span fits [[DenseSum.cap]] and is at most [[DenseSum.DensityFactor]]
+ * times the row count. The table has one slot per key in the window. A later morsel that still
+ * fits that zero-origin window is summed in one pass. A sparser range, a cap of 0, and a
+ * [[PairStep]] chain that can rewrite the key use the hash table. Dense partials emit ascending
+ * keys. Hash partials emit first-seen order. Grouped sums are compared as maps. Classification
+ * reads only `[start, start + length)` and skips null keys. The span is
+ * `max.toLong - min.toLong + 1`.
  */
 private[scarlet] object GroupedSumKernel:
 
@@ -102,7 +103,7 @@ private[scarlet] object GroupedSumKernel:
     finishing {
       require(parallelism > 0, s"parallelism must be positive, got $parallelism")
       require(batchSize > 0, s"batch size must be positive, got $batchSize")
-      require(denseCap > 0, s"dense cap must be positive, got $denseCap")
+      require(denseCap >= 0, s"dense cap must be non-negative, got $denseCap")
       accumulate(
         batches,
         keyOrdinal,
@@ -227,38 +228,29 @@ private[scarlet] object GroupedSumKernel:
         scanFiltered(span, denseCap, keep, map)
 
   /**
-   * Direct index when the present keys in this range fit. `Stepped` does not call this. An empty
-   * key set still publishes an empty partial through the hash table, which clears that table.
+   * Direct index when the present keys in this range are dense. `Stepped` does not call this. A
+   * cap of 0 hashes without reading the keys. An empty key set still publishes an empty partial
+   * through the hash table, which clears that table.
    */
   private def scanPlain(span: Span, denseCap: Int): ColumnBatch =
     if (span.length == 0) then emptyRange(span)
+    else if (denseCap <= 0) then hashPlain(span)
     else
-      val keysPresent = present(span.keys, span.start, span.length)
-      val valuesPresent = present(span.values, span.start, span.length)
-      val direct =
-        if (keysPresent && valuesPresent) then
-          HashAggregate.tryDirectSum(
-            span.keys,
-            span.values,
-            span.start,
-            span.length,
-            denseCap,
-          )
-        else None
-      direct match
+      HashAggregate.tryReuseDirect(
+        span.keys,
+        span.values,
+        span.start,
+        span.length,
+        denseCap,
+      ) match
         case Some(batch) => batch
-        case None => scanPlainClassified(span, denseCap, keysPresent, valuesPresent)
+        case None =>
+          surveyPlain(span, denseCap)
 
-  private def scanPlainClassified(
-      span: Span,
-      denseCap: Int,
-      keysPresent: Boolean,
-      valuesPresent: Boolean,
-  ): ColumnBatch =
-    val fit =
-      if (keysPresent) then DenseSum.classifyPresent(span.keys, span.start, span.length, denseCap)
-      else DenseSum.classify(span.keys, span.start, span.length, denseCap)
-    fit match
+  private def surveyPlain(span: Span, denseCap: Int): ColumnBatch =
+    val surveyed =
+      DenseSum.survey(span.keys, span.values, span.start, span.length, denseCap)
+    surveyed.fit match
       case DenseSum.Window(minKey, keyRange) =>
         HashAggregate.indexSumRange(
           span.keys,
@@ -267,11 +259,13 @@ private[scarlet] object GroupedSumKernel:
           span.length,
           minKey,
           keyRange,
-          columnsPresent = keysPresent && valuesPresent,
+          columnsPresent = surveyed.columnsPresent,
         )
       case DenseSum.Empty => emptyRange(span)
-      case DenseSum.Wide =>
-        HashAggregate.sumRange(span.keys, span.values, span.start, span.length)
+      case DenseSum.Wide => hashPlain(span)
+
+  private def hashPlain(span: Span): ColumnBatch =
+    HashAggregate.sumRange(span.keys, span.values, span.start, span.length)
 
   private def scanFiltered(
       span: Span,
@@ -280,13 +274,10 @@ private[scarlet] object GroupedSumKernel:
       map: ColumnKernel.Int32Map,
   ): ColumnBatch =
     if (span.length == 0) then emptyRange(span)
+    else if (denseCap <= 0) then
+      HashAggregate.sumRange(span.keys, span.values, span.start, span.length, keep, map)
     else
-      val keysPresent = present(span.keys, span.start, span.length)
-      val fit =
-        if (keysPresent) then
-          DenseSum.classifyPresent(span.keys, span.start, span.length, denseCap)
-        else DenseSum.classify(span.keys, span.start, span.length, denseCap)
-      fit match
+      DenseSum.classify(span.keys, span.start, span.length, denseCap) match
         case DenseSum.Window(minKey, keyRange) =>
           HashAggregate.indexSumRange(
             span.keys,
@@ -301,9 +292,6 @@ private[scarlet] object GroupedSumKernel:
         case DenseSum.Empty => emptyRange(span)
         case DenseSum.Wide =>
           HashAggregate.sumRange(span.keys, span.values, span.start, span.length, keep, map)
-
-  private def present(column: Int32Column, start: Int, length: Int): Boolean =
-    Validity.rangePresent(column.validity, start, length)
 
   private def emptyRange(span: Span): ColumnBatch =
     HashAggregate.sumRange(span.keys, span.values, span.start, 0)

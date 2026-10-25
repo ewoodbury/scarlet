@@ -3,51 +3,65 @@ package com.ewoodbury.scarlet.columnar
 /**
  * Direct-index grouped sum for a bounded `Int` key range.
  *
- * One slot is 8 bytes of sum, one flag byte, and 4 bytes in the touched-key list: 13 bytes. The
- * flag holds two bits. The group bit means the key was seen. The value bit means a value was
- * added. A null value sets the group bit and leaves the sum null. A filtered sum sets both bits
- * only when a value is kept, so a key whose rows are all dropped stays absent. The group bit keeps
- * that null sum in the output. The value bit marks the sum present. Those are different results,
- * so the flag needs both bits.
+ * One slot is 8 bytes of sum, one flag byte, 4 bytes in the touched-key list, and 4 bytes in the
+ * zero-origin key cache: 17 bytes. The flag holds two bits. The group bit means the key was seen.
+ * The value bit means a value was added. A null value sets the group bit and leaves the sum null.
+ * A filtered sum sets both bits only when a value is kept, so a key whose rows are all dropped
+ * stays absent. The group bit keeps that null sum in the output. The value bit marks the sum
+ * present. Those are different results, so the flag needs both bits.
  *
  * `cap` is the largest range that stays inside a 4 MiB budget across the workers:
- * `parallelism * range * 13 <= 4 * 1024 * 1024`. At 4 workers a range of 65536 is 3.25 MiB, so it
- * is under the cap. The cap is that budget divided by `parallelism * 13`.
+ * `parallelism * range * 17 <= 4 * 1024 * 1024`. The division floors, so past 246723 workers the
+ * cap is 0 and the caller hashes. At 4 workers the cap is 61680 slots, 4194240 bytes. A prefix of
+ * 65536 does not fit: `4 * 65536 * 17` is 4456448. [[directLimit]] is `min(cap, 65536)`.
  *
- * The span is `max.toLong - min.toLong + 1`. An `Int` subtraction overflows on `Int.MinValue` to
- * `Int.MaxValue` and must not be used. Null keys are skipped, the same rows accumulation skips.
+ * The table is the observed window, `max - min + 1`, and never the whole cap. A morsel whose max
+ * key is 1023 allocates 1024 slots. The window is used only when that span also fits in the cap
+ * and is at most [[DensityFactor]] times the morsel length. 1024 groups spread over `0` until
+ * `300000` fail that test and hash. The span is `max.toLong - min.toLong + 1`. An `Int`
+ * subtraction overflows on `Int.MinValue` beside `Int.MaxValue` and must not be used. Null keys
+ * are skipped, the same rows accumulation skips.
  *
  * Keys come out in ascending order. The hash path still emits first-seen order. Grouped sums are
  * compared as maps. There is no first-touch order array.
  *
  * The arrays live on [[HashAggregate]]'s per-worker holder. [[Accumulator.prepare]] clears the
- * previous range by walking the touched indexes, and allocates again only when `min` or the range
- * changes. [[HashAggregate.releaseSumWorkers]] drops the holder. Each published batch gets a new
- * key array and a new validity bitmap. A worker may keep a private copy of the zero-origin keys
- * and copy that into the batch. The private copy is not published.
+ * touched slots. Those arrays are indexed by slot, so a new minimum with the same width does not
+ * allocate. A later morsel that still fits the same zero-origin window checks presence and the key
+ * prefix, writes nothing on a miss, and otherwise uses the unrolled sum.
+ * [[HashAggregate.releaseSumWorkers]] drops the holder. Each published batch gets a new key array
+ * and a new validity bitmap per column. A worker may keep a private copy of the zero-origin keys
+ * and copy that into the batch. The private copy is not published. The cache holds one span, the
+ * last length requested, so alternating lengths allocate again.
  *
- * A non-negative key in `[0, directLimit)` skips the min/max pass and is indexed by the key.
- * `directLimit` is `min(cap, 65536)`. A key outside that prefix is rejected before any slot is
- * written, and the morsel is classified. A bounds failure after that check is a bug. A window that
- * exceeds `cap`, including `Int.MinValue` together with `Int.MaxValue`, uses the hash table.
+ * [[Accumulator.compactWindow]] is given slot indexes and adds `minKey`. A zero-origin scan is the
+ * case where the slot index is already the key. A shifted window uses the same addition.
+ * [[Accumulator.addDirect]] checks that the rows are present, then rejects a key outside the table
+ * before any slot is written. A failure after that check clears the slots it did write.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[columnar] object DenseSum:
 
-  /** Sum long, flag byte, and one touched-list int. */
-  val BytesPerSlot: Long = 13L
+  /** Sum long, flag byte, touched-list int, and one int in the zero-origin key cache. */
+  val BytesPerSlot: Long = 17L
 
   /** `parallelism * range *` [[BytesPerSlot]] stays at or under this many bytes. */
   val BudgetBytes: Long = 4L * 1024L * 1024L
 
   /**
-   * Prefix indexed by the key itself. `4 * 65536 * 13` is 3.25 MiB, inside [[BudgetBytes]] at four
-   * workers. [[directLimit]] never returns more than `cap`.
+   * Largest zero-based prefix [[directLimit]] will return. Four workers cannot hold this many
+   * 17-byte slots inside [[BudgetBytes]]. The bound is `min(cap, DirectPrefix)`.
    */
   val DirectPrefix: Int = 65536
 
+  /**
+   * A window is dense when its span is at most this many times the morsel length. Length is the
+   * bound that the classify pass already has. Distinct keys cannot exceed it.
+   */
+  val DensityFactor: Int = 4
+
   def directLimit(cap: Int): Int =
-    math.min(cap, DirectPrefix)
+    math.max(0, math.min(cap, DirectPrefix))
 
   private val GroupMask: Int = 1
   private val ValueMask: Int = 2
@@ -62,21 +76,25 @@ private[columnar] object DenseSum:
   /** The present keys do not fit in `cap`. The caller uses the hash table. */
   case object Wide extends Fit
 
-  /** Present keys lie in `[min, min + range)`. `range` is at least 1 and at most `cap`. */
+  /** Present keys lie in `[min, min + range)`. `range` is at least 1, dense, and at most `cap`. */
   final case class Window(min: Int, range: Int) extends Fit
+
+  /** [[classify]] together with whether both columns are fully present in the scanned rows. */
+  final case class Survey(fit: Fit, columnsPresent: Boolean)
 
   /**
    * Largest range whose tables fit in [[BudgetBytes]] when each of `parallelism` workers holds
-   * one. A non-positive parallelism is rejected.
+   * one. A non-positive parallelism is rejected. The result is 0 when the budget cannot hold one
+   * slot per worker. Callers hash in that case.
    */
   def cap(parallelism: Int): Int =
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
-    // The budget is 4 MiB and a slot is 13 bytes, so the quotient fits in an Int.
+    // The budget is 4 MiB and a slot is 17 bytes, so the quotient fits in an Int.
     (BudgetBytes / (BytesPerSlot * parallelism.toLong)).toInt
 
   /**
    * `Empty` when `[start, start + length)` has no present key. `Window` when the present keys fit
-   * in `cap`. `Wide` otherwise. The decision reads only that row range.
+   * in `cap` and are dense in the row count. `Wide` otherwise. One pass reads that row range.
    */
   def classify(keys: Int32Column, start: Int, length: Int, cap: Int): Fit =
     require(
@@ -84,11 +102,36 @@ private[columnar] object DenseSum:
       s"range ($start, $length) outside ${keys.length} rows",
     )
     if (length == 0) then Empty
+    else if (cap <= 0) then Wide
+    else boundKeys(keys.values, keys.validity.words, start, start + length, cap)
+
+  /**
+   * [[classify]] plus whether every key and value in the row range is present. One pass. `Wide`
+   * may stop early, and then `columnsPresent` is false because the scan did not finish.
+   */
+  def survey(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      cap: Int,
+  ): Survey =
+    require(keys.length == values.length, "key and value columns differ in length")
+    require(
+      start >= 0 && length >= 0 && start <= keys.length && length <= keys.length - start,
+      s"range ($start, $length) outside ${keys.length} rows",
+    )
+    if (length == 0) then Survey(Empty, columnsPresent = true)
+    else if (cap <= 0) then Survey(Wide, columnsPresent = false)
     else
-      val end = start + length
-      if (Validity.rangePresent(keys.validity, start, length)) then
-        presentWindow(keys.values, start, end, cap)
-      else classifySparse(keys, start, end, cap)
+      boundRows(
+        keys.values,
+        keys.validity.words,
+        values.validity.words,
+        start,
+        start + length,
+        cap,
+      )
 
   /**
    * Reused direct-index table. `prepare` then one scan then [[compact]] is one range. The next
@@ -106,32 +149,98 @@ private[columnar] object DenseSum:
     private var minSeen: Int = 0
     private var maxSeen: Int = -1
     private var identityKeys: Array[Int] = Array.emptyIntArray
-
-    /** Allocates when `min` or `range` changed. Otherwise clears only the touched slots. */
-    def prepare(min: Int, range: Int): Unit =
-      require(range > 0, s"dense range must be positive, got $range")
-      if (min != minKey || range != keyRange) then allocate(min, range) else reset()
+    // Groups recorded before the next scan throws. Negative means the scan runs to the end.
+    private var failAt: Int = -1
 
     /**
-     * Table for keys in `[0, limit)`. The next call clears only the touched slots when `limit`
-     * matches.
+     * Allocates when `range` changes. A new origin with the same width only clears touched slots:
+     * the arrays are indexed by slot, and `min` is added back when the batch is published.
+     */
+    def prepare(min: Int, range: Int): Unit =
+      require(range > 0, s"dense range must be positive, got $range")
+      if (range != keyRange) then allocate(min, range)
+      else
+        minKey = min
+        reset()
+
+    /**
+     * Table for keys in `[0, limit)`. The next call with the same `limit` clears touched slots.
      */
     def prepareDirect(limit: Int): Unit =
-      require(limit > 0, s"direct limit must be positive, got $limit")
-      if (minKey != 0 || keyRange != limit) then allocate(0, limit) else reset()
+      prepare(0, limit)
+
+    /** Groups recorded by the current window. Zero after [[prepare]] and [[abandonDirect]]. */
+    private[columnar] def touchedSlots: Int = touchedCount
+
+    /**
+     * The next present scan throws [[ArrayIndexOutOfBoundsException]] once `recorded` groups have
+     * been written. The slots stay dirty until [[prepare]] or [[abandonDirect]]. One shot.
+     */
+    private[columnar] def failAfter(recorded: Int): Unit =
+      require(recorded > 0, s"recorded groups must be positive, got $recorded")
+      failAt = recorded
 
     /**
      * Sums present rows by using the key as the index. Returns `false` when a key is outside
-     * `[0, sums.length)`, before any slot is written. [[abandonDirect]] clears a partial scan.
-     * `minSeen` and `maxSeen` cover every recorded key. A bounds failure after the pre-scan is a
-     * bug, not a rejected key.
+     * `[0, sums.length)`, before any slot is written. A throw after that check leaves the written
+     * slots in place. [[abandonDirect]] or [[prepare]] of this same window clears them.
      */
     def addDirect(keys: Int32Column, values: Int32Column, start: Int, end: Int): Boolean =
+      val width = end - start
+      assert(
+        Validity.rangePresent(keys.validity, start, width) &&
+          Validity.rangePresent(values.validity, start, width),
+        "direct sum requires present keys and values",
+      )
       val limit = sums.length
       if (!fitsPrefix(keys.values, start, end, limit)) then false
       else
         sumPrefix(keys, values, start, end)
         true
+
+    /**
+     * Keys and values are present and every key is in `[0, keyRange)`. Used after [[survey]] has
+     * already accepted a zero-origin window of this width.
+     */
+    private[columnar] def addPresentZero(
+        keys: Int32Column,
+        values: Int32Column,
+        start: Int,
+        end: Int,
+    ): Unit =
+      sumPrefix(keys, values, start, end)
+
+    /**
+     * True when this table is a zero-origin window that still satisfies `cap` and the density
+     * limit for `length`. Clears the previous morsel's slots. A different width or origin has to
+     * be surveyed.
+     */
+    private[columnar] def reuseZero(cap: Int, length: Int): Boolean =
+      val range = keyRange
+      val reusable =
+        range > 0 && minKey == 0 && range <= cap && range.toLong <= denseLimit(length)
+      if (reusable) then reset()
+      reusable
+
+    /**
+     * Sums rows into the current zero-origin window. Returns false before any slot is written when
+     * a row is null or a key is outside the window. The caller then surveys the range.
+     */
+    private[columnar] def sumReuse(
+        keys: Int32Column,
+        values: Int32Column,
+        start: Int,
+        end: Int,
+    ): Boolean =
+      requireReady(start, end, keys.length, values.length)
+      val width = end - start
+      val present =
+        Validity.rangePresent(keys.validity, start, width) &&
+          Validity.rangePresent(values.validity, start, width)
+      if (present && fitsPrefix(keys.values, start, end, keyRange)) then
+        sumPrefix(keys, values, start, end)
+        true
+      else false
 
     /** Every key in `[start, end)` is in `[0, limit)`. Reads keys and writes nothing. */
     private def fitsPrefix(keys: Array[Int], start: Int, end: Int, limit: Int): Boolean =
@@ -146,6 +255,7 @@ private[columnar] object DenseSum:
 
     /** Keys are in range. Records a new slot before adding its value. */
     private def sumPrefix(keys: Int32Column, values: Int32Column, start: Int, end: Int): Unit =
+      requireReady(start, end, keys.length, values.length)
       val keyValues = keys.values
       val valueValues = values.values
       val sumsLocal = sums
@@ -201,9 +311,20 @@ private[columnar] object DenseSum:
       seenLocal(index) = both
       if (index < minSeen) then minSeen = index
       if (index > maxSeen) then maxSeen = index
+      val armed = failAt
+      if (armed >= 0 && touchedCount >= armed) then
+        failAt = -1
+        throw new ArrayIndexOutOfBoundsException(
+          s"direct scan failed after recording $touchedCount slots",
+        )
 
-    /** Ascending keys in `[minSeen, maxSeen]`. Used after a successful [[addDirect]]. */
+    /**
+     * Ascending keys in `[minSeen, maxSeen]`. The slot index is the key because this follows
+     * [[prepareDirect]].
+     */
     def compactDirect(): ColumnBatch =
+      failAt = -1
+      require(minKey == 0, "direct compaction requires a zero origin")
       val rows = touchedCount
       if (rows == 0) then emptySum
       else
@@ -214,14 +335,13 @@ private[columnar] object DenseSum:
     /** Clears every slot a rejected direct scan recorded, so the next range starts empty. */
     def abandonDirect(): Unit = reset()
 
+    /**
+     * Rows that are not fully present. A fully present window uses [[addPresentZero]] or
+     * [[addTrusted]]. This scan still accepts present rows. The fully-present loop used to live
+     * here and duplicated [[addTrusted]].
+     */
     def scanPlain(keys: Int32Column, values: Int32Column, start: Int, end: Int): Unit =
-      val length = end - start
-      if (
-          Validity.rangePresent(keys.validity, start, length) &&
-          Validity.rangePresent(values.validity, start, length)
-        )
-      then scanPlainPresent(keys, values, start, end)
-      else scanPlainSparse(keys, values, start, end)
+      scanPlainSparse(keys, values, start, end)
 
     def scanFiltered(
         keys: Int32Column,
@@ -241,9 +361,11 @@ private[columnar] object DenseSum:
 
     /** Ascending keys. A missing value bit publishes a null sum. An unseen group is omitted. */
     def compact(): ColumnBatch =
+      failAt = -1
       val rows = touchedCount
       if (rows == 0) then emptySum
       else if (nullSums == 0 && rows == keyRange) then compactFull(rows)
+      else if (nullSums == 0 && maxSeen >= 0) then compactWindow(minSeen, maxSeen, rows)
       else compactPartial(rows)
 
     private def allocate(min: Int, range: Int): Unit =
@@ -254,7 +376,7 @@ private[columnar] object DenseSum:
       touched = new Array[Int](range)
       touchedCount = 0
       nullSums = 0
-      minSeen = 0
+      minSeen = Int.MaxValue
       maxSeen = -1
 
     private def reset(): Unit =
@@ -271,59 +393,22 @@ private[columnar] object DenseSum:
       }
       touchedCount = 0
       nullSums = 0
-      minSeen = 0
+      minSeen = Int.MaxValue
       maxSeen = -1
 
     /**
-     * Every row in `[start, end)` is present. The index is checked with a long difference, and it
-     * must sit in `[0, limit)` before the slot is updated. A key outside the window fails the
-     * scan. The touched index is recorded before the next key.
+     * The slot arrays match the prepared range, and `[start, end)` lies inside both columns.
+     * Sparse and filtered scans use the same check a fully present scan used to.
      */
-    private[columnar] def scanPlainPresent(
-        keys: Int32Column,
-        values: Int32Column,
-        start: Int,
-        end: Int,
-    ): Unit =
-      val keyValues = keys.values
-      val valueValues = values.values
-      val sumsLocal = sums
-      val seenLocal = seen
-      val touchedLocal = touched
-      val base = minKey
-      val limit = sumsLocal.length
+    private def requireReady(start: Int, end: Int, keyRows: Int, valueRows: Int): Unit =
       if (
-          limit != keyRange || seenLocal.length != limit || touchedLocal.length != limit ||
-          start < 0 || end > keyValues.length || end > valueValues.length
+          sums.length != keyRange || seen.length != keyRange || touched.length != keyRange ||
+          start < 0 || end < start || end > keyRows || end > valueRows
         )
-      then outside(base, base, keyRange)
-      val both = BothBits
-      var count = touchedCount
-      var row = start
-      if (base == 0) then
-        while (row < end) {
-          val index = keyValues(row)
-          if (!inPrefix(index, limit)) then outside(index, 0, limit)
-          if (seenLocal(index) == 0) then
-            seenLocal(index) = both
-            touchedLocal(count) = index
-            count += 1
-            touchedCount = count
-          sumsLocal(index) += valueValues(row).toLong
-          row += 1
-        }
-      else
-        while (row < end) {
-          val index = slot(keyValues(row), base, limit)
-          if (seenLocal(index) == 0) then
-            seenLocal(index) = both
-            touchedLocal(count) = index
-            count += 1
-            touchedCount = count
-          sumsLocal(index) += valueValues(row).toLong
-          row += 1
-        }
-      touchedCount = count
+      then
+        throw new IllegalStateException(
+          s"dense table length ${sums.length} does not match range $keyRange for [$start, $end)",
+        )
 
     /**
      * Rows in `[start, end)` are present and already classified into this window. Each key is
@@ -337,6 +422,7 @@ private[columnar] object DenseSum:
         start: Int,
         end: Int,
     ): Unit =
+      requireReady(start, end, keys.length, values.length)
       val keyValues = keys.values
       val valueValues = values.values
       val sumsLocal = sums
@@ -434,6 +520,7 @@ private[columnar] object DenseSum:
         start: Int,
         end: Int,
     ): Unit =
+      requireReady(start, end, keys.length, values.length)
       val keyValues = keys.values
       val keyWords = keys.validity.words
       val valueValues = values.values
@@ -481,6 +568,7 @@ private[columnar] object DenseSum:
         keep: ColumnKernel.Int32Predicate,
         map: ColumnKernel.Int32Map,
     ): Unit =
+      requireReady(start, end, keys.length, values.length)
       val keyValues = keys.values
       val valueValues = values.values
       val sumsLocal = sums
@@ -512,6 +600,7 @@ private[columnar] object DenseSum:
         keep: ColumnKernel.Int32Predicate,
         map: ColumnKernel.Int32Map,
     ): Unit =
+      requireReady(start, end, keys.length, values.length)
       val keyValues = keys.values
       val keyWords = keys.validity.words
       val valueValues = values.values
@@ -572,7 +661,12 @@ private[columnar] object DenseSum:
         }
       created
 
-    /** Keys `0, 1, ..., span - 1`. Stays on this worker. Callers copy it before publication. */
+    /**
+     * Keys `0, 1, ..., span - 1`. Stays on this worker. Callers copy it before publication.
+     *
+     * Only the last span is cached. A different length allocates again, so alternating lengths
+     * miss. [[BytesPerSlot]] still counts these 4 bytes, because a full span copies one int each.
+     */
     private def identity(span: Int): Array[Int] =
       val cached = identityKeys
       if (cached.length == span) then cached
@@ -586,16 +680,21 @@ private[columnar] object DenseSum:
         identityKeys = created
         created
 
+    /**
+     * `low` and `high` are slot indexes, not keys. The published key is `minKey + index`, which is
+     * `index` only when the window origin is 0.
+     */
     private def compactWindow(low: Int, high: Int, rows: Int): ColumnBatch =
       val outKeys = new Array[Int](rows)
       val outSums = new Array[Long](rows)
       val seenLocal = seen
       val sumsLocal = sums
+      val origin = minKey.toLong
       var cursor = 0
       var index = low
       while (index <= high) {
         if (seenLocal(index) != 0) then
-          outKeys(cursor) = index
+          outKeys(cursor) = (origin + index.toLong).toInt
           outSums(cursor) = sumsLocal(index)
           cursor += 1
         index += 1
@@ -644,9 +743,11 @@ private[columnar] object DenseSum:
         sparse: Boolean,
         rows: Int,
     ): ColumnBatch =
-      val keyValidity = Validity.allValid(rows)
-      val keyColumn = Int32Column.of(outKeys, keyValidity, rows)
-      val valueValidity = if (sparse) then Validity.fromWords(words, rows) else keyValidity
+      val keyColumn = Int32Column.of(outKeys, Validity.allValid(rows), rows)
+      /* A fresh bitmap. The key column's bitmap is not reused, so a later writer cannot clear
+       * both. */
+      val valueValidity =
+        if (sparse) then Validity.fromWords(words, rows) else Validity.allValid(rows)
       val valueColumn = Int64Column.of(outSums, valueValidity, rows)
       new ColumnBatch(
         Vector(LogicalType.Int32, LogicalType.Int64),
@@ -654,75 +755,123 @@ private[columnar] object DenseSum:
         rows,
       )
 
-  private def presentWindow(values: Array[Int], start: Int, end: Int, cap: Int): Fit =
-    var minKey = values(start)
-    var maxKey = minKey
-    if (exceeds(minKey, maxKey, cap)) then Wide
-    else
-      var row = start + 1
-      var wide = false
-      while (row < end && !wide) {
-        val key = values(row)
-        if (key < minKey) then
-          minKey = key
-          wide = exceeds(minKey, maxKey, cap)
-        else if (key > maxKey) then
-          maxKey = key
-          wide = exceeds(minKey, maxKey, cap)
-        row += 1
-      }
-      if (wide) then Wide else window(minKey, maxKey, cap)
-
-  private def classifySparse(keys: Int32Column, start: Int, end: Int, cap: Int): Fit =
-    val values = keys.values
-    val words = keys.validity.words
+  /** One pass over key presence and the key bounds. Null keys are skipped. */
+  private def boundKeys(
+      values: Array[Int],
+      words: Array[Long],
+      start: Int,
+      end: Int,
+      cap: Int,
+  ): Fit =
+    val limit = denseLimit(end - start)
     var row = start
     var seenKey = false
     var minKey = 0
     var maxKey = 0
     var wide = false
     while (row < end && !wide) {
-      if (Validity.isSet(words, row)) then
-        val key = values(row)
-        if (!seenKey) then
-          seenKey = true
-          minKey = key
-          maxKey = key
-          wide = exceeds(minKey, maxKey, cap)
-        else if (key < minKey) then
-          minKey = key
-          wide = exceeds(minKey, maxKey, cap)
-        else if (key > maxKey) then
-          maxKey = key
-          wide = exceeds(minKey, maxKey, cap)
-      row += 1
+      if ((row & 63) == 0 && row + 64 <= end && words(row >>> 6) == -1L) then
+        val stop = row + 64
+        while (row < stop && !wide) {
+          val key = values(row)
+          if (!seenKey) then
+            seenKey = true
+            minKey = key
+            maxKey = key
+          else if (key < minKey) then
+            minKey = key
+            wide = tooWide(minKey, maxKey, cap, limit)
+          else if (key > maxKey) then
+            maxKey = key
+            wide = tooWide(minKey, maxKey, cap, limit)
+          row += 1
+        }
+      else
+        if (Validity.isSet(words, row)) then
+          val key = values(row)
+          if (!seenKey) then
+            seenKey = true
+            minKey = key
+            maxKey = key
+          else if (key < minKey) then
+            minKey = key
+            wide = tooWide(minKey, maxKey, cap, limit)
+          else if (key > maxKey) then
+            maxKey = key
+            wide = tooWide(minKey, maxKey, cap, limit)
+        row += 1
     }
-    if (!seenKey) then Empty else if (wide) then Wide else window(minKey, maxKey, cap)
+    if (!seenKey) then Empty else if (wide) then Wide else window(minKey, maxKey, cap, limit)
 
-  /** `true` when the inclusive span does not fit in `cap`. The span is a `Long`. */
-  private def exceeds(minKey: Int, maxKey: Int, cap: Int): Boolean =
-    maxKey.toLong - minKey.toLong + 1L > cap.toLong
-
-  private def window(minKey: Int, maxKey: Int, cap: Int): Fit =
-    val span = maxKey.toLong - minKey.toLong + 1L
-    if (span <= cap.toLong && span <= Int.MaxValue.toLong) then Window(minKey, span.toInt)
-    else Wide
-
-  /**
-   * Present keys of a column the caller already proved has no nulls in `[start, start + length)`.
-   */
-  private[columnar] def classifyPresent(
-      keys: Int32Column,
+  /** One pass over both presence bitmaps and the key bounds. */
+  private def boundRows(
+      values: Array[Int],
+      keyWords: Array[Long],
+      valueWords: Array[Long],
       start: Int,
-      length: Int,
+      end: Int,
       cap: Int,
-  ): Fit =
-    require(
-      start >= 0 && length >= 0 && start <= keys.length && length <= keys.length - start,
-      s"range ($start, $length) outside ${keys.length} rows",
-    )
-    if (length == 0) then Empty
-    else presentWindow(keys.values, start, start + length, cap)
+  ): Survey =
+    val limit = denseLimit(end - start)
+    var row = start
+    var seenKey = false
+    var keysPresent = true
+    var valuesPresent = true
+    var minKey = 0
+    var maxKey = 0
+    var wide = false
+    while (row < end && !wide) {
+      val aligned = (row & 63) == 0 && row + 64 <= end
+      if (aligned && keyWords(row >>> 6) == -1L && valueWords(row >>> 6) == -1L) then
+        val stop = row + 64
+        while (row < stop && !wide) {
+          val key = values(row)
+          if (!seenKey) then
+            seenKey = true
+            minKey = key
+            maxKey = key
+          else if (key < minKey) then
+            minKey = key
+            wide = tooWide(minKey, maxKey, cap, limit)
+          else if (key > maxKey) then
+            maxKey = key
+            wide = tooWide(minKey, maxKey, cap, limit)
+          row += 1
+        }
+      else
+        if (!Validity.isSet(keyWords, row)) then keysPresent = false
+        else
+          val key = values(row)
+          if (!seenKey) then
+            seenKey = true
+            minKey = key
+            maxKey = key
+          else if (key < minKey) then
+            minKey = key
+            wide = tooWide(minKey, maxKey, cap, limit)
+          else if (key > maxKey) then
+            maxKey = key
+            wide = tooWide(minKey, maxKey, cap, limit)
+        if (!Validity.isSet(valueWords, row)) then valuesPresent = false
+        row += 1
+    }
+    if (!seenKey) then Survey(Empty, columnsPresent = false)
+    else if (wide) then Survey(Wide, columnsPresent = false)
+    else Survey(window(minKey, maxKey, cap, limit), keysPresent && valuesPresent)
+
+  /** `true` when the inclusive span misses the cap or the density limit. The span is a `Long`. */
+  private def tooWide(minKey: Int, maxKey: Int, cap: Int, limit: Long): Boolean =
+    val span = maxKey.toLong - minKey.toLong + 1L
+    span > cap.toLong || span > limit
+
+  private def denseLimit(length: Int): Long =
+    DensityFactor.toLong * math.max(length, 1).toLong
+
+  private def window(minKey: Int, maxKey: Int, cap: Int, limit: Long): Fit =
+    val span = maxKey.toLong - minKey.toLong + 1L
+    if (span <= cap.toLong && span <= limit && span <= Int.MaxValue.toLong) then
+      Window(minKey, span.toInt)
+    else Wide
 
   /** `key` used as an index. Rejects a negative key and a key at or past `limit`. */
   private inline def inPrefix(index: Int, limit: Int): Boolean =

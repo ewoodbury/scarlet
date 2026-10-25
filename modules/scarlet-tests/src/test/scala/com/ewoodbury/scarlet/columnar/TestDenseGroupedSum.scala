@@ -40,19 +40,40 @@ class TestDenseGroupedSum extends AnyFlatSpec with Matchers:
     DenseSum.classify(keys, start = 0, length = 3, DenseSum.cap(4)) shouldBe DenseSum.Wide
   }
 
-  "budget" should "derive the cap from 4 MiB of 13-byte slots" in {
-    DenseSum.BytesPerSlot shouldBe 13L
+  "budget" should "derive the cap from 4 MiB of 17-byte slots" in {
+    DenseSum.BytesPerSlot shouldBe 17L
     DenseSum.BudgetBytes shouldBe 4L * 1024L * 1024L
+    DenseSum.DensityFactor shouldBe 4
     DenseSum.cap(1) shouldBe (DenseSum.BudgetBytes / DenseSum.BytesPerSlot).toInt
     DenseSum.cap(4) shouldBe (DenseSum.BudgetBytes / (DenseSum.BytesPerSlot * 4L)).toInt
     (DenseSum.cap(1).toLong * DenseSum.BytesPerSlot) should be <= DenseSum.BudgetBytes
-    (4L * 65536L * DenseSum.BytesPerSlot) should be < DenseSum.BudgetBytes
-    DenseSum.cap(4) should be >= 65536
+    (DenseSum.cap(4).toLong * 4L * DenseSum.BytesPerSlot) should be <= DenseSum.BudgetBytes
+    (4L * DenseSum.DirectPrefix.toLong * DenseSum.BytesPerSlot) should be > DenseSum.BudgetBytes
+    DenseSum.cap(4) should be < DenseSum.DirectPrefix
     DenseSum.cap(1) should be > DenseSum.cap(4)
     DenseSum.DirectPrefix shouldBe 65536
     DenseSum.directLimit(DenseSum.cap(1)) shouldBe DenseSum.DirectPrefix
-    DenseSum.directLimit(DenseSum.cap(4)) shouldBe DenseSum.DirectPrefix
+    DenseSum.directLimit(DenseSum.cap(4)) shouldBe DenseSum.cap(4)
     DenseSum.directLimit(3) shouldBe 3
+    val workers = (DenseSum.BudgetBytes / DenseSum.BytesPerSlot).toInt + 1
+    DenseSum.cap(workers) shouldBe 0
+  }
+
+  it should "size a dense window to the observed keys" in {
+    val stored = Array.tabulate(64)(row => row % 16)
+    val keys = Int32Column.of(stored, Validity.allValid(stored.length), stored.length)
+
+    DenseSum.classify(keys, start = 0, length = stored.length, DenseSum.cap(1)) shouldBe
+      DenseSum.Window(0, 16)
+  }
+
+  it should "hash a sparse span that still fits the byte cap" in {
+    val stored = Array(0, 300000)
+    val keys = Int32Column.of(stored, Validity.allValid(stored.length), stored.length)
+
+    DenseSum.classify(keys, start = 0, length = stored.length, cap = 1000000) shouldBe
+      DenseSum.Wide
+    DenseSum.classify(keys, start = 0, length = stored.length, cap = 0) shouldBe DenseSum.Wide
   }
 
   "cap" should "index a window that fits and hash a window one past it" in {
@@ -64,6 +85,38 @@ class TestDenseGroupedSum extends AnyFlatSpec with Matchers:
     sums(Vector(indexed)) shouldBe Map(0 -> Some(4L), 2 -> Some(3L))
     keysOf(hashed) shouldBe Seq(3, 0)
     sums(Vector(hashed)) shouldBe Map(0 -> Some(4L), 3 -> Some(3L))
+  }
+
+  it should "hash when the budget leaves no dense slot" in {
+    val rows = Seq((2, 3), (0, 4))
+    val partial = cappedPartial(rows, denseCap = 0)
+
+    keysOf(partial) shouldBe Seq(2, 0)
+    sums(Vector(partial)) shouldBe Map(0 -> Some(4L), 2 -> Some(3L))
+  }
+
+  it should "hash 1024 groups spread over 0 until 300000" in {
+    val distinct = (0 until 1024).map(slot => ((slot.toLong * 300000L) / 1023L).toInt)
+    val rows = distinct.reverse.map(key => (key, 1))
+    val partial = cappedPartial(rows, denseCap = 1000000)
+
+    keysOf(partial) shouldBe rows.map(_._1)
+    keysOf(partial).headOption shouldBe Some(300000)
+  }
+
+  it should "hash a sparse window when the next morsel starts higher" in {
+    val even = (0 until 8).map(slot => ((slot.toLong * 300000L) / 7L).toInt)
+    val odd = even.map(key => key + 7)
+    val rows = even.reverse.map(key => (key, 1)) ++ odd.reverse.map(key => (key, 1))
+    val morsels = partials(BatchCodec.intPairs(rows), batchSize = even.length)
+
+    morsels match
+      case Vector(first, second) =>
+        keysOf(first).headOption shouldBe even.lastOption
+        keysOf(second).headOption shouldBe odd.lastOption
+        keysOf(first) shouldBe even.reverse
+        keysOf(second) shouldBe odd.reverse
+      case other => fail(s"expected two partials, got ${other.length}")
   }
 
   "sums" should "match the hash table, including a null sum and a rejected key" in {
@@ -256,6 +309,82 @@ class TestDenseGroupedSum extends AnyFlatSpec with Matchers:
     sums(Vector(table.compactDirect())) shouldBe Map(0 -> Some(1L), 3 -> Some(1L))
   }
 
+  it should "clear slots written before a direct scan fails" in {
+    val table = new DenseSum.Accumulator
+    val limit = 8
+    val failed = BatchCodec.intPairs(Seq((0, 10), (1, 20), (2, 30), (3, 40)))
+    val follow = BatchCodec.intPairs(Seq((1, 5), (4, 7)))
+    table.prepareDirect(limit)
+    table.failAfter(2)
+    intercept[ArrayIndexOutOfBoundsException] {
+      val _ = table.addDirect(int32(failed, 0), int32(failed, 1), start = 0, end = failed.length)
+    }
+
+    table.touchedSlots should be > 0
+    table.prepareDirect(limit)
+    table.touchedSlots shouldBe 0
+    table.addDirect(int32(follow, 0), int32(follow, 1), start = 0, end = follow.length) shouldBe
+      true
+    sums(Vector(table.compactDirect())) shouldBe Map(1 -> Some(5L), 4 -> Some(7L))
+  }
+
+  it should "drop a failed worker scan before the same window is reused" in {
+    val failed = BatchCodec.intPairs((0 until 8).map(key => (key, 10 + key)))
+    val follow = BatchCodec.intPairs(Seq((7, 1), (0, 2), (3, 4)))
+    HashAggregate.armDirectFailure(2)
+    try
+      intercept[ArrayIndexOutOfBoundsException] {
+        val _ = HashAggregate.indexSumRange(
+          int32(failed, 0),
+          int32(failed, 1),
+          start = 0,
+          length = failed.length,
+          minKey = 0,
+          keyRange = 8,
+          columnsPresent = true,
+        )
+      }
+      HashAggregate.directTouchedSlots shouldBe 0
+      val batch = HashAggregate.indexSumRange(
+        int32(follow, 0),
+        int32(follow, 1),
+        start = 0,
+        length = follow.length,
+        minKey = 0,
+        keyRange = 8,
+        columnsPresent = true,
+      )
+      sums(Vector(batch)) shouldBe Map(0 -> Some(2L), 3 -> Some(4L), 7 -> Some(1L))
+    finally HashAggregate.releaseSumWorkers()
+  }
+
+  it should "add the window origin when a gapped range is compacted" in {
+    val table = new DenseSum.Accumulator
+    val shifted = BatchCodec.intPairs(Seq((105, 4), (100, 1), (103, 2)))
+    table.prepare(min = 100, range = 6)
+    table.addTrusted(int32(shifted, 0), int32(shifted, 1), start = 0, end = shifted.length)
+
+    keysOf(table.compact()) shouldBe Seq(100, 103, 105)
+    table.prepare(min = 200, range = 6)
+    table.touchedSlots shouldBe 0
+    val next = BatchCodec.intPairs(Seq((204, 3), (200, 8)))
+    table.addTrusted(int32(next, 0), int32(next, 1), start = 0, end = next.length)
+    sums(Vector(table.compact())) shouldBe Map(200 -> Some(8L), 204 -> Some(3L))
+  }
+
+  it should "reject a direct scan whose values are not all present" in {
+    val stored = Array(0, 1)
+    val keys = Int32Column.of(stored, Validity.allValid(stored.length), stored.length)
+    val values = Int32Column.of(stored, Validity.pack(stored.length, row => row == 0), stored.length)
+    val table = new DenseSum.Accumulator
+    table.prepareDirect(4)
+
+    intercept[AssertionError] {
+      val _ = table.addDirect(keys, values, start = 0, end = stored.length)
+    }
+    table.touchedSlots shouldBe 0
+  }
+
   "failure" should "not carry a rejected direct scan into the next morsel" in {
     val wide = DenseSum.cap(1)
     val failed = Seq((0, 10), (1, 20), (2, 30), (3, 40), (4, 50), (5, 60), (6, 70), (wide, 80))
@@ -285,6 +414,8 @@ class TestDenseGroupedSum extends AnyFlatSpec with Matchers:
         leftKeys.values should not be theSameInstanceAs(rightKeys.values)
         leftKeys.validity should not be theSameInstanceAs(rightKeys.validity)
         leftSums.validity should not be theSameInstanceAs(rightSums.validity)
+        leftKeys.validity should not be theSameInstanceAs(leftSums.validity)
+        rightKeys.validity should not be theSameInstanceAs(rightSums.validity)
         leftKeys.validity should not be theSameInstanceAs(rightSums.validity)
         leftSums.values should not be theSameInstanceAs(rightSums.values)
       case other => fail(s"expected two partials, got ${other.length}")

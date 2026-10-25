@@ -154,39 +154,38 @@ object HashAggregate:
     }
 
   /**
-   * Sums a present range whose keys all lie in `[0, directLimit)`. Returns `None` when a key is
-   * outside that prefix, without publishing, so the caller can classify. A hit emits ascending
-   * keys. An index that passed that check and still falls outside the table is a bug: the slots
-   * already written are cleared and the exception propagates.
+   * Sums a morsel into the worker's current zero-origin window when that window still fits.
+   * Returns `None` when the window is missing, the origin is not zero, or a key or a null forces a
+   * new survey. A rejected attempt leaves the table empty.
    */
-  private[columnar] def tryDirectSum(
+  private[columnar] def tryReuseDirect(
       keys: Int32Column,
       values: Int32Column,
       start: Int,
       length: Int,
       denseCap: Int,
   ): Option[ColumnBatch] =
-    val limit = DenseSum.directLimit(denseCap)
-    if (limit <= 0 || length <= 0) then None
+    if (length <= 0) then None
     else
       checkRange(keys, values, start, length)
       val dense = sumWorkers.get().dense
-      dense.prepareDirect(limit)
-      val accepted =
-        try dense.addDirect(keys, values, start, start + length)
-        catch
-          case ex: ArrayIndexOutOfBoundsException =>
-            dense.abandonDirect()
-            throw ex
-      if (accepted) then Some(dense.compactDirect())
+      if (!dense.reuseZero(denseCap, length)) then None
       else
-        dense.abandonDirect()
-        None
+        var accepted = false
+        guard(dense) {
+          accepted = dense.sumReuse(keys, values, start, start + length)
+        }
+        if (accepted) then Some(dense.compact())
+        else
+          dense.abandonDirect()
+          None
 
   /**
    * Sums `[start, start + length)` into the worker's direct-index table. `minKey` and `keyRange`
-   * are the classified window. A key outside that window fails the scan. The table is cleared for
-   * the next range on this thread, and [[releaseSumWorkers]] drops it.
+   * are the classified window, and the table is that window rather than the cap. A key outside the
+   * window fails the scan. A failure after slots were written clears them before the exception
+   * propagates. The next range on this thread calls `prepare` again. [[releaseSumWorkers]] drops
+   * the table.
    */
   private[columnar] def indexSumRange(
       keys: Int32Column,
@@ -200,10 +199,13 @@ object HashAggregate:
     checkRange(keys, values, start, length)
     val dense = sumWorkers.get().dense
     dense.prepare(minKey, keyRange)
-    if (length != 0) then
-      val end = start + length
-      if (columnsPresent) then dense.addTrusted(keys, values, start, end)
-      else dense.scanPlain(keys, values, start, end)
+    guard(dense) {
+      if (length != 0) then
+        val end = start + length
+        if (columnsPresent && minKey == 0) then dense.addPresentZero(keys, values, start, end)
+        else if (columnsPresent) then dense.addTrusted(keys, values, start, end)
+        else dense.scanPlain(keys, values, start, end)
+    }
     dense.compact()
 
   /**
@@ -223,8 +225,26 @@ object HashAggregate:
     checkRange(keys, values, start, length)
     val dense = sumWorkers.get().dense
     dense.prepare(minKey, keyRange)
-    if (length != 0) then dense.scanFiltered(keys, values, start, start + length, keep, map)
+    guard(dense) {
+      if (length != 0) then dense.scanFiltered(keys, values, start, start + length, keep, map)
+    }
     dense.compact()
+
+  /** The next direct scan on this thread throws once `afterGroups` new groups are recorded. */
+  private[columnar] def armDirectFailure(afterGroups: Int): Unit =
+    sumWorkers.get().dense.failAfter(afterGroups)
+
+  /** Groups currently recorded in this thread's direct-index table. */
+  private[columnar] def directTouchedSlots: Int =
+    sumWorkers.get().dense.touchedSlots
+
+  /** A failed scan must not leave sums for the next morsel that reuses this window. */
+  private def guard(dense: DenseSum.Accumulator)(body: => Unit): Unit =
+    try body
+    catch
+      case ex: RuntimeException =>
+        dense.abandonDirect()
+        throw ex
 
   /**
    * Sums an `Int64` column into an `Int64` sum. This merges one batch of partial sums, and partial
