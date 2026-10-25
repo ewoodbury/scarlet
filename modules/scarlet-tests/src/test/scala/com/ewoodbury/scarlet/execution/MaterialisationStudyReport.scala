@@ -199,7 +199,7 @@ private[execution] object MaterialisationStudyReport:
         s"F4 t$threads batches ${fused.batches} against encode+slice $fusedAccount " +
           s"(${relation(fused.batches, fusedAccount)}). Visits ${fused.visits} against " +
           s"${facts.morsels} morsels (${relation(fused.visits, facts.morsels.toLong)}). " +
-          "ElementSum reads the sliced scan and does not write a column.",
+          "ElementSum reads the morsel scan and does not write a column.",
       )
       println(
         s"B4 t$threads batches ${boundary.batches} against encode+slice+output+concat+reslice " +

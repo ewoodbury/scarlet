@@ -479,8 +479,8 @@ object ColumnarPlanner:
   /**
    * Fold `fn` over the batches `op` produces. The default cuts each batch into [[Morsel]]s that
    * share the batch and runs those on the scheduler. `cut = false` reads each batch from row 0 for
-   * its whole length on the caller. A dictionary code count uses that: slicing would copy the code
-   * array, and the count reads the array in place.
+   * its whole length on the caller, for kernels that read a whole column in place. The dictionary
+   * code count uses that: it counts the code array in place and needs the full range.
    */
   private[execution] def foldInterpreted(
       plan: Plan[_],

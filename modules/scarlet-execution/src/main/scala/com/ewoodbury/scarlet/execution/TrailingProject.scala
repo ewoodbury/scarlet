@@ -93,6 +93,10 @@ private[execution] object TrailingProject:
   private def countLiteralStrings(plan: Plan[_], op: PhysicalOp): Option[Long] =
     literalChain(plan, op).map { case (basePlan, baseOp, groups) =>
       ColumnarPlanner.foldInterpreted(basePlan, baseOp, cut = false) { morsel =>
+        require(
+          morsel.start == 0 && morsel.length == morsel.batch.length,
+          "literal count needs the whole batch",
+        )
         ColumnKernel.countByGroups(morsel.batch, 0, groups)
       }
     }
