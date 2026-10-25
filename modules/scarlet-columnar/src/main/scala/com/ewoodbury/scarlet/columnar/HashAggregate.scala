@@ -24,9 +24,12 @@ import java.util.Arrays
  *
  * One open-addressed table serves every measure set. A batch-sized table is at least twice the row
  * count, so one batch does not rehash. The range scans reuse one small table per worker and grow
- * it, and `grow` keeps first-seen order. The kernel drops that table when the action returns. A
- * shorter capacity exists so tests can force `grow`. Loops keep the row index in a `var` so the
- * bodies stay allocation-free, matching `ColumnKernel`.
+ * it, and `grow` keeps first-seen order. [[GroupedSumKernel]] sums a bounded key range through
+ * [[DenseSum]] on this same worker, and leaves this table for a wide range or a pair step that can
+ * rewrite the key. Direct-index partials come out in ascending key order. This table stays
+ * first-seen. The kernel drops both when the action returns. A shorter capacity exists so tests
+ * can force `grow`. Loops keep the row index in a `var` so the bodies stay allocation-free,
+ * matching `ColumnKernel`.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object HashAggregate:
@@ -149,6 +152,99 @@ object HashAggregate:
         if (dense) then scanSumDenseSteps(table, keys, values, steps, slot, start, end)
         else scanSumSparseSteps(table, keys, values, steps, slot, start, end)
     }
+
+  /**
+   * Sums a morsel into the worker's current zero-origin window when that window still fits.
+   * Returns `None` when the window is missing, the origin is not zero, or a key or a null forces a
+   * new survey. A rejected attempt leaves the table empty.
+   */
+  private[columnar] def tryReuseDirect(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      denseCap: Int,
+  ): Option[ColumnBatch] =
+    if (length <= 0) then None
+    else
+      checkRange(keys, values, start, length)
+      val dense = sumWorkers.get().dense
+      if (!dense.reuseZero(denseCap, length)) then None
+      else
+        var accepted = false
+        guard(dense) {
+          accepted = dense.sumReuse(keys, values, start, start + length)
+        }
+        if (accepted) then Some(dense.compact())
+        else
+          dense.abandonDirect()
+          None
+
+  /**
+   * Sums `[start, start + length)` into the worker's direct-index table. `minKey` and `keyRange`
+   * are the classified window, and the table is that window rather than the cap. A key outside the
+   * window fails the scan. A failure after slots were written clears them before the exception
+   * propagates. The next range on this thread calls `prepare` again. [[releaseSumWorkers]] drops
+   * the table.
+   */
+  private[columnar] def indexSumRange(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      minKey: Int,
+      keyRange: Int,
+      columnsPresent: Boolean,
+  ): ColumnBatch =
+    checkRange(keys, values, start, length)
+    val dense = sumWorkers.get().dense
+    dense.prepare(minKey, keyRange)
+    guard(dense) {
+      if (length != 0) then
+        val end = start + length
+        if (columnsPresent && minKey == 0) then dense.addPresentZero(keys, values, start, end)
+        else if (columnsPresent) then dense.addTrusted(keys, values, start, end)
+        else dense.scanPlain(keys, values, start, end)
+    }
+    dense.compact()
+
+  /**
+   * Same window as [[indexSumRange]], after `keep` and `map`. A null value is dropped before
+   * `keep`.
+   */
+  private[columnar] def indexSumRange(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      minKey: Int,
+      keyRange: Int,
+      keep: ColumnKernel.Int32Predicate,
+      map: ColumnKernel.Int32Map,
+  ): ColumnBatch =
+    checkRange(keys, values, start, length)
+    val dense = sumWorkers.get().dense
+    dense.prepare(minKey, keyRange)
+    guard(dense) {
+      if (length != 0) then dense.scanFiltered(keys, values, start, start + length, keep, map)
+    }
+    dense.compact()
+
+  /** The next direct scan on this thread throws once `afterGroups` new groups are recorded. */
+  private[columnar] def armDirectFailure(afterGroups: Int): Unit =
+    sumWorkers.get().dense.failAfter(afterGroups)
+
+  /** Groups currently recorded in this thread's direct-index table. */
+  private[columnar] def directTouchedSlots: Int =
+    sumWorkers.get().dense.touchedSlots
+
+  /** A failed scan must not leave sums for the next morsel that reuses this window. */
+  private def guard(dense: DenseSum.Accumulator)(body: => Unit): Unit =
+    try body
+    catch
+      case ex: RuntimeException =>
+        dense.abandonDirect()
+        throw ex
 
   /**
    * Sums an `Int64` column into an `Int64` sum. This merges one batch of partial sums, and partial
@@ -289,6 +385,7 @@ object HashAggregate:
   private final class SumWorker:
     val table: GroupTable = new GroupTable(SumTableStart, SumOnly)
     val slot: PairSlot = new PairSlot
+    val dense: DenseSum.Accumulator = new DenseSum.Accumulator
 
   private val sumWorkers: ThreadLocal[SumWorker] = new ThreadLocal[SumWorker]:
     override def initialValue(): SumWorker = new SumWorker
@@ -338,9 +435,9 @@ object HashAggregate:
       else scanSumLongSparse(table, keys, values)
 
   /**
-   * Drops this thread's reused sum table. [[GroupedSumKernel]] calls this when the action returns.
-   * A range runs on the calling thread when `parallelism` is 1 or there is one morsel, and that
-   * thread outlives the action.
+   * Drops this thread's reused sum table and its direct-index accumulator. [[GroupedSumKernel]]
+   * calls this when the action returns. A range runs on the calling thread when `parallelism` is 1
+   * or there is one morsel, and that thread outlives the action.
    */
   private[columnar] def releaseSumWorkers(): Unit =
     sumWorkers.remove()

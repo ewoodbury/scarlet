@@ -64,8 +64,10 @@ object ColumnPipeline:
 
   /**
    * Runs `steps` inside the partial range scan. A chain of value filters uses the `keep`/`map`
-   * overload before [[GroupedSumKernel.run]] sees those steps. Any other chain, including a key
-   * filter, a row filter, or a pair map, uses the pair scan.
+   * overload before [[GroupedSumKernel.run]] sees those steps, so it can take the direct-index
+   * sum. Any other chain, including a key filter, a row filter, or a pair map, uses the pair scan.
+   * That scan stays on the hash table: a [[PairStep.MapPair]] can rewrite the key, and the direct
+   * index classifies the key it sums.
    */
   def sumByKey(
       batches: Vector[ColumnBatch],

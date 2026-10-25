@@ -27,8 +27,14 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * reads. `groupedSum` itself returns only the grand total, which is unchanged if those pairs are
  * reassigned across keys. The columnar check folds the groups `ColumnPipeline.sumByKey` returns
  * and must match the oracle. Both checks run at every width, before warmup and again after the
- * measured rounds, outside the timer. `grouped-shuffled` uses the same fold. The two grouped
- * checksums must differ, because the shuffle reassigns keys and the grand totals stay equal.
+ * measured rounds, outside the timer. `grouped-shuffled` uses the same fold. The repeating and
+ * shuffled checksums must differ, because the shuffle reassigns keys and the grand totals stay
+ * equal.
+ *
+ * `grouped-sparse` spreads 1024 groups across `0` until `300000`. `grouped-shifting` uses that
+ * spread and adds 7 on every odd morsel. Both spans fail the density test, so the partial hashes.
+ * The harness checks one morsel of each pattern, outside the timer, and fails if that partial is
+ * sorted.
  *
  * Every sample installs a [[CountingSink]] outside the timer. A columnar sample must publish at
  * least one batch. A row sample must publish none. The check runs at each width and each layout.
@@ -148,6 +154,11 @@ object QueryBench:
     require(repeatFold.total == groupedTotal, "repeating groups drifted from the closed sum")
     require(shuffledFold.total == groupedTotal, "shuffled groups drifted from the closed sum")
     require(repeatFold.hash != shuffledFold.hash, "grouped checksums collided")
+    val sparse = GroupedBenchCases.sparse(groupedRows, sourcePartitions, batchSize)
+    val shifting = GroupedBenchCases.shifting(groupedRows, sourcePartitions, batchSize)
+    require(sparse.hash != shifting.hash, "spread checksums collided")
+    require(sparse.hash != repeatFold.hash, "sparse checksum collided with repeating groups")
+    GroupedBenchCases.requireHashFallback(sparse, shifting, batchSize)
     Vector(
       whole("int-narrow", elementRows, "Pipeline2(Scan)", narrowSum, narrow.plan, narrow.sum),
       whole("int-chain", elementRows, "Pipeline4(Scan)", chainSum, intChain.plan, intChain.sum),
@@ -157,6 +168,8 @@ object QueryBench:
       whole("boolean", elementRows, "Filter(Scan)", expectBools(), bools.plan, bools.count()),
       grouped("grouped-repeat", repeating, repeatFold.hash),
       grouped("grouped-shuffled", shuffled, shuffledFold.hash),
+      openGrouped("grouped-sparse", sparse),
+      openGrouped("grouped-shifting", shifting),
     )
 
   private def whole(
@@ -215,6 +228,23 @@ object QueryBench:
       () => sourceGroupFold(source),
       () => columnarGroupFold(source),
     )
+
+  private def openGrouped(name: String, input: GroupedBenchCases.Input): Query =
+    requireShape(name, "GroupedSum(Scan)", input.source.plan)
+    val source = input.source
+    new Query(
+      name,
+      groupedRows,
+      "GroupedSum(Scan)",
+      Answer.Whole(input.total),
+      () => Answer.Whole(source.groupedSum),
+      Some(input.hash),
+      () => copied(GroupedBenchCases.sourceFold(source)),
+      () => copied(GroupedBenchCases.columnarFold(source)),
+    )
+
+  private def copied(fold: GroupedBenchCases.Fold): GroupFold =
+    GroupFold(fold.hash, fold.total)
 
   private def unusedGroups(name: String): GroupFold =
     throw new IllegalStateException(s"$name has no group checksum")
