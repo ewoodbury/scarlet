@@ -60,7 +60,7 @@ object ColumnBatches:
    * validity. A published column is not mutated, so this is a view rather than a copy.
    */
   def takeColumn(batch: ColumnBatch, ordinal: Int): ColumnBatch =
-    val column = columnAt(batch, ordinal)
+    val column = ColumnKernel.columnAt(batch, ordinal)
     new ColumnBatch(Vector(column.logicalType), Vector(column), column.length)
 
   def concat(parts: Vector[ColumnBatch]): ColumnBatch =
@@ -77,7 +77,7 @@ object ColumnBatches:
       }
       val total = parts.iterator.map(_.length).sum
       val columns = head.columns.indices.map { ordinal =>
-        append(parts.map(part => columnAt(part, ordinal)), total)
+        append(parts.map(part => ColumnKernel.columnAt(part, ordinal)), total)
       }.toVector
       new ColumnBatch(head.schema, columns, total)
 
@@ -112,13 +112,6 @@ object ColumnBatches:
           validityRange(utf8.validity, start, length),
           length,
         )
-
-  private def columnAt(batch: ColumnBatch, ordinal: Int): Column =
-    batch.columns.lift(ordinal).getOrElse {
-      throw new IllegalArgumentException(
-        s"ordinal $ordinal outside width ${batch.columns.length}",
-      )
-    }
 
   private def append(columns: Vector[Column], total: Int): Column =
     columns.headOption match

@@ -75,7 +75,7 @@ final class StageExecutor[F[_]: Sync](
         case info if info.isShuffleStage =>
           executeShuffleStageTyped(info, inputPartitions, stageToShuffleId)
         case info =>
-          executeNarrowStageTyped(info, inputPartitions, stageToShuffleId)
+          executeNarrowStageTyped(info, inputPartitions)
       }
     }
   }
@@ -89,10 +89,9 @@ final class StageExecutor[F[_]: Sync](
   private def executeNarrowStageTyped(
       stageInfo: StageBuilder.StageInfo,
       inputPartitions: Seq[Partition[_]],
-      stageToShuffleId: Map[StageId, ShuffleId],
   ): F[Seq[Partition[_]]] = {
     val anyPartitions = inputPartitions.asInstanceOf[Seq[Partition[Any]]]
-    executeNarrowStage(stageInfo, anyPartitions, stageToShuffleId)
+    executeNarrowStage(stageInfo, anyPartitions)
   }
 
   /**
@@ -276,7 +275,6 @@ final class StageExecutor[F[_]: Sync](
   private def executeNarrowStage[A, B](
       stageInfo: StageBuilder.StageInfo,
       inputPartitions: Seq[Partition[A]],
-      @annotation.unused stageToShuffleId: Map[StageId, ShuffleId],
   ): F[Seq[Partition[_]]] = {
     executePerPartition(inputPartitions, stageInfo.stage.asInstanceOf[Stage[A, B]])
   }

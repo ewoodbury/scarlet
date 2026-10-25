@@ -125,13 +125,4 @@ object PairKernel:
     }
 
   private def int32At(batch: ColumnBatch, ordinal: Int): Int32Column =
-    batch.columns.lift(ordinal) match
-      case Some(column: Int32Column) => column
-      case Some(other) =>
-        throw new IllegalArgumentException(
-          s"column $ordinal is ${other.logicalType}, expected Int32",
-        )
-      case None =>
-        throw new IllegalArgumentException(
-          s"ordinal $ordinal outside width ${batch.columns.length}",
-        )
+    ColumnKernel.asInt32(ColumnKernel.columnAt(batch, ordinal), ordinal)

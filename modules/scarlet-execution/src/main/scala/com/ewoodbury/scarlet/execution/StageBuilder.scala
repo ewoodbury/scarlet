@@ -205,32 +205,19 @@ object StageBuilder:
    *   This function only handles narrow operations. Wide operations should be processed through
    *   separate shuffle stages before materialization.
    */
+  // Vector is immutable, and require(ops.nonEmpty) already ran, so head and tail are total.
+  @SuppressWarnings(Array("org.wartremover.warts.IterableOps"))
   private[execution] def materialize(ops: Vector[Operation[Any, Any]]): Stage[Any, Any] = {
     require(ops.nonEmpty, "Cannot materialize empty operation vector")
 
     // For single operations, return the operation directly without chaining
     if (ops.length == 1) {
-      ops.headOption match {
-        case Some(op) => createStageFromOp(op)
-        case None =>
-          throw new IllegalStateException(
-            "Single operation vector unexpectedly empty after length check. " +
-              "This indicates a concurrent modification or internal error.",
-          )
-      }
+      createStageFromOp(ops.head)
     } else {
       // For multiple operations, build the chain efficiently
-      ops.headOption match {
-        case Some(firstOp) =>
-          ops.drop(1).foldLeft(createStageFromOp(firstOp)) { (stage, op) =>
-            chainOperationUnsafe(stage, op)
-          }
-        case None =>
-          throw new IllegalStateException(
-            "Multiple operation vector unexpectedly empty after validation. " +
-              s"Original vector length: ${ops.length}. " +
-              "This indicates a concurrent modification or internal error.",
-          )
+      val firstOp = ops.head
+      ops.tail.foldLeft(createStageFromOp(firstOp)) { (stage, op) =>
+        chainOperationUnsafe(stage, op)
       }
     }
   }
