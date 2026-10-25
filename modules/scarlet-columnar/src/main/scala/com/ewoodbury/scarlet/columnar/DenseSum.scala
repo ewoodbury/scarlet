@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import java.util.Arrays
+
 /**
  * Direct-index grouped sum for a bounded `Int` key range.
  *
@@ -28,7 +30,11 @@ package com.ewoodbury.scarlet.columnar
  * The arrays live on [[HashAggregate]]'s per-worker holder. [[Accumulator.prepare]] clears the
  * touched slots. Those arrays are indexed by slot, so a new minimum with the same width does not
  * allocate. A later morsel that still fits the same zero-origin window checks presence and the key
- * prefix, writes nothing on a miss, and otherwise uses the unrolled sum.
+ * prefix, writes nothing on a miss, and otherwise uses the unrolled sum. That sum stores the flag
+ * on every row. A fresh permutation makes a per-row "already seen" test mispredict, and the same
+ * test predicts when every morsel repeats one key sequence. The touched list is rebuilt with one
+ * pass over the window after the rows are added. An armed failure still records each new group as
+ * it is inserted, so a throw leaves those slots on the touched list.
  * [[HashAggregate.releaseSumWorkers]] drops the holder. Each published batch gets a new key array
  * and a new validity bitmap per column. A worker may keep a private copy of the zero-origin keys
  * and copy that into the batch. The private copy is not published. The cache holds one span, the
@@ -253,17 +259,27 @@ private[columnar] object DenseSum:
       }
       fits
 
-    /** Keys are in range. Records a new slot before adding its value. */
+    /**
+     * Keys are in `[0, keyRange)`. The steady path stores the flag on every row and rebuilds the
+     * touched list afterwards. An armed failure records each new group before its sum changes, and
+     * throws from that record.
+     */
     private def sumPrefix(keys: Int32Column, values: Int32Column, start: Int, end: Int): Unit =
       requireReady(start, end, keys.length, values.length)
+      if (failAt >= 0) then sumPrefixNoting(keys, values, start, end)
+      else sumPrefixOpen(keys, values, start, end)
+
+    private def sumPrefixOpen(
+        keys: Int32Column,
+        values: Int32Column,
+        start: Int,
+        end: Int,
+    ): Unit =
       val keyValues = keys.values
       val valueValues = values.values
       val sumsLocal = sums
       val seenLocal = seen
-      val touchedLocal = touched
       val both = BothBits
-      minSeen = Int.MaxValue
-      maxSeen = Int.MinValue
       var row = start
       while (row + 8 <= end) {
         val i0 = keyValues(row)
@@ -274,30 +290,78 @@ private[columnar] object DenseSum:
         val i5 = keyValues(row + 5)
         val i6 = keyValues(row + 6)
         val i7 = keyValues(row + 7)
-        if (seenLocal(i0) == 0) then note(seenLocal, touchedLocal, i0, both)
+        seenLocal(i0) = both
         sumsLocal(i0) += valueValues(row).toLong
-        if (seenLocal(i1) == 0) then note(seenLocal, touchedLocal, i1, both)
+        seenLocal(i1) = both
         sumsLocal(i1) += valueValues(row + 1).toLong
-        if (seenLocal(i2) == 0) then note(seenLocal, touchedLocal, i2, both)
+        seenLocal(i2) = both
         sumsLocal(i2) += valueValues(row + 2).toLong
-        if (seenLocal(i3) == 0) then note(seenLocal, touchedLocal, i3, both)
+        seenLocal(i3) = both
         sumsLocal(i3) += valueValues(row + 3).toLong
-        if (seenLocal(i4) == 0) then note(seenLocal, touchedLocal, i4, both)
+        seenLocal(i4) = both
         sumsLocal(i4) += valueValues(row + 4).toLong
-        if (seenLocal(i5) == 0) then note(seenLocal, touchedLocal, i5, both)
+        seenLocal(i5) = both
         sumsLocal(i5) += valueValues(row + 5).toLong
-        if (seenLocal(i6) == 0) then note(seenLocal, touchedLocal, i6, both)
+        seenLocal(i6) = both
         sumsLocal(i6) += valueValues(row + 6).toLong
-        if (seenLocal(i7) == 0) then note(seenLocal, touchedLocal, i7, both)
+        seenLocal(i7) = both
         sumsLocal(i7) += valueValues(row + 7).toLong
         row += 8
       }
+      while (row < end) {
+        val index = keyValues(row)
+        seenLocal(index) = both
+        sumsLocal(index) += valueValues(row).toLong
+        row += 1
+      }
+      recordTouched(seenLocal)
+
+    /** Same rows as [[sumPrefixOpen]]. Each new group is recorded before its sum is updated. */
+    private def sumPrefixNoting(
+        keys: Int32Column,
+        values: Int32Column,
+        start: Int,
+        end: Int,
+    ): Unit =
+      val keyValues = keys.values
+      val valueValues = values.values
+      val sumsLocal = sums
+      val seenLocal = seen
+      val touchedLocal = touched
+      val both = BothBits
+      minSeen = Int.MaxValue
+      maxSeen = Int.MinValue
+      var row = start
       while (row < end) {
         val index = keyValues(row)
         if (seenLocal(index) == 0) then note(seenLocal, touchedLocal, index, both)
         sumsLocal(index) += valueValues(row).toLong
         row += 1
       }
+
+    /** One pass over the window. Slots the open sum marked are appended in ascending order. */
+    private def recordTouched(seenLocal: Array[Byte]): Unit =
+      val touchedLocal = touched
+      val limit = keyRange
+      var index = 0
+      var count = 0
+      var low = Int.MaxValue
+      var high = Int.MinValue
+      while (index < limit) {
+        if (seenLocal(index) != 0) then
+          touchedLocal(count) = index
+          count += 1
+          if (index < low) then low = index
+          if (index > high) then high = index
+        index += 1
+      }
+      touchedCount = count
+      if (count == 0) then
+        minSeen = Int.MaxValue
+        maxSeen = -1
+      else
+        minSeen = low
+        maxSeen = high
 
     private def note(
         seenLocal: Array[Byte],
@@ -332,8 +396,18 @@ private[columnar] object DenseSum:
         if (rows == span) then compactSpan(minSeen, span)
         else compactWindow(minSeen, maxSeen, rows)
 
-    /** Clears every slot a rejected direct scan recorded, so the next range starts empty. */
-    def abandonDirect(): Unit = reset()
+    /**
+     * Clears the whole window, not only the touched list. The open sum writes slots before it
+     * rebuilds that list, so a throw in the middle would leave sums the touched list does not
+     * name.
+     */
+    def abandonDirect(): Unit =
+      Arrays.fill(sums, 0L)
+      Arrays.fill(seen, 0.toByte)
+      touchedCount = 0
+      nullSums = 0
+      minSeen = Int.MaxValue
+      maxSeen = -1
 
     /**
      * Rows that are not fully present. A fully present window uses [[addPresentZero]] or
