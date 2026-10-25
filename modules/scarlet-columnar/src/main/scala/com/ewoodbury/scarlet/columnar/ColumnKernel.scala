@@ -6,8 +6,10 @@ package com.ewoodbury.scarlet.columnar
  * Filter builds a selection of rows whose predicate column passes the predicate. For ints, longs,
  * floats, and bools, nulls are dropped and the predicate is not called. A string filter calls the
  * predicate on every row, including an empty cell, and an empty cell may survive. Survivors stay
- * in input order. Every column is compacted. The output capacity is the input live length, and the
- * output length is the survivor count. A string filter keeps the input dictionary.
+ * in input order. Every column is compacted. The output length is the survivor count. A
+ * whole-batch scan sizes its output to the input live length. An int or long range scan sizes the
+ * filtered column to the range length and records absolute row indexes, so the other columns are
+ * still compacted from the source batch. A string filter keeps the input dictionary.
  *
  * Project maps one column and shares the others. For the primitive columns, a null stays null, the
  * new slot stores `0`, and the function is not called. The mapped column reuses the input validity
@@ -57,23 +59,49 @@ object ColumnKernel:
     def apply(value: String): String
 
   def filterInt32(batch: ColumnBatch, ordinal: Int, predicate: Int32Predicate): ColumnBatch =
+    filterInt32(batch, ordinal, 0, batch.length, predicate)
+
+  /** Scans `[start, start + length)` and records absolute row indexes. */
+  def filterInt32(
+      batch: ColumnBatch,
+      ordinal: Int,
+      start: Int,
+      length: Int,
+      predicate: Int32Predicate,
+  ): ColumnBatch =
     val column = asInt32(columnAt(batch, ordinal), ordinal)
+    requireRange(start, length, column.length)
     if (batch.columns.length == 1) then
-      val scanned = scanInt32(column, predicate, record = false, selection = noSelection)
+      val scanned =
+        scanInt32(column, start, length, predicate, record = false, selection = noSelection)
       publish(batch, scanned.column, scanned.count)
     else
-      val selection = new Array[Int](batch.length)
-      val scanned = scanInt32(column, predicate, record = true, selection = selection)
+      val selection = new Array[Int](length)
+      val scanned =
+        scanInt32(column, start, length, predicate, record = true, selection = selection)
       assemble(batch, ordinal, scanned.column, selection, scanned.count)
 
   def filterInt64(batch: ColumnBatch, ordinal: Int, predicate: Int64Predicate): ColumnBatch =
+    filterInt64(batch, ordinal, 0, batch.length, predicate)
+
+  /** Scans `[start, start + length)` and records absolute row indexes. */
+  def filterInt64(
+      batch: ColumnBatch,
+      ordinal: Int,
+      start: Int,
+      length: Int,
+      predicate: Int64Predicate,
+  ): ColumnBatch =
     val column = asInt64(columnAt(batch, ordinal), ordinal)
+    requireRange(start, length, column.length)
     if (batch.columns.length == 1) then
-      val scanned = scanInt64(column, predicate, record = false, selection = noSelection)
+      val scanned =
+        scanInt64(column, start, length, predicate, record = false, selection = noSelection)
       publish(batch, scanned.column, scanned.count)
     else
-      val selection = new Array[Int](batch.length)
-      val scanned = scanInt64(column, predicate, record = true, selection = selection)
+      val selection = new Array[Int](length)
+      val scanned =
+        scanInt64(column, start, length, predicate, record = true, selection = selection)
       assemble(batch, ordinal, scanned.column, selection, scanned.count)
 
   def filterFloat64(
@@ -114,11 +142,13 @@ object ColumnKernel:
     val keep: Int32Predicate = code => selected(mask, code)
     val codeColumn = Int32Column.of(column.codes, column.validity, column.length)
     if (batch.columns.length == 1) then
-      val scanned = scanInt32(codeColumn, keep, record = false, selection = noSelection)
+      val scanned =
+        scanInt32(codeColumn, 0, codeColumn.length, keep, record = false, selection = noSelection)
       publish(batch, filteredUtf8(column, scanned, ordinal), scanned.count)
     else
       val selection = new Array[Int](batch.length)
-      val scanned = scanInt32(codeColumn, keep, record = true, selection = selection)
+      val scanned =
+        scanInt32(codeColumn, 0, codeColumn.length, keep, record = true, selection = selection)
       assemble(batch, ordinal, filteredUtf8(column, scanned, ordinal), selection, scanned.count)
 
   /**
@@ -263,19 +293,29 @@ object ColumnKernel:
 
   private final case class Scanned(column: Column, count: Int)
 
+  private def requireRange(start: Int, length: Int, rows: Int): Unit =
+    require(start >= 0, s"filter start must be >= 0, got $start")
+    require(length >= 0, s"filter length must be >= 0, got $length")
+    require(
+      start.toLong + length.toLong <= rows.toLong,
+      s"filter [$start, ${start.toLong + length.toLong}) outside column length $rows",
+    )
+
   private inline def scanInt32(
       column: Int32Column,
+      start: Int,
+      length: Int,
       predicate: Int32Predicate,
       inline record: Boolean,
       selection: Array[Int],
   ): Scanned =
-    val live = column.length
     val in = column.values
     val words = column.validity.words
-    val out = new Array[Int](live)
+    val out = new Array[Int](length)
+    val end = start + length
     var written = 0
-    var row = 0
-    while (row < live) {
+    var row = start
+    while (row < end) {
       if (Validity.isSet(words, row)) then
         val value = in(row)
         if (predicate(value)) then
@@ -284,22 +324,24 @@ object ColumnKernel:
           written += 1
       row += 1
     }
-    val built = Int32Column.of(out, Validity.prefixValid(live, written), written)
+    val built = Int32Column.of(out, Validity.prefixValid(length, written), written)
     Scanned(built, written)
 
   private inline def scanInt64(
       column: Int64Column,
+      start: Int,
+      length: Int,
       predicate: Int64Predicate,
       inline record: Boolean,
       selection: Array[Int],
   ): Scanned =
-    val live = column.length
     val in = column.values
     val words = column.validity.words
-    val out = new Array[Long](live)
+    val out = new Array[Long](length)
+    val end = start + length
     var written = 0
-    var row = 0
-    while (row < live) {
+    var row = start
+    while (row < end) {
       if (Validity.isSet(words, row)) then
         val value = in(row)
         if (predicate(value)) then
@@ -308,7 +350,7 @@ object ColumnKernel:
           written += 1
       row += 1
     }
-    val built = Int64Column.of(out, Validity.prefixValid(live, written), written)
+    val built = Int64Column.of(out, Validity.prefixValid(length, written), written)
     Scanned(built, written)
 
   private inline def scanFloat64(
