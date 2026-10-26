@@ -11,6 +11,9 @@ class TestHashPartitioner extends AnyFlatSpec with Matchers {
 
   private val partitioner = new HashPartitioner
 
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def nullKey: Any = null
+
   "HashPartitioner" should "handle Int.MinValue hashes without producing negative partitions" in {
     val partition = partitioner.partition(Int.MinValue, 4)
 
@@ -46,6 +49,10 @@ class TestHashPartitioner extends AnyFlatSpec with Matchers {
     keys.foreach { key =>
       partitioner.partition(key, 1) shouldEqual 0
     }
+  }
+
+  it should "route a null key to partition 0 so the consumer can decide" in {
+    partitioner.partition(nullKey, 8) shouldEqual 0
   }
 
   it should "return 0 for non-positive partition counts" in {

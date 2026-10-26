@@ -176,12 +176,12 @@ the pair type, such as `(Int, Int) => (Long, Int)`, is excluded: `partitioning`,
 `tryGroupedSum` stay on the row path. The structural peel label is still
 `GroupedSum(MapPair(Scan))`.
 
-These 49 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+These 50 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
 `sortBy`, map on join triples, a general tuple filter on join triples, non-Int `mapValues`,
 string/double pair projection or pair filters, string/double-key `groupByKey`, `reduceByKey`, and
-join, explicit sort-merge joins, single-precision `Float` sources/maps, all-null
-strings, empty generic sources without a type descriptor, and
+join, explicit sort-merge joins, left outer join (no outer-join kernel), single-precision
+`Float` sources/maps, all-null strings, empty generic sources without a type descriptor, and
 element maps that do not preserve the column type.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then
 `toString`, and a type-changing map inside a three-step chain), a `Long` mapped to `Int` or
@@ -326,3 +326,5 @@ Roadmap and sequencing are tracked externally; the headline items:
   hint records both children and builds the right input. A later cost-based pass may build the
   left input. The build table must fit in `broadcastBuildBudgetBytes`. The row-path sort-merge
   join is a hash grouping wearing a sort-merge name; a true typed sort-merge join is deferred.
+  A left outer join stays on the row path. Its `joinStrategy` hint is stored and not consulted;
+  the row executor always shuffle-hashes it.

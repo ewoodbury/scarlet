@@ -342,7 +342,8 @@ object StageBuilder:
    *      - GroupByKeyOp, ReduceByKeyOp: Supports shuffle bypass optimization when already
    *        partitioned correctly
    *      - SortByOp, PartitionByOp, RepartitionOp, CoalesceOp: Always creates shuffle boundaries
-   *      - JoinOp, CoGroupOp: Multi-input wide operations with side tagging for disambiguation
+   *      - JoinOp, LeftOuterJoinOp, CoGroupOp: Multi-input wide operations with side tagging for
+   *        disambiguation
    *      - Uses WideOp metadata structures for shuffle execution planning
    *
    * **Optimization Strategies**:
@@ -731,6 +732,28 @@ object StageBuilder:
         )
         (shuffleId, Some(joinOp))
 
+      case joinOp: Plan.LeftOuterJoinOp[_, _, _] =>
+        val (leftStageId, _) = buildStagesFromPlan(ctx, joinOp.left, builderMap, dependencies)
+        val (rightStageId, _) = buildStagesFromPlan(ctx, joinOp.right, builderMap, dependencies)
+
+        val numPartitions = ScarletConf.get.defaultShufflePartitions
+        val shuffleId = createShuffleStageUnified(
+          ctx,
+          Seq(leftStageId, rightStageId),
+          LeftOuterJoinWideOp(
+            SimpleWideOpMeta(
+              kind = WideOpKind.LeftOuterJoin,
+              numPartitions = numPartitions,
+              // Recorded for the plan. The row executor does not read it.
+              joinStrategy = joinOp.joinStrategy,
+              sides = Seq(Side.Left, Side.Right),
+            ),
+          ),
+          builderMap,
+          dependencies,
+        )
+        (shuffleId, Some(joinOp))
+
       case cogroupOp: Plan.CoGroupOp[_, _, _] =>
         val (leftStageId, _) = buildStagesFromPlan(ctx, cogroupOp.left, builderMap, dependencies)
         val (rightStageId, _) = buildStagesFromPlan(ctx, cogroupOp.right, builderMap, dependencies)
@@ -841,12 +864,13 @@ object StageBuilder:
       case RepartitionWideOp(m) => m
       case CoalesceWideOp(m) => m
       case JoinWideOp(m) => m
+      case LeftOuterJoinWideOp(m) => m
       case CoGroupWideOp(m) => m
     }
 
     // Create shuffle input sources based on operation type
     val shuffleInputSources = meta.kind match {
-      case WideOpKind.Join | WideOpKind.CoGroup =>
+      case WideOpKind.Join | WideOpKind.LeftOuterJoin | WideOpKind.CoGroup =>
         // Multi-input operations need sides
         require(upstreamIds.length == 2, s"${meta.kind} requires exactly 2 upstream stages")
         require(meta.sides.length == 2, s"${meta.kind} requires exactly 2 sides")
@@ -870,7 +894,7 @@ object StageBuilder:
     // repartition and coalesce only promise a width: the writer hashes the element.
     val outputPartitioning = meta.kind match {
       case WideOpKind.GroupByKey | WideOpKind.ReduceByKey | WideOpKind.PartitionBy |
-          WideOpKind.Join | WideOpKind.CoGroup =>
+          WideOpKind.Join | WideOpKind.LeftOuterJoin | WideOpKind.CoGroup =>
         Some(PartitioningInfo.hash(meta.numPartitions))
       case WideOpKind.SortBy =>
         Some(PartitioningInfo.rangeSorted(meta.numPartitions))

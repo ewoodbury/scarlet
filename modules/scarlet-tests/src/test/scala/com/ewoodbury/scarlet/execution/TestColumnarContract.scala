@@ -31,7 +31,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
     accepted.size shouldBe 161
-    excluded.size shouldBe 49
+    // Left outer join is excluded: the columnar planner has no outer-join kernel.
+    excluded.size shouldBe 50
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -544,6 +545,10 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         "explicit sort-merge join",
         DistCollection(pairSource).sortMergeJoin(DistCollection(rightPairSource)).plan,
       ),
+      ExcludedCase(
+        "left outer join",
+        DistCollection(pairSource).leftOuterJoin(DistCollection(rightPairSource)).plan,
+      ),
       ExcludedCase("single-precision Float source", floatSource),
       ExcludedCase("single-precision Float map", floatMap),
       ExcludedCase("all-null string source", allNullStringSource),
@@ -619,8 +624,9 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     )
 
   /**
-   * `lower` and the action gates share one decision. A refused plan, including a sort-merge join
-   * and a type-changing pair map, makes every gate return `None`. An accepted plan
+   * `lower` and the action gates share one decision. A refused plan, including a sort-merge join,
+   * a left outer join, and a type-changing pair map, makes every gate return `None`. An accepted
+   * plan
    * runs `tryRun` and `tryCount`. `tryTake` runs when the physical tree keeps input partitions.
    * `trySumInt`, `trySumLong`, and `trySumDouble` run only for that numeric kind. `tryGroupedSum` equals
    * `groupedSum` for an accepted grouped pair source and for an accepted row, key, or value
@@ -809,6 +815,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case Plan.ReduceByKeyOp(_, _) => PlanNode.ReduceByKey
     case Plan.SortByOp(_, _, _) => PlanNode.SortBy
     case Plan.JoinOp(_, _, _) => PlanNode.Join
+    case Plan.LeftOuterJoinOp(_, _, _) => PlanNode.Join
     case Plan.CoGroupOp(_, _) => PlanNode.CoGroup
 
   /**
