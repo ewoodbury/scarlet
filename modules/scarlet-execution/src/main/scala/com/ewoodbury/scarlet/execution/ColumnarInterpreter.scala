@@ -424,12 +424,8 @@ private[execution] object ColumnarInterpreter:
       regroup(cut.map(_.length), mapped)
 
   /**
-   * One visit per copied slice. The function sees a batch whose rows start at zero.
-   */
-
-  /**
    * One visit per morsel of the shared batch. The function owns its output. Regroup uses the same
-   * per-part visit counts as [[onEachSliced]].
+   * per-part visit counts as the fan-out above.
    */
   private def onEachMorsel(
       parts: Vector[ColumnBatch],
