@@ -12,7 +12,8 @@ import com.ewoodbury.scarlet.core.Partition
  * the child kind. [[PhysicalOp.Column]] narrows a pair to one int column and shares its arrays.
  * [[PhysicalOp.MapValue]] rewrites an int value and keeps the pair. [[PhysicalOp.Exchange]] sits
  * under [[PhysicalOp.HashAggregate]] and on each side of [[PhysicalOp.HashJoin]]. Those kernels
- * perform the shuffle. Interpreting the boundary on its own does not.
+ * perform the shuffle. Interpreting the boundary on its own does not. [[PhysicalOp.BroadcastJoin]]
+ * has no exchange. Its right child is the build side and its left child is probed in place.
  */
 enum PhysicalOp:
   case Scan(sourceKind: PhysicalOp.Kind, partitions: Seq[Partition[_]])
@@ -34,6 +35,13 @@ enum PhysicalOp:
   case HashAggregate(child: PhysicalOp)
   case HashJoin(left: PhysicalOp, right: PhysicalOp)
 
+  /**
+   * Inner join with no exchange. `probe` is the left input and `build` is the right input. The
+   * right side is always the build side, including when it is the larger input. Output kind is
+   * triples: `(key, left, right)`.
+   */
+  case BroadcastJoin(probe: PhysicalOp, build: PhysicalOp)
+
   def kind: PhysicalOp.Kind = this match
     case Scan(sourceKind, _) => sourceKind
     case Filter(child, _) => child.kind
@@ -44,6 +52,7 @@ enum PhysicalOp:
     case MapValue(_) => PhysicalOp.Kind.Pairs
     case HashAggregate(_) => PhysicalOp.Kind.Pairs
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
+    case BroadcastJoin(_, _) => PhysicalOp.Kind.Triples
 
   /** Operator nesting, without data. */
   def shape: String = this match
@@ -61,6 +70,7 @@ enum PhysicalOp:
     case MapValue(child) => s"MapValue(${child.shape})"
     case HashAggregate(child) => s"HashAggregate(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
+    case BroadcastJoin(probe, build) => s"BroadcastJoin(${probe.shape}, ${build.shape})"
 
 object PhysicalOp:
   enum Kind:

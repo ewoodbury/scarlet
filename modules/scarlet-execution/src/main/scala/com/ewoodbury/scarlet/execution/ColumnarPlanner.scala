@@ -54,17 +54,19 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * That check reads the method descriptor and does not call the function. `getDeclaredMethods` does
  * not see an inherited `apply`, so that function stays on the row path too. `reduceByKey` applies
  * the user's function and wraps at `Int`. A `join` with no hint, or with an explicit shuffle-hash
- * hint, hash-partitions both sides and probes one bucket at a time. Sort-merge and broadcast are
- * not implemented: those hints make `lower` return `None`, so the plan stays on the row path.
- * Output width for an accepted join or aggregate is `defaultShufflePartitions`. [[tryCount]] and
- * [[trySumInt]] fold an int filter/map chain that starts at a scan or at `keys` or `values`,
- * including an int `mapValues`, and do not write that chain. Sum folds one trailing project and
- * chains longer than four. Count folds those, chains of two to four steps, and a string scan under
- * only dictionary literal filters. That string fold reads the scan `lower` built. A string shape
- * that is not that chain reads the finished batches. [[trySumLong]] folds a long filter/map chain
- * the same way, and the sum wraps. [[trySumDouble]] folds at most four steps. Sum of `keys`,
- * `values`, or an int `mapValues` with no further element chain reads the pair column in that
- * morsel loop and does not build the projection. [[tryGroupedSum]] runs
+ * hint, hash-partitions both sides and probes one bucket at a time. A broadcast hint builds a hash
+ * table from the right input and probes the left input in place, with no exchange on either side.
+ * The right input is always the build side. Sort-merge is not implemented: that hint makes `lower`
+ * return `None`, so the plan stays on the row path. Output width for a shuffle-hash join or an
+ * aggregate is `defaultShufflePartitions`. A broadcast join keeps the probe side's partition
+ * count. [[tryCount]] and [[trySumInt]] fold an int filter/map chain that starts at a scan or at
+ * `keys` or `values`, including an int `mapValues`, and do not write that chain. Sum folds one
+ * trailing project and chains longer than four. Count folds those, chains of two to four steps,
+ * and a string scan under only dictionary literal filters. That string fold reads the scan `lower`
+ * built. A string shape that is not that chain reads the finished batches. [[trySumLong]] folds a
+ * long filter/map chain the same way, and the sum wraps. [[trySumDouble]] folds at most four
+ * steps. Sum of `keys`, `values`, or an int `mapValues` with no further element chain reads the
+ * pair column in that morsel loop and does not build the projection. [[tryGroupedSum]] runs
  * [[ColumnPipeline.sumByKey]] on a typed pair source and folds the `Int64` group sums. A preceding
  * `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that partial scan,
  * so the action does not build those pairs. [[groupedSumPeel]] labels those walked steps. It is
@@ -115,8 +117,8 @@ object ColumnarPlanner:
   /**
    * The physical tree for `plan`, without running it. `None` means the row path, including an
    * element chain whose project does not declare the column's type. A join lowers when its hint is
-   * absent or shuffle-hash. Sort-merge and broadcast return `None`. [[partitioning]] and
-   * [[tryRun]] follow that refusal. They also drop a lowered tree whose layout is invalid.
+   * absent, shuffle-hash, or broadcast. Sort-merge returns `None`. [[partitioning]] and [[tryRun]]
+   * follow that refusal. They also drop a lowered tree whose layout is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -550,18 +552,29 @@ object ColumnarPlanner:
     case PhysicalOp.Pipeline(child, _) => preservedPartitions(child)
     case PhysicalOp.Column(child, _) => preservedPartitions(child)
     case PhysicalOp.MapValue(child) => preservedPartitions(child)
-    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.Exchange => None
+    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.BroadcastJoin |
+        _: PhysicalOp.Exchange =>
+      None
 
   private def lowerPlan(plan: Plan[_]): Option[PhysicalOp] =
     val (base, steps) = elementSteps(plan, Int.MaxValue)
     if (steps.isEmpty) then lowerPlanNode(base)
     else lowerPlan(base).flatMap(child => lowerElementSteps(child, steps))
 
-  /** Columnar joins are hash joins. No hint and an explicit shuffle-hash hint both qualify. */
+  /**
+   * Columnar joins are hash joins. No hint, shuffle-hash, and broadcast all qualify. Sort-merge
+   * does not. Broadcast builds the right input; see [[joinOf]].
+   */
   private[execution] def acceptsHashJoin(strategy: Option[Plan.JoinStrategy]): Boolean =
     strategy match
+      case None | Some(Plan.JoinStrategy.ShuffleHash) | Some(Plan.JoinStrategy.Broadcast) => true
+      case Some(Plan.JoinStrategy.SortMerge) => false
+
+  /** Shuffle-hash, including a join with no hint. Broadcast is a different physical node. */
+  private[execution] def acceptsShuffleHash(strategy: Option[Plan.JoinStrategy]): Boolean =
+    strategy match
       case None | Some(Plan.JoinStrategy.ShuffleHash) => true
-      case Some(_) => false
+      case Some(Plan.JoinStrategy.Broadcast) | Some(Plan.JoinStrategy.SortMerge) => false
 
   private def lowerPlanNode(plan: Plan[_]): Option[PhysicalOp] = plan match
     case source: Plan.Source[_] =>
@@ -588,10 +601,26 @@ object ColumnarPlanner:
         case (Some(leftOp), Some(rightOp)) =>
           (leftOp.kind, rightOp.kind) match
             case (PhysicalOp.Kind.Pairs, PhysicalOp.Kind.Pairs) =>
-              Some(PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)))
+              Some(joinOf(strategy, leftOp, rightOp))
             case _ => None
         case _ => None
     case _ => None
+
+  /**
+   * Shuffle-hash exchanges both children. Broadcast does not: `leftOp` is the probe and `rightOp`
+   * is the build, even when the right input is larger.
+   */
+  private def joinOf(
+      strategy: Option[Plan.JoinStrategy],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+  ): PhysicalOp = strategy match
+    case Some(Plan.JoinStrategy.Broadcast) =>
+      PhysicalOp.BroadcastJoin(probe = leftOp, build = rightOp)
+    case None | Some(Plan.JoinStrategy.ShuffleHash) =>
+      PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp))
+    case Some(Plan.JoinStrategy.SortMerge) =>
+      throw new IllegalStateException("sort-merge is not a columnar join")
 
   private[execution] def elementSteps(
       plan: Plan[_],
@@ -862,6 +891,8 @@ object ColumnarPlanner:
     case PhysicalOp.Column(child, _) => infoOf(child).withoutPairDistribution
     case PhysicalOp.MapValue(child) => infoOf(child)
     case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin => hashed
+    case PhysicalOp.BroadcastJoin(probe, _) =>
+      infoOf(probe).copy(layout = layoutOf(PhysicalOp.Kind.Triples))
     case PhysicalOp.Exchange(_) =>
       throw new IllegalStateException("exchange is only a child of aggregate or join")
     case PhysicalOp.Scan(kind, partitions) =>

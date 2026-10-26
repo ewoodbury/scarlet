@@ -156,7 +156,7 @@ private[execution] object ColumnarInterpreter:
     case (
           Plan.JoinOp(left, right, strategy),
           PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
-        ) if ColumnarPlanner.acceptsHashJoin(strategy) =>
+        ) if ColumnarPlanner.acceptsShuffleHash(strategy) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       Columns.Triples(
@@ -164,6 +164,20 @@ private[execution] object ColumnarInterpreter:
           pairsOf(interpret(left, leftOp, selectedPartition)),
           pairsOf(interpret(right, rightOp, selectedPartition)),
           ColumnarPlanner.shuffleWidth,
+          ColumnarPlanner.parallelism,
+          ColumnarPlanner.batchSize,
+        ),
+      )
+    case (
+          Plan.JoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
+          PhysicalOp.BroadcastJoin(probe, build),
+        ) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      Columns.Triples(
+        ColumnPipeline.broadcastJoin(
+          pairsOf(interpret(left, probe, selectedPartition)),
+          pairsOf(interpret(right, build, selectedPartition)),
           ColumnarPlanner.parallelism,
           ColumnarPlanner.batchSize,
         ),

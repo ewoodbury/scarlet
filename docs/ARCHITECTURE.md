@@ -80,6 +80,7 @@ outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are 
 | Pair `keys`, `values`, int `mapValues`, mapped key/value columns, filtered int `mapValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `Project(Key(Scan))`, `Project(Value(Scan))`, `FilterValue(MapValue(Scan))` |
 | Int `reduceByKey`, after a value filter or int `mapValues`, and nested reduction | `Columnar` | `HashAggregate(Exchange(Scan))`, `HashAggregate(Exchange(FilterValue(Scan)))`, `HashAggregate(Exchange(MapValue(Scan)))`, `HashAggregate(Exchange(HashAggregate(Exchange(Scan))))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
+| Explicit broadcast int join. The right input is the build side, and neither side is exchanged | `Columnar` | `BroadcastJoin(Scan, Scan)` |
 | Join after an int aggregate | `Columnar` | `HashJoin(Exchange(HashAggregate(Exchange(Scan))), Exchange(Scan))` |
 | Int join key/left-value/right-value filters | `Columnar` | `FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))`, `FilterTripleLeftValue(HashJoin(Exchange(Scan), Exchange(Scan)))`, `FilterTripleRightValue(HashJoin(Exchange(Scan), Exchange(Scan)))` |
 
@@ -175,11 +176,11 @@ the pair type, such as `(Int, Int) => (Long, Int)`, is excluded: `partitioning`,
 `tryGroupedSum` stay on the row path. The structural peel label is still
 `GroupedSum(MapPair(Scan))`.
 
-These 50 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+These 49 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
 `sortBy`, map on join triples, a general tuple filter on join triples, non-Int `mapValues`,
 string/double pair projection or pair filters, string/double-key `groupByKey`, `reduceByKey`, and
-join, explicit sort-merge and broadcast joins, single-precision `Float` sources/maps, all-null
+join, explicit sort-merge joins, single-precision `Float` sources/maps, all-null
 strings, empty generic sources without a type descriptor, and
 element maps that do not preserve the column type.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then
@@ -198,10 +199,10 @@ a pair that stays `(Int, Int)` is also excluded from `lower` and
 fixture reports a layout when `lower` refuses the plan. `partitioning` is defined exactly when
 the plan is accepted: `lower` returns a physical tree and that tree's layout is valid.
 
-A join lowers when its hint is absent or is an explicit shuffle-hash hint. Sort-merge and
-broadcast are not implemented on the columnar path: those hints make `lower` return `None`, and
-`partitioning` reports no layout. The absent hint and shuffle-hash stay the columnar hash join
-above.
+A join lowers when its hint is absent, shuffle-hash, or broadcast. Sort-merge is not implemented
+on the columnar path: that hint makes `lower` return `None`, and `partitioning` reports no layout.
+The absent hint and shuffle-hash stay the columnar hash join above. Broadcast builds the right
+input and probes the left input in place, so the physical tree has no exchange.
 
 `collect`, `foreach`, `reduce`, `fold`, and `aggregate` are deliberate boxed exits: they consume
 columnar results as ordinary Scala values at the action boundary. A collected `reduceByKey` also
@@ -313,7 +314,7 @@ Roadmap and sequencing are tracked externally; the headline items:
   shuffle write per stage.
 - Fusion has no cost model or general predicate pushdown. `collect` decodes every output row into a
   `Seq`.
-- The columnar path does not implement sort-merge or broadcast joins. Those hints stay on the
-  row path. A join with no hint, or with shuffle-hash, lowers to the columnar hash join. The
-  row-path sort-merge join is a hash grouping wearing a sort-merge name; a true typed sort-merge
-  join is deferred.
+- The columnar path does not implement sort-merge join. That hint stays on the row path. A join
+  with no hint, or with shuffle-hash, lowers to the columnar hash join. An explicit broadcast
+  hint builds the right input and probes the left input in place. The row-path sort-merge join is
+  a hash grouping wearing a sort-merge name; a true typed sort-merge join is deferred.

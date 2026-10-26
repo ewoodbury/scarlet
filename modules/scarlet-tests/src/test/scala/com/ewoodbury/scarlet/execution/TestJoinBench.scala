@@ -94,16 +94,19 @@ class TestJoinBench extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     ScarletConf.get.enableSortMergeJoin shouldBe beforeSort
   }
 
-  "broadcast-shaped" should "keep the broadcast hint and refuse the columnar plan" in {
+  "broadcast-shaped" should "keep the broadcast hint and lower to a broadcast join" in {
     val spec = JoinCases.broadcast(probeRows = 32, buildRows = 4)
     JoinCases.hint(spec) shouldBe Some(Plan.JoinStrategy.Broadcast)
     JoinCases.rowStrategy(spec) shouldBe "broadcast"
-    JoinBench.columnarShape(spec) shouldBe None
+    JoinBench.columnarShape(spec) shouldBe Some("BroadcastJoin(Scan, Scan)")
 
     val row = JoinBench.digestOf(spec, threads = 1, columnar = false)
+    val columnar = JoinBench.digestOf(spec, threads = 1, columnar = true)
     row.batches shouldBe 0L
+    columnar.batches should be > 0L
     row.digest.total shouldBe spec.expectedPairs
     row.digest.counts.map(_.count).sum shouldBe spec.expectedPairs
+    JoinDigest.agrees(row.digest, columnar.digest) shouldBe true
   }
 
   "hash cases" should "agree across layouts for symmetric, duplicate, and hot keys" in {

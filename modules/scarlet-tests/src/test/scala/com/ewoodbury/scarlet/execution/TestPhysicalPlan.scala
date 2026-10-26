@@ -238,6 +238,34 @@ class TestPhysicalPlan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.lower(pairs.mapValues[Int, Int, String](_.toString).plan) shouldBe rowPath
   }
 
+  it should "broadcast the right side, keep one batch per probe partition, and refuse sort-merge" in {
+    val probe = DistCollection.ofIntPairs(Array(1, 2, 1), Array(10, 20, 11), 3)
+    val build = DistCollection.ofIntPairs(Array(1, 1), Array(100, 101), 1)
+    val broadcast = probe.broadcastJoin(build)
+    shape(broadcast) shouldBe "BroadcastJoin(Scan, Scan)"
+    ColumnarPlanner.lower(probe.sortMergeJoin(build).plan) shouldBe rowPath
+
+    val parts = ColumnarPlanner.tryRun(broadcast.plan).getOrElse(fail("broadcast was refused"))
+    parts.length shouldBe 3
+    parts.flatMap(_.data) should contain theSameElementsAs probe
+      .shuffleHashJoin(build)
+      .collect()
+      .toSeq
+
+    val emptyProbe = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 3)
+    val emptyBuild = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 2)
+    val noProbe = ColumnarPlanner.tryRun(emptyProbe.broadcastJoin(build).plan).getOrElse {
+      fail("empty probe was refused")
+    }
+    noProbe.length shouldBe 3
+    noProbe.foreach(_.data shouldBe empty)
+    val noBuild = ColumnarPlanner.tryRun(probe.broadcastJoin(emptyBuild).plan).getOrElse {
+      fail("empty build was refused")
+    }
+    noBuild.length shouldBe 3
+    noBuild.foreach(_.data shouldBe empty)
+  }
+
   it should "exchange each join input, including an aggregate input" in {
     val build = DistCollection(Seq(1 -> 1, 1 -> 2), 1).reduceByKey[Int, Int](_ + _)
     val probe = DistCollection(Seq(1 -> 10), 1)
