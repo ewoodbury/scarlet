@@ -1,8 +1,17 @@
 package com.ewoodbury.scarlet.columnar
 
 /**
- * Filter a two-column `Int32` pair. A null key or a null value is dropped, and the predicate is
- * not called on it. Survivors stay in input order.
+ * Filter a two-column `Int32` pair or a three-column int join batch.
+ *
+ * A pair drops a null key or a null value and does not call the predicate on that row. A triple
+ * treats a null component as an error and names the absolute row; the predicate is not called.
+ * Survivors stay in input order.
+ *
+ * The whole-batch methods scan every live row. The range methods scan `[start, start + length)`
+ * and read validity at those absolute rows. Every column is part of the predicate, so there is
+ * nothing else to gather. The output is a new compacted batch of the same width. Its arrays are
+ * sized to the range, and its length is the survivor count. An empty range publishes an empty
+ * batch and does not call the predicate.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object PairKernel:
@@ -14,6 +23,15 @@ object PairKernel:
     def apply(key: Int, left: Int, right: Int): Boolean
 
   def filter(batch: ColumnBatch, predicate: IntPairPredicate): ColumnBatch =
+    filter(batch, 0, batch.length, predicate)
+
+  /** Scans `[start, start + length)`. Output columns are sized to the range. */
+  def filter(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      predicate: IntPairPredicate,
+  ): ColumnBatch =
     require(
       batch.columns.length == 2,
       s"pair filter expected 2 columns, got ${batch.columns.length}",
@@ -21,16 +39,17 @@ object PairKernel:
     val keys = int32At(batch, 0)
     val values = int32At(batch, 1)
     require(keys.length == values.length, "key and value columns differ in length")
-    val rows = keys.length
-    val outKeys = new Array[Int](rows)
-    val outValues = new Array[Int](rows)
+    Ranges.check(start, length, keys.length)
+    val outKeys = new Array[Int](length)
+    val outValues = new Array[Int](length)
     val keyValues = keys.values
     val valueValues = values.values
     val keyWords = keys.validity.words
     val valueWords = values.validity.words
+    val end = start + length
     var written = 0
-    var row = 0
-    while (row < rows) {
+    var row = start
+    while (row < end) {
       if (Validity.isSet(keyWords, row) && Validity.isSet(valueWords, row)) then
         val key = keyValues(row)
         val value = valueValues(row)
@@ -40,22 +59,21 @@ object PairKernel:
           written += 1
       row += 1
     }
-    val present = Validity.prefixValid(rows, written)
-    new ColumnBatch(
-      batch.schema,
-      Vector(
-        Int32Column.of(outKeys, present, written),
-        Int32Column.of(outValues, present, written),
-      ),
-      written,
-    )
+    publish(batch.schema, outKeys, outValues, length, written)
+
+  def filterTriple(batch: ColumnBatch, predicate: IntTriplePredicate): ColumnBatch =
+    filterTriple(batch, 0, batch.length, predicate)
 
   /**
-   * Filter and compact a three-column int join batch in one pass. Join rows are non-nullable at
-   * the row API, so a null component is an error rather than a row to silently discard. Survivors
-   * stay in input order.
+   * Scans `[start, start + length)`. A null component in that range is still an error at its
+   * absolute row. Output columns are sized to the range.
    */
-  def filterTriple(batch: ColumnBatch, predicate: IntTriplePredicate): ColumnBatch =
+  def filterTriple(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      predicate: IntTriplePredicate,
+  ): ColumnBatch =
     require(
       batch.columns.length == 3,
       s"triple filter expected 3 columns, got ${batch.columns.length}",
@@ -63,20 +81,21 @@ object PairKernel:
     val keys = int32At(batch, 0)
     val leftValues = int32At(batch, 1)
     val rightValues = int32At(batch, 2)
-    val rows = keys.length
-    require(leftValues.length == rows, "key and left value columns differ in length")
-    require(rightValues.length == rows, "key and right value columns differ in length")
-    if (!joinValuesPresent(keys, leftValues, rightValues, rows)) then
-      failNullTriple(keys, leftValues, rightValues, rows)
-    val outKeys = new Array[Int](rows)
-    val outLeft = new Array[Int](rows)
-    val outRight = new Array[Int](rows)
+    require(leftValues.length == keys.length, "key and left value columns differ in length")
+    require(rightValues.length == keys.length, "key and right value columns differ in length")
+    Ranges.check(start, length, keys.length)
+    if (!joinValuesPresent(keys, leftValues, rightValues, start, length)) then
+      failNullTriple(keys, leftValues, rightValues, start, length)
+    val outKeys = new Array[Int](length)
+    val outLeft = new Array[Int](length)
+    val outRight = new Array[Int](length)
     val keyArr = keys.values
     val leftArr = leftValues.values
     val rightArr = rightValues.values
+    val end = start + length
     var written = 0
-    var row = 0
-    while (row < rows) {
+    var row = start
+    while (row < end) {
       val key = keyArr(row)
       val left = leftArr(row)
       val right = rightArr(row)
@@ -87,7 +106,7 @@ object PairKernel:
         written += 1
       row += 1
     }
-    val present = Validity.prefixValid(rows, written)
+    val present = Validity.prefixValid(length, written)
     new ColumnBatch(
       batch.schema,
       Vector(
@@ -98,24 +117,44 @@ object PairKernel:
       written,
     )
 
+  private def publish(
+      schema: IndexedSeq[LogicalType],
+      outKeys: Array[Int],
+      outValues: Array[Int],
+      capacity: Int,
+      written: Int,
+  ): ColumnBatch =
+    val present = Validity.prefixValid(capacity, written)
+    new ColumnBatch(
+      schema,
+      Vector(
+        Int32Column.of(outKeys, present, written),
+        Int32Column.of(outValues, present, written),
+      ),
+      written,
+    )
+
   private def joinValuesPresent(
       keys: Int32Column,
       leftValues: Int32Column,
       rightValues: Int32Column,
-      rows: Int,
+      start: Int,
+      length: Int,
   ): Boolean =
-    Validity.livePresent(keys.validity, rows) &&
-      Validity.livePresent(leftValues.validity, rows) &&
-      Validity.livePresent(rightValues.validity, rows)
+    Validity.rangePresent(keys.validity, start, length) &&
+      Validity.rangePresent(leftValues.validity, start, length) &&
+      Validity.rangePresent(rightValues.validity, start, length)
 
   private def failNullTriple(
       keys: Int32Column,
       leftValues: Int32Column,
       rightValues: Int32Column,
-      rows: Int,
+      start: Int,
+      length: Int,
   ): Unit =
-    var row = 0
-    while (row < rows) {
+    val end = start + length
+    var row = start
+    while (row < end) {
       val present =
         Validity.isSet(keys.validity.words, row) &&
           Validity.isSet(leftValues.validity.words, row) &&
