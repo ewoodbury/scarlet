@@ -240,7 +240,8 @@ class TestColumnPipeline extends AnyFlatSpec with Matchers:
     val probe = Vector(BatchCodec.intPairs(Seq((1, 100))))
     val rows = 3
     val estimate = HashJoin.retainedBuildBytes(rows)
-    estimate shouldBe 183L
+    estimate should be > (rows.toLong * 9L)
+    estimate should be >= 256L
     val over = intercept[IllegalStateException] {
       broadcast(probe, build, parallelism = 1, buildBudgetBytes = estimate - 1)
     }

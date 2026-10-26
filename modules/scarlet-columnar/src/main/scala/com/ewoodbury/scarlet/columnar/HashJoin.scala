@@ -61,16 +61,18 @@ object HashJoin:
 
   /**
    * Retained bytes of the open build table for `rows` live build rows. Each row keeps a 4-byte
-   * key, a 4-byte value, and one byte for the validity bitmaps. Each slot keeps a 4-byte key, a
-   * 4-byte head, and one byte of state. Each row also keeps a 4-byte chain link. The validity and
-   * state charges are whole bytes, which rounds those bitsets up. This is the build table only.
+   * key, a 4-byte value, and one byte for the validity bitmaps. Each slot keeps a 4-byte key and a
+   * 4-byte head; a slot is free when its head is -1. Each row also keeps a 4-byte chain link. The
+   * validity charge is whole bytes, which rounds those bitsets up, and a fixed allowance covers
+   * the array headers and alignment. This is the build table only.
    */
   private[scarlet] def retainedBuildBytes(rows: Int): Long =
     val slots = ColumnHash.tableSize(rows).toLong
     val rowBytes = 4L + 4L + 1L
-    val slotBytes = 4L + 4L + 1L
+    val slotBytes = 4L + 4L
     val chainBytes = 4L
-    rows.toLong * rowBytes + slots * slotBytes + rows.toLong * chainBytes
+    val headers = 256L
+    rows.toLong * rowBytes + slots * slotBytes + rows.toLong * chainBytes + headers
 
   private def refuseBuild(rows: Int, estimate: Long, budget: Long): Nothing =
     throw new IllegalStateException(
