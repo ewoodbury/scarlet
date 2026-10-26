@@ -256,6 +256,19 @@ final case class DistCollection[A](plan: Plan[A]):
     DistCollection(Plan.LeftOuterJoinOp(kvPlan, other.plan, None))
 
   /**
+   * Transformation: Right-outer-joins this collection with another by key, requiring a shuffle.
+   * Matching keys emit the cartesian product. A right row whose key is absent on the left is
+   * emitted once with `None`. A null key never matches: a right null is kept with `None`, and a
+   * left null matches nothing. Order is unspecified. The row executor always shuffle-hashes; a
+   * strategy hint on the plan is ignored in this iteration. Returns a new DistCollection
+   * representing the joined data. Does not trigger computation.
+   */
+  def rightOuterJoin[K, V, W](other: DistCollection[(K, W)])(using
+      ev: A =:= (K, V),
+  ): DistCollection[(K, (Option[V], W))] =
+    DistCollection(Plan.RightOuterJoinOp(kvPlan, other.plan, None))
+
+  /**
    * Transformation: Joins this collection with another collection by key using shuffle-hash join.
    * A null key is dropped on both sides and does not match. Returns a new DistCollection
    * representing the joined data. Does not trigger computation.

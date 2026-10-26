@@ -32,6 +32,12 @@ object Task extends StrictLogging:
       rightData: Seq[(K, R)],
   ): ShuffleHashLeftOuterJoinTask[K, L, R] = ShuffleHashLeftOuterJoinTask(leftData, rightData)
 
+  /** Creates a shuffle-hash right outer join task. */
+  def createShuffleHashRightOuterJoinTask[K, L, R](
+      leftData: Seq[(K, L)],
+      rightData: Seq[(K, R)],
+  ): ShuffleHashRightOuterJoinTask[K, L, R] = ShuffleHashRightOuterJoinTask(leftData, rightData)
+
   /** Creates a broadcast hash join task. */
   def createBroadcastHashJoinTask[K, L, R](
       localData: Seq[(K, L)],
@@ -138,6 +144,36 @@ object Task extends StrictLogging:
         val matches = rightValues(key)
         if (matches.isEmpty) Seq((key, (leftValue, None)))
         else matches.map(rightValue => (key, (leftValue, Some(rightValue))))
+      }
+      Partition(result)
+    }
+
+  /**
+   * A per-partition shuffle-hash right outer join. The left side is grouped with null keys
+   * dropped. Matches emit the cartesian product. Each right row whose key is absent on the left is
+   * emitted once as `(key, (None, rightValue))`. A null key never matches, but a right row with a
+   * null key is still emitted with `None`.
+   */
+  final case class ShuffleHashRightOuterJoinTask[K, L, R](
+      leftData: Seq[(K, L)],
+      rightData: Seq[(K, R)],
+  ) extends RunnableTask[Any, (K, (Option[L], R))]:
+    @SuppressWarnings(Array("org.wartremover.warts.Null", "org.wartremover.warts.Equals"))
+    override def run(): Partition[(K, (Option[L], R))] = {
+      taskLogger.debug(
+        s"[${Thread.currentThread().getName}] ShuffleHashRightOuterJoinTask on partition",
+      )
+      val leftGrouped =
+        NullKeys.drop(leftData).groupBy(_._1).view.mapValues(_.map(_._2).toSeq).toMap
+
+      def leftValues(key: K): Seq[L] =
+        if (key == null) Seq.empty[L]
+        else leftGrouped.getOrElse(key, Seq.empty[L])
+
+      val result = rightData.flatMap { case (key, rightValue) =>
+        val matches = leftValues(key)
+        if (matches.isEmpty) Seq((key, (None, rightValue)))
+        else matches.map(leftValue => (key, (Some(leftValue), rightValue)))
       }
       Partition(result)
     }

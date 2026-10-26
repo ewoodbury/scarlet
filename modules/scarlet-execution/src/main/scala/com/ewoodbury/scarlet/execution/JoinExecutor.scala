@@ -181,6 +181,28 @@ final class JoinExecutor[F[_]: Sync](
     scheduler.submit(tasks).map(_.asInstanceOf[Seq[Partition[_]]])
   }
 
+  /**
+   * Execute a shuffle-hash right outer join. Each partition groups the co-located left rows,
+   * dropping null keys, and keeps unmatched right rows.
+   */
+  @SuppressWarnings(
+    Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Any"),
+  )
+  def executeShuffleHashRightOuterJoin(
+      leftShuffleId: ShuffleId,
+      rightShuffleId: ShuffleId,
+      numPartitions: Int,
+  ): F[Seq[Partition[_]]] = {
+    val tasks = (0 until numPartitions).map { partitionId =>
+      val leftRows: Seq[(Any, Any)] =
+        shuffle.readPartition[Any, Any](leftShuffleId, PartitionId(partitionId)).data.toSeq
+      val rightRows: Seq[(Any, Any)] =
+        shuffle.readPartition[Any, Any](rightShuffleId, PartitionId(partitionId)).data.toSeq
+      Task.createShuffleHashRightOuterJoinTask[Any, Any, Any](leftRows, rightRows)
+    }
+    scheduler.submit(tasks).map(_.asInstanceOf[Seq[Partition[_]]])
+  }
+
   /** Groups broadcast rows by key. A null key is dropped and is not a probe match. */
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
   private def indexByKey(rows: Iterable[(Any, Any)]): Map[Any, Seq[Any]] =
