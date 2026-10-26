@@ -202,7 +202,8 @@ the plan is accepted: `lower` returns a physical tree and that tree's layout is 
 A join lowers when its hint is absent, shuffle-hash, or broadcast. Sort-merge is not implemented
 on the columnar path: that hint makes `lower` return `None`, and `partitioning` reports no layout.
 The absent hint and shuffle-hash stay the columnar hash join above. Broadcast builds the right
-input and probes the left input in place, so the physical tree has no exchange.
+input and probes the left input in place, so the join itself adds no exchange. A probe subtree
+can still contain its own exchange, for example an aggregate that feeds the join.
 
 `collect`, `foreach`, `reduce`, `fold`, and `aggregate` are deliberate boxed exits: they consume
 columnar results as ordinary Scala values at the action boundary. A collected `reduceByKey` also

@@ -167,10 +167,8 @@ object ColumnPipeline:
       probe: Vector[ColumnBatch],
       build: Vector[ColumnBatch],
       parallelism: Int,
-      batchSize: Int,
   ): Vector[ColumnBatch] =
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
-    require(batchSize > 0, s"batch size must be positive, got $batchSize")
     if (probe.isEmpty) then Vector.empty
     else
       val table = HashJoin.openInt32(build.map { batch =>

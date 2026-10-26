@@ -162,8 +162,8 @@ class TestColumnPipeline extends AnyFlatSpec with Matchers:
         val left = batchesOf(leftRows)
         val right = batchesOf(rightRows)
         val hashed = ColumnPipeline.innerJoin(left, right, 4, parallelism = 1, batchSize = 2)
-        val once = ColumnPipeline.broadcastJoin(left, right, parallelism = 1, batchSize = 2)
-        val parallel = ColumnPipeline.broadcastJoin(left, right, parallelism = 4, batchSize = 2)
+        val once = ColumnPipeline.broadcastJoin(left, right, parallelism = 1)
+        val parallel = ColumnPipeline.broadcastJoin(left, right, parallelism = 4)
         triples(once).sorted shouldBe triples(hashed).sorted
         triples(parallel).sorted shouldBe triples(hashed).sorted
       }
@@ -180,7 +180,7 @@ class TestColumnPipeline extends AnyFlatSpec with Matchers:
       BatchCodec.nullableIntPairs(Seq((None, Some(7)), (Some(1), Some(100)), (Some(3), None))),
     )
     val hashed = ColumnPipeline.innerJoin(probe, build, 4, parallelism = 1, batchSize = 8)
-    val broadcast = ColumnPipeline.broadcastJoin(probe, build, parallelism = 1, batchSize = 8)
+    val broadcast = ColumnPipeline.broadcastJoin(probe, build, parallelism = 1)
     // Hash join builds the left input. Broadcast builds the right input. Both publish
     // (key, left, right), so the null build value is the right value here.
     nullableTriples(broadcast).sorted shouldBe Seq((1, Some(100), None), (1, Some(100), Some(10)))
@@ -189,11 +189,11 @@ class TestColumnPipeline extends AnyFlatSpec with Matchers:
     val nullBuild = Vector(BatchCodec.nullableIntPairs(Seq((None, Some(1)), (None, Some(2)))))
     val presentProbe = Vector(BatchCodec.intPairs(Seq((1, 3))))
     ColumnPipeline
-      .broadcastJoin(presentProbe, nullBuild, parallelism = 1, batchSize = 8)
+      .broadcastJoin(presentProbe, nullBuild, parallelism = 1)
       .map(_.length) shouldBe Seq(0)
     val nullProbe = Vector(BatchCodec.nullableIntPairs(Seq((None, Some(3)))))
     ColumnPipeline
-      .broadcastJoin(nullProbe, presentProbe, parallelism = 1, batchSize = 8)
+      .broadcastJoin(nullProbe, presentProbe, parallelism = 1)
       .map(_.length) shouldBe Seq(0)
   }
 
@@ -206,7 +206,7 @@ class TestColumnPipeline extends AnyFlatSpec with Matchers:
       BatchCodec.intPairs(Seq((1, 100), (2, 200))),
       BatchCodec.intPairs(Seq((1, 101))),
     )
-    val parts = ColumnPipeline.broadcastJoin(probe, build, parallelism = 4, batchSize = 1)
+    val parts = ColumnPipeline.broadcastJoin(probe, build, parallelism = 4)
     parts.length shouldBe 2
     val first = parts.headOption.getOrElse(fail("missing first probe batch"))
     val second = parts.drop(1).headOption.getOrElse(fail("missing second probe batch"))
@@ -229,13 +229,11 @@ class TestColumnPipeline extends AnyFlatSpec with Matchers:
       Vector.empty,
       build,
       parallelism = 1,
-      batchSize = 8,
     ) shouldBe Vector.empty[ColumnBatch]
     val emptyBuild = ColumnPipeline.broadcastJoin(
       probe,
       Vector.empty,
       parallelism = 1,
-      batchSize = 8,
     )
     emptyBuild.length shouldBe 2
     emptyBuild.map(_.length) shouldBe Seq(0, 0)

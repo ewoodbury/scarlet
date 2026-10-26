@@ -58,11 +58,12 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * table from the right input and probes the left input in place, with no exchange on either side.
  * The right input is always the build side. Sort-merge is not implemented: that hint makes `lower`
  * return `None`, so the plan stays on the row path. Output width for a shuffle-hash join or an
- * aggregate is `defaultShufflePartitions`. A broadcast join keeps the probe side's partition
- * count. [[tryCount]] and [[trySumInt]] fold an int filter/map chain that starts at a scan or at
- * `keys` or `values`, including an int `mapValues`, and do not write that chain. Sum folds one
- * trailing project and chains longer than four. Count folds those, chains of two to four steps,
- * and a string scan under only dictionary literal filters. That string fold reads the scan `lower`
+ * aggregate is `defaultShufflePartitions`. A broadcast join's output follows the probe side's
+ * partition count; `take` still refuses a join, so the prefix path does not use that count.
+ * [[tryCount]] and [[trySumInt]] fold an int filter/map chain that starts at a scan or at `keys`
+ * or `values`, including an int `mapValues`, and do not write that chain. Sum folds one trailing
+ * project and chains longer than four. Count folds those, chains of two to four steps, and a
+ * string scan under only dictionary literal filters. That string fold reads the scan `lower`
  * built. A string shape that is not that chain reads the finished batches. [[trySumLong]] folds a
  * long filter/map chain the same way, and the sum wraps. [[trySumDouble]] folds at most four
  * steps. Sum of `keys`, `values`, or an int `mapValues` with no further element chain reads the

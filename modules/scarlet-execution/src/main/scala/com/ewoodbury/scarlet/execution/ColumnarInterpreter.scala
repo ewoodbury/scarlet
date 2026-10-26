@@ -179,7 +179,6 @@ private[execution] object ColumnarInterpreter:
           pairsOf(interpret(left, probe, selectedPartition)),
           pairsOf(interpret(right, build, selectedPartition)),
           ColumnarPlanner.parallelism,
-          ColumnarPlanner.batchSize,
         ),
       )
     case _ =>
