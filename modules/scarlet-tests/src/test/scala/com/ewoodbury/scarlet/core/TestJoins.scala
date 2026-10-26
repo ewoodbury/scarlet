@@ -4,7 +4,13 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.execution.{ColumnarPlanner, LeftOuterJoinWideOp, StageBuilder, WideOpKind}
+import com.ewoodbury.scarlet.execution.{
+  ColumnarPlanner,
+  LeftOuterJoinWideOp,
+  RightOuterJoinWideOp,
+  StageBuilder,
+  WideOpKind,
+}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 class TestJoins extends AnyFlatSpec with Matchers {
@@ -296,6 +302,102 @@ class TestJoins extends AnyFlatSpec with Matchers {
     }
   }
 
+  it should "match a scalar right outer join reference" in {
+    val cases: Seq[(String, Seq[(String, Int)], Seq[(String, Int)])] = Seq(
+      (
+        "matches and unmatched right rows",
+        Seq("a" -> 1, "b" -> 7, "a" -> 3),
+        Seq("a" -> 2, "a" -> 4, "c" -> 9),
+      ),
+      (
+        "duplicate keys",
+        Seq("a" -> 1, "a" -> 3, "b" -> 5),
+        Seq("a" -> 2, "a" -> 4, "b" -> 6, "b" -> 7),
+      ),
+      (
+        "null key on the left",
+        Seq(nullKey(1), "a" -> 2, nullKey(4)),
+        Seq("a" -> 3, "b" -> 8),
+      ),
+      (
+        "null key on the right",
+        Seq("a" -> 1, "b" -> 2),
+        Seq(nullKey(9), "a" -> 3),
+      ),
+      (
+        "null keys on both sides",
+        Seq(nullKey(1), "a" -> 2, nullKey(4)),
+        Seq(nullKey(9), nullKey(8), "a" -> 3),
+      ),
+      (
+        "empty left side",
+        Seq.empty[(String, Int)],
+        Seq("x" -> 1, "y" -> 2),
+      ),
+      (
+        "empty right side",
+        Seq("x" -> 1, "y" -> 2, "x" -> 1),
+        Seq.empty[(String, Int)],
+      ),
+    )
+
+    cases.foreach { case (name, leftRows, rightRows) =>
+      ScarletRuntime.get.shuffle.clear()
+      val actual =
+        toDistCollection(leftRows).rightOuterJoin(toDistCollection(rightRows)).collect().toSeq
+      withClue(name) {
+        actual should contain theSameElementsAs referenceRightOuter(leftRows, rightRows)
+      }
+    }
+  }
+
+  it should "plan a wide right outer join that the columnar planner refuses" in {
+    ScarletRuntime.get.shuffle.clear()
+    val left = toDistCollection(Seq("a" -> 1, "b" -> 4))
+    val right = toDistCollection(Seq("a" -> 2))
+    val plan = left.rightOuterJoin(right).plan
+
+    plan shouldBe a[Plan.RightOuterJoinOp[_, _, _]]
+    plan match {
+      case Plan.RightOuterJoinOp(_, _, strategy) => strategy shouldBe None
+      case _ => fail("Expected RightOuterJoinOp")
+    }
+    PlanWide.isWide(plan) shouldBe true
+    PlanWide.isDirectlyWide(plan) shouldBe true
+    rightOuterKinds(plan) shouldBe Set(WideOpKind.RightOuterJoin)
+
+    val saved = ScarletConf.get
+    try {
+      ScarletConf.set(saved.copy(columnarExecution = true))
+      ColumnarPlanner.lower(plan) shouldBe None
+    } finally ScarletConf.set(saved)
+  }
+
+  it should "keep a right null key with None when a strategy hint is set" in {
+    val leftRows = Seq(nullKey(1), "a" -> 2, nullKey(4))
+    val rightRows = Seq(nullKey(9), nullKey(8), "a" -> 3)
+    val expected = Seq(rightNull(9), rightNull(8), "a" -> (Some(2), 3))
+    val hints = Seq(
+      None,
+      Some(Plan.JoinStrategy.Broadcast),
+      Some(Plan.JoinStrategy.SortMerge),
+      Some(Plan.JoinStrategy.ShuffleHash),
+    )
+
+    hints.foreach { hint =>
+      ScarletRuntime.get.shuffle.clear()
+      val plan = Plan.RightOuterJoinOp(
+        Plan.Source(Seq(Partition(leftRows))),
+        Plan.Source(Seq(Partition(rightRows))),
+        hint,
+      )
+      withClue(hint) {
+        rightOuterKinds(plan) shouldBe Set(WideOpKind.RightOuterJoin)
+        DistCollection(plan).collect().toSeq should contain theSameElementsAs expected
+      }
+    }
+  }
+
   private def leftOuterKinds(plan: Plan[_]): Set[WideOpKind] =
     StageBuilder
       .buildStageGraph(plan)
@@ -305,12 +407,25 @@ class TestJoins extends AnyFlatSpec with Matchers {
       .collect { case op: LeftOuterJoinWideOp => op.meta.kind }
       .toSet
 
+  private def rightOuterKinds(plan: Plan[_]): Set[WideOpKind] =
+    StageBuilder
+      .buildStageGraph(plan)
+      .stages
+      .values
+      .flatMap(_.wideOp)
+      .collect { case op: RightOuterJoinWideOp => op.meta.kind }
+      .toSet
+
   @SuppressWarnings(Array("org.wartremover.warts.Null", "org.wartremover.warts.Equals"))
   private def nullKey(value: Int): (String, Int) = (null: String) -> value
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def leftNull(value: Int): (String, (Int, Option[Int])) =
     ((null: String), (value, None))
+
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def rightNull(value: Int): (String, (Option[Int], Int)) =
+    ((null: String), (None, value))
 
   /** Scalar left outer join. A null key does not match, and each unmatched left row is kept once. */
   @SuppressWarnings(Array("org.wartremover.warts.Null", "org.wartremover.warts.Equals"))
@@ -324,6 +439,23 @@ class TestJoins extends AnyFlatSpec with Matchers {
         else right.collect { case (rightKey, rightValue) if rightKey == key => rightValue }
       if (matches.isEmpty) Seq((key, (leftValue, None)))
       else matches.map(rightValue => (key, (leftValue, Some(rightValue))))
+    }
+
+  /**
+   * Scalar right outer join. A null key does not match, and each unmatched right row is kept
+   * once.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Null", "org.wartremover.warts.Equals"))
+  private def referenceRightOuter(
+      left: Seq[(String, Int)],
+      right: Seq[(String, Int)],
+  ): Seq[(String, (Option[Int], Int))] =
+    right.flatMap { case (key, rightValue) =>
+      val matches =
+        if (key == null) Seq.empty[Int]
+        else left.collect { case (leftKey, leftValue) if leftKey == key => leftValue }
+      if (matches.isEmpty) Seq((key, (None, rightValue)))
+      else matches.map(leftValue => (key, (Some(leftValue), rightValue)))
     }
 }
 
