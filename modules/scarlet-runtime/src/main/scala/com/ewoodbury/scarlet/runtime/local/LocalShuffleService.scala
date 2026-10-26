@@ -26,6 +26,7 @@ final class LocalShuffleService extends ShuffleService:
   private val storage = new ConcurrentHashMap[ShuffleId, ShuffleData[_, _]]()
   private val nextShuffleId = new AtomicInteger(0)
 
+  /** Partitions keyed data; a null key is routed by the partitioner rather than rejected here. */
   def partitionByKey[K, V](
       data: Seq[Partition[(K, V)]],
       numPartitions: Int,

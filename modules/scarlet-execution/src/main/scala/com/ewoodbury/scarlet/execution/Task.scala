@@ -115,7 +115,8 @@ object Task extends StrictLogging:
 
   /**
    * A per-partition shuffle-hash left outer join. Matches emit the cartesian product. Each left
-   * row whose key is absent on the right is emitted once with `None`. A null key never matches.
+   * row whose key is absent on the right is emitted once with `None`. A null key never matches,
+   * but a left row with a null key is still emitted with `None`.
    */
   final case class ShuffleHashLeftOuterJoinTask[K, L, R](
       leftData: Seq[(K, L)],
@@ -153,7 +154,7 @@ object Task extends StrictLogging:
     override def run(): Partition[(K, (L, R))] = {
       taskLogger.debug(s"[${Thread.currentThread().getName}] SortMergeJoinTask on partition")
 
-      // Sort both sides by key if they're not already sorted. Null keys are already gone.
+      // Sort both sides by key if they're not already sorted. Null keys are dropped first.
       val sortedLeft = NullKeys.drop(leftData).toSeq.sortBy(_._1)
       val sortedRight = NullKeys.drop(rightData).toSeq.sortBy(_._1)
 
