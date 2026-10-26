@@ -285,8 +285,13 @@ private[execution] object ColumnarInterpreter:
       case PhysicalOp.Slot.Row =>
         val keep = predicate.asInstanceOf[((Int, Int)) => Boolean]
         // `keep` is `(Int, Int) => Boolean`, so the pair is boxed for the call.
-        Columns.Pairs(onEachSliced(pairsOf(columns)) { batch =>
-          PairKernel.filter(batch, (key, value) => keep((key, value)))
+        Columns.Pairs(onEachMorsel(pairsOf(columns)) { morsel =>
+          PairKernel.filter(
+            morsel.batch,
+            morsel.start,
+            morsel.length,
+            (key, value) => keep((key, value)),
+          )
         })
       case PhysicalOp.Slot.Key =>
         val keep = predicate.asInstanceOf[Int => Boolean]
@@ -304,8 +309,8 @@ private[execution] object ColumnarInterpreter:
           case recognized: IntJoinTriplePredicate[?] => recognized
           case _ => throw new IllegalStateException("triple filter lost its slot predicate")
         val select = triplePredicate(slot, keep)
-        Columns.Triples(onEachSliced(triplesOf(columns)) { batch =>
-          PairKernel.filterTriple(batch, select)
+        Columns.Triples(onEachMorsel(triplesOf(columns)) { morsel =>
+          PairKernel.filterTriple(morsel.batch, morsel.start, morsel.length, select)
         })
 
   private def project(columns: Columns, mapper: Any): Columns = columns match
