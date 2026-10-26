@@ -16,9 +16,10 @@ package com.ewoodbury.scarlet.columnar
  * new slot stores `0`, and the function is not called. A whole-column project reuses the input
  * validity bitmap, so null positions do not change. An int, long, or float project over
  * `[start, start + length)` reads validity at those absolute rows and writes `length` rows from
- * index 0. The whole-column entry is that scan with start 0 and the batch length. A string project
- * calls the function on every row of that range, including an empty cell, stores an empty result
- * as an empty cell, and builds a new dictionary. Callers do not mutate a published bitmap.
+ * index 0. The whole-column entry delegates with start 0 and the batch length; a full-range call
+ * may take the whole-column fast path and reuse the input validity bitmap. A string project calls
+ * the function on every row of that range, including an empty cell, stores an empty result as an
+ * empty cell, and builds a new dictionary. Callers do not mutate a published bitmap.
  *
  * Primitive loops keep the row index in a `var` so the bodies stay allocation-free. Each primitive
  * has its own loop so the copy stays monomorphic. Fused runs of two to four filters and projects
@@ -349,11 +350,12 @@ object ColumnKernel:
   ): ColumnBatch =
     val column = asInt32(columnAt(batch, ordinal), ordinal)
     Ranges.check(start, length, column.length)
+    val wholeColumn = start == 0 && length == column.length
     val mapped =
-      if (start == 0 && length == column.length) then mapInt32(column, mapper)
+      if (wholeColumn) then mapInt32(column, mapper)
       else mapInt32Range(column, start, length, mapper)
     if (batch.columns.length == 1) then publish(batch, mapped, mapped.length)
-    else if (start == 0 && length == column.length) then replace(batch, ordinal, mapped)
+    else if (wholeColumn) then replace(batch, ordinal, mapped)
     else
       val selection = Array.tabulate(length)(offset => start + offset)
       assemble(batch, ordinal, mapped, selection, length)
