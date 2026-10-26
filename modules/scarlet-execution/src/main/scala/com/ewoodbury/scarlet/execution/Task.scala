@@ -99,7 +99,8 @@ object Task extends StrictLogging:
 
       // Build hash maps for both sides to avoid unsafe casting
       val leftGrouped = NullKeys.drop(leftData).groupBy(_._1).view.mapValues(_.map(_._2)).toMap
-      val rightGrouped = NullKeys.drop(rightData).groupBy(_._1).view.mapValues(_.map(_._2).toSeq).toMap
+      val rightGrouped =
+        NullKeys.drop(rightData).groupBy(_._1).view.mapValues(_.map(_._2).toSeq).toMap
 
       // Find all common keys and perform cross product
       val commonKeys = leftGrouped.keySet.intersect(rightGrouped.keySet)
@@ -125,7 +126,8 @@ object Task extends StrictLogging:
       taskLogger.debug(
         s"[${Thread.currentThread().getName}] ShuffleHashLeftOuterJoinTask on partition",
       )
-      val rightGrouped = NullKeys.drop(rightData).groupBy(_._1).view.mapValues(_.map(_._2).toSeq).toMap
+      val rightGrouped =
+        NullKeys.drop(rightData).groupBy(_._1).view.mapValues(_.map(_._2).toSeq).toMap
 
       def rightValues(key: K): Seq[R] =
         if (key == null) Seq.empty[R]
