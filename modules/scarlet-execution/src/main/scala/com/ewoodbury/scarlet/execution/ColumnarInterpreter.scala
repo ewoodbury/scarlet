@@ -313,30 +313,54 @@ private[execution] object ColumnarInterpreter:
       // Named erasure boundary. Lowering already checked the declared `Int => Int` shape.
       @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Int => Int]
-      Columns.Ints(onEachSliced(parts) { batch =>
-        ColumnKernel.projectInt32(batch, 0, value => fn(value))
+      Columns.Ints(onEachMorsel(parts) { morsel =>
+        ColumnKernel.projectInt32(
+          morsel.batch,
+          0,
+          morsel.start,
+          morsel.length,
+          value => fn(value),
+        )
       })
     case Columns.Longs(parts) =>
       // Named erasure boundary. Lowering already checked the declared `Long => Long` shape.
       @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Long => Long]
-      Columns.Longs(onEachSliced(parts) { batch =>
-        ColumnKernel.projectInt64(batch, 0, value => fn(value))
+      Columns.Longs(onEachMorsel(parts) { morsel =>
+        ColumnKernel.projectInt64(
+          morsel.batch,
+          0,
+          morsel.start,
+          morsel.length,
+          value => fn(value),
+        )
       })
     case Columns.Floats(parts) =>
       // Named erasure boundary. Lowering already checked the declared `Double => Double` shape.
       @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Double => Double]
-      Columns.Floats(onEachSliced(parts) { batch =>
-        ColumnKernel.projectFloat64(batch, 0, value => fn(value))
+      Columns.Floats(onEachMorsel(parts) { morsel =>
+        ColumnKernel.projectFloat64(
+          morsel.batch,
+          0,
+          morsel.start,
+          morsel.length,
+          value => fn(value),
+        )
       })
     case Columns.Strings(parts) =>
       // Named erasure boundary. A declared string map may return another value; `stringResult`
       // turns that into `ClassCastException`, which is the row-path fallback.
       @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Any"))
       val fn = mapper.asInstanceOf[String => Any]
-      Columns.Strings(onEachSliced(parts) { batch =>
-        ColumnKernel.projectUtf8(batch, 0, value => ColumnarPlanner.stringResult(fn(value)))
+      Columns.Strings(onEachMorsel(parts) { morsel =>
+        ColumnKernel.projectUtf8(
+          morsel.batch,
+          0,
+          morsel.start,
+          morsel.length,
+          value => ColumnarPlanner.stringResult(fn(value)),
+        )
       })
     case Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) =>
       throw new IllegalStateException(

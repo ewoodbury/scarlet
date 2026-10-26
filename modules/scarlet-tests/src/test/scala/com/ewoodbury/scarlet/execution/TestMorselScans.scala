@@ -15,9 +15,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Int and long action folds scan morsels in place. An empty batch is one zero-length morsel. A
  * tail shorter than the batch size is its own morsel. Null slots stay in a map-only count and stay
  * out of a filtered count. Element filters for ints, longs, floats, strings, and bools collect
- * morsels without copying the input batch. A single-step element map still copies slices, and
- * that batch count is the comparison for a filter. A float or string chain of 2–4 steps scans
- * each morsel once. The published batch count is that pass.
+ * morsels without copying the input batch. A single-step element map publishes one output column
+ * per morsel and does not copy the input. A float or string chain of 2–4 steps scans each morsel
+ * once. The published batch count is that pass.
  */
 class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -146,8 +146,9 @@ class TestMorselScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     boolCollected.batches shouldBe collected.batches
     collected.visits shouldBe 3L
     floatMapped.visits shouldBe collected.visits
-    // Each sliced map visit publishes one copied input batch. The range filter does not.
-    collected.batches shouldBe floatMapped.batches - collected.visits
+    // A single-step map publishes one output column per morsel and no copied input slice.
+    floatMapped.batches shouldBe collected.batches
+    floatMapped.batches shouldBe floatMapped.visits + 2L
   }
 
   it should "visit one zero-length morsel when the partition is empty" in {
