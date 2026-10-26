@@ -610,6 +610,9 @@ object ColumnarPlanner:
               Some(joinOf(strategy, leftOp, rightOp))
             case _ => None
         case _ => None
+
+    /** The columnar path does not lower an outer join yet. */
+    case _: Plan.LeftOuterJoinOp[_, _, _] => None
     case _ => None
 
   /**

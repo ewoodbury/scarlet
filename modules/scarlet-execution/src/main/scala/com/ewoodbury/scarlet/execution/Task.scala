@@ -26,6 +26,12 @@ object Task extends StrictLogging:
       rightData: Seq[(K, R)],
   ): ShuffleHashJoinTask[K, L, R] = ShuffleHashJoinTask(leftData, rightData)
 
+  /** Creates a shuffle-hash left outer join task. */
+  def createShuffleHashLeftOuterJoinTask[K, L, R](
+      leftData: Seq[(K, L)],
+      rightData: Seq[(K, R)],
+  ): ShuffleHashLeftOuterJoinTask[K, L, R] = ShuffleHashLeftOuterJoinTask(leftData, rightData)
+
   /** Creates a broadcast hash join task. */
   def createBroadcastHashJoinTask[K, L, R](
       localData: Seq[(K, L)],
@@ -99,6 +105,33 @@ object Task extends StrictLogging:
         rightValue <- rightGrouped(key)
       } yield (key, (leftValue, rightValue))
 
+      Partition(result)
+    }
+
+  /**
+   * A per-partition shuffle-hash left outer join. Matches emit the cartesian product. Each left
+   * row whose key is absent on the right is emitted once with `None`. A null key never matches.
+   */
+  final case class ShuffleHashLeftOuterJoinTask[K, L, R](
+      leftData: Seq[(K, L)],
+      rightData: Seq[(K, R)],
+  ) extends RunnableTask[Any, (K, (L, Option[R]))]:
+    @SuppressWarnings(Array("org.wartremover.warts.Null", "org.wartremover.warts.Equals"))
+    override def run(): Partition[(K, (L, Option[R]))] = {
+      taskLogger.debug(
+        s"[${Thread.currentThread().getName}] ShuffleHashLeftOuterJoinTask on partition",
+      )
+      val rightGrouped = rightData.groupBy(_._1).view.mapValues(_.map(_._2)).toMap
+
+      def rightValues(key: K): Seq[R] =
+        if (key == null) Seq.empty[R]
+        else rightGrouped.getOrElse(key, Seq.empty[R])
+
+      val result = leftData.flatMap { case (key, leftValue) =>
+        val matches = rightValues(key)
+        if (matches.isEmpty) Seq((key, (leftValue, None)))
+        else matches.map(rightValue => (key, (leftValue, Some(rightValue))))
+      }
       Partition(result)
     }
 

@@ -73,6 +73,7 @@ final case class PartitionByWideOp(meta: SimpleWideOpMeta) extends WideOp
 final case class RepartitionWideOp(meta: SimpleWideOpMeta) extends WideOp
 final case class CoalesceWideOp(meta: SimpleWideOpMeta) extends WideOp
 final case class JoinWideOp(meta: SimpleWideOpMeta) extends WideOp
+final case class LeftOuterJoinWideOp(meta: SimpleWideOpMeta) extends WideOp
 final case class CoGroupWideOp(meta: SimpleWideOpMeta) extends WideOp
 
 // Narrow transformations

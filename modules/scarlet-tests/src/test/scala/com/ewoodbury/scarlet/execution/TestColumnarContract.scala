@@ -809,6 +809,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case Plan.ReduceByKeyOp(_, _) => PlanNode.ReduceByKey
     case Plan.SortByOp(_, _, _) => PlanNode.SortBy
     case Plan.JoinOp(_, _, _) => PlanNode.Join
+    case Plan.LeftOuterJoinOp(_, _, _) => PlanNode.Join
     case Plan.CoGroupOp(_, _) => PlanNode.CoGroup
 
   /**

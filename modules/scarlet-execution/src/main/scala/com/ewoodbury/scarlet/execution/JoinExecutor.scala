@@ -160,3 +160,25 @@ final class JoinExecutor[F[_]: Sync](
     }
     scheduler.submit(tasks).map(_.asInstanceOf[Seq[Partition[_]]])
   }
+
+  /**
+   * Execute a shuffle-hash left outer join. Each partition probes the co-located right rows and
+   * keeps unmatched left rows.
+   */
+  @SuppressWarnings(
+    Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Any"),
+  )
+  def executeShuffleHashLeftOuterJoin(
+      leftShuffleId: ShuffleId,
+      rightShuffleId: ShuffleId,
+      numPartitions: Int,
+  ): F[Seq[Partition[_]]] = {
+    val tasks = (0 until numPartitions).map { partitionId =>
+      val leftRows: Seq[(Any, Any)] =
+        shuffle.readPartition[Any, Any](leftShuffleId, PartitionId(partitionId)).data.toSeq
+      val rightRows: Seq[(Any, Any)] =
+        shuffle.readPartition[Any, Any](rightShuffleId, PartitionId(partitionId)).data.toSeq
+      Task.ShuffleHashLeftOuterJoinTask[Any, Any, Any](leftRows, rightRows)
+    }
+    scheduler.submit(tasks).map(_.asInstanceOf[Seq[Partition[_]]])
+  }
