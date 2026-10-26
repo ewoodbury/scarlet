@@ -6,7 +6,7 @@ import com.typesafe.scalalogging.StrictLogging
 
 import com.ewoodbury.scarlet.core.{Partition, PartitionId, Plan, ScarletConf, ShuffleId}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
-import com.ewoodbury.scarlet.runtime.api.{ShuffleService, TaskScheduler}
+import com.ewoodbury.scarlet.runtime.api.{RunnableTask, ShuffleService, TaskScheduler}
 
 /**
  * Executor for handling different join strategies.
@@ -160,45 +160,73 @@ final class JoinExecutor[F[_]: Sync](
   }
 
   /**
-   * Execute a shuffle-hash left outer join. Each partition probes the co-located right rows and
-   * keeps unmatched left rows.
+   * Execute a shuffle-hash left outer join. Each partition groups both sides and keeps unmatched
+   * left rows.
    */
-  @SuppressWarnings(
-    Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Any"),
-  )
   def executeShuffleHashLeftOuterJoin(
       leftShuffleId: ShuffleId,
       rightShuffleId: ShuffleId,
       numPartitions: Int,
-  ): F[Seq[Partition[_]]] = {
-    val tasks = (0 until numPartitions).map { partitionId =>
-      val leftRows: Seq[(Any, Any)] =
-        shuffle.readPartition[Any, Any](leftShuffleId, PartitionId(partitionId)).data.toSeq
-      val rightRows: Seq[(Any, Any)] =
-        shuffle.readPartition[Any, Any](rightShuffleId, PartitionId(partitionId)).data.toSeq
-      Task.createShuffleHashLeftOuterJoinTask[Any, Any, Any](leftRows, rightRows)
-    }
-    scheduler.submit(tasks).map(_.asInstanceOf[Seq[Partition[_]]])
-  }
+  ): F[Seq[Partition[_]]] =
+    executeShuffleHashOuterJoin(
+      leftShuffleId,
+      rightShuffleId,
+      numPartitions,
+      Task.createShuffleHashLeftOuterJoinTask,
+    )
 
   /**
-   * Execute a shuffle-hash right outer join. Each partition groups the co-located left rows,
-   * dropping null keys, and keeps unmatched right rows.
+   * Execute a shuffle-hash right outer join. Each partition groups both sides and keeps unmatched
+   * right rows.
    */
-  @SuppressWarnings(
-    Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Any"),
-  )
   def executeShuffleHashRightOuterJoin(
       leftShuffleId: ShuffleId,
       rightShuffleId: ShuffleId,
       numPartitions: Int,
+  ): F[Seq[Partition[_]]] =
+    executeShuffleHashOuterJoin(
+      leftShuffleId,
+      rightShuffleId,
+      numPartitions,
+      Task.createShuffleHashRightOuterJoinTask,
+    )
+
+  /**
+   * Execute a shuffle-hash full outer join. Each partition groups both sides and keeps unmatched
+   * rows from either side.
+   */
+  def executeShuffleHashFullOuterJoin(
+      leftShuffleId: ShuffleId,
+      rightShuffleId: ShuffleId,
+      numPartitions: Int,
+  ): F[Seq[Partition[_]]] =
+    executeShuffleHashOuterJoin(
+      leftShuffleId,
+      rightShuffleId,
+      numPartitions,
+      Task.createShuffleHashFullOuterJoinTask,
+    )
+
+  /**
+   * Submit one shuffle-hash outer-join task per co-partitioned pair. The factory chooses left,
+   * right, or full. Named erasure boundary: the shuffle read is `(Any, Any)` and the task result
+   * is cast back to the stage's partition sequence.
+   */
+  @SuppressWarnings(
+    Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Any"),
+  )
+  private def executeShuffleHashOuterJoin[B](
+      leftShuffleId: ShuffleId,
+      rightShuffleId: ShuffleId,
+      numPartitions: Int,
+      makeTask: (Seq[(Any, Any)], Seq[(Any, Any)]) => RunnableTask[Any, B],
   ): F[Seq[Partition[_]]] = {
     val tasks = (0 until numPartitions).map { partitionId =>
       val leftRows: Seq[(Any, Any)] =
         shuffle.readPartition[Any, Any](leftShuffleId, PartitionId(partitionId)).data.toSeq
       val rightRows: Seq[(Any, Any)] =
         shuffle.readPartition[Any, Any](rightShuffleId, PartitionId(partitionId)).data.toSeq
-      Task.createShuffleHashRightOuterJoinTask[Any, Any, Any](leftRows, rightRows)
+      makeTask(leftRows, rightRows)
     }
     scheduler.submit(tasks).map(_.asInstanceOf[Seq[Partition[_]]])
   }

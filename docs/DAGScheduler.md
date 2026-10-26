@@ -56,6 +56,7 @@ core `Plan` nodes:
 | `JoinWideOp` | Side-tagged dual shuffle read; strategy per `SimpleWideOpMeta.joinStrategy` or auto-selection |
 | `LeftOuterJoinWideOp` | Side-tagged dual shuffle read; shuffle-hash left outer join. `joinStrategy` is not consulted |
 | `RightOuterJoinWideOp` | Side-tagged dual shuffle read; shuffle-hash right outer join. `joinStrategy` is not consulted |
+| `FullOuterJoinWideOp` | Side-tagged dual shuffle read; shuffle-hash full outer join. `joinStrategy` is not consulted |
 | `CoGroupWideOp` | `CogroupTask` per co-located left/right shuffle partition |
 | `RepartitionWideOp` / `CoalesceWideOp` | Unwrap `(element, Unit)` pairs written by the repartition shuffle |
 | `PartitionByWideOp` | Identity pass-through — the key-hash partitioning happened in the shuffle write |

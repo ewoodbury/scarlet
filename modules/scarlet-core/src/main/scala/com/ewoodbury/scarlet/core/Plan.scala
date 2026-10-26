@@ -324,6 +324,33 @@ object Plan {
   ) extends Plan[(K, (Option[V], W))]
 
   /**
+   * Represents a full outer join. Matching keys emit the cartesian product with both values
+   * present. A key only on the left emits each left row with the right value absent. A key only on
+   * the right emits each right row with the left value absent. A null key never matches: each left
+   * null row is emitted once with the right value absent, and each right null row is emitted once
+   * with the left value absent.
+   *
+   * @param left
+   *   The left plan node (producing elements of type (K, V)).
+   * @param right
+   *   The right plan node (producing elements of type (K, W)).
+   * @param joinStrategy
+   *   Stored with the plan. The row executor ignores it and always runs shuffle-hash. Broadcast
+   *   and sort-merge are not implemented for outer joins in this iteration.
+   * @tparam K
+   *   The key type.
+   * @tparam V
+   *   The left value type.
+   * @tparam W
+   *   The right value type.
+   */
+  case class FullOuterJoinOp[K, V, W](
+      left: Plan[(K, V)],
+      right: Plan[(K, W)],
+      joinStrategy: Option[JoinStrategy],
+  ) extends Plan[(K, (Option[V], Option[W]))]
+
+  /**
    * Represents a cogroup transformation that groups both datasets by key. A null key is dropped on
    * either side and does not form a group.
    * @param left

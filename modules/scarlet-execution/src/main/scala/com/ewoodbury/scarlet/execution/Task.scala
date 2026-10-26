@@ -38,6 +38,12 @@ object Task extends StrictLogging:
       rightData: Seq[(K, R)],
   ): ShuffleHashRightOuterJoinTask[K, L, R] = ShuffleHashRightOuterJoinTask(leftData, rightData)
 
+  /** Creates a shuffle-hash full outer join task. */
+  def createShuffleHashFullOuterJoinTask[K, L, R](
+      leftData: Seq[(K, L)],
+      rightData: Seq[(K, R)],
+  ): ShuffleHashFullOuterJoinTask[K, L, R] = ShuffleHashFullOuterJoinTask(leftData, rightData)
+
   /** Creates a broadcast hash join task. */
   def createBroadcastHashJoinTask[K, L, R](
       localData: Seq[(K, L)],
@@ -128,53 +134,86 @@ object Task extends StrictLogging:
       leftData: Seq[(K, L)],
       rightData: Seq[(K, R)],
   ) extends RunnableTask[Any, (K, (L, Option[R]))]:
-    @SuppressWarnings(Array("org.wartremover.warts.Null", "org.wartremover.warts.Equals"))
     override def run(): Partition[(K, (L, Option[R]))] = {
       taskLogger.debug(
         s"[${Thread.currentThread().getName}] ShuffleHashLeftOuterJoinTask on partition",
       )
-      val rightGrouped =
-        NullKeys.drop(rightData).groupBy(_._1).view.mapValues(_.map(_._2).toSeq).toMap
-
-      def rightValues(key: K): Seq[R] =
-        if (key == null) Seq.empty[R]
-        else rightGrouped.getOrElse(key, Seq.empty[R])
-
-      val result = leftData.flatMap { case (key, leftValue) =>
-        val matches = rightValues(key)
-        if (matches.isEmpty) Seq((key, (leftValue, None)))
-        else matches.map(rightValue => (key, (leftValue, Some(rightValue))))
-      }
+      val result = OuterJoinRows.emit[K, L, R, (K, (L, Option[R]))](
+        leftData,
+        rightData,
+        onMatch = (key, leftValues, rightValues) =>
+          for {
+            leftValue <- leftValues
+            rightValue <- rightValues
+          } yield (key, (leftValue, Some(rightValue))),
+        onLeftOnly = (key, leftValues) => leftValues.map(leftValue => (key, (leftValue, None))),
+        onRightOnly = (_, _) => Seq.empty,
+        onLeftNull = (key, leftValue) => Seq((key, (leftValue, None))),
+        onRightNull = (_, _) => Seq.empty,
+      )
       Partition(result)
     }
 
   /**
-   * A per-partition shuffle-hash right outer join. The left side is grouped with null keys
-   * dropped. Matches emit the cartesian product. Each right row whose key is absent on the left is
-   * emitted once as `(key, (None, rightValue))`. A null key never matches, but a right row with a
-   * null key is still emitted with `None`.
+   * A per-partition shuffle-hash right outer join. Matches emit the cartesian product. Each right
+   * row whose key is absent on the left is emitted once as `(key, (None, rightValue))`. A null key
+   * never matches, but a right row with a null key is still emitted with `None`.
    */
   final case class ShuffleHashRightOuterJoinTask[K, L, R](
       leftData: Seq[(K, L)],
       rightData: Seq[(K, R)],
   ) extends RunnableTask[Any, (K, (Option[L], R))]:
-    @SuppressWarnings(Array("org.wartremover.warts.Null", "org.wartremover.warts.Equals"))
     override def run(): Partition[(K, (Option[L], R))] = {
       taskLogger.debug(
         s"[${Thread.currentThread().getName}] ShuffleHashRightOuterJoinTask on partition",
       )
-      val leftGrouped =
-        NullKeys.drop(leftData).groupBy(_._1).view.mapValues(_.map(_._2).toSeq).toMap
+      val result = OuterJoinRows.emit[K, L, R, (K, (Option[L], R))](
+        leftData,
+        rightData,
+        onMatch = (key, leftValues, rightValues) =>
+          for {
+            leftValue <- leftValues
+            rightValue <- rightValues
+          } yield (key, (Some(leftValue), rightValue)),
+        onLeftOnly = (_, _) => Seq.empty,
+        onRightOnly =
+          (key, rightValues) => rightValues.map(rightValue => (key, (None, rightValue))),
+        onLeftNull = (_, _) => Seq.empty,
+        onRightNull = (key, rightValue) => Seq((key, (None, rightValue))),
+      )
+      Partition(result)
+    }
 
-      def leftValues(key: K): Seq[L] =
-        if (key == null) Seq.empty[L]
-        else leftGrouped.getOrElse(key, Seq.empty[L])
-
-      val result = rightData.flatMap { case (key, rightValue) =>
-        val matches = leftValues(key)
-        if (matches.isEmpty) Seq((key, (None, rightValue)))
-        else matches.map(leftValue => (key, (Some(leftValue), rightValue)))
-      }
+  /**
+   * A per-partition shuffle-hash full outer join. Both sides are grouped with null keys dropped.
+   * Matches emit the cartesian product as `(Some, Some)`. A key only on the left emits each left
+   * row as `(Some, None)`. A key only on the right emits each right row as `(None, Some)`. Each
+   * null-key row is emitted once, unmatched: a left null as `(Some(v), None)` and a right null as
+   * `(None, Some(w))`.
+   */
+  final case class ShuffleHashFullOuterJoinTask[K, L, R](
+      leftData: Seq[(K, L)],
+      rightData: Seq[(K, R)],
+  ) extends RunnableTask[Any, (K, (Option[L], Option[R]))]:
+    override def run(): Partition[(K, (Option[L], Option[R]))] = {
+      taskLogger.debug(
+        s"[${Thread.currentThread().getName}] ShuffleHashFullOuterJoinTask on partition",
+      )
+      val result = OuterJoinRows.emit[K, L, R, (K, (Option[L], Option[R]))](
+        leftData,
+        rightData,
+        onMatch = (key, leftValues, rightValues) =>
+          for {
+            leftValue <- leftValues
+            rightValue <- rightValues
+          } yield (key, (Some(leftValue), Some(rightValue))),
+        onLeftOnly =
+          (key, leftValues) => leftValues.map(leftValue => (key, (Some(leftValue), None))),
+        onRightOnly =
+          (key, rightValues) => rightValues.map(rightValue => (key, (None, Some(rightValue)))),
+        onLeftNull = (key, leftValue) => Seq((key, (Some(leftValue), None))),
+        onRightNull = (key, rightValue) => Seq((key, (None, Some(rightValue)))),
+      )
       Partition(result)
     }
 

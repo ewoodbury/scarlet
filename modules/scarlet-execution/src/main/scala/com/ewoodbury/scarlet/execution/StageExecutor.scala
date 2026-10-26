@@ -106,9 +106,26 @@ final class StageExecutor[F[_]: Sync](
       case Some(op: JoinWideOp) =>
         executeJoinOperation(stageInfo, op, stageToShuffleId)
       case Some(_: LeftOuterJoinWideOp) =>
-        executeLeftOuterJoinOperation(stageInfo, stageToShuffleId)
+        executeOuterJoinOperation(
+          stageInfo,
+          stageToShuffleId,
+          "LeftOuterJoin",
+          joinExecutor.executeShuffleHashLeftOuterJoin,
+        )
       case Some(_: RightOuterJoinWideOp) =>
-        executeRightOuterJoinOperation(stageInfo, stageToShuffleId)
+        executeOuterJoinOperation(
+          stageInfo,
+          stageToShuffleId,
+          "RightOuterJoin",
+          joinExecutor.executeShuffleHashRightOuterJoin,
+        )
+      case Some(_: FullOuterJoinWideOp) =>
+        executeOuterJoinOperation(
+          stageInfo,
+          stageToShuffleId,
+          "FullOuterJoin",
+          joinExecutor.executeShuffleHashFullOuterJoin,
+        )
       case Some(op: SortByWideOp[_, _]) =>
         executeSortByOperation(op, inputPartitions)
       case Some(_: GroupByKeyWideOp) =>
@@ -204,33 +221,20 @@ final class StageExecutor[F[_]: Sync](
   }
 
   /**
-   * Left outer join over co-partitioned shuffle inputs. Always the shuffle-hash task.
-   * `LeftOuterJoinOp.joinStrategy` is ignored in this iteration: broadcast and sort-merge tasks
-   * are inner joins, and this path does not select them.
+   * Outer join over co-partitioned shuffle inputs. Always the shuffle-hash task. The plan's
+   * `joinStrategy` is ignored in this iteration: broadcast and sort-merge tasks are inner joins,
+   * and this path does not select them.
    */
-  private def executeLeftOuterJoinOperation(
+  private def executeOuterJoinOperation(
       stageInfo: StageBuilder.StageInfo,
       stageToShuffleId: Map[StageId, ShuffleId],
+      operationName: String,
+      run: (ShuffleId, ShuffleId, Int) => F[Seq[Partition[_]]],
   ): F[Seq[Partition[_]]] = {
     val (leftShuffleId, rightShuffleId, numPartitions) =
-      resolveBinaryShuffleInputs(stageInfo, stageToShuffleId, "LeftOuterJoin")
-    logger.info(s"Using left outer join for stage ${stageInfo.id.toInt}")
-    joinExecutor.executeShuffleHashLeftOuterJoin(leftShuffleId, rightShuffleId, numPartitions)
-  }
-
-  /**
-   * Right outer join over co-partitioned shuffle inputs. Always the shuffle-hash task.
-   * `RightOuterJoinOp.joinStrategy` is ignored in this iteration: broadcast and sort-merge tasks
-   * are inner joins, and this path does not select them.
-   */
-  private def executeRightOuterJoinOperation(
-      stageInfo: StageBuilder.StageInfo,
-      stageToShuffleId: Map[StageId, ShuffleId],
-  ): F[Seq[Partition[_]]] = {
-    val (leftShuffleId, rightShuffleId, numPartitions) =
-      resolveBinaryShuffleInputs(stageInfo, stageToShuffleId, "RightOuterJoin")
-    logger.info(s"Using right outer join for stage ${stageInfo.id.toInt}")
-    joinExecutor.executeShuffleHashRightOuterJoin(leftShuffleId, rightShuffleId, numPartitions)
+      resolveBinaryShuffleInputs(stageInfo, stageToShuffleId, operationName)
+    logger.info(s"Using $operationName for stage ${stageInfo.id.toInt}")
+    run(leftShuffleId, rightShuffleId, numPartitions)
   }
 
   /**

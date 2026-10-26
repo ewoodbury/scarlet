@@ -58,7 +58,7 @@ final case class ReduceWideOpMeta[V](
  */
 enum WideOpKind:
   case GroupByKey, ReduceByKey, SortBy, PartitionBy, Repartition, Coalesce, Join, LeftOuterJoin,
-    RightOuterJoin, CoGroup
+    RightOuterJoin, FullOuterJoin, CoGroup
 
 /**
  * Structured description of a wide operation attached to a shuffle stage. This is the execution
@@ -76,6 +76,7 @@ final case class CoalesceWideOp(meta: SimpleWideOpMeta) extends WideOp
 final case class JoinWideOp(meta: SimpleWideOpMeta) extends WideOp
 final case class LeftOuterJoinWideOp(meta: SimpleWideOpMeta) extends WideOp
 final case class RightOuterJoinWideOp(meta: SimpleWideOpMeta) extends WideOp
+final case class FullOuterJoinWideOp(meta: SimpleWideOpMeta) extends WideOp
 final case class CoGroupWideOp(meta: SimpleWideOpMeta) extends WideOp
 
 // Narrow transformations
