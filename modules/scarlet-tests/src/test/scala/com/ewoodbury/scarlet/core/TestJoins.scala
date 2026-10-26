@@ -4,13 +4,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.execution.{
-  ColumnarPlanner,
-  LeftOuterJoinWideOp,
-  RightOuterJoinWideOp,
-  StageBuilder,
-  WideOpKind,
-}
+import com.ewoodbury.scarlet.execution.*
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 class TestJoins extends AnyFlatSpec with Matchers {
@@ -398,6 +392,113 @@ class TestJoins extends AnyFlatSpec with Matchers {
     }
   }
 
+  it should "match a scalar full outer join reference" in {
+    val cases: Seq[(String, Seq[(String, Int)], Seq[(String, Int)])] = Seq(
+      (
+        "matches, left-only rows, and right-only rows",
+        Seq("a" -> 1, "b" -> 7, "a" -> 3),
+        Seq("a" -> 2, "a" -> 4, "c" -> 9),
+      ),
+      (
+        "duplicate keys on both sides",
+        Seq("a" -> 1, "a" -> 3, "b" -> 5),
+        Seq("a" -> 2, "a" -> 4, "b" -> 6, "b" -> 7),
+      ),
+      (
+        "null key on the left",
+        Seq(nullKey(1), "a" -> 2, nullKey(4)),
+        Seq("a" -> 3, "b" -> 8),
+      ),
+      (
+        "null key on the right",
+        Seq("a" -> 1, "b" -> 2),
+        Seq(nullKey(9), "a" -> 3),
+      ),
+      (
+        "null keys on both sides",
+        Seq(nullKey(1), "a" -> 2, nullKey(4)),
+        Seq(nullKey(9), nullKey(8), "a" -> 3),
+      ),
+      (
+        "empty left side",
+        Seq.empty[(String, Int)],
+        Seq("x" -> 1, "y" -> 2),
+      ),
+      (
+        "empty right side",
+        Seq("x" -> 1, "y" -> 2, "x" -> 1),
+        Seq.empty[(String, Int)],
+      ),
+      (
+        "both sides empty",
+        Seq.empty[(String, Int)],
+        Seq.empty[(String, Int)],
+      ),
+    )
+
+    cases.foreach { case (name, leftRows, rightRows) =>
+      ScarletRuntime.get.shuffle.clear()
+      val actual =
+        toDistCollection(leftRows).fullOuterJoin(toDistCollection(rightRows)).collect().toSeq
+      withClue(name) {
+        actual should contain theSameElementsAs referenceFullOuter(leftRows, rightRows)
+      }
+    }
+  }
+
+  it should "plan a wide full outer join that the columnar planner refuses" in {
+    ScarletRuntime.get.shuffle.clear()
+    val left = toDistCollection(Seq("a" -> 1, "c" -> 4))
+    val right = toDistCollection(Seq("a" -> 2, "b" -> 3))
+    val plan = left.fullOuterJoin(right).plan
+
+    plan shouldBe a[Plan.FullOuterJoinOp[_, _, _]]
+    plan match {
+      case Plan.FullOuterJoinOp(_, _, strategy) => strategy shouldBe None
+      case _ => fail("Expected FullOuterJoinOp")
+    }
+    PlanWide.isWide(plan) shouldBe true
+    PlanWide.isDirectlyWide(plan) shouldBe true
+    fullOuterKinds(plan) shouldBe Set(WideOpKind.FullOuterJoin)
+
+    val saved = ScarletConf.get
+    try {
+      ScarletConf.set(saved.copy(columnarExecution = true))
+      ColumnarPlanner.lower(plan) shouldBe None
+    } finally ScarletConf.set(saved)
+  }
+
+  it should "keep null keys unmatched when a full outer strategy hint is set" in {
+    val leftRows = Seq(nullKey(1), "a" -> 2, nullKey(4))
+    val rightRows = Seq(nullKey(9), nullKey(8), "a" -> 3)
+    val expected = Seq(
+      fullNullLeft(1),
+      "a" -> (Some(2), Some(3)),
+      fullNullLeft(4),
+      fullNullRight(9),
+      fullNullRight(8),
+    )
+    val hints = Seq(
+      None,
+      Some(Plan.JoinStrategy.Broadcast),
+      Some(Plan.JoinStrategy.SortMerge),
+      Some(Plan.JoinStrategy.ShuffleHash),
+    )
+
+    hints.foreach { hint =>
+      ScarletRuntime.get.shuffle.clear()
+      val plan = Plan.FullOuterJoinOp(
+        Plan.Source(Seq(Partition(leftRows))),
+        Plan.Source(Seq(Partition(rightRows))),
+        hint,
+      )
+      withClue(hint) {
+        fullOuterKinds(plan) shouldBe Set(WideOpKind.FullOuterJoin)
+        DistCollection(plan).collect().toSeq should contain theSameElementsAs expected
+      }
+    }
+  }
+
   private def leftOuterKinds(plan: Plan[_]): Set[WideOpKind] =
     StageBuilder
       .buildStageGraph(plan)
@@ -416,6 +517,15 @@ class TestJoins extends AnyFlatSpec with Matchers {
       .collect { case op: RightOuterJoinWideOp => op.meta.kind }
       .toSet
 
+  private def fullOuterKinds(plan: Plan[_]): Set[WideOpKind] =
+    StageBuilder
+      .buildStageGraph(plan)
+      .stages
+      .values
+      .flatMap(_.wideOp)
+      .collect { case op: FullOuterJoinWideOp => op.meta.kind }
+      .toSet
+
   @SuppressWarnings(Array("org.wartremover.warts.Null", "org.wartremover.warts.Equals"))
   private def nullKey(value: Int): (String, Int) = (null: String) -> value
 
@@ -426,6 +536,14 @@ class TestJoins extends AnyFlatSpec with Matchers {
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def rightNull(value: Int): (String, (Option[Int], Int)) =
     ((null: String), (None, value))
+
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def fullNullLeft(value: Int): (String, (Option[Int], Option[Int])) =
+    ((null: String), (Some(value), None))
+
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def fullNullRight(value: Int): (String, (Option[Int], Option[Int])) =
+    ((null: String), (None, Some(value)))
 
   /** Scalar left outer join. A null key does not match, and each unmatched left row is kept once. */
   @SuppressWarnings(Array("org.wartremover.warts.Null", "org.wartremover.warts.Equals"))
@@ -457,6 +575,33 @@ class TestJoins extends AnyFlatSpec with Matchers {
       if (matches.isEmpty) Seq((key, (None, rightValue)))
       else matches.map(leftValue => (key, (Some(leftValue), rightValue)))
     }
+
+  /**
+   * Scalar full outer join. A null key does not match. Each unmatched row from either side is kept
+   * once, including a null key, and a key on both sides emits the full cartesian product.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Null", "org.wartremover.warts.Equals"))
+  private def referenceFullOuter(
+      left: Seq[(String, Int)],
+      right: Seq[(String, Int)],
+  ): Seq[(String, (Option[Int], Option[Int]))] = {
+    val leftNonNull = left.filter { case (key, _) => key != null }
+    val rightNonNull = right.filter { case (key, _) => key != null }
+    val matched = for {
+      (leftKey, leftValue) <- leftNonNull
+      (rightKey, rightValue) <- rightNonNull
+      if leftKey == rightKey
+    } yield (leftKey, (Some(leftValue), Some(rightValue)))
+    val leftUnmatched = left.collect {
+      case (key, value) if key == null || !rightNonNull.exists(_._1 == key) =>
+        (key, (Some(value), None))
+    }
+    val rightUnmatched = right.collect {
+      case (key, value) if key == null || !leftNonNull.exists(_._1 == key) =>
+        (key, (None, Some(value)))
+    }
+    matched ++ leftUnmatched ++ rightUnmatched
+  }
 }
 
 
