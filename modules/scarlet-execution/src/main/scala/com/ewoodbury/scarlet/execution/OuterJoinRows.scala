@@ -7,6 +7,10 @@ package com.ewoodbury.scarlet.execution
  * supplies the rows for a matched key, a left-only key, a right-only key, and each null-key row. A
  * side the join does not preserve returns an empty sequence. Matched keys are the caller's
  * cartesian product of the two value sequences. Each null-key row is passed once, unmatched.
+ *
+ * Emission order is not part of the contract: keys come out in hash order and null-key rows last.
+ * Grouping the preserved side as well costs one grouped copy per task compared with streaming it;
+ * the shuffle data is already resident, and the price buys one path for all three outer joins.
  */
 object OuterJoinRows:
 
