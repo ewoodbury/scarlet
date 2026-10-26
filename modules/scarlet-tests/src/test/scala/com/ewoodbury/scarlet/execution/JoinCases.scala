@@ -24,7 +24,6 @@ private[execution] object JoinCases:
   val symmetricRows: Int = 300000
   val duplicateRows: Int = 200000
   val distinctKeys: Int = 1000
-  val nullRows: Int = 100000
   val hotRows: Int = 100000
 
   final case class JoinSpec(
