@@ -338,6 +338,8 @@ object HashJoin:
         row += 1
       }
       if (filled == 0) then emptyJoin
+      // publish takes its value arrays as (first, second). Passing probe first writes
+      // (key, probe, build), which the broadcast path turns into (key, left, right).
       else publish(outKeys, outProbe, outBuild, probeWords, buildWords, outCapacity, filled)
 
   private object Int32Build:
