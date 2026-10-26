@@ -125,6 +125,7 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
     WideOpKind.values should contain (Repartition)
     WideOpKind.values should contain (Coalesce)
     WideOpKind.values should contain (Join)
+    WideOpKind.values should contain (LeftOuterJoin)
     WideOpKind.values should contain (CoGroup)
 
     // Test WideOpMeta creation - GroupByKey doesn't need functions

@@ -111,23 +111,25 @@ object Stage {
 
   /**
    * Local keyed groupBy on a single partition. Used for shuffle-bypass groupByKey and as the
-   * per-partition operator of a groupByKey shuffle stage (input is already key-partitioned).
-   * `groupMap` is a single pass; value order inside each group follows input order.
+   * per-partition operator of a groupByKey shuffle stage (input is already key-partitioned). A
+   * null key is dropped before grouping. `groupMap` is a single pass; value order inside each
+   * group follows input order.
    */
   def groupByKeyLocal[K, V]: Stage[(K, V), (K, Iterable[V])] = {
     SingleOpStage { p =>
-      Partition(p.data.groupMap(_._1)(_._2).toSeq)
+      Partition(NullKeys.drop(p.data).groupMap(_._1)(_._2).toSeq)
     }
   }
 
   /**
    * Local keyed reduce on a single partition. Used for shuffle-bypass reduceByKey and as the
-   * per-partition operator of a reduceByKey shuffle stage (input is already key-partitioned).
-   * `groupMapReduce` is a single pass; a key with one value is returned unchanged.
+   * per-partition operator of a reduceByKey shuffle stage (input is already key-partitioned). A
+   * null key is dropped before reducing. `groupMapReduce` is a single pass; a key with one value
+   * is returned unchanged.
    */
   def reduceByKeyLocal[K, V](op: (V, V) => V): Stage[(K, V), (K, V)] = {
     SingleOpStage { p =>
-      Partition(p.data.groupMapReduce(_._1)(_._2)(op).toSeq)
+      Partition(NullKeys.drop(p.data).groupMapReduce(_._1)(_._2)(op).toSeq)
     }
   }
 

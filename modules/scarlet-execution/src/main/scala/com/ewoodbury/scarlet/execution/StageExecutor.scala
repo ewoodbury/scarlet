@@ -202,8 +202,9 @@ final class StageExecutor[F[_]: Sync](
   }
 
   /**
-   * Left outer join over co-partitioned shuffle inputs. Always the shuffle-hash task: broadcast
-   * and sort-merge tasks are inner joins.
+   * Left outer join over co-partitioned shuffle inputs. Always the shuffle-hash task.
+   * `LeftOuterJoinOp.joinStrategy` is ignored in this iteration: broadcast and sort-merge tasks
+   * are inner joins, and this path does not select them.
    */
   private def executeLeftOuterJoinOperation(
       stageInfo: StageBuilder.StageInfo,

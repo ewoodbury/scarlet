@@ -260,7 +260,8 @@ object Plan {
    * @param right
    *   The right plan node (producing elements of type (K, W)).
    * @param joinStrategy
-   *   Hint for join strategy selection (None means auto-select).
+   *   Hint for join strategy selection (None means auto-select). A null key is dropped on both
+   *   sides for every strategy and does not match.
    * @tparam K
    *   The key type.
    * @tparam V
@@ -283,7 +284,8 @@ object Plan {
    * @param right
    *   The right plan node (producing elements of type (K, W)).
    * @param joinStrategy
-   *   Hint for join strategy selection (None means auto-select).
+   *   Stored with the plan. The row executor ignores it and always runs shuffle-hash. Broadcast
+   *   and sort-merge are not implemented for outer joins in this iteration.
    * @tparam K
    *   The key type.
    * @tparam V
@@ -298,7 +300,8 @@ object Plan {
   ) extends Plan[(K, (V, Option[W]))]
 
   /**
-   * Represents a cogroup transformation that groups both datasets by key.
+   * Represents a cogroup transformation that groups both datasets by key. A null key is dropped on
+   * either side and does not form a group.
    * @param left
    *   The left plan node (producing elements of type (K, V)).
    * @param right

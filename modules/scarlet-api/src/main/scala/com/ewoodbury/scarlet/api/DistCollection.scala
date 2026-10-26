@@ -205,8 +205,9 @@ final case class DistCollection[A](plan: Plan[A]):
   // --- Wide Transformations (require shuffles) ---
 
   /**
-   * Transformation: Groups values by key, requiring a shuffle operation. Returns a new
-   * DistCollection representing the grouped data. Does not trigger computation.
+   * Transformation: Groups values by key, requiring a shuffle operation. A null key is dropped and
+   * does not form a group. Returns a new DistCollection representing the grouped data. Does not
+   * trigger computation.
    */
   def groupByKey[K, V](using ev: A =:= (K, V)): DistCollection[(K, Iterable[V])] =
     DistCollection(Plan.GroupByKeyOp(kvPlan))
@@ -218,7 +219,7 @@ final case class DistCollection[A](plan: Plan[A]):
    *
    * `op` must be associative and commutative. Scarlet may combine values within each mapper
    * partition before the shuffle and again after; applying `op` in a different grouping must not
-   * change the result.
+   * change the result. A null key is dropped and is not reduced.
    */
   def reduceByKey[K, V](op: (V, V) => V)(using ev: A =:= (K, V)): DistCollection[(K, V)] =
     DistCollection(Plan.ReduceByKeyOp(kvPlan, op))
@@ -233,8 +234,8 @@ final case class DistCollection[A](plan: Plan[A]):
 
   /**
    * Transformation: Joins this collection with another collection by key, requiring a shuffle
-   * operation. Returns a new DistCollection representing the joined data. Does not trigger
-   * computation.
+   * operation. A null key is dropped on both sides and does not match, for every strategy. Returns
+   * a new DistCollection representing the joined data. Does not trigger computation.
    */
   def join[K, V, W](other: DistCollection[(K, W)])(using
       ev: A =:= (K, V),
@@ -244,8 +245,10 @@ final case class DistCollection[A](plan: Plan[A]):
   /**
    * Transformation: Left-outer-joins this collection with another by key, requiring a shuffle.
    * Matching keys emit the cartesian product. A left row whose key is absent on the right is
-   * emitted once with `None`. A null key never matches. Order is unspecified. Returns a new
-   * DistCollection representing the joined data. Does not trigger computation.
+   * emitted once with `None`. A null key never matches: a left null is kept with `None`, and a
+   * right null matches nothing. Order is unspecified. The row executor always shuffle-hashes; a
+   * strategy hint on the plan is ignored in this iteration. Returns a new DistCollection
+   * representing the joined data. Does not trigger computation.
    */
   def leftOuterJoin[K, V, W](other: DistCollection[(K, W)])(using
       ev: A =:= (K, V),
@@ -254,7 +257,8 @@ final case class DistCollection[A](plan: Plan[A]):
 
   /**
    * Transformation: Joins this collection with another collection by key using shuffle-hash join.
-   * Returns a new DistCollection representing the joined data. Does not trigger computation.
+   * A null key is dropped on both sides and does not match. Returns a new DistCollection
+   * representing the joined data. Does not trigger computation.
    */
   def shuffleHashJoin[K, V, W](other: DistCollection[(K, W)])(using
       ev: A =:= (K, V),
@@ -268,8 +272,9 @@ final case class DistCollection[A](plan: Plan[A]):
     )
 
   /**
-   * Transformation: Joins this collection with another collection by key using sort-merge join.
-   * Returns a new DistCollection representing the joined data. Does not trigger computation.
+   * Transformation: Joins this collection with another collection by key using sort-merge join. A
+   * null key is dropped on both sides before ordering and does not match. Returns a new
+   * DistCollection representing the joined data. Does not trigger computation.
    */
   def sortMergeJoin[K, V, W](other: DistCollection[(K, W)])(using
       ev: A =:= (K, V),
@@ -301,8 +306,8 @@ final case class DistCollection[A](plan: Plan[A]):
 
   /**
    * Transformation: Co-groups this collection with another collection by key, requiring a shuffle
-   * operation. Returns a new DistCollection representing the co-grouped data. Does not trigger
-   * computation.
+   * operation. A null key is dropped on either side and does not form a group. Returns a new
+   * DistCollection representing the co-grouped data. Does not trigger computation.
    */
   def cogroup[K, V, W](other: DistCollection[(K, W)])(using
       ev: A =:= (K, V),

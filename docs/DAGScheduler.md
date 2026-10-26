@@ -54,6 +54,7 @@ core `Plan` nodes:
 | `ReduceByKeyWideOp[V]` | `Stage.reduceByKeyLocal` as one `StageTask` per shuffle partition |
 | `SortByWideOp[A, S]` | `Stage.sortLocal` as one `StageTask` per range partition; collect concatenates in order |
 | `JoinWideOp` | Side-tagged dual shuffle read; strategy per `SimpleWideOpMeta.joinStrategy` or auto-selection |
+| `LeftOuterJoinWideOp` | Side-tagged dual shuffle read; shuffle-hash left outer join. `joinStrategy` is not consulted |
 | `CoGroupWideOp` | `CogroupTask` per co-located left/right shuffle partition |
 | `RepartitionWideOp` / `CoalesceWideOp` | Unwrap `(element, Unit)` pairs written by the repartition shuffle |
 | `PartitionByWideOp` | Identity pass-through — the key-hash partitioning happened in the shuffle write |

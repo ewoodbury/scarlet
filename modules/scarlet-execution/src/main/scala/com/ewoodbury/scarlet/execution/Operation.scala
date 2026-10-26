@@ -57,7 +57,8 @@ final case class ReduceWideOpMeta[V](
  * Enumeration of wide operation types that require shuffle boundaries.
  */
 enum WideOpKind:
-  case GroupByKey, ReduceByKey, SortBy, PartitionBy, Repartition, Coalesce, Join, CoGroup
+  case GroupByKey, ReduceByKey, SortBy, PartitionBy, Repartition, Coalesce, Join, LeftOuterJoin,
+    CoGroup
 
 /**
  * Structured description of a wide operation attached to a shuffle stage. This is the execution

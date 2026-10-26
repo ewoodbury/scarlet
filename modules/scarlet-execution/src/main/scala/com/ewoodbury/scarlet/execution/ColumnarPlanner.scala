@@ -123,8 +123,9 @@ object ColumnarPlanner:
   /**
    * The physical tree for `plan`, without running it. `None` means the row path, including an
    * element chain whose project does not declare the column's type. A join lowers when its hint is
-   * absent, shuffle-hash, or broadcast. Sort-merge returns `None`. [[partitioning]] and [[tryRun]]
-   * follow that refusal. They also drop a lowered tree whose layout is invalid.
+   * absent, shuffle-hash, or broadcast. Sort-merge and left outer join return `None`.
+   * [[partitioning]] and [[tryRun]] follow that refusal. They also drop a lowered tree whose
+   * layout is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -611,7 +612,8 @@ object ColumnarPlanner:
             case _ => None
         case _ => None
 
-    /** The columnar path does not lower an outer join yet. */
+    // Kept ahead of the wildcard so an outer-join kernel has to replace this arm. There is no
+    // columnar left outer join; the row path runs it.
     case _: Plan.LeftOuterJoinOp[_, _, _] => None
     case _ => None
 

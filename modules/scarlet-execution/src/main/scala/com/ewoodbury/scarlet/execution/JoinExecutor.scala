@@ -78,8 +78,7 @@ final class JoinExecutor[F[_]: Sync](
       }
       val broadcastId = ScarletRuntime.get.broadcast.broadcast(leftData)
       val broadcastData = ScarletRuntime.get.broadcast.getBroadcast[(Any, Any)](broadcastId)
-      val broadcastMap =
-        broadcastData.groupBy(_._1).view.map { case (k, values) => k -> values.map(_._2) }.toMap
+      val broadcastMap = indexByKey(broadcastData)
       val tasks = (0 until numPartitions).map { partitionId =>
         val rightLocalData: Seq[(Any, Any)] =
           shuffle.readPartition[Any, Any](rightShuffleId, PartitionId(partitionId)).data.toSeq
@@ -98,8 +97,7 @@ final class JoinExecutor[F[_]: Sync](
       }
       val broadcastId = ScarletRuntime.get.broadcast.broadcast(rightData)
       val broadcastData = ScarletRuntime.get.broadcast.getBroadcast[(Any, Any)](broadcastId)
-      val broadcastMap =
-        broadcastData.groupBy(_._1).view.map { case (k, values) => k -> values.map(_._2) }.toMap
+      val broadcastMap = indexByKey(broadcastData)
       val tasks = (0 until numPartitions).map { partitionId =>
         val leftLocalData: Seq[(Any, Any)] =
           shuffle.readPartition[Any, Any](leftShuffleId, PartitionId(partitionId)).data.toSeq
@@ -178,7 +176,19 @@ final class JoinExecutor[F[_]: Sync](
         shuffle.readPartition[Any, Any](leftShuffleId, PartitionId(partitionId)).data.toSeq
       val rightRows: Seq[(Any, Any)] =
         shuffle.readPartition[Any, Any](rightShuffleId, PartitionId(partitionId)).data.toSeq
-      Task.ShuffleHashLeftOuterJoinTask[Any, Any, Any](leftRows, rightRows)
+      Task.createShuffleHashLeftOuterJoinTask[Any, Any, Any](leftRows, rightRows)
     }
     scheduler.submit(tasks).map(_.asInstanceOf[Seq[Partition[_]]])
   }
+
+  /** Groups broadcast rows by key. A null key is dropped and is not a probe match. */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def indexByKey(rows: Iterable[(Any, Any)]): Map[Any, Seq[Any]] =
+    NullKeys
+      .drop(rows)
+      .groupBy(_._1)
+      .view
+      .map { case (key, pairs) =>
+        key -> pairs.map(_._2).toSeq
+      }
+      .toMap

@@ -63,7 +63,8 @@ object Task extends StrictLogging:
 
   /**
    * A per-partition cogroup task over two co-partitioned inputs. Includes keys present on either
-   * side, with an empty sequence for a missing side.
+   * side, with an empty sequence for a missing side. A null key is dropped and does not form a
+   * group.
    */
   final case class CogroupTask[K, L, R](
       leftData: Seq[(K, L)],
@@ -71,8 +72,8 @@ object Task extends StrictLogging:
   ) extends RunnableTask[Any, (K, (Iterable[L], Iterable[R]))]:
     override def run(): Partition[(K, (Iterable[L], Iterable[R]))] = {
       taskLogger.debug(s"[${Thread.currentThread().getName}] CogroupTask on partition")
-      val leftGrouped = leftData.groupMap(_._1)(_._2)
-      val rightGrouped = rightData.groupMap(_._1)(_._2)
+      val leftGrouped = NullKeys.drop(leftData).groupMap(_._1)(_._2)
+      val rightGrouped = NullKeys.drop(rightData).groupMap(_._1)(_._2)
       val result = (leftGrouped.keySet union rightGrouped.keySet).iterator.map { key =>
         (
           key,
@@ -85,7 +86,10 @@ object Task extends StrictLogging:
       Partition(result)
     }
 
-  /** A per-partition shuffle-hash inner join task that joins two co-partitioned inputs. */
+  /**
+   * A per-partition shuffle-hash inner join task that joins two co-partitioned inputs. A null key
+   * is dropped on both sides and does not match.
+   */
   final case class ShuffleHashJoinTask[K, L, R](
       leftData: Seq[(K, L)],
       rightData: Seq[(K, R)],
@@ -94,8 +98,8 @@ object Task extends StrictLogging:
       taskLogger.debug(s"[${Thread.currentThread().getName}] ShuffleHashJoinTask on partition")
 
       // Build hash maps for both sides to avoid unsafe casting
-      val leftGrouped = leftData.groupBy(_._1).view.mapValues(_.map(_._2)).toMap
-      val rightGrouped = rightData.groupBy(_._1).view.mapValues(_.map(_._2)).toMap
+      val leftGrouped = NullKeys.drop(leftData).groupBy(_._1).view.mapValues(_.map(_._2)).toMap
+      val rightGrouped = NullKeys.drop(rightData).groupBy(_._1).view.mapValues(_.map(_._2)).toMap
 
       // Find all common keys and perform cross product
       val commonKeys = leftGrouped.keySet.intersect(rightGrouped.keySet)
@@ -135,7 +139,10 @@ object Task extends StrictLogging:
       Partition(result)
     }
 
-  /** A per-partition sort-merge inner join task that joins two sorted, co-partitioned inputs. */
+  /**
+   * A per-partition sort-merge inner join task that joins two sorted, co-partitioned inputs. A
+   * null key is dropped on both sides before ordering, so it is not compared and does not match.
+   */
   final case class SortMergeJoinTask[K, L, R](
       leftData: Seq[(K, L)],
       rightData: Seq[(K, R)],
@@ -144,9 +151,9 @@ object Task extends StrictLogging:
     override def run(): Partition[(K, (L, R))] = {
       taskLogger.debug(s"[${Thread.currentThread().getName}] SortMergeJoinTask on partition")
 
-      // Sort both sides by key if they're not already sorted
-      val sortedLeft = leftData.sortBy(_._1)
-      val sortedRight = rightData.sortBy(_._1)
+      // Sort both sides by key if they're not already sorted. Null keys are already gone.
+      val sortedLeft = NullKeys.drop(leftData).toSeq.sortBy(_._1)
+      val sortedRight = NullKeys.drop(rightData).toSeq.sortBy(_._1)
 
       // Group by key and perform cross product for matching keys
       val leftByKey = sortedLeft.groupBy(_._1).view.mapValues(_.map(_._2)).toMap
@@ -168,7 +175,8 @@ object Task extends StrictLogging:
    * Named erasure boundary: the task operates on erased (Any, Any) records because join sides
    * travel through the shuffle service; when the broadcast side is the join's left input the
    * values are re-typed at the tuple level. Safe because the caller broadcasts and reads the same
-   * side consistently for a given join stage.
+   * side consistently for a given join stage. A null key is dropped from the local rows. The
+   * broadcast map is built without null keys, so a null key does not match.
    */
   final case class BroadcastHashJoinTask[K, L, R](
       localData: Seq[(K, L)],
@@ -178,7 +186,7 @@ object Task extends StrictLogging:
     @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
     override def run(): Partition[(K, (L, R))] = {
       taskLogger.debug(s"[${Thread.currentThread().getName}] BroadcastHashJoinTask on partition")
-      val result = localData.iterator.flatMap { case (k, localValue) =>
+      val result = NullKeys.drop(localData).iterator.flatMap { case (k, localValue) =>
         broadcastMap.getOrElse(k, Seq.empty[R]).iterator.map { broadcastValue =>
           if (isRightLocal) {
             // Local data is right side (R), broadcast is left side (L)
