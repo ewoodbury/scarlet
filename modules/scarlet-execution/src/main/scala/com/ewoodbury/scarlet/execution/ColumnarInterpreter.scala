@@ -132,8 +132,8 @@ private[execution] object ColumnarInterpreter:
       // before lowering, so this cast is safe.
       @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Int => Int]
-      Columns.Pairs(onEachSliced(pairsOf(interpret(source, child, selectedPartition))) { batch =>
-        ColumnKernel.projectInt32(batch, 1, value => fn(value))
+      Columns.Pairs(onEachMorsel(pairsOf(interpret(source, child, selectedPartition))) { morsel =>
+        ColumnKernel.projectInt32(morsel.batch, 1, morsel.start, morsel.length, value => fn(value))
       })
     case (
           Plan.ReduceByKeyOp(source, reduceFunc),
@@ -295,13 +295,25 @@ private[execution] object ColumnarInterpreter:
         })
       case PhysicalOp.Slot.Key =>
         val keep = predicate.asInstanceOf[Int => Boolean]
-        Columns.Pairs(onEachSliced(pairsOf(columns)) { batch =>
-          ColumnKernel.filterInt32(batch, 0, value => keep(value))
+        Columns.Pairs(onEachMorsel(pairsOf(columns)) { morsel =>
+          ColumnKernel.filterInt32(
+            morsel.batch,
+            0,
+            morsel.start,
+            morsel.length,
+            value => keep(value),
+          )
         })
       case PhysicalOp.Slot.Value =>
         val keep = predicate.asInstanceOf[Int => Boolean]
-        Columns.Pairs(onEachSliced(pairsOf(columns)) { batch =>
-          ColumnKernel.filterInt32(batch, 1, value => keep(value))
+        Columns.Pairs(onEachMorsel(pairsOf(columns)) { morsel =>
+          ColumnKernel.filterInt32(
+            morsel.batch,
+            1,
+            morsel.start,
+            morsel.length,
+            value => keep(value),
+          )
         })
       case PhysicalOp.Slot.TripleKey | PhysicalOp.Slot.TripleLeftValue |
           PhysicalOp.Slot.TripleRightValue =>
@@ -414,10 +426,6 @@ private[execution] object ColumnarInterpreter:
   /**
    * One visit per copied slice. The function sees a batch whose rows start at zero.
    */
-  private def onEachSliced(
-      parts: Vector[ColumnBatch],
-  )(fn: ColumnBatch => ColumnBatch): Vector[ColumnBatch] =
-    fanOut(parts)(part => ColumnBatches.slice(part, ColumnarPlanner.batchSize))(fn)
 
   /**
    * One visit per morsel of the shared batch. The function owns its output. Regroup uses the same
