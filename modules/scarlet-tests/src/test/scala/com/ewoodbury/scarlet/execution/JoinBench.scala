@@ -23,6 +23,10 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * and columnar digests must agree whenever both paths return. A mismatch fails the run. Raw order
  * is not compared.
  *
+ * The printed `strategy` column is derived, not observed: the row-path value comes from the
+ * case's declared hint and sizes, while the columnar value is true only because the planner
+ * accepts shuffle-hash and refuses the rest. The table names what the case asked for.
+ *
  * A broadcast hint is not a columnar hash join. That case records the refusal and still times the
  * row path. `broadcastJoinThreshold` and `enableSortMergeJoin` are restored after every case.
  *

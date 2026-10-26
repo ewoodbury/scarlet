@@ -19,8 +19,8 @@ private[execution] object JoinCases:
   val sourcePartitions: Int = 2
   val probeRows: Int = 1000000
   val buildRows: Int = 1000
-  // 1M per side on the row path is GC-bound (over 70% of time in GC) and measures the
-  // collector, not the join. 300k keeps the shape measurable.
+  // 1M per side on the row path is allocation-bound and dominated by GC in the sbt JVM, so it
+  // measures the collector rather than the join. 300k keeps the shape measurable.
   val symmetricRows: Int = 300000
   val duplicateRows: Int = 200000
   val distinctKeys: Int = 1000
@@ -80,18 +80,6 @@ private[execution] object JoinCases:
     val right = intPairs(rows, row => row % distinct, row => row)
     val pairs = distinct.toLong * perKey.toLong * perKey.toLong
     forcedHash("duplicates", rows, rows, left.join(right), pairs)
-
-  /**
-   * Every tenth key is null, including the first row. The other keys are the row index, so they
-   * are unique and match the other side once. `expectedPairs` counts those present keys. A leading
-   * null is not a pair witness, so the columnar planner refuses the source.
-   */
-  def nullKeys(rows: Int): JoinSpec =
-    require(rows > 0 && rows % 10 == 0, s"null-key rows must be a positive multiple of 10, got $rows")
-    val left = nullablePairs(rows)
-    val right = nullablePairs(rows)
-    val present = rows.toLong - rows.toLong / 10L
-    forcedHash("null-keys", rows, rows, left.join(right), present)
 
   /**
    * A fixed small group shares key `0`; every other row keeps a unique key that exists on both
@@ -172,19 +160,4 @@ private[execution] object JoinCases:
     }
     DistCollection.ofIntPairs(keys, values, sourcePartitions)
 
-  /**
-   * Null keys are absent ints, which is the cell the encoders already read. The cast rebuilds that
-   * erased pair. Safe because the key is a boxed int or null and the value is a boxed int.
-   */
-  private def nullablePairs(rows: Int): DistCollection[(Int, Int)] =
-    val rowsSeq = Vector.tabulate(rows) { row =>
-      val key = if (row % 10 == 0) then None else Some(row)
-      erasedPair(key, row)
-    }
-    DistCollection(rowsSeq, sourcePartitions)
 
-  private def erasedPair(key: Option[Int], value: Int): (Int, Int) =
-    val keyCell: AnyRef = key match
-      case Some(present) => Int.box(present)
-      case None => null
-    Tuple2(keyCell, Int.box(value)).asInstanceOf[(Int, Int)]
