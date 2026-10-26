@@ -2,7 +2,7 @@ package com.ewoodbury.scarlet.execution
 
 import com.ewoodbury.scarlet.api.IntJoinTriplePredicate
 import com.ewoodbury.scarlet.columnar.*
-import com.ewoodbury.scarlet.core.{Partition, Plan}
+import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 
 /**
  * Runs a lowered [[PhysicalOp]] tree and encodes source partitions into columns.
@@ -10,10 +10,12 @@ import com.ewoodbury.scarlet.core.{Partition, Plan}
  * Named erasure boundary, shared with [[ColumnarPlanner]]. [[ColumnarPlanner.lower]] chooses the
  * tree and does not call user functions. [[interpret]] walks that same logical plan and applies
  * the operator recorded on each physical node. A mismatch throws `IllegalStateException`, which
- * [[ColumnarPlanner.tryRun]] does not turn into a row-path fallback. A partition selector on an
- * aggregate or a join fails a `require` guard with `IllegalArgumentException`, and that is not a
- * fallback either. A `ClassCastException` from a filter, or from a string map that declares
- * `String` and returns another value, is still a fallback, and that function may already have run.
+ * [[ColumnarPlanner.tryRun]] does not turn into a row-path fallback. A broadcast build table above
+ * `broadcastBuildBudgetBytes` throws `IllegalStateException` the same way: both inputs are already
+ * evaluated, and the budget covers that table only. A partition selector on an aggregate or a join
+ * fails a `require` guard with `IllegalArgumentException`, and that is not a fallback either. A
+ * `ClassCastException` from a filter, or from a string map that declares `String` and returns
+ * another value, is still a fallback, and that function may already have run.
  */
 @SuppressWarnings(
   Array(
@@ -170,17 +172,27 @@ private[execution] object ColumnarInterpreter:
       )
     case (
           Plan.JoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
-          PhysicalOp.BroadcastJoin(probe, build),
+          PhysicalOp.BroadcastJoin(leftOp, rightOp, buildSide),
         ) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      Columns.Triples(
-        ColumnPipeline.broadcastJoin(
-          pairsOf(interpret(left, probe, selectedPartition)),
-          pairsOf(interpret(right, build, selectedPartition)),
-          ColumnarPlanner.parallelism,
-        ),
+      val leftBatches = pairsOf(interpret(left, leftOp, selectedPartition))
+      val rightBatches = pairsOf(interpret(right, rightOp, selectedPartition))
+      val (probe, build) = buildSide match
+        case PhysicalOp.BuildSide.Right => (leftBatches, rightBatches)
+        case PhysicalOp.BuildSide.Left => (rightBatches, leftBatches)
+      val joined = ColumnPipeline.broadcastJoin(
+        probe,
+        build,
+        ColumnarPlanner.parallelism,
+        ScarletConf.get.broadcastBuildBudgetBytes,
       )
+      // The kernel writes (key, probe value, build value). Building the left child makes that
+      // (key, right, left), so the value columns are swapped back to (key, left, right).
+      val ordered = buildSide match
+        case PhysicalOp.BuildSide.Right => joined
+        case PhysicalOp.BuildSide.Left => swapValueColumns(joined)
+      Columns.Triples(ordered)
     case _ =>
       throw new IllegalStateException(
         s"physical tree does not match ${plan.getClass.getSimpleName}",
@@ -396,6 +408,25 @@ private[execution] object ColumnarInterpreter:
       throw new IllegalStateException(
         s"columnar map expects ${elementColumnList(includeBooleans = false)}",
       )
+
+  /**
+   * Kernel probe output is `(key, probe value, build value)`. Exchange the two value columns so a
+   * left-side build publishes `(key, left, right)`.
+   */
+  private def swapValueColumns(batches: Vector[ColumnBatch]): Vector[ColumnBatch] =
+    batches.map { batch =>
+      batch.columns match
+        case Seq(key, probeValue, buildValue) =>
+          new ColumnBatch(
+            Vector(key.logicalType, buildValue.logicalType, probeValue.logicalType),
+            Vector(key, buildValue, probeValue),
+            batch.length,
+          )
+        case other =>
+          throw new IllegalArgumentException(
+            s"broadcast join output has ${other.size} columns",
+          )
+    }
 
   private[execution] def pairsOf(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.Pairs(parts) if parts.nonEmpty => parts

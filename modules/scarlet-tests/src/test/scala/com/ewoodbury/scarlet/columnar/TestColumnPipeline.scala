@@ -3,6 +3,8 @@ package com.ewoodbury.scarlet.columnar
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import com.ewoodbury.scarlet.core.ScarletConf
+
 class TestColumnPipeline extends AnyFlatSpec with Matchers:
 
   "sum" should "merge partials across morsels without wrapping at Int" in {
@@ -162,8 +164,8 @@ class TestColumnPipeline extends AnyFlatSpec with Matchers:
         val left = batchesOf(leftRows)
         val right = batchesOf(rightRows)
         val hashed = ColumnPipeline.innerJoin(left, right, 4, parallelism = 1, batchSize = 2)
-        val once = ColumnPipeline.broadcastJoin(left, right, parallelism = 1)
-        val parallel = ColumnPipeline.broadcastJoin(left, right, parallelism = 4)
+        val once = broadcast(left, right, parallelism = 1)
+        val parallel = broadcast(left, right, parallelism = 4)
         triples(once).sorted shouldBe triples(hashed).sorted
         triples(parallel).sorted shouldBe triples(hashed).sorted
       }
@@ -180,24 +182,20 @@ class TestColumnPipeline extends AnyFlatSpec with Matchers:
       BatchCodec.nullableIntPairs(Seq((None, Some(7)), (Some(1), Some(100)), (Some(3), None))),
     )
     val hashed = ColumnPipeline.innerJoin(probe, build, 4, parallelism = 1, batchSize = 8)
-    val broadcast = ColumnPipeline.broadcastJoin(probe, build, parallelism = 1)
+    val joined = broadcast(probe, build, parallelism = 1)
     // Hash join builds the left input. Broadcast builds the right input. Both publish
     // (key, left, right), so the null build value is the right value here.
-    nullableTriples(broadcast).sorted shouldBe Seq((1, Some(100), None), (1, Some(100), Some(10)))
-    nullableTriples(broadcast).sorted shouldBe nullableTriples(hashed).sorted
+    nullableTriples(joined).sorted shouldBe Seq((1, Some(100), None), (1, Some(100), Some(10)))
+    nullableTriples(joined).sorted shouldBe nullableTriples(hashed).sorted
 
     val nullBuild = Vector(BatchCodec.nullableIntPairs(Seq((None, Some(1)), (None, Some(2)))))
     val presentProbe = Vector(BatchCodec.intPairs(Seq((1, 3))))
-    ColumnPipeline
-      .broadcastJoin(presentProbe, nullBuild, parallelism = 1)
-      .map(_.length) shouldBe Seq(0)
+    broadcast(presentProbe, nullBuild, parallelism = 1).map(_.length) shouldBe Seq(0)
     val nullProbe = Vector(BatchCodec.nullableIntPairs(Seq((None, Some(3)))))
-    ColumnPipeline
-      .broadcastJoin(nullProbe, presentProbe, parallelism = 1)
-      .map(_.length) shouldBe Seq(0)
+    broadcast(nullProbe, presentProbe, parallelism = 1).map(_.length) shouldBe Seq(0)
   }
 
-  it should "publish one batch per probe batch, newest build row first" in {
+  it should "publish one batch per probe batch, with an unspecified match order" in {
     val build = Vector(
       BatchCodec.intPairs(Seq((1, 10), (2, 20))),
       BatchCodec.intPairs(Seq((1, 11))),
@@ -206,12 +204,12 @@ class TestColumnPipeline extends AnyFlatSpec with Matchers:
       BatchCodec.intPairs(Seq((1, 100), (2, 200))),
       BatchCodec.intPairs(Seq((1, 101))),
     )
-    val parts = ColumnPipeline.broadcastJoin(probe, build, parallelism = 4)
+    val parts = broadcast(probe, build, parallelism = 4)
     parts.length shouldBe 2
     val first = parts.headOption.getOrElse(fail("missing first probe batch"))
     val second = parts.drop(1).headOption.getOrElse(fail("missing second probe batch"))
-    triples(Vector(first)) shouldBe Seq((1, 100, 11), (1, 100, 10), (2, 200, 20))
-    triples(Vector(second)) shouldBe Seq((1, 101, 11), (1, 101, 10))
+    triples(Vector(first)).sorted shouldBe Seq((1, 100, 10), (1, 100, 11), (2, 200, 20)).sorted
+    triples(Vector(second)).sorted shouldBe Seq((1, 101, 10), (1, 101, 11)).sorted
 
     val combinedBuild = ColumnBatches.concat(build)
     val combinedProbe = ColumnBatches.concat(probe)
@@ -220,24 +218,49 @@ class TestColumnPipeline extends AnyFlatSpec with Matchers:
       HashJoin.JoinSide(combinedProbe, key = 0, value = 1),
     )
     val opened = HashJoin
-      .openInt32(build.map(batch => HashJoin.JoinSide(batch, key = 0, value = 1)))
+      .openInt32(
+        build.map(batch => HashJoin.JoinSide(batch, key = 0, value = 1)),
+        buildBudget,
+      )
       .probe(HashJoin.JoinSide(combinedProbe, key = 0, value = 1))
     // innerInt32 writes (key, build, probe). The multi-batch probe writes (key, probe, build).
-    swapped(triples(Vector(single))) shouldBe triples(Vector(opened))
+    swapped(triples(Vector(single))).sorted shouldBe triples(Vector(opened)).sorted
 
-    ColumnPipeline.broadcastJoin(
-      Vector.empty,
-      build,
-      parallelism = 1,
-    ) shouldBe Vector.empty[ColumnBatch]
-    val emptyBuild = ColumnPipeline.broadcastJoin(
-      probe,
-      Vector.empty,
-      parallelism = 1,
-    )
+    broadcast(Vector.empty, build, parallelism = 1) shouldBe Vector.empty[ColumnBatch]
+    val emptyBuild = broadcast(probe, Vector.empty, parallelism = 1)
     emptyBuild.length shouldBe 2
     emptyBuild.map(_.length) shouldBe Seq(0, 0)
   }
+
+  it should "refuse a build table above the budget and still build one that fits" in {
+    val build = Vector(
+      BatchCodec.intPairs(Seq((1, 10))),
+      BatchCodec.intPairs(Seq((1, 11), (2, 20))),
+    )
+    val probe = Vector(BatchCodec.intPairs(Seq((1, 100))))
+    val rows = 3
+    val estimate = HashJoin.retainedBuildBytes(rows)
+    estimate shouldBe 183L
+    val over = intercept[IllegalStateException] {
+      broadcast(probe, build, parallelism = 1, buildBudgetBytes = estimate - 1)
+    }
+    over.getMessage shouldBe
+      s"broadcast build table retains about $estimate bytes for $rows rows, above the budget of ${estimate - 1} bytes"
+    triples(broadcast(probe, build, parallelism = 1, buildBudgetBytes = estimate)).sorted shouldBe
+      Seq((1, 100, 10), (1, 100, 11)).sorted
+    broadcast(probe, Vector.empty, parallelism = 1, buildBudgetBytes = 0L).map(_.length) shouldBe
+      Seq(0)
+  }
+
+  private def broadcast(
+      probe: Vector[ColumnBatch],
+      build: Vector[ColumnBatch],
+      parallelism: Int,
+      buildBudgetBytes: Long = buildBudget,
+  ): Vector[ColumnBatch] =
+    ColumnPipeline.broadcastJoin(probe, build, parallelism, buildBudgetBytes)
+
+  private def buildBudget: Long = ScarletConf.get.broadcastBuildBudgetBytes
 
   private def runSum(batches: Vector[ColumnBatch], parallelism: Int): Vector[ColumnBatch] =
     ColumnPipeline.sumByKey(

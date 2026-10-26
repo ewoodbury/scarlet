@@ -54,20 +54,25 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * That check reads the method descriptor and does not call the function. `getDeclaredMethods` does
  * not see an inherited `apply`, so that function stays on the row path too. `reduceByKey` applies
  * the user's function and wraps at `Int`. A `join` with no hint, or with an explicit shuffle-hash
- * hint, hash-partitions both sides and probes one bucket at a time. A broadcast hint builds a hash
- * table from the right input and probes the left input in place, with no exchange on either side.
- * The right input is always the build side. Sort-merge is not implemented: that hint makes `lower`
- * return `None`, so the plan stays on the row path. Output width for a shuffle-hash join or an
- * aggregate is `defaultShufflePartitions`. A broadcast join's output follows the probe side's
- * partition count; `take` still refuses a join, so the prefix path does not use that count.
- * [[tryCount]] and [[trySumInt]] fold an int filter/map chain that starts at a scan or at `keys`
- * or `values`, including an int `mapValues`, and do not write that chain. Sum folds one trailing
- * project and chains longer than four. Count folds those, chains of two to four steps, and a
- * string scan under only dictionary literal filters. That string fold reads the scan `lower`
- * built. A string shape that is not that chain reads the finished batches. [[trySumLong]] folds a
- * long filter/map chain the same way, and the sum wraps. [[trySumDouble]] folds at most four
- * steps. Sum of `keys`, `values`, or an int `mapValues` with no further element chain reads the
- * pair column in that morsel loop and does not build the projection. [[tryGroupedSum]] runs
+ * hint, hash-partitions both sides and probes one bucket at a time. A broadcast hint records both
+ * children and builds the right input. A later cost-based pass may build the left input instead.
+ * The other child is probed in place, with no exchange on either side. Output columns stay
+ * `(key, left, right)`. Multiplicity, values, and null semantics match the shuffle-hash join.
+ * Order is unspecified. The build table is estimated before it is allocated. That estimate covers
+ * the table only, not the rest of the query. An estimate above `broadcastBuildBudgetBytes` throws
+ * `IllegalStateException`. Both inputs are already evaluated, so [[tryRun]] does not turn that
+ * failure into a row-path fallback. Sort-merge is not implemented: that hint makes `lower` return
+ * `None`, so the plan stays on the row path. Output width for a shuffle-hash join or an aggregate
+ * is `defaultShufflePartitions`. A broadcast join's output follows the probe side, whichever child
+ * that is; `take` still refuses a join, so the prefix path does not use that count. [[tryCount]]
+ * and [[trySumInt]] fold an int filter/map chain that starts at a scan or at `keys` or `values`,
+ * including an int `mapValues`, and do not write that chain. Sum folds one trailing project and
+ * chains longer than four. Count folds those, chains of two to four steps, and a string scan under
+ * only dictionary literal filters. That string fold reads the scan `lower` built. A string shape
+ * that is not that chain reads the finished batches. [[trySumLong]] folds a long filter/map chain
+ * the same way, and the sum wraps. [[trySumDouble]] folds at most four steps. Sum of `keys`,
+ * `values`, or an int `mapValues` with no further element chain reads the pair column in that
+ * morsel loop and does not build the projection. [[tryGroupedSum]] runs
  * [[ColumnPipeline.sumByKey]] on a typed pair source and folds the `Int64` group sums. A preceding
  * `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that partial scan,
  * so the action does not build those pairs. [[groupedSumPeel]] labels those walked steps. It is
@@ -564,7 +569,7 @@ object ColumnarPlanner:
 
   /**
    * Columnar joins are hash joins. No hint, shuffle-hash, and broadcast all qualify. Sort-merge
-   * does not. Broadcast builds the right input; see [[joinOf]].
+   * does not. Broadcast records the right input as the build side; see [[joinOf]].
    */
   private[execution] def acceptsHashJoin(strategy: Option[Plan.JoinStrategy]): Boolean =
     strategy match
@@ -608,8 +613,8 @@ object ColumnarPlanner:
     case _ => None
 
   /**
-   * Shuffle-hash exchanges both children. Broadcast does not: `leftOp` is the probe and `rightOp`
-   * is the build, even when the right input is larger.
+   * Shuffle-hash exchanges both children. Broadcast keeps both children and records
+   * [[PhysicalOp.BuildSide.Right]]. A later cost-based pass may choose the left side.
    */
   private def joinOf(
       strategy: Option[Plan.JoinStrategy],
@@ -617,7 +622,11 @@ object ColumnarPlanner:
       rightOp: PhysicalOp,
   ): PhysicalOp = strategy match
     case Some(Plan.JoinStrategy.Broadcast) =>
-      PhysicalOp.BroadcastJoin(probe = leftOp, build = rightOp)
+      PhysicalOp.BroadcastJoin(
+        left = leftOp,
+        right = rightOp,
+        buildSide = PhysicalOp.BuildSide.Right,
+      )
     case None | Some(Plan.JoinStrategy.ShuffleHash) =>
       PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp))
     case Some(Plan.JoinStrategy.SortMerge) =>
@@ -885,14 +894,17 @@ object ColumnarPlanner:
           case Some(_: String) => Some(PhysicalOp.Kind.Strings)
           case Some(_) => None
 
-  private def infoOf(op: PhysicalOp): PartitioningInfo = op match
+  private[execution] def infoOf(op: PhysicalOp): PartitioningInfo = op match
     case PhysicalOp.Filter(child, _) => infoOf(child)
     case PhysicalOp.Project(child) => infoOf(child)
     case PhysicalOp.Pipeline(child, _) => infoOf(child)
     case PhysicalOp.Column(child, _) => infoOf(child).withoutPairDistribution
     case PhysicalOp.MapValue(child) => infoOf(child)
     case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin => hashed
-    case PhysicalOp.BroadcastJoin(probe, _) =>
+    case PhysicalOp.BroadcastJoin(left, right, buildSide) =>
+      val probe = buildSide match
+        case PhysicalOp.BuildSide.Right => left
+        case PhysicalOp.BuildSide.Left => right
       infoOf(probe).copy(layout = layoutOf(PhysicalOp.Kind.Triples))
     case PhysicalOp.Exchange(_) =>
       throw new IllegalStateException("exchange is only a child of aggregate or join")

@@ -80,7 +80,7 @@ outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are 
 | Pair `keys`, `values`, int `mapValues`, mapped key/value columns, filtered int `mapValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `Project(Key(Scan))`, `Project(Value(Scan))`, `FilterValue(MapValue(Scan))` |
 | Int `reduceByKey`, after a value filter or int `mapValues`, and nested reduction | `Columnar` | `HashAggregate(Exchange(Scan))`, `HashAggregate(Exchange(FilterValue(Scan)))`, `HashAggregate(Exchange(MapValue(Scan)))`, `HashAggregate(Exchange(HashAggregate(Exchange(Scan))))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
-| Explicit broadcast int join. The right input is the build side, and neither side is exchanged | `Columnar` | `BroadcastJoin(Scan, Scan)` |
+| Explicit broadcast int join. The planner builds the right input. A later pass may build the left. Neither side is exchanged. Order is unspecified | `Columnar` | `BroadcastJoin(Scan, Scan)` |
 | Join after an int aggregate | `Columnar` | `HashJoin(Exchange(HashAggregate(Exchange(Scan))), Exchange(Scan))` |
 | Int join key/left-value/right-value filters | `Columnar` | `FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))`, `FilterTripleLeftValue(HashJoin(Exchange(Scan), Exchange(Scan)))`, `FilterTripleRightValue(HashJoin(Exchange(Scan), Exchange(Scan)))` |
 
@@ -201,9 +201,15 @@ the plan is accepted: `lower` returns a physical tree and that tree's layout is 
 
 A join lowers when its hint is absent, shuffle-hash, or broadcast. Sort-merge is not implemented
 on the columnar path: that hint makes `lower` return `None`, and `partitioning` reports no layout.
-The absent hint and shuffle-hash stay the columnar hash join above. Broadcast builds the right
-input and probes the left input in place, so the join itself adds no exchange. A probe subtree
-can still contain its own exchange, for example an aggregate that feeds the join.
+The absent hint and shuffle-hash stay the columnar hash join above. Broadcast records both
+children and builds the right input. A later cost-based pass may build the left input instead.
+The other child is probed in place, so the join itself adds no exchange. Output distribution
+follows that probe side. Output columns stay `(key, left, right)`. Multiplicity, values, and
+null semantics match the shuffle-hash join. Order is unspecified. The build table is estimated
+before it is allocated and must fit in `broadcastBuildBudgetBytes` (64 MiB). That budget covers
+the table only. An estimate above it fails the action. The inputs are already evaluated, so the
+failure does not fall back to the row path. A probe subtree can still contain its own exchange,
+for example an aggregate that feeds the join.
 
 `collect`, `foreach`, `reduce`, `fold`, and `aggregate` are deliberate boxed exits: they consume
 columnar results as ordinary Scala values at the action boundary. A collected `reduceByKey` also
@@ -317,5 +323,6 @@ Roadmap and sequencing are tracked externally; the headline items:
   `Seq`.
 - The columnar path does not implement sort-merge join. That hint stays on the row path. A join
   with no hint, or with shuffle-hash, lowers to the columnar hash join. An explicit broadcast
-  hint builds the right input and probes the left input in place. The row-path sort-merge join is
-  a hash grouping wearing a sort-merge name; a true typed sort-merge join is deferred.
+  hint records both children and builds the right input. A later cost-based pass may build the
+  left input. The build table must fit in `broadcastBuildBudgetBytes`. The row-path sort-merge
+  join is a hash grouping wearing a sort-merge name; a true typed sort-merge join is deferred.

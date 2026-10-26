@@ -12,7 +12,8 @@ package com.ewoodbury.scarlet.columnar
  * columns. An empty input is `numPartitions` empty sum batches, the same convention as
  * [[HashReduce.byKey]]. The hash join reads key column 0 and value column 1 on both sides,
  * exchanges each side, and probes one partition at a time. The broadcast join builds one table
- * from the right-hand batches and probes the left-hand batches in place.
+ * from the batches chosen as the build side and probes the other batches in place. Match order is
+ * a kernel detail. The published multiset is multiplicity, values, and null semantics.
  */
 object ColumnPipeline:
 
@@ -155,25 +156,31 @@ object ColumnPipeline:
     }
 
   /**
-   * Inner join with no exchange. `probe` is the left input and `build` is the right input, and the
-   * right input is always the build side. One table is filled from every build batch, then each
-   * probe batch is probed in place. The result is one batch per probe batch, in that order. Rows
-   * inside a batch follow probe-row order, and build matches for one probe row are newest-first.
-   * Output columns are `(key, probe value, build value)`, which is `(key, left, right)`. An empty
-   * probe returns no batches. An empty build returns one empty batch per probe batch. `batchSize`
-   * is checked and does not slice either side.
+   * Inner join with no exchange. `probe` and `build` are already chosen. One table is filled from
+   * every build batch, then each probe batch is probed in place. The result is one batch per probe
+   * batch. Output columns are `(key, probe value, build value)`. The caller restores
+   * `(key, left, right)` when the logical left input is the build side. Multiplicity, values, and
+   * null semantics are the result. Order inside a batch is unspecified here. The kernel walks each
+   * build chain newest-first, which is a kernel detail. An empty probe returns no batches and does
+   * not allocate a table. An empty build returns one empty batch per probe batch.
+   * `buildBudgetBytes` bounds the build table only. An estimate above that bound throws
+   * `IllegalStateException` before the table is allocated.
    */
   def broadcastJoin(
       probe: Vector[ColumnBatch],
       build: Vector[ColumnBatch],
       parallelism: Int,
+      buildBudgetBytes: Long,
   ): Vector[ColumnBatch] =
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     if (probe.isEmpty) then Vector.empty
     else
-      val table = HashJoin.openInt32(build.map { batch =>
-        HashJoin.JoinSide(batch, key = 0, value = 1)
-      })
+      val table = HashJoin.openInt32(
+        build.map { batch =>
+          HashJoin.JoinSide(batch, key = 0, value = 1)
+        },
+        buildBudgetBytes,
+      )
       MorselScheduler.map(probe, parallelism) { (_, probeBatch) =>
         table.probe(HashJoin.JoinSide(probeBatch, key = 0, value = 1))
       }

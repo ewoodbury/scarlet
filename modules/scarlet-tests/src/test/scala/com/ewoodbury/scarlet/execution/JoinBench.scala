@@ -25,8 +25,8 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  *
  * The printed `strategy` column is derived, not observed. The row-path value comes from the
  * case's declared hint and sizes. The columnar value is `broadcast` when the physical tree is a
- * broadcast join, and `shuffle-hash` otherwise. A broadcast join has no exchange: the right input
- * is the build side and the left input is probed in place. Sort-merge stays on the row path.
+ * broadcast join, and `shuffle-hash` otherwise. A broadcast join has no exchange. The planner
+ * builds the right input and probes the left input in place. Sort-merge stays on the row path.
  * `broadcastJoinThreshold` and `enableSortMergeJoin` are restored after every case.
  *
  * `runMain` executes in the sbt JVM. `Test / fork` is left false, so absolute times carry sbt and

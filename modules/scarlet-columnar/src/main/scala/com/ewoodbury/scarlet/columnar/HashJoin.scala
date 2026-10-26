@@ -4,16 +4,19 @@ import java.util.Arrays
 
 /**
  * Inner hash join of `Int32` keys. Null keys are dropped on both sides. A null value is preserved
- * on a matched row and stored as `0`.
+ * on a matched row and stored as `0`. The published join is the multiset of matches: multiplicity,
+ * values, and null semantics. Order is unspecified.
  *
- * [[innerInt32]] builds from one batch and writes `(key, build value, probe value)` in probe
- * order. Within a probe row the build chain is newest-first. That order is part of the contract.
+ * [[innerInt32]] builds from one batch and writes `(key, build value, probe value)`. Within a
+ * probe row the build chain is newest-first. That walk is a kernel detail, not a public contract.
  *
- * [[openInt32]] fills one table from every build batch, then probes. A later batch is newer than
- * an earlier batch, and a later row is newer than an earlier row. `probe` writes
- * `(key, probe value, build value)`, so a broadcast join whose left input is the probe and whose
- * right input is the build publishes `(key, left, right)`. The table is not mutated by a probe, so
- * probes may run together. [[innerInt32]] does not use this table.
+ * [[openInt32]] fills one table from every build batch, then probes. A later batch is inserted
+ * after an earlier batch, and a later row after an earlier row, so the chain walk is newest-first.
+ * That walk is a kernel detail. `probe` writes `(key, probe value, build value)`. The caller
+ * restores `(key, left, right)` when the logical left input was the build side. The table is not
+ * mutated by a probe, so probes may run together. [[innerInt32]] does not use this table. A
+ * non-empty build is estimated before the table is allocated. The estimate covers that table only.
+ * An estimate above `buildBudgetBytes` throws `IllegalStateException`.
  *
  * Each side names its key and value ordinals. The probe writes matches directly, with the row
  * index in a `var`, so the hot loop stays allocation-free like `ColumnKernel`. Output columns keep
@@ -37,20 +40,42 @@ object HashJoin:
 
   /**
    * One build table for every batch in `sides`, in vector order. An empty input, or batches whose
-   * live lengths sum to zero, probes to an empty batch. A non-int column or a bad ordinal fails
-   * before the table is built.
+   * live lengths sum to zero, probes to an empty batch and allocates nothing. A non-int column or
+   * a bad ordinal fails before the table is built. Otherwise [[retainedBuildBytes]] is compared
+   * with `buildBudgetBytes` before any table array is allocated.
    */
-  def openInt32(sides: Vector[JoinSide]): Int32Build =
+  def openInt32(sides: Vector[JoinSide], buildBudgetBytes: Long): Int32Build =
     val checked = sides.map(checkedSide)
     val totalLong = checked.iterator.map(side => side.keys.length.toLong).sum
     require(totalLong <= Int.MaxValue.toLong, s"build side has $totalLong rows")
     val total = totalLong.toInt
     if (total == 0) then Int32Build.empty
     else
-      val flat = copyBuild(checked, total)
-      val table = Int32Build(flat)
-      table.insert()
-      table
+      val estimate = retainedBuildBytes(total)
+      if (estimate > buildBudgetBytes) then refuseBuild(total, estimate, buildBudgetBytes)
+      else
+        val flat = copyBuild(checked, total)
+        val table = Int32Build(flat)
+        table.insert()
+        table
+
+  /**
+   * Retained bytes of the open build table for `rows` live build rows. Each row keeps a 4-byte
+   * key, a 4-byte value, and one byte for the validity bitmaps. Each slot keeps a 4-byte key, a
+   * 4-byte head, and one byte of state. Each row also keeps a 4-byte chain link. The validity and
+   * state charges are whole bytes, which rounds those bitsets up. This is the build table only.
+   */
+  private[scarlet] def retainedBuildBytes(rows: Int): Long =
+    val slots = ColumnHash.tableSize(rows).toLong
+    val rowBytes = 4L + 4L + 1L
+    val slotBytes = 4L + 4L + 1L
+    val chainBytes = 4L
+    rows.toLong * rowBytes + slots * slotBytes + rows.toLong * chainBytes
+
+  private def refuseBuild(rows: Int, estimate: Long, budget: Long): Nothing =
+    throw new IllegalStateException(
+      s"broadcast build table retains about $estimate bytes for $rows rows, above the budget of $budget bytes",
+    )
 
   private def checkedSide(side: JoinSide): CheckedSide =
     val keys = ColumnHash.int32At(side.batch, side.key)
@@ -220,8 +245,8 @@ object HashJoin:
     )
 
   /**
-   * Build table shared by every probe. `probe` writes `(key, probe value, build value)` in
-   * probe-row order, newest build row first. An empty build returns an empty batch.
+   * Build table shared by every probe. `probe` writes `(key, probe value, build value)`. An empty
+   * build returns an empty batch. The chain walk is newest-first, which is a kernel detail.
    */
   final class Int32Build private (
       mask: Int,

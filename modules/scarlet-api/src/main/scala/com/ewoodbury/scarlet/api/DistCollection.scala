@@ -273,7 +273,9 @@ final case class DistCollection[A](plan: Plan[A]):
 
   /**
    * Transformation: Joins this collection with another collection by key using broadcast-hash
-   * join. Returns a new DistCollection representing the joined data. Does not trigger computation.
+   * join. The result matches a shuffle-hash join in multiplicity, values, and null semantics.
+   * Order is unspecified. Returns a new DistCollection representing the joined data. Does not
+   * trigger computation.
    */
   def broadcastJoin[K, V, W](other: DistCollection[(K, W)])(using
       ev: A =:= (K, V),

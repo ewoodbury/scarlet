@@ -677,7 +677,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case PhysicalOp.Column(child, _) => preservesPartitions(child)
     case PhysicalOp.MapValue(child) => preservesPartitions(child)
     case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.HashJoin(_, _) |
-        PhysicalOp.BroadcastJoin(_, _) =>
+        PhysicalOp.BroadcastJoin(_, _, _) =>
       false
 
   private def assertRowPath[A](plan: Plan[A]): Unit =
