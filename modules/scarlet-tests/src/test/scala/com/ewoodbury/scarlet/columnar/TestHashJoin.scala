@@ -59,7 +59,7 @@ class TestHashJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     ) shouldBe fromEngine
   }
 
-  it should "emit probe order, and newest build rows first within a key" in {
+  it should "walk the build chain newest-first, a kernel detail and not a public contract" in {
     val buildRows = Seq(
       (Some(1), Some(10)),
       (Some(2), Some(20)),

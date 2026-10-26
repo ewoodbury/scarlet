@@ -10,8 +10,10 @@ package com.ewoodbury.scarlet.columnar
  * the exchange still sees one partial per input batch. Each output batch is an `Int32` key and an
  * `Int64` sum. Fold the sum with [[ColumnReduce.sumInt64]] at ordinal 1; the batch has two
  * columns. An empty input is `numPartitions` empty sum batches, the same convention as
- * [[HashReduce.byKey]]. The join reads key column 0 and value column 1 on both sides, exchanges
- * each side, and probes one partition at a time.
+ * [[HashReduce.byKey]]. The hash join reads key column 0 and value column 1 on both sides,
+ * exchanges each side, and probes one partition at a time. The broadcast join builds one table
+ * from the batches chosen as the build side and probes the other batches in place. Match order is
+ * a kernel detail. The published multiset is multiplicity, values, and null semantics.
  */
 object ColumnPipeline:
 
@@ -152,6 +154,36 @@ object ColumnPipeline:
         HashJoin.JoinSide(probeBatch, key = 0, value = 1),
       )
     }
+
+  /**
+   * Inner join with no exchange. `probe` and `build` are already chosen. One table is filled from
+   * every build batch, then each probe batch is probed in place. The result is one batch per probe
+   * batch. Output columns are `(key, probe value, build value)`. The caller restores
+   * `(key, left, right)` when the logical left input is the build side. Multiplicity, values, and
+   * null semantics are the result. Order inside a batch is unspecified here. The kernel walks each
+   * build chain newest-first, which is a kernel detail. An empty probe returns no batches and does
+   * not allocate a table. An empty build returns one empty batch per probe batch.
+   * `buildBudgetBytes` bounds the build table only. An estimate above that bound throws
+   * `IllegalStateException` before the table is allocated.
+   */
+  def broadcastJoin(
+      probe: Vector[ColumnBatch],
+      build: Vector[ColumnBatch],
+      parallelism: Int,
+      buildBudgetBytes: Long,
+  ): Vector[ColumnBatch] =
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    if (probe.isEmpty) then Vector.empty
+    else
+      val table = HashJoin.openInt32(
+        build.map { batch =>
+          HashJoin.JoinSide(batch, key = 0, value = 1)
+        },
+        buildBudgetBytes,
+      )
+      MorselScheduler.map(probe, parallelism) { (_, probeBatch) =>
+        table.probe(HashJoin.JoinSide(probeBatch, key = 0, value = 1))
+      }
 
   private def emptySum: ColumnBatch =
     val keys = Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0)

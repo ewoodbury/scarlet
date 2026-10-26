@@ -12,7 +12,10 @@ import com.ewoodbury.scarlet.core.Partition
  * the child kind. [[PhysicalOp.Column]] narrows a pair to one int column and shares its arrays.
  * [[PhysicalOp.MapValue]] rewrites an int value and keeps the pair. [[PhysicalOp.Exchange]] sits
  * under [[PhysicalOp.HashAggregate]] and on each side of [[PhysicalOp.HashJoin]]. Those kernels
- * perform the shuffle. Interpreting the boundary on its own does not.
+ * perform the shuffle. Interpreting the boundary on its own does not. [[PhysicalOp.BroadcastJoin]]
+ * has no exchange. [[PhysicalOp.BuildSide]] chooses which logical child is built. The planner
+ * records the right child. A later cost-based pass may choose the left child. The other child is
+ * probed in place.
  */
 enum PhysicalOp:
   case Scan(sourceKind: PhysicalOp.Kind, partitions: Seq[Partition[_]])
@@ -34,6 +37,15 @@ enum PhysicalOp:
   case HashAggregate(child: PhysicalOp)
   case HashJoin(left: PhysicalOp, right: PhysicalOp)
 
+  /**
+   * Inner join with no exchange. `left` and `right` stay the logical inputs. `buildSide` selects
+   * which child fills the hash table. The other child is probed in place. The planner records
+   * [[BuildSide.Right]]. A later cost-based pass may choose [[BuildSide.Left]]. Output kind is
+   * triples `(key, left, right)`. Multiplicity, values, and null semantics are the contract. Order
+   * is unspecified.
+   */
+  case BroadcastJoin(left: PhysicalOp, right: PhysicalOp, buildSide: PhysicalOp.BuildSide)
+
   def kind: PhysicalOp.Kind = this match
     case Scan(sourceKind, _) => sourceKind
     case Filter(child, _) => child.kind
@@ -44,6 +56,7 @@ enum PhysicalOp:
     case MapValue(_) => PhysicalOp.Kind.Pairs
     case HashAggregate(_) => PhysicalOp.Kind.Pairs
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
+    case BroadcastJoin(_, _, _) => PhysicalOp.Kind.Triples
 
   /** Operator nesting, without data. */
   def shape: String = this match
@@ -61,10 +74,15 @@ enum PhysicalOp:
     case MapValue(child) => s"MapValue(${child.shape})"
     case HashAggregate(child) => s"HashAggregate(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
+    case BroadcastJoin(left, right, _) => s"BroadcastJoin(${left.shape}, ${right.shape})"
 
 object PhysicalOp:
   enum Kind:
     case Ints, Longs, Floats, Pairs, Triples, Strings, Bools
+
+  /** Which logical child of [[PhysicalOp.BroadcastJoin]] fills the build table. */
+  enum BuildSide:
+    case Left, Right
 
   /**
    * `Element` is the single column, an int, a long, a double, a boolean, or a string, and its

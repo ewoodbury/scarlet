@@ -8,8 +8,8 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.BatchCodec
-import com.ewoodbury.scarlet.core.ScarletConf
+import com.ewoodbury.scarlet.columnar.{BatchCodec, HashJoin}
+import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /** The columnar path lowers physical trees and fuses short element filter/project runs. */
@@ -238,6 +238,76 @@ class TestPhysicalPlan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.lower(pairs.mapValues[Int, Int, String](_.toString).plan) shouldBe rowPath
   }
 
+  it should "broadcast the right side, keep one batch per probe partition, and refuse sort-merge" in {
+    val probe = DistCollection.ofIntPairs(Array(1, 2, 1), Array(10, 20, 11), 3)
+    val build = DistCollection.ofIntPairs(Array(1, 1), Array(100, 101), 1)
+    val broadcast = probe.broadcastJoin(build)
+    shape(broadcast) shouldBe "BroadcastJoin(Scan, Scan)"
+    ColumnarPlanner.lower(probe.sortMergeJoin(build).plan) shouldBe rowPath
+
+    val parts = ColumnarPlanner.tryRun(broadcast.plan).getOrElse(fail("broadcast was refused"))
+    parts.length shouldBe 3
+    parts.flatMap(_.data) should contain theSameElementsAs probe
+      .shuffleHashJoin(build)
+      .collect()
+      .toSeq
+
+    val emptyProbe = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 3)
+    val emptyBuild = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 2)
+    val noProbe = ColumnarPlanner.tryRun(emptyProbe.broadcastJoin(build).plan).getOrElse {
+      fail("empty probe was refused")
+    }
+    noProbe.length shouldBe 3
+    noProbe.foreach(_.data shouldBe empty)
+    val noBuild = ColumnarPlanner.tryRun(probe.broadcastJoin(emptyBuild).plan).getOrElse {
+      fail("empty build was refused")
+    }
+    noBuild.length shouldBe 3
+    noBuild.foreach(_.data shouldBe empty)
+  }
+
+  it should "keep the same multiset when either logical input is the build side" in {
+    val left = DistCollection(Seq(1 -> 10, 1 -> 11, 2 -> 20), 3)
+    val right = DistCollection(Seq(1 -> 100, 1 -> 101, 3 -> 30), 1)
+    val plan = left.broadcastJoin(right).plan
+    val lowered = ColumnarPlanner.lower(plan).getOrElse(fail("broadcast was refused"))
+    val (leftOp, rightOp) = lowered match
+      case PhysicalOp.BroadcastJoin(leftScan, rightScan, PhysicalOp.BuildSide.Right) =>
+        (leftScan, rightScan)
+      case other => fail(s"planner did not build the right side: $other")
+
+    ColumnarPlanner.partitioning(plan).map(_.numPartitions) shouldBe Some(3)
+    ColumnarPlanner
+      .infoOf(PhysicalOp.BroadcastJoin(leftOp, rightOp, PhysicalOp.BuildSide.Left))
+      .numPartitions shouldBe 1
+    ColumnarPlanner
+      .infoOf(PhysicalOp.BroadcastJoin(leftOp, rightOp, PhysicalOp.BuildSide.Right))
+      .numPartitions shouldBe 3
+
+    val expected = left.shuffleHashJoin(right).collect().toSeq
+    val builtRight = broadcastRows(plan, leftOp, rightOp, PhysicalOp.BuildSide.Right)
+    val builtLeft = broadcastRows(plan, leftOp, rightOp, PhysicalOp.BuildSide.Left)
+    builtRight.rows should contain theSameElementsAs expected
+    builtLeft.rows should contain theSameElementsAs builtRight.rows
+    builtRight.partitions shouldBe 3
+    builtLeft.partitions shouldBe 1
+  }
+
+  it should "fail a build table above the budget instead of falling back to the row path" in {
+    val left = DistCollection.ofIntPairs(Array(1, 2), Array(10, 20), 2)
+    val right = DistCollection.ofIntPairs(Array(1, 1, 3), Array(100, 101, 30), 1)
+    val plan = left.broadcastJoin(right).plan
+    val rows = 3
+    val estimate = HashJoin.retainedBuildBytes(rows)
+    ScarletConf.set(ScarletConf.get.copy(broadcastBuildBudgetBytes = estimate - 1))
+    val fromPlanner = intercept[IllegalStateException] {
+      ColumnarPlanner.tryRun(plan)
+    }
+    fromPlanner.getMessage shouldBe
+      s"broadcast build table retains about $estimate bytes for $rows rows, above the budget of ${estimate - 1} bytes"
+    an[IllegalStateException] should be thrownBy left.broadcastJoin(right).collect()
+  }
+
   it should "exchange each join input, including an aggregate input" in {
     val build = DistCollection(Seq(1 -> 1, 1 -> 2), 1).reduceByKey[Int, Int](_ + _)
     val probe = DistCollection(Seq(1 -> 10), 1)
@@ -338,6 +408,19 @@ class TestPhysicalPlan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.lower(mapped.plan) shouldBe rowPath
     mapped.collect() shouldBe Seq(2, 3)
   }
+
+  private def broadcastRows(
+      plan: Plan[_],
+      left: PhysicalOp,
+      right: PhysicalOp,
+      buildSide: PhysicalOp.BuildSide,
+  ): BroadcastRows =
+    ColumnarInterpreter.interpret(plan, PhysicalOp.BroadcastJoin(left, right, buildSide)) match
+      case ColumnarInterpreter.Columns.Triples(parts) =>
+        BroadcastRows(parts.flatMap(BatchCodec.decodeIntTriples), parts.length)
+      case other => fail(s"broadcast did not return triples: $other")
+
+  private final case class BroadcastRows(rows: Seq[(Int, (Int, Int))], partitions: Int)
 
   private val rowPath = Option.empty[PhysicalOp]
 

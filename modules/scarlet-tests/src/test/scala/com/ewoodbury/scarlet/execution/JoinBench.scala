@@ -23,12 +23,11 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * and columnar digests must agree whenever both paths return. A mismatch fails the run. Raw order
  * is not compared.
  *
- * The printed `strategy` column is derived, not observed: the row-path value comes from the
- * case's declared hint and sizes, while the columnar value is true only because the planner
- * accepts shuffle-hash and refuses the rest. The table names what the case asked for.
- *
- * A broadcast hint is not a columnar hash join. That case records the refusal and still times the
- * row path. `broadcastJoinThreshold` and `enableSortMergeJoin` are restored after every case.
+ * The printed `strategy` column is derived, not observed. The row-path value comes from the
+ * case's declared hint and sizes. The columnar value is `broadcast` when the physical tree is a
+ * broadcast join, and `shuffle-hash` otherwise. A broadcast join has no exchange. The planner
+ * builds the right input and probes the left input in place. Sort-merge stays on the row path.
+ * `broadcastJoinThreshold` and `enableSortMergeJoin` are restored after every case.
  *
  * `runMain` executes in the sbt JVM. `Test / fork` is left false, so absolute times carry sbt and
  * JIT noise. Comparisons within one run are the signal.
@@ -188,7 +187,7 @@ object JoinBench:
       }
     finally ScarletConf.set(baseline)
 
-  /** `None` when the broadcast or sort-merge hint keeps the plan on the row path. */
+  /** `None` when the hint keeps the plan on the row path. Sort-merge is the remaining refusal. */
   private[execution] def columnarShape(spec: JoinCases.JoinSpec): Option[String] =
     val saved = ScarletConf.get
     try
@@ -521,7 +520,9 @@ object JoinBench:
     String.format(Locale.ENGLISH, "%.3f", averageNanos / 1000000.0)
 
   private def strategyOf(item: Measured, columnar: Boolean): String =
-    if (columnar) then "shuffle-hash" else JoinCases.rowStrategy(item.spec)
+    if (!columnar) then JoinCases.rowStrategy(item.spec)
+    else if (item.shape.startsWith("BroadcastJoin")) then "broadcast"
+    else "shuffle-hash"
 
   private def rowsOf(item: Measured): String =
     s"${item.spec.leftRows}x${item.spec.rightRows}"

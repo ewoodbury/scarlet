@@ -30,8 +30,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    accepted.size shouldBe 160
-    excluded.size shouldBe 50
+    accepted.size shouldBe 161
+    excluded.size shouldBe 49
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -157,7 +157,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     DistCollection(preservedDouble).collect() shouldBe Seq(2.5, 3.5, 4.5)
   }
 
-  it should "keep a non-default join strategy on the row path" in {
+  it should "keep sort-merge on the row path and broadcast on the columnar path" in {
     val left = DistCollection(Seq(1 -> 10, 1 -> 11, 2 -> 20), 2)
     val right = DistCollection(Seq(1 -> 100, 1 -> 101, 3 -> 30), 2)
     val sortMerge = left.sortMergeJoin(right).plan
@@ -172,9 +172,13 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     )
 
     assertRowPath(sortMerge)
-    assertRowPath(broadcast)
     collected(sortMerge) should contain theSameElementsAs expected
-    collected(broadcast) should contain theSameElementsAs expected
+
+    ColumnarPlanner.partitioning(broadcast).map(_.layout) shouldBe Some(columnarLayout)
+    ColumnarPlanner.lower(broadcast).map(_.shape) shouldBe Some("BroadcastJoin(Scan, Scan)")
+    ColumnarPlanner.tryRun(broadcast) shouldBe defined
+    collected(broadcast) should contain theSameElementsAs rowResult(broadcast)
+    rowResult(broadcast) should contain theSameElementsAs expected
 
     ColumnarPlanner.partitioning(plain).map(_.layout) shouldBe Some(columnarLayout)
     ColumnarPlanner.lower(plain).map(_.shape) shouldBe Some(
@@ -355,6 +359,9 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val shuffleHashJoin = DistCollection(pairSource)
       .shuffleHashJoin(DistCollection(rightPairSource))
       .plan
+    val broadcastJoin = DistCollection(pairSource)
+      .broadcastJoin(DistCollection(rightPairSource))
+      .plan
     val joinAfterAggregate = DistCollection(reduced).join(DistCollection(rightPairSource)).plan
     val joinedCollection = DistCollection(tripleSource)
     val joinKeyFilter = joinedCollection.filterJoinKey(_ > 0).plan
@@ -405,6 +412,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       AcceptedCase("nested int reduceByKey", reducedTwice, hashedInfo(layout), Some("HashAggregate(Exchange(HashAggregate(Exchange(Scan))))")),
       AcceptedCase("int hash join", joined, hashedInfo(layout), Some("HashJoin(Exchange(Scan), Exchange(Scan))")),
       AcceptedCase("explicit shuffle-hash join", shuffleHashJoin, hashedInfo(layout), Some("HashJoin(Exchange(Scan), Exchange(Scan))")),
+      AcceptedCase("explicit broadcast join", broadcastJoin, narrowInfo(2, layout), Some("BroadcastJoin(Scan, Scan)")),
       AcceptedCase("join after int aggregate", joinAfterAggregate, hashedInfo(layout), Some("HashJoin(Exchange(HashAggregate(Exchange(Scan))), Exchange(Scan))")),
       AcceptedCase("join-key filter", joinKeyFilter, hashedInfo(layout), Some("FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))")),
       AcceptedCase("join-left-value filter", joinLeftFilter, hashedInfo(layout), Some("FilterTripleLeftValue(HashJoin(Exchange(Scan), Exchange(Scan)))")),
@@ -536,10 +544,6 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         "explicit sort-merge join",
         DistCollection(pairSource).sortMergeJoin(DistCollection(rightPairSource)).plan,
       ),
-      ExcludedCase(
-        "explicit broadcast join",
-        DistCollection(pairSource).broadcastJoin(DistCollection(rightPairSource)).plan,
-      ),
       ExcludedCase("single-precision Float source", floatSource),
       ExcludedCase("single-precision Float map", floatMap),
       ExcludedCase("all-null string source", allNullStringSource),
@@ -615,8 +619,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     )
 
   /**
-   * `lower` and the action gates share one decision. A refused plan, including a sort-merge or
-   * broadcast join and a type-changing pair map, makes every gate return `None`. An accepted plan
+   * `lower` and the action gates share one decision. A refused plan, including a sort-merge join
+   * and a type-changing pair map, makes every gate return `None`. An accepted plan
    * runs `tryRun` and `tryCount`. `tryTake` runs when the physical tree keeps input partitions.
    * `trySumInt`, `trySumLong`, and `trySumDouble` run only for that numeric kind. `tryGroupedSum` equals
    * `groupedSum` for an accepted grouped pair source and for an accepted row, key, or value
@@ -672,7 +676,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case PhysicalOp.Pipeline(child, _) => preservesPartitions(child)
     case PhysicalOp.Column(child, _) => preservesPartitions(child)
     case PhysicalOp.MapValue(child) => preservesPartitions(child)
-    case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.HashJoin(_, _) =>
+    case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.HashJoin(_, _) |
+        PhysicalOp.BroadcastJoin(_, _, _) =>
       false
 
   private def assertRowPath[A](plan: Plan[A]): Unit =

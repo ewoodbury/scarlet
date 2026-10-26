@@ -80,6 +80,7 @@ order-independence.
 ## Configuration
 
 `ScarletConf` controls shuffle output width (`defaultShufflePartitions`), join strategy
-thresholds (`broadcastJoinThreshold`, `enableSortMergeJoin`), sort sampling
+thresholds (`broadcastJoinThreshold`, `enableSortMergeJoin`), the broadcast build-table
+budget (`broadcastBuildBudgetBytes`, 64 MiB, the table only), sort sampling
 (`sortSamplePerPartition`, `sortMaxSample`), and retry behavior (`maxTaskRetries`,
 `baseRetryDelayMs`, `maxRetryDelayMs`). Runtime components come from `ScarletRuntime`.

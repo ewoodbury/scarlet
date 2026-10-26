@@ -20,6 +20,12 @@ final case class ScarletConf(
     /** Size threshold (in number of records) below which broadcast-hash join is preferred. */
     broadcastJoinThreshold: Long = 1000L,
     /**
+     * Byte budget for the broadcast join's build table only, not the rest of the query. The
+     * default is 64 MiB. The check runs after that input is evaluated. An estimate above the
+     * budget throws `IllegalStateException` and does not fall back to the row path.
+     */
+    broadcastBuildBudgetBytes: Long = 64L * 1024L * 1024L,
+    /**
      * Whether to enable sort-merge join for large datasets. If false, always uses shuffle-hash
      * join.
      */
