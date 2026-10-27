@@ -169,7 +169,7 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     rows.find(_._1.contains(4)).getOrElse(fail("missing matched row")) shouldBe
       ((Some(4), true, true))
 
-    canonical(BatchCodec.decodeOuter(batch)) should contain theSameElementsAs Seq(
+    canonical(BatchCodec.decodeOuter(batch, AbsentSide.Right)) should contain theSameElementsAs Seq(
       (Some(1), Some(10), Some(100)),
       (Some(2), Some(11), None),
       (Some(3), Some(30), None),
@@ -208,9 +208,7 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     ColumnarPlanner.lower(unhinted).map(_.shape) shouldBe Some(shuffleShape)
     val refused = Seq(
       Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
-      Plan.RightOuterJoinOp(left, right, None),
-      Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
-      Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.ShuffleHash)),
+      Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
       Plan.FullOuterJoinOp(left, right, None),
       Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
       Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
@@ -368,11 +366,11 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
       ((0, None, true, false))
     rows.exists(_._2.contains(8)) shouldBe false
     val unmatched = parts.lift(Math.floorMod(2, 4)).getOrElse(fail("missing partition"))
-    canonical(BatchCodec.decodeOuter(unmatched)) should contain theSameElementsAs Seq(
+    canonical(BatchCodec.decodeOuter(unmatched, AbsentSide.Right)) should contain theSameElementsAs Seq(
       (Some(2), Some(20), None),
     )
     val carried = parts.headOption.getOrElse(fail("missing partition 0"))
-    canonical(BatchCodec.decodeOuter(carried)) should contain theSameElementsAs Seq(
+    canonical(BatchCodec.decodeOuter(carried, AbsentSide.Right)) should contain theSameElementsAs Seq(
       (None, Some(7), None),
       (Some(4), Some(40), None),
     )
@@ -433,7 +431,7 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     batch.length should be > 3
     ColumnMetrics.withSink(new CountingSink) {
       val decoded = ColumnarInterpreter.decodePrefix(
-        ColumnarInterpreter.Columns.Outer(Vector(batch)),
+        ColumnarInterpreter.Columns.Outer(Vector(batch), AbsentSide.Right),
         3,
       )
       decoded.length shouldBe 3
