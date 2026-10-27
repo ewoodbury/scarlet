@@ -11,13 +11,14 @@ import com.ewoodbury.scarlet.core.Partition
  * Other filters and projects remain one node per step. [[PhysicalOp.Project]] and `Pipeline` keep
  * the child kind. [[PhysicalOp.Column]] narrows a pair to one int column and shares its arrays.
  * [[PhysicalOp.MapValue]] rewrites an int value and keeps the pair. [[PhysicalOp.Exchange]] sits
- * under [[PhysicalOp.HashAggregate]] and on each side of [[PhysicalOp.HashJoin]]. Those kernels
- * perform the shuffle. Interpreting the boundary on its own does not. [[PhysicalOp.BroadcastJoin]]
- * and [[PhysicalOp.BroadcastLeftOuter]] have no exchange. [[PhysicalOp.BuildSide]] chooses which
- * logical child of an inner broadcast join is built. The planner records the right child. A later
- * cost-based pass may choose the left child. The other child is probed in place. A left outer join
- * always builds the right input. The left input is the probe side. A probe-side row with no
- * partner clears the build value's validity bit. That bit is absence. A null value is not absence.
+ * under [[PhysicalOp.HashAggregate]] and on each side of [[PhysicalOp.HashJoin]] and
+ * [[PhysicalOp.HashLeftOuter]]. Those kernels perform the shuffle. Interpreting the boundary on
+ * its own does not. [[PhysicalOp.BroadcastJoin]] and [[PhysicalOp.BroadcastLeftOuter]] have no
+ * exchange. [[PhysicalOp.BuildSide]] chooses which logical child of an inner broadcast join is
+ * built. The planner records the right child. A later cost-based pass may choose the left child.
+ * The other child is probed in place. A left outer join always builds the right input. The left
+ * input is the probe side. A probe-side row with no partner clears the build value's validity bit.
+ * That bit is absence. A null value is not absence.
  */
 enum PhysicalOp:
   case Scan(sourceKind: PhysicalOp.Kind, partitions: Seq[Partition[_]])
@@ -38,6 +39,18 @@ enum PhysicalOp:
   case Exchange(child: PhysicalOp)
   case HashAggregate(child: PhysicalOp)
   case HashJoin(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * Shuffle-hash left outer join. `left` and `right` are exchanges. The left input is the probe
+   * side, and its exchange carries a null key to partition 0. The right input is the build side,
+   * and its exchange drops a null key, so a null build key is not inserted. Each partition builds
+   * one table and probes with the left-outer kernel. Output columns are `(key, left, right)`.
+   * Absence is a probe-side row with no partner, and the right value's validity bit is clear. A
+   * null value is not absence and stays on the row path. The build table uses the same budget as a
+   * broadcast join. This is a different node from [[HashJoin]], so the inner join does not carry
+   * null keys.
+   */
+  case HashLeftOuter(left: PhysicalOp, right: PhysicalOp)
 
   /**
    * Inner join with no exchange. `left` and `right` stay the logical inputs. `buildSide` selects
@@ -69,6 +82,7 @@ enum PhysicalOp:
     case MapValue(_) => PhysicalOp.Kind.Pairs
     case HashAggregate(_) => PhysicalOp.Kind.Pairs
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
+    case HashLeftOuter(_, _) => PhysicalOp.Kind.Triples
     case BroadcastJoin(_, _, _) => PhysicalOp.Kind.Triples
     case BroadcastLeftOuter(_, _) => PhysicalOp.Kind.Triples
 
@@ -88,6 +102,7 @@ enum PhysicalOp:
     case MapValue(child) => s"MapValue(${child.shape})"
     case HashAggregate(child) => s"HashAggregate(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
+    case HashLeftOuter(left, right) => s"HashLeftOuter(${left.shape}, ${right.shape})"
     case BroadcastJoin(left, right, _) => s"BroadcastJoin(${left.shape}, ${right.shape})"
     case BroadcastLeftOuter(left, right) => s"BroadcastLeftOuter(${left.shape}, ${right.shape})"
 

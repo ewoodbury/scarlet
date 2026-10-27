@@ -247,8 +247,9 @@ final case class DistCollection[A](plan: Plan[A]):
    * Matching keys emit the cartesian product. A left row whose key is absent on the right is
    * emitted once with `None`. A null key never matches: a left null is kept with `None`, and a
    * right null matches nothing. Order is unspecified. The row executor always shuffle-hashes; a
-   * strategy hint on the plan is ignored in this iteration. Returns a new DistCollection
-   * representing the joined data. Does not trigger computation.
+   * strategy hint on the plan is ignored there. The columnar planner runs an int-pair left outer
+   * join for an absent hint, a shuffle-hash hint, or a broadcast hint. Returns a new
+   * DistCollection representing the joined data. Does not trigger computation.
    */
   def leftOuterJoin[K, V, W](other: DistCollection[(K, W)])(using
       ev: A =:= (K, V),

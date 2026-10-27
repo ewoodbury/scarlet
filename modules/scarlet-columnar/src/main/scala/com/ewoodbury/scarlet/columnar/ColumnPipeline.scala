@@ -11,12 +11,14 @@ package com.ewoodbury.scarlet.columnar
  * `Int64` sum. Fold the sum with [[ColumnReduce.sumInt64]] at ordinal 1; the batch has two
  * columns. An empty input is `numPartitions` empty sum batches, the same convention as
  * [[HashReduce.byKey]]. The hash join reads key column 0 and value column 1 on both sides,
- * exchanges each side, and probes one partition at a time. The broadcast join builds one table
- * from the batches chosen as the build side and probes the other batches in place. The left outer
- * broadcast join uses that table and keeps the probe side. A probe-side row with no partner is
- * kept, and the build value's validity bit is clear. That bit is absence. A null value is not
- * absence. Match order is a kernel detail. The published multiset is multiplicity, values, and
- * null semantics.
+ * exchanges each side, and probes one partition at a time. Those exchanges leave `carryNullKeys`
+ * off, so a null key is dropped. The broadcast join builds one table from the batches chosen as
+ * the build side and probes the other batches in place. The left outer broadcast join uses that
+ * table and keeps the probe side. The shuffle-hash left outer join exchanges both sides, carries a
+ * null key on the probe side only, and builds one table per partition. A probe-side row with no
+ * partner is kept, and the build value's validity bit is clear. That bit is absence. A null value
+ * is not absence. Match order is a kernel detail. The published multiset is multiplicity, values,
+ * and null semantics.
  */
 object ColumnPipeline:
 
@@ -198,6 +200,63 @@ object ColumnPipeline:
       "a left outer join needs fully present value columns",
     )
     broadcast(probe, build, parallelism, buildBudgetBytes, preserveProbe = true)
+
+  /**
+   * Shuffle-hash left outer join. `probe` is the left input. `build` is the right input. The probe
+   * exchange carries a null key to partition 0. The build exchange drops a null key, so it is not
+   * inserted and does not match probe key 0. Each partition builds one table and probes with the
+   * same left-outer kernel as [[broadcastLeftOuterJoin]]. Call this only when both value columns
+   * are fully valid. [[valuesFullyPresent]] reads the validity words encoding already wrote.
+   * Output columns are `(key, probe value, build value)`. An empty probe bucket emits nothing. An
+   * empty build bucket emits every probe row in that partition with the build value absent.
+   * `buildBudgetBytes` is the same per-table budget as [[broadcastLeftOuterJoin]], applied to each
+   * partition's build table.
+   */
+  def hashLeftOuterJoin(
+      probe: Vector[ColumnBatch],
+      build: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+      buildBudgetBytes: Long,
+  ): Vector[ColumnBatch] =
+    require(
+      valuesFullyPresent(probe) && valuesFullyPresent(build),
+      "a left outer join needs fully present value columns",
+    )
+    val probeBuckets = HashExchange.partitionAll(
+      sliceAll(probe, batchSize),
+      keyOrdinal = 0,
+      numPartitions,
+      parallelism,
+      carryNullKeys = true,
+    )
+    // The build side keeps the default. A null build key is dropped before the table is filled.
+    val buildBuckets = HashExchange.partitionAll(
+      sliceAll(build, batchSize),
+      keyOrdinal = 0,
+      numPartitions,
+      parallelism,
+    )
+    MorselScheduler.map(probeBuckets, parallelism) { (part, probeBatch) =>
+      leftOuterPartition(probeBatch, bucketAt(buildBuckets, part), buildBudgetBytes)
+    }
+
+  /**
+   * One exchanged partition of a left outer join. `probe` and `build` are already in the same
+   * bucket. The build bucket fills one table. The probe uses that table's left-outer probe, the
+   * same kernel [[broadcastLeftOuterJoin]] runs. `buildBudgetBytes` bounds this table only.
+   */
+  private[scarlet] def leftOuterPartition(
+      probe: ColumnBatch,
+      build: ColumnBatch,
+      buildBudgetBytes: Long,
+  ): ColumnBatch =
+    val table = HashJoin.openInt32(
+      Vector(HashJoin.JoinSide(build, key = 0, value = 1)),
+      buildBudgetBytes,
+    )
+    table.probe(HashJoin.JoinSide(probe, key = 0, value = 1), preserveProbe = true)
 
   /**
    * True when every live value cell is present. Pair batches store the value at ordinal 1. The

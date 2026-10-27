@@ -262,6 +262,38 @@ private[execution] object ColumnarInterpreter:
         ScarletConf.get.broadcastBuildBudgetBytes,
       )
       Columns.Outer(joined)
+    case (
+          Plan.LeftOuterJoinOp(left, right, strategy),
+          PhysicalOp.HashLeftOuter(
+            PhysicalOp.Exchange(leftOp),
+            PhysicalOp.Exchange(rightOp),
+          ),
+        ) if ColumnarPlanner.acceptsShuffleHash(strategy) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      // preserveAbsence keeps null keys. The left input is the probe side. Its exchange carries a
+      // null key. The right input is the build side. Its exchange drops a null key.
+      val probe = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
+      val build = pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+      // Validity words are already on the columns. A null value is not a probe-side row with no
+      // partner, and this path cannot represent one, so the kernel is not chosen.
+      val valuesPresent =
+        ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
+      if (!valuesPresent) then
+        throw new ClassCastException(
+          "a null value on a left outer join stays on the row path",
+        )
+      // The kernel writes (key, probe value, build value). The probe side is the left input, so
+      // the batch is already (key, left, right). A clear build-value bit is absence.
+      val joined = ColumnPipeline.hashLeftOuterJoin(
+        probe,
+        build,
+        ColumnarPlanner.shuffleWidth,
+        ColumnarPlanner.parallelism,
+        ColumnarPlanner.batchSize,
+        ScarletConf.get.broadcastBuildBudgetBytes,
+      )
+      Columns.Outer(joined)
     case _ =>
       throw new IllegalStateException(
         s"physical tree does not match ${plan.getClass.getSimpleName}",

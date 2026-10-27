@@ -4,22 +4,30 @@ package com.ewoodbury.scarlet.columnar
  * Hash-partitions batches on an `Int32` key.
  *
  * The bucket is `floorMod(key, numPartitions)`, the same rule `HashPartitioner` uses for an `Int`
- * key, because `hashCode` is the value. Null keys are dropped. Null values stay null and move with
- * the row. Order inside a bucket is input order. An empty bucket is an empty batch of the same
- * schema.
+ * key, because `hashCode` is the value. Null keys are dropped unless `carryNullKeys` is set. A
+ * carried null key goes to partition 0, the bucket `HashPartitioner` uses for a null key. The
+ * default is off, so an inner join and the build side of an outer join still drop a null key. Null
+ * values stay null and move with the row. Order inside a bucket is input order. An empty bucket is
+ * an empty batch of the same schema.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object HashExchange:
+
+  /** Partition a null key lands in when `carryNullKeys` is set. Matches `HashPartitioner`. */
+  private val nullKeyPartition = 0
 
   def partitionInt32(
       batch: ColumnBatch,
       keyOrdinal: Int,
       numPartitions: Int,
+      carryNullKeys: Boolean = false,
   ): Vector[ColumnBatch] =
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     val keys = ColumnHash.int32At(batch, keyOrdinal)
     val rows = batch.length
-    if (numPartitions == 1 && ColumnHash.fullyPresent(keys)) then Vector(batch)
+    // One partition already holds every row. Sharing the batch is safe when null keys are kept,
+    // and when there is no null key to drop.
+    if (numPartitions == 1 && (carryNullKeys || ColumnHash.fullyPresent(keys))) then Vector(batch)
     else
       val dest = new Array[Int](rows)
       val counts = new Array[Int](numPartitions)
@@ -31,6 +39,9 @@ object HashExchange:
           val part = Math.floorMod(keyValues(row), numPartitions)
           dest(row) = part
           counts(part) += 1
+        else if (carryNullKeys) then
+          dest(row) = nullKeyPartition
+          counts(nullKeyPartition) += 1
         else dest(row) = -1
         row += 1
       }
@@ -49,10 +60,11 @@ object HashExchange:
       keyOrdinal: Int,
       numPartitions: Int,
       parallelism: Int,
+      carryNullKeys: Boolean = false,
   ): Vector[ColumnBatch] =
     require(batches.nonEmpty, "partitionAll needs at least one batch")
     val scattered = MorselScheduler.map(batches, parallelism) { (_, batch) =>
-      partitionInt32(batch, keyOrdinal, numPartitions)
+      partitionInt32(batch, keyOrdinal, numPartitions, carryNullKeys)
     }
     Vector.tabulate(numPartitions) { part =>
       ColumnBatches.concat(scattered.map(buckets => bucketAt(buckets, part)))
