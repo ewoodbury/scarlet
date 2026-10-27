@@ -333,6 +333,39 @@ object BatchCodec:
           s"join output is not three Int32 columns: ${batch.schema}",
         )
 
+  /**
+   * Left outer rows are `(key, (left, Option[right]))`. A clear right bit is absence: the probe
+   * side row has no partner, decoded as `None`. A clear key bit is a null key. A null value is not
+   * absence and is not representable on this path. `maxRows` limits the prefix the same way as
+   * [[decodeIntTriples]].
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  def decodeOuter(batch: ColumnBatch): Seq[Any] = decodeOuter(batch, batch.length)
+
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  def decodeOuter(batch: ColumnBatch, maxRows: Int): Seq[Any] =
+    batch.columns match
+      case Seq(keys: Int32Column, left: Int32Column, right: Int32Column) =>
+        require(
+          keys.length == batch.length && left.length == batch.length && right.length == batch.length,
+          "outer join columns disagree on length",
+        )
+        val rows = decodedLength(batch, maxRows)
+        ColumnMetrics.decoded(rows)
+        Seq.tabulate(rows) { row =>
+          val rightValue = if (right.isValid(row)) Some(right.values(row)) else None
+          (presentInt(keys, row), (presentInt(left, row), rightValue))
+        }
+      case _ =>
+        throw new IllegalArgumentException(
+          s"outer join output is not three Int32 columns: ${batch.schema}",
+        )
+
+  /** A clear bit stays null. A set bit is the stored `Int`. */
+  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
+  private def presentInt(column: Int32Column, row: Int): Any =
+    if (column.isValid(row)) then column.values(row) else null
+
   def decodeNullableIntPairs(batch: ColumnBatch): Seq[(Option[Int], Option[Int])] =
     val (left, right) = intPair(batch)
     Seq.tabulate(batch.length) { row =>

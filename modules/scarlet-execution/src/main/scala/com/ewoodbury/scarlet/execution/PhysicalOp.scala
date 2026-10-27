@@ -13,9 +13,11 @@ import com.ewoodbury.scarlet.core.Partition
  * [[PhysicalOp.MapValue]] rewrites an int value and keeps the pair. [[PhysicalOp.Exchange]] sits
  * under [[PhysicalOp.HashAggregate]] and on each side of [[PhysicalOp.HashJoin]]. Those kernels
  * perform the shuffle. Interpreting the boundary on its own does not. [[PhysicalOp.BroadcastJoin]]
- * has no exchange. [[PhysicalOp.BuildSide]] chooses which logical child is built. The planner
- * records the right child. A later cost-based pass may choose the left child. The other child is
- * probed in place.
+ * and [[PhysicalOp.BroadcastLeftOuter]] have no exchange. [[PhysicalOp.BuildSide]] chooses which
+ * logical child of an inner broadcast join is built. The planner records the right child. A later
+ * cost-based pass may choose the left child. The other child is probed in place. A left outer join
+ * always builds the right input. The left input is the probe side. A probe-side row with no
+ * partner clears the build value's validity bit. That bit is absence. A null value is not absence.
  */
 enum PhysicalOp:
   case Scan(sourceKind: PhysicalOp.Kind, partitions: Seq[Partition[_]])
@@ -46,6 +48,17 @@ enum PhysicalOp:
    */
   case BroadcastJoin(left: PhysicalOp, right: PhysicalOp, buildSide: PhysicalOp.BuildSide)
 
+  /**
+   * Left outer join with no exchange. `left` and `right` stay the logical inputs. The right input
+   * fills the hash table. The left input is the probe side and is probed in place. There is no
+   * build side: building the left input would keep unmatched right rows. Output columns are
+   * `(key, left, right)`. Absence is a probe-side row with no partner, and the right value's
+   * validity bit is clear. A null value is not absence and is not representable on this path. A
+   * null value on either input stays on the row path. This is a different node from
+   * [[BroadcastJoin]], so the inner join does not carry an outer flag.
+   */
+  case BroadcastLeftOuter(left: PhysicalOp, right: PhysicalOp)
+
   def kind: PhysicalOp.Kind = this match
     case Scan(sourceKind, _) => sourceKind
     case Filter(child, _) => child.kind
@@ -57,6 +70,7 @@ enum PhysicalOp:
     case HashAggregate(_) => PhysicalOp.Kind.Pairs
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
     case BroadcastJoin(_, _, _) => PhysicalOp.Kind.Triples
+    case BroadcastLeftOuter(_, _) => PhysicalOp.Kind.Triples
 
   /** Operator nesting, without data. */
   def shape: String = this match
@@ -75,12 +89,13 @@ enum PhysicalOp:
     case HashAggregate(child) => s"HashAggregate(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
     case BroadcastJoin(left, right, _) => s"BroadcastJoin(${left.shape}, ${right.shape})"
+    case BroadcastLeftOuter(left, right) => s"BroadcastLeftOuter(${left.shape}, ${right.shape})"
 
 object PhysicalOp:
   enum Kind:
     case Ints, Longs, Floats, Pairs, Triples, Strings, Bools
 
-  /** Which logical child of [[PhysicalOp.BroadcastJoin]] fills the build table. */
+  /** Which logical child of a broadcast join fills the build table. */
   enum BuildSide:
     case Left, Right
 

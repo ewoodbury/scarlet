@@ -30,9 +30,9 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    accepted.size shouldBe 161
-    // Outer joins are excluded: the columnar planner has no outer-join kernel.
-    excluded.size shouldBe 52
+    accepted.size shouldBe 162
+    // Right and full outer joins stay excluded. A broadcast left outer join is accepted.
+    excluded.size shouldBe 51
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -414,6 +414,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       AcceptedCase("int hash join", joined, hashedInfo(layout), Some("HashJoin(Exchange(Scan), Exchange(Scan))")),
       AcceptedCase("explicit shuffle-hash join", shuffleHashJoin, hashedInfo(layout), Some("HashJoin(Exchange(Scan), Exchange(Scan))")),
       AcceptedCase("explicit broadcast join", broadcastJoin, narrowInfo(2, layout), Some("BroadcastJoin(Scan, Scan)")),
+      AcceptedCase(
+        "broadcast left outer join",
+        Plan.LeftOuterJoinOp(pairSource, rightPairSource, Some(Plan.JoinStrategy.Broadcast)),
+        narrowInfo(2, layout),
+        Some("BroadcastLeftOuter(Scan, Scan)"),
+      ),
       AcceptedCase("join after int aggregate", joinAfterAggregate, hashedInfo(layout), Some("HashJoin(Exchange(HashAggregate(Exchange(Scan))), Exchange(Scan))")),
       AcceptedCase("join-key filter", joinKeyFilter, hashedInfo(layout), Some("FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))")),
       AcceptedCase("join-left-value filter", joinLeftFilter, hashedInfo(layout), Some("FilterTripleLeftValue(HashJoin(Exchange(Scan), Exchange(Scan)))")),
@@ -544,10 +550,6 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ExcludedCase(
         "explicit sort-merge join",
         DistCollection(pairSource).sortMergeJoin(DistCollection(rightPairSource)).plan,
-      ),
-      ExcludedCase(
-        "left outer join",
-        DistCollection(pairSource).leftOuterJoin(DistCollection(rightPairSource)).plan,
       ),
       ExcludedCase(
         "right outer join",
@@ -691,7 +693,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case PhysicalOp.Column(child, _) => preservesPartitions(child)
     case PhysicalOp.MapValue(child) => preservesPartitions(child)
     case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.HashJoin(_, _) |
-        PhysicalOp.BroadcastJoin(_, _, _) =>
+        PhysicalOp.BroadcastJoin(_, _, _) | PhysicalOp.BroadcastLeftOuter(_, _) =>
       false
 
   private def assertRowPath[A](plan: Plan[A]): Unit =
