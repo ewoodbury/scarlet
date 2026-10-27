@@ -6,6 +6,8 @@ import com.ewoodbury.scarlet.core.Plan
 /**
  * Join inputs for [[JoinBench]]. Each case is a [[DistCollection]] join. `expectedPairs` is the
  * pair count implied by the generator, and the bench rejects a result that disagrees with it.
+ * Outer cases reuse the symmetric and duplicate generators. The row executor shuffle-hashes every
+ * outer join and ignores the hint. The columnar planner follows that hint.
  */
 @SuppressWarnings(
   Array(
@@ -24,6 +26,10 @@ private[execution] object JoinCases:
   val symmetricRows: Int = 300000
   val duplicateRows: Int = 200000
   val distinctKeys: Int = 1000
+  // 200k rows and 1k keys is a 40M-row product. The outer oracle keeps every row, and each
+  // matched row carries an Option. That multiset does not fit the 3GB sbt heap. 10k keys on
+  // the same 200k rows leaves 20 copies per key, so the product is still the cost.
+  val outerDuplicateKeys: Int = 10000
   val hotRows: Int = 100000
 
   final case class JoinSpec(
@@ -32,8 +38,9 @@ private[execution] object JoinCases:
       rightRows: Int,
       threshold: Long,
       sortMerge: Boolean,
-      joined: DistCollection[(Int, (Int, Int))],
+      plan: Plan[_],
       expectedPairs: Long,
+      outer: Boolean,
   )
 
   def full: Vector[JoinSpec] = Vector(
@@ -41,6 +48,17 @@ private[execution] object JoinCases:
     symmetric(symmetricRows),
     duplicates(duplicateRows, distinctKeys),
     hotKey(hotRows),
+  )
+
+  /**
+   * Left, right, and full outer joins on the symmetric inputs, plus a duplicate-key left outer
+   * join. Scales match [[full]].
+   */
+  def outer: Vector[JoinSpec] = Vector(
+    leftOuter(symmetricRows),
+    rightOuter(symmetricRows),
+    fullOuter(symmetricRows),
+    outerDuplicates(duplicateRows, outerDuplicateKeys),
   )
 
   /**
@@ -57,15 +75,14 @@ private[execution] object JoinCases:
       buildRows,
       threshold = buildRows.toLong,
       sortMerge = true,
-      probe.broadcastJoin(build),
+      probe.broadcastJoin(build).plan,
       expectedPairs = probeRows.toLong,
     )
 
   /** Both sides use unique keys. The right side is shifted by half, so half the keys match. */
   def symmetric(rows: Int): JoinSpec =
     require(rows > 0 && rows % 2 == 0, s"symmetric rows must be a positive even count, got $rows")
-    val left = intPairs(rows, row => row, row => row)
-    val right = intPairs(rows, row => row + rows / 2, row => row)
+    val (left, right) = shifted(rows)
     forcedHash("symmetric", rows, rows, left.join(right), expectedPairs = rows.toLong / 2L)
 
   /**
@@ -94,6 +111,77 @@ private[execution] object JoinCases:
     val unique = rows.toLong - hotCount
     forcedHash("hot-key", rows, rows, left.join(right), hotCount.toLong * hotCount + unique)
 
+  /**
+   * Same keys as [[symmetric]]. Half of the right keys sit past the left range, so half of the
+   * probe rows have no partner. Every left row is kept. Hint is absent, which both paths run as
+   * shuffle-hash.
+   */
+  def leftOuter(rows: Int): JoinSpec =
+    require(rows > 0 && rows % 2 == 0, s"left-outer rows must be a positive even count, got $rows")
+    val (left, right) = shifted(rows)
+    outerSpec(
+      "left-outer",
+      rows,
+      Plan.LeftOuterJoinOp(left.plan, right.plan, None),
+      expectedPairs = rows.toLong,
+    )
+
+  /**
+   * The mirror of [[leftOuter]]: the same inputs, preserving the right side. The hint is
+   * broadcast. The row path still shuffle-hashes. The columnar path builds the left input.
+   */
+  def rightOuter(rows: Int): JoinSpec =
+    require(
+      rows > 0 && rows % 2 == 0,
+      s"right-outer rows must be a positive even count, got $rows",
+    )
+    val (left, right) = shifted(rows)
+    outerSpec(
+      "right-outer",
+      rows,
+      Plan.RightOuterJoinOp(left.plan, right.plan, Some(Plan.JoinStrategy.Broadcast)),
+      expectedPairs = rows.toLong,
+    )
+
+  /**
+   * The same inputs again. Each side keeps the keys the other side does not have, so the result
+   * is larger than either input. The hint is shuffle-hash on both paths.
+   */
+  def fullOuter(rows: Int): JoinSpec =
+    require(rows > 0 && rows % 2 == 0, s"full-outer rows must be a positive even count, got $rows")
+    val (left, right) = shifted(rows)
+    outerSpec(
+      "full-outer",
+      rows,
+      Plan.FullOuterJoinOp(left.plan, right.plan, Some(Plan.JoinStrategy.ShuffleHash)),
+      expectedPairs = 3L * rows.toLong / 2L,
+    )
+
+  /**
+   * Same row count as [[duplicates]], with more keys so the product fits in the sbt heap. Every
+   * key is on both sides, so the result is the cartesian product and there is no missing side.
+   * The product is the cost. The hint is absent.
+   */
+  def outerDuplicates(rows: Int, distinct: Int): JoinSpec =
+    require(distinct > 0 && rows > 0 && rows % distinct == 0, "duplicate rows must divide evenly")
+    val perKey = rows / distinct
+    val left = intPairs(rows, row => row % distinct, row => row)
+    val right = intPairs(rows, row => row % distinct, row => row)
+    val pairs = distinct.toLong * perKey.toLong * perKey.toLong
+    outerSpec(
+      "outer-duplicates",
+      rows,
+      Plan.LeftOuterJoinOp(left.plan, right.plan, None),
+      pairs,
+    )
+
+  /**
+   * A row whose right value is null, not `None`. The static type hides that null the same way
+   * [[joinRow]] hides a null key. Digest tests use this.
+   */
+  def nullValueRow(key: Int, left: Int): (Int, (Int, Int)) =
+    Tuple2(Int.box(key), Tuple2(Int.box(left), null)).asInstanceOf[(Int, (Int, Int))]
+
   /** A join row with a possibly null key, for digest tests. Values stay present. */
   def joinRow(key: Option[Int], left: Int, right: Int): (Int, (Int, Int)) =
     val boxedKey: AnyRef = key match
@@ -102,9 +190,17 @@ private[execution] object JoinCases:
     val values = Tuple2(Int.box(left), Int.box(right)).asInstanceOf[(Int, Int)]
     Tuple2(boxedKey, values).asInstanceOf[(Int, (Int, Int))]
 
-  def hint(spec: JoinSpec): Option[Plan.JoinStrategy] = spec.joined.plan match
+  def hint(spec: JoinSpec): Option[Plan.JoinStrategy] = spec.plan match
     case Plan.JoinOp(_, _, strategy) => strategy
+    case Plan.LeftOuterJoinOp(_, _, strategy) => strategy
+    case Plan.RightOuterJoinOp(_, _, strategy) => strategy
+    case Plan.FullOuterJoinOp(_, _, strategy) => strategy
     case _ => throw new IllegalStateException(s"${spec.name} is not a join")
+
+  /** `unhinted` when the plan stores no strategy. Otherwise the hint's name. */
+  def hintLabel(spec: JoinSpec): String = hint(spec) match
+    case None => "unhinted"
+    case Some(strategy) => strategyName(strategy)
 
   def strategyName(strategy: Plan.JoinStrategy): String = strategy match
     case Plan.JoinStrategy.Broadcast => "broadcast"
@@ -112,17 +208,49 @@ private[execution] object JoinCases:
     case Plan.JoinStrategy.SortMerge => "sort-merge"
 
   /**
-   * Hint when the plan has one. Otherwise the size rule in `JoinExecutor.selectJoinStrategy`
-   * applied to these row counts and this case's threshold and sort-merge flag.
+   * Path the row executor runs. An outer join is always shuffle-hash: the executor ignores the
+   * hint. An inner join uses the hint when the plan has one. Otherwise the size rule in
+   * `JoinExecutor.selectJoinStrategy` applied to these row counts and this case's threshold and
+   * sort-merge flag.
    */
-  def rowStrategy(spec: JoinSpec): String = hint(spec) match
-    case Some(strategy) => strategyName(strategy)
-    case None =>
-      val left = spec.leftRows.toLong
-      val right = spec.rightRows.toLong
-      if (left <= spec.threshold || right <= spec.threshold) then "broadcast"
-      else if (spec.sortMerge) then "sort-merge"
-      else "shuffle-hash"
+  def rowStrategy(spec: JoinSpec): String =
+    if (spec.outer) then "shuffle-hash"
+    else
+      hint(spec) match
+        case Some(strategy) => strategyName(strategy)
+        case None =>
+          val left = spec.leftRows.toLong
+          val right = spec.rightRows.toLong
+          if (left <= spec.threshold || right <= spec.threshold) then "broadcast"
+          else if (spec.sortMerge) then "sort-merge"
+          else "shuffle-hash"
+
+  /**
+   * Runs `spec`. The cast is the erasure boundary: [[JoinSpec.plan]] has no element type, and
+   * `count` does not use one. The plan is the join these cases build.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  def count(spec: JoinSpec): Long =
+    val collection: DistCollection[Any] =
+      DistCollection(spec.plan.asInstanceOf[Plan[Any]])
+    collection.count()
+
+  /**
+   * One result digest. Outer rows go through [[JoinDigest.fromOuter]] so a missing side stays
+   * `None`. Inner rows stay on [[JoinDigest.from]], which rejects a null value.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  def digest(spec: JoinSpec): JoinDigest.Digest =
+    val collection: DistCollection[Any] =
+      DistCollection(spec.plan.asInstanceOf[Plan[Any]])
+    val rows: Iterable[Any] = collection.collect()
+    if (spec.outer) then JoinDigest.fromOuter(rows)
+    else JoinDigest.from(rows.asInstanceOf[Iterable[(Int, (Int, Int))]])
+
+  private def shifted(rows: Int): (DistCollection[(Int, Int)], DistCollection[(Int, Int)]) =
+    val left = intPairs(rows, row => row, row => row)
+    val right = intPairs(rows, row => row + rows / 2, row => row)
+    (left, right)
 
   private def forcedHash(
       name: String,
@@ -131,7 +259,24 @@ private[execution] object JoinCases:
       joined: DistCollection[(Int, (Int, Int))],
       expectedPairs: Long,
   ): JoinSpec =
-    spec(name, leftRows, rightRows, threshold = 0L, sortMerge = false, joined, expectedPairs)
+    spec(name, leftRows, rightRows, threshold = 0L, sortMerge = false, joined.plan, expectedPairs)
+
+  private def outerSpec(
+      name: String,
+      rows: Int,
+      plan: Plan[_],
+      expectedPairs: Long,
+  ): JoinSpec =
+    JoinSpec(
+      name,
+      rows,
+      rows,
+      threshold = 0L,
+      sortMerge = false,
+      plan,
+      expectedPairs,
+      outer = true,
+    )
 
   private def spec(
       name: String,
@@ -139,10 +284,10 @@ private[execution] object JoinCases:
       rightRows: Int,
       threshold: Long,
       sortMerge: Boolean,
-      joined: DistCollection[(Int, (Int, Int))],
+      plan: Plan[_],
       expectedPairs: Long,
   ): JoinSpec =
-    JoinSpec(name, leftRows, rightRows, threshold, sortMerge, joined, expectedPairs)
+    JoinSpec(name, leftRows, rightRows, threshold, sortMerge, plan, expectedPairs, outer = false)
 
   private def intPairs(
       rows: Int,

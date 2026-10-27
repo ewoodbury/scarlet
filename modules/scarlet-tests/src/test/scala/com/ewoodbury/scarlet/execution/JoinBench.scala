@@ -19,27 +19,32 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * Not a test, and not part of `make test`.
  *
  * The timed region is the action. Warmup rounds are discarded. The multiset digest is compared
- * outside the timer: per-key pair counts and a checksum over `(key, leftValue, rightValue)`. Row
- * and columnar digests must agree whenever both paths return. A mismatch fails the run. Raw order
- * is not compared.
+ * outside the timer: per-key pair counts and a checksum over `(key, leftValue, rightValue)`. An
+ * outer join's missing side is `None` in that mix. Row and columnar digests must agree whenever
+ * both paths return. A mismatch fails the run. A case that cannot show that equality fails
+ * instead of printing a time. Raw order is not compared.
  *
- * The printed `strategy` column is derived, not observed. The row-path value comes from the
- * case's declared hint and sizes. The columnar value is `broadcast` when the physical tree is a
- * broadcast join, and `shuffle-hash` otherwise. A broadcast join has no exchange. The planner
- * builds the right input and probes the left input in place. Sort-merge stays on the row path.
+ * The printed `strategy` column is the path that layout ran. For an inner join the row-path value
+ * comes from the case's declared hint and sizes. The columnar value is `broadcast` when the
+ * physical tree is a broadcast join, and `shuffle-hash` otherwise. An outer join's row path is
+ * always `shuffle-hash`: the row executor ignores the hint. The columnar path follows the hint.
+ * Absent is `unhinted` and still shuffle-hashes. Sort-merge stays on the row path. A null value
+ * lowers to an outer shape and then stays on the row path; that case publishes no column batch,
+ * so the run fails it instead of labeling the row path as columnar.
  * `broadcastJoinThreshold` and `enableSortMergeJoin` are restored after every case.
  *
  * `runMain` executes in the sbt JVM. `Test / fork` is left false, so absolute times carry sbt and
- * JIT noise. Comparisons within one run are the signal.
+ * JIT noise. Comparisons within one run are the signal. Width 4 shares that JVM with width 1.
  *
  * {{{
  * sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.JoinBench"
+ * sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.JoinBench outer"
  * }}}
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object JoinBench:
 
-  private val schemaName = "join-bench-1"
+  private val schemaName = "join-bench-2"
   private[execution] val warmup = 2
   private[execution] val measure = 5
   private val measureOffset = 1
@@ -79,9 +84,10 @@ object JoinBench:
     val schedulers = threadCounts.map { threads =>
       threads -> new LocalTaskScheduler(threads)
     }.toMap
+    val selected = suites(args)
     try
       install(schedulers, threads = 1, columnar = true)
-      val (fitting, overflow) = JoinCases.full.partition(fitsJoinBuffer)
+      val (fitting, overflow) = selected.partition(fitsJoinBuffer)
       val cases = prepare(fitting)
       val runnable = cases.filter(_.runnable)
       val blocked = cases.filterNot(_.runnable)
@@ -104,6 +110,15 @@ object JoinBench:
       finally
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)
+
+  private def suites(args: Array[String]): Vector[JoinCases.JoinSpec] =
+    args.toList match
+      case Nil | "inner" :: Nil => JoinCases.full
+      case "outer" :: Nil => JoinCases.outer
+      case other =>
+        throw new IllegalArgumentException(
+          s"usage: JoinBench [inner|outer], got ${other.mkString(" ")}",
+        )
 
   private[execution] def checkHarness(): Unit =
     require(warmup == 2 && measure == 5, s"warmup=$warmup measure=$measure")
@@ -181,7 +196,7 @@ object JoinBench:
         val previous = ColumnMetrics.install(sink)
         try
           ScarletRuntime.get.shuffle.clear()
-          val digest = JoinDigest.from(spec.joined.collect())
+          val digest = JoinCases.digest(spec)
           Observation(digest, sink.batchCount)
         finally ColumnMetrics.restore(previous)
       }
@@ -192,7 +207,7 @@ object JoinBench:
     val saved = ScarletConf.get
     try
       ScarletConf.set(saved.copy(columnarExecution = true))
-      ColumnarPlanner.lower(spec.joined.plan).map(_.shape)
+      ColumnarPlanner.lower(spec.plan).map(_.shape)
     finally ScarletConf.set(saved)
 
   /** The join writes an `Int`-length buffer, so a larger defined output cannot be returned. */
@@ -205,7 +220,8 @@ object JoinBench:
       val measured = new Measured(spec, shape.isDefined, shape.getOrElse("refused"))
       System.err.println(
         s"case ${spec.name} rows=${spec.leftRows}x${spec.rightRows} " +
-          s"strategy=${JoinCases.rowStrategy(spec)} columnar=${measured.shape}",
+          s"hint=${JoinCases.hintLabel(spec)} strategy=${JoinCases.rowStrategy(spec)} " +
+          s"columnar=${measured.shape}",
       )
       if (!measured.accepted) then
         val why = JoinCases.hint(spec) match
@@ -370,7 +386,7 @@ object JoinBench:
       try
         ScarletRuntime.get.shuffle.clear()
         val started = System.nanoTime()
-        val pairs = item.spec.joined.count()
+        val pairs = JoinCases.count(item.spec)
         val elapsed = System.nanoTime() - started
         requirePath(item, columnar, threads, sink.batchCount)
         val expected = item.digest.getOrElse(JoinDigest.empty).total
@@ -417,7 +433,7 @@ object JoinBench:
                       try
                         val (pairs, bytes) = probe.account {
                           ScarletRuntime.get.shuffle.clear()
-                          item.spec.joined.count()
+                          JoinCases.count(item.spec)
                         }
                         requirePath(item, columnar, threads, sink.batchCount)
                         val expected = item.digest.getOrElse(JoinDigest.empty).total
@@ -443,8 +459,9 @@ object JoinBench:
     val header = Vector(
       preamble(allocOn),
       "",
-      "| case | layout | threads | rows | strategy | p50 ms | mean ms | p99 ms | alloc mb |",
-      "| --- | --- | ---: | --- | --- | ---: | ---: | ---: | ---: |",
+      "| case | layout | threads | rows | hint | strategy | p50 ms | mean ms | p99 ms | " +
+        "alloc mb |",
+      "| --- | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: |",
     )
     val body = cases.flatMap { item =>
       val rows = layouts.flatMap { columnar =>
@@ -480,8 +497,8 @@ object JoinBench:
     val (median, average, tail) = percentiles(item, columnar, threads)
     val alloc = allocText(item, columnar, threads, allocOn)
     s"| ${item.spec.name} | ${layoutName(columnar)} | $threads | ${rowsOf(item)} | " +
-      s"${strategyOf(item, columnar)} | ${millis(median)} | ${meanMillis(average)} | " +
-      s"${millis(tail)} | $alloc |"
+      s"${JoinCases.hintLabel(item.spec)} | ${strategyOf(item, columnar)} | " +
+      s"${millis(median)} | ${meanMillis(average)} | ${millis(tail)} | $alloc |"
 
   private def jsonRow(
       item: Measured,
@@ -499,6 +516,7 @@ object JoinBench:
       s""""threads":$threads,""" +
       s""""left_rows":${item.spec.leftRows},""" +
       s""""right_rows":${item.spec.rightRows},""" +
+      s""""hint":"${JoinCases.hintLabel(item.spec)}",""" +
       s""""strategy":"${strategyOf(item, columnar)}",""" +
       s""""rounds":$measure,""" +
       s""""p50_ms":${millis(median)},""" +
@@ -521,8 +539,11 @@ object JoinBench:
 
   private def strategyOf(item: Measured, columnar: Boolean): String =
     if (!columnar) then JoinCases.rowStrategy(item.spec)
-    else if (item.shape.startsWith("BroadcastJoin")) then "broadcast"
+    else if (item.shape.startsWith("Broadcast")) then "broadcast"
     else "shuffle-hash"
+
+  private def columnarPath(item: Measured): String =
+    if (!item.accepted) then "refused" else strategyOf(item, columnar = true)
 
   private def rowsOf(item: Measured): String =
     s"${item.spec.leftRows}x${item.spec.rightRows}"
@@ -530,7 +551,9 @@ object JoinBench:
   private def checksumNotes(cases: Vector[Measured]): Vector[String] =
     val lines = cases.map { item =>
       val digest = item.digest.getOrElse(JoinDigest.empty)
-      s"${item.spec.name} pairs=${digest.total} checksum=${digest.checksum}"
+      s"${item.spec.name} pairs=${digest.total} checksum=${digest.checksum} " +
+        s"hint=${JoinCases.hintLabel(item.spec)} row=${JoinCases.rowStrategy(item.spec)} " +
+        s"columnar=${columnarPath(item)} shape=${item.shape}"
     }
     Vector("") ++ lines
 
@@ -629,7 +652,13 @@ object JoinBench:
       "Widths 1 and 4 share one JVM. Width order and layout order flip on different bits of " +
       "the round. Measure round 0 uses the order of warmup round 1.\n" +
       "The digest sums a mix of (key, left value, right value) and counts pairs per key, null " +
-      "included. Row and columnar digests are compared outside the timer.\n" +
+      "included. A missing outer-join side is None, which is not the value 0 and not a null " +
+      "value. Row and columnar digests are compared outside the timer. A mismatch fails the " +
+      "run.\n" +
+      "hint is the plan's joinStrategy. unhinted means the hint is absent. strategy is the " +
+      "path that layout ran. An outer join's row path is shuffle-hash for every hint. The " +
+      "columnar path is broadcast when the physical tree is a broadcast join, and " +
+      "shuffle-hash otherwise.\n" +
       "alloc_mb is the nearest-rank p50 of process-wide thread bytes, in decimal megabytes " +
       "(bytes / 1e6). The probe excludes itself.\n" +
       s"java=${runtime.getVmName} ${runtime.getVmVersion}"

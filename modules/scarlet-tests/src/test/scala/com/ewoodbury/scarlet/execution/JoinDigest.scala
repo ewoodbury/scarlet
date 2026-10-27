@@ -3,15 +3,18 @@ package com.ewoodbury.scarlet.execution
 import scala.collection.mutable
 
 /**
- * Order-independent summary of an inner-join result.
+ * Order-independent summary of a join result, inner or outer.
  *
  * Rows are grouped by key, null included. The checksum is the sum of a per-row mix of
  * `(key, leftValue, rightValue)`, so two results with the same pairs in a different order agree,
- * and a value change at one row does not. Callers compare [[Digest]] values, not raw order.
+ * and a value change at one row does not. An outer join's missing side is `None`. That is a
+ * different mix from the value `0` and from a null value. Callers compare [[Digest]] values, not
+ * raw order.
  */
 @SuppressWarnings(
   Array(
     "org.wartremover.warts.Any",
+    "org.wartremover.warts.AsInstanceOf",
     "org.wartremover.warts.Null",
     "org.wartremover.warts.Var",
     "org.wartremover.warts.MutableDataStructures",
@@ -28,11 +31,21 @@ private[execution] object JoinDigest:
 
   /** Null keys stay null. A null value, or any other cell, fails the run. */
   def from(rows: Iterable[(Int, (Int, Int))]): Digest =
+    accumulate(rows, outer = false)
+
+  /**
+   * Outer-join rows. A value may be a present `Int`, `Some(int)`, `None`, or null. `None` is a
+   * missing side. A null cell is a null value, not a missing side. Any other cell fails the run.
+   */
+  def fromOuter(rows: Iterable[Any]): Digest =
+    accumulate(rows, outer = true)
+
+  private def accumulate(rows: Iterable[Any], outer: Boolean): Digest =
     val counts = mutable.HashMap.empty[Option[Int], Long]
     var checksum = 0L
     var total = 0L
     rows.foreach { row =>
-      val (key, left, right) = read(row)
+      val (key, left, right) = if (outer) then readOuter(row) else readInner(row)
       total += 1L
       checksum += mix(key, left, right)
       val count = counts.getOrElse(key, 0L) + 1L
@@ -52,6 +65,24 @@ private[execution] object JoinDigest:
           s"checksum ${left.checksum} != ${right.checksum}"
         else "equal"
       }
+
+  /** Present ints only. A null value still fails, which is the inner-join rule. */
+  private def readInner(row: Any): (Option[Int], Cell, Cell) =
+    val (key, left, right) = read(row.asInstanceOf[(Int, (Int, Int))])
+    (key, Cell.Present(left), Cell.Present(right))
+
+  private def readOuter(row: Any): (Option[Int], Cell, Cell) =
+    val product = pairOf(row, "join row")
+    val nested = pairOf(product.productElement(1), "join value")
+    (
+      readKey(product.productElement(0)),
+      readCell(nested.productElement(0)),
+      readCell(nested.productElement(1)),
+    )
+
+  private def pairOf(cell: Any, slot: String): Product = cell match
+    case pair: Product if pair.productArity == 2 => pair
+    case _ => throw new IllegalStateException(s"$slot was not a pair")
 
   /**
    * Reads one join row without unboxing a null key. The tuple fields are erased references: a
@@ -75,15 +106,41 @@ private[execution] object JoinDigest:
     case null => throw new IllegalStateException(s"null join $slot value")
     case _ => throw new IllegalStateException(s"join $slot value was not an int")
 
-  /** Wrapping sum of this mix is independent of row order. Left and right use different factors. */
-  private def mix(key: Option[Int], left: Int, right: Int): Long =
+  /**
+   * Wrapping sum of this mix is independent of row order. Left and right use different factors.
+   * A present int keeps the inner-join mix. Absence and a null value use multipliers outside the
+   * int range, so neither collides with a present int: multiplication by the odd factor is
+   * injective, and those multipliers are not ints.
+   */
+  private def mix(key: Option[Int], left: Cell, right: Cell): Long =
+    var hash = mixKey(key)
+    hash ^= cellBits(left, leftFactor)
+    hash ^= cellBits(right, rightFactor)
+    hash
+
+  private def mixKey(key: Option[Int]): Long =
     val mixedKey = key match
       case Some(present) => present.toLong
       case None => nullKeyBits
-    var hash = mixedKey * keyFactor
-    hash ^= left.toLong * leftFactor
-    hash ^= right.toLong * rightFactor
-    hash
+    mixedKey * keyFactor
+
+  private def cellBits(cell: Cell, factor: Long): Long = cell match
+    case Cell.Present(value) => value.toLong * factor
+    case Cell.Absent => factor * absentMultiplier
+    case Cell.NullValue => factor * nullValueMultiplier
+
+  private enum Cell:
+    case Present(value: Int)
+    case Absent
+    case NullValue
+
+  private def readCell(cell: Any): Cell = cell match
+    case null => Cell.NullValue
+    case number: Int => Cell.Present(number)
+    case Some(number: Int) => Cell.Present(number)
+    case Some(null) => Cell.NullValue
+    case None => Cell.Absent
+    case _ => throw new IllegalStateException("join value was not an int or an optional int")
 
   private def ordered(counts: mutable.HashMap[Option[Int], Long]): Vector[KeyCount] =
     counts.toVector
@@ -131,6 +188,10 @@ private[execution] object JoinDigest:
   private val keyFactor: Long = 0x9e3779b97f4a7c15L
   private val leftFactor: Long = 0xbf58476d1ce4e5b9L
   private val rightFactor: Long = 0x94d049bb133111ebL
+
+  /** Not an int, so absence does not mix like a present value. `+ 1` is a null value. */
+  private val absentMultiplier: Long = 1L << 32
+  private val nullValueMultiplier: Long = absentMultiplier + 1L
 
   /** Not a sign-extended int, so a null key does not collide with a present key in [[mix]]. */
   private val nullKeyBits: Long = 0x5a5a5a5a5a5a5a5aL
