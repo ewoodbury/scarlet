@@ -12,9 +12,10 @@ import com.ewoodbury.scarlet.core.Partition
  * the child kind. [[PhysicalOp.Column]] narrows a pair to one int column and shares its arrays.
  * [[PhysicalOp.MapValue]] rewrites an int value and keeps the pair. [[PhysicalOp.Exchange]] sits
  * under [[PhysicalOp.HashAggregate]] and on each side of [[PhysicalOp.HashJoin]] and
- * [[PhysicalOp.HashLeftOuter]] and [[PhysicalOp.HashRightOuter]]. Those kernels perform the
- * shuffle. Interpreting the boundary on its own does not. [[PhysicalOp.BroadcastJoin]],
- * [[PhysicalOp.BroadcastLeftOuter]], and [[PhysicalOp.BroadcastRightOuter]] have no exchange.
+ * [[PhysicalOp.HashLeftOuter]] and [[PhysicalOp.HashRightOuter]] and [[PhysicalOp.HashFullOuter]].
+ * Those kernels perform the shuffle. Interpreting the boundary on its own does not.
+ * [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.BroadcastLeftOuter]],
+ * [[PhysicalOp.BroadcastRightOuter]], and [[PhysicalOp.BroadcastFullOuter]] have no exchange.
  * [[PhysicalOp.BuildSide]] chooses which logical child of an inner broadcast join is built. The
  * planner records the right child. A later cost-based pass may choose the left child. The other
  * child is probed in place. A left outer join always builds the right input. The left input is the
@@ -94,6 +95,28 @@ enum PhysicalOp:
    */
   case BroadcastRightOuter(left: PhysicalOp, right: PhysicalOp)
 
+  /**
+   * Shuffle-hash full outer join. `left` and `right` are exchanges. Both exchanges carry a null
+   * key to partition 0. The left input is the probe side. The right input is the build side. Each
+   * partition builds one table, probes with one bitmap, and emits that partition's unmatched build
+   * rows. A null build key is carried outside the table and emitted once. Output columns are
+   * `(key, left, right)`. Either value's clear bit is absence. A null value is not absence and
+   * stays on the row path. The build table uses the same budget as a broadcast join. The bitmap is
+   * not part of that budget.
+   */
+  case HashFullOuter(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * Full outer join with no exchange. `left` and `right` stay the logical inputs. The right input
+   * fills the hash table. The left input is the probe side and is probed in place. Each probe
+   * thread keeps its own matched-row bitmap. The bitmaps are OR'd after the probes join. A clear
+   * bit emits that build row with the left value absent. A null build key is carried outside the
+   * table and emitted once. An empty probe still emits every build row. Output columns are
+   * `(key, left, right)`. Either value's clear bit is absence. A null value stays on the row path.
+   * The bitmap is not part of the build budget.
+   */
+  case BroadcastFullOuter(left: PhysicalOp, right: PhysicalOp)
+
   def kind: PhysicalOp.Kind = this match
     case Scan(sourceKind, _) => sourceKind
     case Filter(child, _) => child.kind
@@ -109,6 +132,8 @@ enum PhysicalOp:
     case BroadcastJoin(_, _, _) => PhysicalOp.Kind.Triples
     case BroadcastLeftOuter(_, _) => PhysicalOp.Kind.Triples
     case BroadcastRightOuter(_, _) => PhysicalOp.Kind.Triples
+    case HashFullOuter(_, _) => PhysicalOp.Kind.Triples
+    case BroadcastFullOuter(_, _) => PhysicalOp.Kind.Triples
 
   /** Operator nesting, without data. */
   def shape: String = this match
@@ -131,6 +156,8 @@ enum PhysicalOp:
     case BroadcastJoin(left, right, _) => s"BroadcastJoin(${left.shape}, ${right.shape})"
     case BroadcastLeftOuter(left, right) => s"BroadcastLeftOuter(${left.shape}, ${right.shape})"
     case BroadcastRightOuter(left, right) => s"BroadcastRightOuter(${left.shape}, ${right.shape})"
+    case HashFullOuter(left, right) => s"HashFullOuter(${left.shape}, ${right.shape})"
+    case BroadcastFullOuter(left, right) => s"BroadcastFullOuter(${left.shape}, ${right.shape})"
 
 object PhysicalOp:
   enum Kind:

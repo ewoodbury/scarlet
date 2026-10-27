@@ -22,7 +22,8 @@ final case class ScarletConf(
     /**
      * Byte budget for the broadcast join's build table only, not the rest of the query. The
      * default is 64 MiB. The check runs after that input is evaluated. An estimate above the
-     * budget throws `IllegalStateException` and does not fall back to the row path.
+     * budget throws `IllegalStateException` and does not fall back to the row path. A full outer
+     * join's matched-row bitmaps are allocated beside the table and are not part of this budget.
      */
     broadcastBuildBudgetBytes: Long = 64L * 1024L * 1024L,
     /**

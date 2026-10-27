@@ -20,7 +20,10 @@ package com.ewoodbury.scarlet.columnar
  * swaps the value columns back to `(key, left, right)`. A probe-side row with no partner is kept,
  * and the build value's validity bit is clear. That bit is absence. A null value is not absence.
  * Match order is a kernel detail. The published multiset is multiplicity, values, and null
- * semantics.
+ * semantics. A full outer join probes the left input and also emits build rows no probe matched.
+ * Broadcast gives each probe thread its own bitmap and ORs them after the probes join. Shuffle
+ * keeps one bitmap per partition and finishes that partition immediately. Null build keys are
+ * carried outside the table and emitted once. Those bitmaps are not part of the build budget.
  */
 object ColumnPipeline:
 
@@ -259,6 +262,127 @@ object ColumnPipeline:
       buildBudgetBytes,
     )
     table.probe(HashJoin.JoinSide(probe, key = 0, value = 1), preserveProbe = true)
+
+  /**
+   * Full outer join with no exchange. `probe` is the left input and `build` is the right input.
+   * Output columns are `(key, left, right)`. A probe row with no partner clears the right value's
+   * validity bit. A build row with no partner clears the left value's validity bit and is emitted
+   * once, in table order. Each probe thread owns one bitmap of the present-key build rows, sized
+   * once for the table. The threads use plain stores. After they join, the bitmaps are OR'd. A
+   * clear bit is an unmatched build row. Null build keys are not inserted and are emitted once as
+   * `(key, absent left, build value)`. An empty probe does not return early: every build row,
+   * including a null key, is emitted. An empty table emits nothing from the table. Call this only
+   * when both value columns are fully valid. A null value is not absence. `buildBudgetBytes`
+   * bounds the build table only. The matched-row bitmaps sit beside that table and are not part of
+   * the budget.
+   */
+  def broadcastFullOuterJoin(
+      probe: Vector[ColumnBatch],
+      build: Vector[ColumnBatch],
+      parallelism: Int,
+      buildBudgetBytes: Long,
+  ): Vector[ColumnBatch] =
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(
+      valuesFullyPresent(probe) && valuesFullyPresent(build),
+      "a full outer join needs fully present value columns",
+    )
+    val (present, nullKeys) = HashJoin.separateNullBuildKeys(buildSides(build))
+    val table = HashJoin.openInt32(present, buildBudgetBytes)
+    val bitsets =
+      if (probe.isEmpty) then Array(Validity.allocate(table.buildRows))
+      else Array.fill(parallelism)(Validity.allocate(table.buildRows))
+    val probed: Vector[ColumnBatch] =
+      if (probe.isEmpty) then Vector.empty
+      else
+        MorselScheduler.mapByThread(probe, parallelism) { (worker, probeBatch) =>
+          table.probeFull(HashJoin.JoinSide(probeBatch, key = 0, value = 1), bitsets(worker))
+        }
+    val matched = HashJoin.orMatched(bitsets)
+    withLeftovers(
+      probed,
+      table.unmatchedBuild(matched).toVector ++ nullKeys.toVector.map(emitNull),
+    )
+
+  /**
+   * Shuffle-hash full outer join. `probe` is the left input. `build` is the right input. Both
+   * exchanges carry a null key to partition 0. Each partition builds one table from its present
+   * keys, probes with one bitmap, and emits that partition's unmatched build rows before the next
+   * partition is joined. There is no cross-partition OR. A null build key is carried out of that
+   * partition's table and emitted once. A partition with build rows and an empty probe still emits
+   * every build row. Call this only when both value columns are fully valid. Output columns are
+   * `(key, left, right)`. `buildBudgetBytes` bounds each partition's table only, not the bitmap.
+   */
+  def hashFullOuterJoin(
+      probe: Vector[ColumnBatch],
+      build: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+      buildBudgetBytes: Long,
+  ): Vector[ColumnBatch] =
+    require(
+      valuesFullyPresent(probe) && valuesFullyPresent(build),
+      "a full outer join needs fully present value columns",
+    )
+    val probeBuckets = HashExchange.partitionAll(
+      sliceAll(probe, batchSize),
+      keyOrdinal = 0,
+      numPartitions,
+      parallelism,
+      carryNullKeys = true,
+    )
+    val buildBuckets = HashExchange.partitionAll(
+      sliceAll(build, batchSize),
+      keyOrdinal = 0,
+      numPartitions,
+      parallelism,
+      carryNullKeys = true,
+    )
+    MorselScheduler.map(probeBuckets, parallelism) { (part, probeBatch) =>
+      fullOuterPartition(probeBatch, bucketAt(buildBuckets, part), buildBudgetBytes)
+    }
+
+  /**
+   * One exchanged partition of a full outer join. The bitmap lives only for this partition and is
+   * consumed before the call returns.
+   */
+  private[scarlet] def fullOuterPartition(
+      probe: ColumnBatch,
+      build: ColumnBatch,
+      buildBudgetBytes: Long,
+  ): ColumnBatch =
+    val (present, nullKeys) = HashJoin.separateNullBuildKeys(
+      Vector(HashJoin.JoinSide(build, key = 0, value = 1)),
+    )
+    val table = HashJoin.openInt32(present, buildBudgetBytes)
+    val matched = Validity.allocate(table.buildRows)
+    val probed = table.probeFull(HashJoin.JoinSide(probe, key = 0, value = 1), matched)
+    val pieces =
+      probed +: (table.unmatchedBuild(matched).toVector ++ nullKeys.toVector.map(emitNull))
+    val live = pieces.filter(_.length > 0)
+    live match
+      case Vector() => probed
+      case Vector(only) => only
+      case many => ColumnBatches.concat(many)
+
+  private def emitNull(batch: ColumnBatch): ColumnBatch =
+    HashJoin.emitNullBuildKeys(batch)
+
+  private def buildSides(build: Vector[ColumnBatch]): Vector[HashJoin.JoinSide] =
+    build.map(batch => HashJoin.JoinSide(batch, key = 0, value = 1))
+
+  private def withLeftovers(
+      probed: Vector[ColumnBatch],
+      leftovers: Vector[ColumnBatch],
+  ): Vector[ColumnBatch] =
+    val tail = leftovers.filter(_.length > 0)
+    if (tail.isEmpty) then probed
+    else
+      val extra = tail match
+        case Vector(only) => only
+        case many => ColumnBatches.concat(many)
+      if (probed.isEmpty) then Vector(extra) else probed :+ extra
 
   /**
    * True when every live value cell is present. Pair batches store the value at ordinal 1. The

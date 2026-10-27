@@ -276,9 +276,10 @@ final case class DistCollection[A](plan: Plan[A]):
    * emits each left row as `(Some, None)`. A key only on the right emits each right row as
    * `(None, Some)`. A null key never matches: each left null row is emitted once as
    * `(Some(v), None)`, and each right null row is emitted once as `(None, Some(w))`. Order is
-   * unspecified. The row executor always shuffle-hashes; a strategy hint on the plan is ignored in
-   * this iteration. Returns a new DistCollection representing the joined data. Does not trigger
-   * computation.
+   * unspecified. The row executor always shuffle-hashes; a strategy hint on the plan is ignored
+   * there. The columnar planner runs an int-pair full outer join for an absent hint, a
+   * shuffle-hash hint, or a broadcast hint. Sort-merge stays on the row path. Returns a new
+   * DistCollection representing the joined data. Does not trigger computation.
    */
   def fullOuterJoin[K, V, W](other: DistCollection[(K, W)])(using
       ev: A =:= (K, V),

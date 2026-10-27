@@ -317,7 +317,7 @@ class TestRightOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     assertDecodeShapes(batch)
   }
 
-  it should "refuse sort-merge and full outer" in {
+  it should "refuse sort-merge" in {
     val left = DistCollection(Seq(1 -> 10), 2).plan
     val right = DistCollection(Seq(1 -> 20, 2 -> 30), 1).plan
     ColumnarPlanner.lower(
@@ -337,9 +337,7 @@ class TestRightOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
       .map(_.shape) shouldBe Some(shuffleShape)
     val refused = Seq(
       Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
-      Plan.FullOuterJoinOp(left, right, None),
-      Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
-      Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.ShuffleHash)),
+      Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
     )
     refused.foreach(plan => ColumnarPlanner.lower(plan) shouldBe None)
   }
