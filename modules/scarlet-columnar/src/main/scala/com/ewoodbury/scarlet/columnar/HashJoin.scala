@@ -216,10 +216,31 @@ object HashJoin:
       capacity: Int,
       rows: Int,
   ): ColumnBatch =
+    publish(
+      keys,
+      buildValues,
+      probeValues,
+      buildWords,
+      probeWords,
+      capacity,
+      rows,
+      Validity.prefixValid(capacity, rows).words,
+    )
+
+  private def publish(
+      keys: Array[Int],
+      buildValues: Array[Int],
+      probeValues: Array[Int],
+      buildWords: Array[Long],
+      probeWords: Array[Long],
+      capacity: Int,
+      rows: Int,
+      keyWords: Array[Long],
+  ): ColumnBatch =
     new ColumnBatch(
       Vector(LogicalType.Int32, LogicalType.Int32, LogicalType.Int32),
       Vector(
-        Int32Column.of(keys, Validity.prefixValid(capacity, rows), rows),
+        Int32Column.of(keys, Validity.fromWords(keyWords, capacity), rows),
         Int32Column.of(buildValues, Validity.fromWords(buildWords, capacity), rows),
         Int32Column.of(probeValues, Validity.fromWords(probeWords, capacity), rows),
       ),
@@ -248,7 +269,10 @@ object HashJoin:
 
   /**
    * Build table shared by every probe. `probe` writes `(key, probe value, build value)`. An empty
-   * build returns an empty batch. The chain walk is newest-first, which is a kernel detail.
+   * build returns an empty batch when the probe is not preserved. `preserveProbe` keeps that
+   * column order and emits each probe row that has no build match, including a null probe key,
+   * with the build value's validity clear. The chain walk is newest-first, which is a kernel
+   * detail.
    */
   final class Int32Build private (
       mask: Int,
@@ -283,22 +307,35 @@ object HashJoin:
         row += 1
       }
 
-    def probe(side: JoinSide): ColumnBatch =
+    /** Inner probe. A probe row with no build match, including a null key, is dropped. */
+    def probe(side: JoinSide): ColumnBatch = probe(side, preserveProbe = false)
+
+    /**
+     * `preserveProbe` appends each unmatched probe row. The build value column's validity is clear
+     * on that row. A null probe key does not match and is kept only when `preserveProbe` is set. A
+     * null probe value stays in the probe column and does not mean the build value is absent.
+     */
+    def probe(side: JoinSide, preserveProbe: Boolean): ColumnBatch =
       val probeKeys = ColumnHash.int32At(side.batch, side.key)
       val probeValues = ColumnHash.int32At(side.batch, side.value)
       require(
         probeKeys.length == probeValues.length,
         "probe key and value columns differ in length",
       )
-      if (rows == 0 || probeKeys.length == 0) then emptyJoin
-      else writeProbe(probeKeys, probeValues)
+      if (probeKeys.length == 0 || (rows == 0 && !preserveProbe)) then emptyJoin
+      else writeProbe(probeKeys, probeValues, preserveProbe)
 
-    private def writeProbe(probeKeys: Int32Column, probeValues: Int32Column): ColumnBatch =
+    private def writeProbe(
+        probeKeys: Int32Column,
+        probeValues: Int32Column,
+        preserveProbe: Boolean,
+    ): ColumnBatch =
       var outCapacity = math.max(16, probeKeys.length)
       var filled = 0
       var outKeys = new Array[Int](outCapacity)
       var outProbe = new Array[Int](outCapacity)
       var outBuild = new Array[Int](outCapacity)
+      var keyWords = Validity.allocate(outCapacity)
       var probeWords = Validity.allocate(outCapacity)
       var buildWords = Validity.allocate(outCapacity)
       val probeValueValues = probeValues.values
@@ -306,32 +343,71 @@ object HashJoin:
       val probeKeyValues = probeKeys.values
       val probeKeyWords = probeKeys.validity.words
       val probeRows = probeKeys.length
+
+      def grow(): Unit =
+        outCapacity = doubled(outCapacity)
+        outKeys = Arrays.copyOf(outKeys, outCapacity)
+        outProbe = Arrays.copyOf(outProbe, outCapacity)
+        outBuild = Arrays.copyOf(outBuild, outCapacity)
+        keyWords = growWords(keyWords, outCapacity)
+        probeWords = growWords(probeWords, outCapacity)
+        buildWords = growWords(buildWords, outCapacity)
+
+      def append(
+          key: Int,
+          keyPresent: Boolean,
+          probeValue: Int,
+          probePresent: Boolean,
+          buildValue: Int,
+          buildPresent: Boolean,
+      ): Unit =
+        if (filled == outCapacity) then grow()
+        outKeys(filled) = key
+        if (keyPresent) then Validity.setBit(keyWords, filled)
+        if (probePresent) then
+          outProbe(filled) = probeValue
+          Validity.setBit(probeWords, filled)
+        if (buildPresent) then
+          outBuild(filled) = buildValue
+          Validity.setBit(buildWords, filled)
+        filled += 1
+
+      def appendUnmatched(probeRow: Int): Unit =
+        append(
+          probeKeyValues(probeRow),
+          Validity.isSet(probeKeyWords, probeRow),
+          probeValueValues(probeRow),
+          Validity.isSet(probeValueWords, probeRow),
+          0,
+          false,
+        )
+
       var row = 0
       while (row < probeRows) {
-        if (Validity.isSet(probeKeyWords, row)) then
+        if (!Validity.isSet(probeKeyWords, row)) then
+          if (preserveProbe) then appendUnmatched(row)
+        else if (rows == 0) then
+          if (preserveProbe) then appendUnmatched(row)
+        else
           val key = probeKeyValues(row)
           var slot = ColumnHash.mix(key) & mask
           var resolved = false
           while (!resolved) {
-            if (head(slot) == -1) then resolved = true
+            if (head(slot) == -1) then
+              if (preserveProbe) then appendUnmatched(row)
+              resolved = true
             else if (slotKey(slot) == key) then
               var buildRow = head(slot)
               while (buildRow != -1) {
-                if (filled == outCapacity) then
-                  outCapacity = doubled(outCapacity)
-                  outKeys = Arrays.copyOf(outKeys, outCapacity)
-                  outProbe = Arrays.copyOf(outProbe, outCapacity)
-                  outBuild = Arrays.copyOf(outBuild, outCapacity)
-                  probeWords = growWords(probeWords, outCapacity)
-                  buildWords = growWords(buildWords, outCapacity)
-                outKeys(filled) = buildKeys(buildRow)
-                if (Validity.isSet(probeValueWords, row)) then
-                  outProbe(filled) = probeValueValues(row)
-                  Validity.setBit(probeWords, filled)
-                if (Validity.isSet(buildValueWords, buildRow)) then
-                  outBuild(filled) = buildValues(buildRow)
-                  Validity.setBit(buildWords, filled)
-                filled += 1
+                val buildPresent = Validity.isSet(buildValueWords, buildRow)
+                append(
+                  buildKeys(buildRow),
+                  true,
+                  probeValueValues(row),
+                  Validity.isSet(probeValueWords, row),
+                  if (buildPresent) then buildValues(buildRow) else 0,
+                  buildPresent,
+                )
                 buildRow = next(buildRow)
               }
               resolved = true
@@ -342,7 +418,17 @@ object HashJoin:
       if (filled == 0) then emptyJoin
       // publish takes its value arrays as (first, second). Passing probe first writes
       // (key, probe, build), which the broadcast path turns into (key, left, right).
-      else publish(outKeys, outProbe, outBuild, probeWords, buildWords, outCapacity, filled)
+      else
+        publish(
+          outKeys,
+          outProbe,
+          outBuild,
+          probeWords,
+          buildWords,
+          outCapacity,
+          filled,
+          keyWords,
+        )
 
   private object Int32Build:
 

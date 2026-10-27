@@ -12,8 +12,10 @@ package com.ewoodbury.scarlet.columnar
  * columns. An empty input is `numPartitions` empty sum batches, the same convention as
  * [[HashReduce.byKey]]. The hash join reads key column 0 and value column 1 on both sides,
  * exchanges each side, and probes one partition at a time. The broadcast join builds one table
- * from the batches chosen as the build side and probes the other batches in place. Match order is
- * a kernel detail. The published multiset is multiplicity, values, and null semantics.
+ * from the batches chosen as the build side and probes the other batches in place. The left outer
+ * broadcast join uses that table. A probe row with no build match is kept, and the build value's
+ * validity bit is clear. Match order is a kernel detail. The published multiset is multiplicity,
+ * values, and null semantics.
  */
 object ColumnPipeline:
 
@@ -172,6 +174,32 @@ object ColumnPipeline:
       parallelism: Int,
       buildBudgetBytes: Long,
   ): Vector[ColumnBatch] =
+    broadcast(probe, build, parallelism, buildBudgetBytes, preserveProbe = false)
+
+  /**
+   * Left outer join with no exchange. The probe is the preserved side. A probe row with no build
+   * match is appended once, and the build value column's validity is clear on that row. A null
+   * probe key does not match and is kept. A null probe value stays null in the probe column.
+   * Output columns are `(key, probe value, build value)`. The caller restores `(key, left, right)`
+   * when the logical left input is the build side. An empty probe returns no batches. An empty
+   * build emits every probe row with the build value absent. `buildBudgetBytes` is the same budget
+   * as [[broadcastJoin]].
+   */
+  def broadcastLeftOuterJoin(
+      probe: Vector[ColumnBatch],
+      build: Vector[ColumnBatch],
+      parallelism: Int,
+      buildBudgetBytes: Long,
+  ): Vector[ColumnBatch] =
+    broadcast(probe, build, parallelism, buildBudgetBytes, preserveProbe = true)
+
+  private def broadcast(
+      probe: Vector[ColumnBatch],
+      build: Vector[ColumnBatch],
+      parallelism: Int,
+      buildBudgetBytes: Long,
+      preserveProbe: Boolean,
+  ): Vector[ColumnBatch] =
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     if (probe.isEmpty) then Vector.empty
     else
@@ -182,7 +210,7 @@ object ColumnPipeline:
         buildBudgetBytes,
       )
       MorselScheduler.map(probe, parallelism) { (_, probeBatch) =>
-        table.probe(HashJoin.JoinSide(probeBatch, key = 0, value = 1))
+        table.probe(HashJoin.JoinSide(probeBatch, key = 0, value = 1), preserveProbe)
       }
 
   private def emptySum: ColumnBatch =
