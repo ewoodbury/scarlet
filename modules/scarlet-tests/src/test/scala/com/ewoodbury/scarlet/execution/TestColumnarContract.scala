@@ -30,8 +30,9 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    accepted.size shouldBe 162
-    // Right and full outer joins stay excluded. A broadcast left outer join is accepted.
+    accepted.size shouldBe 163
+    // Right and full outer joins stay excluded. Broadcast and shuffle-hash left outer joins are
+    // accepted. The unhinted left outer fixture was already removed when broadcast was accepted.
     excluded.size shouldBe 51
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
@@ -420,6 +421,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         narrowInfo(2, layout),
         Some("BroadcastLeftOuter(Scan, Scan)"),
       ),
+      AcceptedCase(
+        "shuffle-hash left outer join",
+        Plan.LeftOuterJoinOp(pairSource, rightPairSource, Some(Plan.JoinStrategy.ShuffleHash)),
+        hashedInfo(layout),
+        Some("HashLeftOuter(Exchange(Scan), Exchange(Scan))"),
+      ),
       AcceptedCase("join after int aggregate", joinAfterAggregate, hashedInfo(layout), Some("HashJoin(Exchange(HashAggregate(Exchange(Scan))), Exchange(Scan))")),
       AcceptedCase("join-key filter", joinKeyFilter, hashedInfo(layout), Some("FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))")),
       AcceptedCase("join-left-value filter", joinLeftFilter, hashedInfo(layout), Some("FilterTripleLeftValue(HashJoin(Exchange(Scan), Exchange(Scan)))")),
@@ -693,7 +700,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case PhysicalOp.Column(child, _) => preservesPartitions(child)
     case PhysicalOp.MapValue(child) => preservesPartitions(child)
     case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.HashJoin(_, _) |
-        PhysicalOp.BroadcastJoin(_, _, _) | PhysicalOp.BroadcastLeftOuter(_, _) =>
+        PhysicalOp.HashLeftOuter(_, _) | PhysicalOp.BroadcastJoin(_, _, _) |
+        PhysicalOp.BroadcastLeftOuter(_, _) =>
       false
 
   private def assertRowPath[A](plan: Plan[A]): Unit =

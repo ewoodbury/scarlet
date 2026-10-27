@@ -65,27 +65,29 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * `None`, so the plan stays on the row path. Output width for a shuffle-hash join or an aggregate
  * is `defaultShufflePartitions`. A broadcast join's output follows the probe side, whichever child
  * that is; `take` still refuses a join, so the prefix path does not use that count. A left outer
- * join with a broadcast hint lowers to [[PhysicalOp.BroadcastLeftOuter]] when both inputs are int
- * pairs. The right input is built. The left input is the probe side. The op carries no build side,
- * so it cannot build the left input. A probe-side row with no partner keeps the left value and
+ * join on int pairs lowers for a broadcast hint, a shuffle-hash hint, or an absent hint. Broadcast
+ * is [[PhysicalOp.BroadcastLeftOuter]]: the right input is built and the left input is the probe
+ * side, with no exchange. Shuffle-hash and an absent hint are [[PhysicalOp.HashLeftOuter]]. An
+ * absent hint is the same choice an inner join makes. The row executor shuffle-hashes an unhinted
+ * outer join, so that plan is the shuffle op. The left exchange carries a null key to partition 0.
+ * The right exchange drops a null key. A probe-side row with no partner keeps the left value and
  * clears the right value's validity bit. That bit is absence. A null value is not absence and is
  * not representable here: interpretation reads the value columns' validity words and leaves the
- * plan on the row path. An unhinted or shuffle-hash left outer, a sort-merge left outer, and every
- * right or full outer join stay on the row path. [[tryCount]] and [[trySumInt]] fold an int
- * filter/map chain that starts at a scan or at `keys` or `values`, including an int `mapValues`,
- * and do not write that chain. Sum folds one trailing project and chains longer than four. Count
- * folds those, chains of two to four steps, and a string scan under only dictionary literal
- * filters. That string fold reads the scan `lower` built. A string shape that is not that chain
- * reads the finished batches. [[trySumLong]] folds a long filter/map chain the same way, and the
- * sum wraps. [[trySumDouble]] folds at most four steps. Sum of `keys`, `values`, or an int
- * `mapValues` with no further element chain reads the pair column in that morsel loop and does not
- * build the projection. [[tryGroupedSum]] runs [[ColumnPipeline.sumByKey]] on a typed pair source
- * and folds the `Int64` group sums. A preceding `FilterOp`, `filterKeys`, `filterValues`, or pair
- * `MapOp` is applied inside that partial scan, so the action does not build those pairs.
- * [[groupedSumPeel]] labels those walked steps. It is not an action shape and not a physical node.
- * A source descriptor supplies the type when all partitions are empty. It does not decode.
- * `collect` still does. A pair `MapOp` stays on the row path for `collect` and `reduceByKey`, and
- * [[partitioning]] reports no layout for it.
+ * plan on the row path. Sort-merge, and every right or full outer join, stay on the row path.
+ * [[tryCount]] and [[trySumInt]] fold an int filter/map chain that starts at a scan or at `keys`
+ * or `values`, including an int `mapValues`, and do not write that chain. Sum folds one trailing
+ * project and chains longer than four. Count folds those, chains of two to four steps, and a
+ * string scan under only dictionary literal filters. That string fold reads the scan `lower`
+ * built. A string shape that is not that chain reads the finished batches. [[trySumLong]] folds a
+ * long filter/map chain the same way, and the sum wraps. [[trySumDouble]] folds at most four
+ * steps. Sum of `keys`, `values`, or an int `mapValues` with no further element chain reads the
+ * pair column in that morsel loop and does not build the projection. [[tryGroupedSum]] runs
+ * [[ColumnPipeline.sumByKey]] on a typed pair source and folds the `Int64` group sums. A preceding
+ * `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that partial scan,
+ * so the action does not build those pairs. [[groupedSumPeel]] labels those walked steps. It is
+ * not an action shape and not a physical node. A source descriptor supplies the type when all
+ * partitions are empty. It does not decode. `collect` still does. A pair `MapOp` stays on the row
+ * path for `collect` and `reduceByKey`, and [[partitioning]] reports no layout for it.
  *
  * An [[com.ewoodbury.scarlet.core.IntArrays]], [[com.ewoodbury.scarlet.core.LongArrays]],
  * [[com.ewoodbury.scarlet.core.BoolArrays]], [[com.ewoodbury.scarlet.core.DoubleArrays]],
@@ -130,11 +132,12 @@ object ColumnarPlanner:
   /**
    * The physical tree for `plan`, without running it. `None` means the row path, including an
    * element chain whose project does not declare the column's type. A join lowers when its hint is
-   * absent, shuffle-hash, or broadcast. Sort-merge returns `None`. A left outer join lowers only
-   * for a broadcast hint on int pairs. Any other outer join returns `None`. A null value does not
-   * change that shape: [[tryRun]] reads the value columns and returns `None`, and the row path
-   * runs. [[partitioning]] and [[tryRun]] follow a refusal. They also drop a lowered tree whose
-   * layout is invalid.
+   * absent, shuffle-hash, or broadcast. Sort-merge returns `None`. A left outer join on int pairs
+   * lowers for a broadcast hint, a shuffle-hash hint, or an absent hint. An absent hint uses the
+   * shuffle-hash op, matching an inner join. Sort-merge and every right or full outer join return
+   * `None`. A null value does not change that shape: [[tryRun]] reads the value columns and
+   * returns `None`, and the row path runs. [[partitioning]] and [[tryRun]] follow a refusal. They
+   * also drop a lowered tree whose layout is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -568,8 +571,8 @@ object ColumnarPlanner:
     case PhysicalOp.Pipeline(child, _) => preservedPartitions(child)
     case PhysicalOp.Column(child, _) => preservedPartitions(child)
     case PhysicalOp.MapValue(child) => preservedPartitions(child)
-    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.BroadcastJoin |
-        _: PhysicalOp.BroadcastLeftOuter | _: PhysicalOp.Exchange =>
+    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.HashLeftOuter |
+        _: PhysicalOp.BroadcastJoin | _: PhysicalOp.BroadcastLeftOuter | _: PhysicalOp.Exchange =>
       None
 
   private def lowerPlan(plan: Plan[_]): Option[PhysicalOp] =
@@ -629,8 +632,22 @@ object ColumnarPlanner:
               Some(PhysicalOp.BroadcastLeftOuter(left = leftOp, right = rightOp))
             case _ => None
         case _ => None
-    // An unhinted or shuffle-hash left outer, and every right or full outer join, stay on the
-    // row path. Sort-merge is refused with them.
+    // An absent hint is shuffle-hash, the same rule as an inner join. The row executor
+    // shuffle-hashes an unhinted outer join, so that plan is this op.
+    case Plan.LeftOuterJoinOp(left, right, strategy) if acceptsShuffleHash(strategy) =>
+      (lowerPlan(left), lowerPlan(right)) match
+        case (Some(leftOp), Some(rightOp)) =>
+          (leftOp.kind, rightOp.kind) match
+            case (PhysicalOp.Kind.Pairs, PhysicalOp.Kind.Pairs) =>
+              Some(
+                PhysicalOp.HashLeftOuter(
+                  PhysicalOp.Exchange(leftOp),
+                  PhysicalOp.Exchange(rightOp),
+                ),
+              )
+            case _ => None
+        case _ => None
+    // Sort-merge left outer, and every right or full outer join, stay on the row path.
     case _: Plan.LeftOuterJoinOp[_, _, _] | _: Plan.RightOuterJoinOp[_, _, _] |
         _: Plan.FullOuterJoinOp[_, _, _] =>
       None
@@ -924,7 +941,8 @@ object ColumnarPlanner:
     case PhysicalOp.Pipeline(child, _) => infoOf(child)
     case PhysicalOp.Column(child, _) => infoOf(child).withoutPairDistribution
     case PhysicalOp.MapValue(child) => infoOf(child)
-    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin => hashed
+    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.HashLeftOuter =>
+      hashed
     case PhysicalOp.BroadcastJoin(left, right, buildSide) =>
       broadcastInfo(left, right, buildSide)
     case PhysicalOp.BroadcastLeftOuter(left, _) =>

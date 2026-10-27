@@ -62,6 +62,43 @@ class TestHashExchange extends AnyFlatSpec with Matchers:
     pairs(bucket(parts, 2)) shouldBe Seq((2, 20))
   }
 
+  it should "drop null keys unless carryNullKeys is set" in {
+    // The stored null payload is 1, which would be partition 1 if the bit were present.
+    val keys = Int32Column.of(Array(1, 2), Validity.pack(2, row => row == 1), 2)
+    val values = Int32Column.of(Array(99, 20), Validity.allValid(2), 2)
+    val batch = new ColumnBatch(
+      Vector(LogicalType.Int32, LogicalType.Int32),
+      Vector(keys, values),
+      2,
+    )
+    val width = 4
+    val dropped = HashExchange.partitionInt32(batch, keyOrdinal = 0, numPartitions = width)
+    val explicitOff = HashExchange.partitionInt32(
+      batch,
+      keyOrdinal = 0,
+      numPartitions = width,
+      carryNullKeys = false,
+    )
+
+    dropped.map(_.length) shouldBe explicitOff.map(_.length)
+    dropped.map(_.length).sum shouldBe 1
+    Math.floorMod(1, width) shouldBe 1
+    bucket(dropped, 2).length shouldBe 1
+    bucket(dropped, 1).length shouldBe 0
+
+    val carried = HashExchange.partitionInt32(
+      batch,
+      keyOrdinal = 0,
+      numPartitions = width,
+      carryNullKeys = true,
+    )
+    carried.map(_.length).sum shouldBe 2
+    carried.headOption.getOrElse(fail("missing partition 0")).length shouldBe 1
+    val nullBucket = int32(carried.headOption.getOrElse(fail("missing partition 0")), 0)
+    nullBucket.isValid(0) shouldBe false
+    nullBucket.values(0) shouldBe 1
+  }
+
   it should "drop null keys and keep a null value" in {
     val batch = BatchCodec.nullableIntPairs(
       Seq((Some(1), Some(10)), (None, Some(99)), (Some(2), None), (Some(1), Some(12))),

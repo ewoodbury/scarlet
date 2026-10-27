@@ -188,6 +188,24 @@ class TestColumnPipeline extends AnyFlatSpec with Matchers:
     nullableTriples(joined).sorted shouldBe Seq((1, Some(100), None), (1, Some(100), Some(10)))
     nullableTriples(joined).sorted shouldBe nullableTriples(hashed).sorted
 
+    // The inner-join exchange leaves carryNullKeys off. The default and the explicit flag agree,
+    // and the null probe key is not in the result.
+    val probeBuckets = HashExchange.partitionAll(
+      probe,
+      keyOrdinal = 0,
+      numPartitions = 4,
+      parallelism = 1,
+    )
+    val explicitOff = HashExchange.partitionAll(
+      probe,
+      keyOrdinal = 0,
+      numPartitions = 4,
+      parallelism = 1,
+      carryNullKeys = false,
+    )
+    probeBuckets.map(_.length) shouldBe explicitOff.map(_.length)
+    probeBuckets.map(_.length).sum shouldBe 2
+
     val nullBuild = Vector(BatchCodec.nullableIntPairs(Seq((None, Some(1)), (None, Some(2)))))
     val presentProbe = Vector(BatchCodec.intPairs(Seq((1, 3))))
     broadcast(presentProbe, nullBuild, parallelism = 1).map(_.length) shouldBe Seq(0)
