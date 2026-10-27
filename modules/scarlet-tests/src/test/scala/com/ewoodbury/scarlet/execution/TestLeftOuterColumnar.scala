@@ -138,9 +138,9 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     val probe = BatchCodec.nullableIntPairs(
       Seq(
         (Some(1), Some(10)),
-        (Some(2), None),
+        (Some(2), Some(11)),
         (Some(3), Some(30)),
-        (Some(4), None),
+        (Some(4), Some(13)),
       ),
     )
     val build = BatchCodec.nullableIntPairs(Seq((Some(1), Some(100)), (Some(4), Some(7))))
@@ -162,20 +162,33 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     }
     rows.find(_._1.contains(1)).getOrElse(fail("missing matched row")) shouldBe
       ((Some(1), true, true))
-    rows.find(_._1.contains(2)).getOrElse(fail("missing unmatched null value")) shouldBe
-      ((Some(2), false, false))
+    rows.find(_._1.contains(2)).getOrElse(fail("missing unmatched probe row")) shouldBe
+      ((Some(2), true, false))
     rows.find(_._1.contains(3)).getOrElse(fail("missing unmatched probe row")) shouldBe
       ((Some(3), true, false))
-    // A null left value on a matched row stays invalid, and the right value stays present.
-    rows.find(_._1.contains(4)).getOrElse(fail("missing matched null value")) shouldBe
-      ((Some(4), false, true))
+    rows.find(_._1.contains(4)).getOrElse(fail("missing matched row")) shouldBe
+      ((Some(4), true, true))
 
     canonical(BatchCodec.decodeOuter(batch)) should contain theSameElementsAs Seq(
       (Some(1), Some(10), Some(100)),
-      (Some(2), None, None),
+      (Some(2), Some(11), None),
       (Some(3), Some(30), None),
-      (Some(4), None, Some(7)),
+      (Some(4), Some(13), Some(7)),
     )
+  }
+
+  it should "refuse a null value before the kernel runs" in {
+    val probe = BatchCodec.nullableIntPairs(Seq((Some(1), Some(10)), (Some(2), None)))
+    val build = BatchCodec.nullableIntPairs(Seq((Some(1), Some(100))))
+    val refused = intercept[IllegalArgumentException] {
+      ColumnPipeline.broadcastLeftOuterJoin(
+        Vector(probe),
+        Vector(build),
+        parallelism = 1,
+        ScarletConf.get.broadcastBuildBudgetBytes,
+      )
+    }
+    refused.getMessage should include("fully present")
   }
 
   it should "never record a left build for an outer join" in {

@@ -193,6 +193,10 @@ object ColumnPipeline:
       parallelism: Int,
       buildBudgetBytes: Long,
   ): Vector[ColumnBatch] =
+    require(
+      valuesFullyPresent(probe) && valuesFullyPresent(build),
+      "a left outer join needs fully present value columns",
+    )
     broadcast(probe, build, parallelism, buildBudgetBytes, preserveProbe = true)
 
   /**
