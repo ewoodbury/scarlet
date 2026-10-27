@@ -15,7 +15,9 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * evaluated, and the budget covers that table only. A partition selector on an aggregate or a join
  * fails a `require` guard with `IllegalArgumentException`, and that is not a fallback either. A
  * `ClassCastException` from a filter, or from a string map that declares `String` and returns
- * another value, is still a fallback, and that function may already have run.
+ * another value, is still a fallback, and that function may already have run. A null value on a
+ * left outer join is the same fallback: the value columns are already encoded, and the kernel is
+ * not chosen.
  */
 @SuppressWarnings(
   Array(
@@ -47,7 +49,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.Triples(parts) => parts
     case Columns.Strings(parts) => parts
     case Columns.Bools(parts) => parts
-    case Columns.Outer(parts, _) => parts
+    case Columns.Outer(parts) => parts
 
   private[execution] enum Columns:
     case Ints(parts: Vector[ColumnBatch])
@@ -57,7 +59,7 @@ private[execution] object ColumnarInterpreter:
     case Triples(parts: Vector[ColumnBatch])
     case Strings(parts: Vector[ColumnBatch])
     case Bools(parts: Vector[ColumnBatch])
-    case Outer(parts: Vector[ColumnBatch], kind: OuterKind)
+    case Outer(parts: Vector[ColumnBatch])
 
   private def selectPartition[A](
       partitions: Seq[Partition[A]],
@@ -81,8 +83,8 @@ private[execution] object ColumnarInterpreter:
         case Columns.Triples(parts) =>
           // Joins are not partition-preserving, so `take` does not reach this arm.
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeIntTriples(batch, rows))
-        case Columns.Outer(parts, kind) =>
-          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeOuter(batch, kind).take(rows))
+        case Columns.Outer(parts) =>
+          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeOuter(batch, rows))
         case Columns.Strings(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeStrings(batch, rows))
         case Columns.Bools(parts) =>
@@ -113,7 +115,8 @@ private[execution] object ColumnarInterpreter:
         case PhysicalOp.Kind.Longs => Columns.Longs(encodeLongs(selected))
         case PhysicalOp.Kind.Floats => Columns.Floats(encodeFloats(selected))
         case PhysicalOp.Kind.Pairs =>
-          // A left outer join keeps a null key and a null value. Other pair plans still unbox.
+          // preserveAbsence keeps a null key or a null value in the pair columns. It is not the
+          // probe side. Other pair plans still unbox.
           val encoded =
             if (preserveAbsence) then encodeGroupedPairs(selected) else encodePairs(selected)
           Columns.Pairs(encoded)
@@ -235,31 +238,30 @@ private[execution] object ColumnarInterpreter:
       Columns.Triples(ordered)
     case (
           Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
-          PhysicalOp.BroadcastLeftOuter(leftOp, rightOp, buildSide),
+          PhysicalOp.BroadcastLeftOuter(leftOp, rightOp),
         ) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      // Null keys and null values stay absent. The inner join still unboxes its pairs.
-      val leftBatches = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
-      val rightBatches =
-        pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
-      val (probe, build) = buildSide match
-        case PhysicalOp.BuildSide.Right => (leftBatches, rightBatches)
-        case PhysicalOp.BuildSide.Left => (rightBatches, leftBatches)
+      // preserveAbsence keeps null keys. It is not the probe side. The right input is the build.
+      val probe = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
+      val build = pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+      // Validity words are already on the columns. A null value is not a probe-side row with no
+      // partner, and this path cannot represent one, so the kernel is not chosen.
+      val valuesPresent =
+        ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
+      if (!valuesPresent) then
+        throw new ClassCastException(
+          "a null value on a left outer join stays on the row path",
+        )
+      // The kernel writes (key, probe value, build value). The probe side is the left input, so
+      // the batch is already (key, left, right). A clear build-value bit is absence.
       val joined = ColumnPipeline.broadcastLeftOuterJoin(
         probe,
         build,
         ColumnarPlanner.parallelism,
         ScarletConf.get.broadcastBuildBudgetBytes,
       )
-      // The kernel writes (key, probe value, build value) and clears build validity when the
-      // probe row has no match. The planner builds the right child, so the probe is the left
-      // input and the batch is already (key, left, right). Building the left child makes that
-      // (key, right, left); swapping the value columns restores (key, left, right).
-      val ordered = buildSide match
-        case PhysicalOp.BuildSide.Right => joined
-        case PhysicalOp.BuildSide.Left => swapValueColumns(joined)
-      Columns.Outer(ordered, OuterKind.Left)
+      Columns.Outer(joined)
     case _ =>
       throw new IllegalStateException(
         s"physical tree does not match ${plan.getClass.getSimpleName}",
@@ -294,7 +296,7 @@ private[execution] object ColumnarInterpreter:
         Columns.Floats(onEachMorsel(parts)(morsel => ElementPipeline.floats(morsel, steps)))
       case Columns.Strings(parts) =>
         Columns.Strings(onEachMorsel(parts)(morsel => ElementPipeline.strings(morsel, steps)))
-      case Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) | Columns.Outer(_, _) =>
+      case Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) | Columns.Outer(_) =>
         rejected
 
   private def triplePredicate(
@@ -372,7 +374,7 @@ private[execution] object ColumnarInterpreter:
             Columns.Bools(onEachMorsel(parts) { morsel =>
               BoolPipeline.filter(morsel.batch, morsel.start, morsel.length, predicate)
             })
-          case Columns.Pairs(_) | Columns.Triples(_) | Columns.Outer(_, _) =>
+          case Columns.Pairs(_) | Columns.Triples(_) | Columns.Outer(_) =>
             throw new IllegalStateException(
               s"columnar element filter expects ${elementColumnList(includeBooleans = true)}",
             )
@@ -473,7 +475,7 @@ private[execution] object ColumnarInterpreter:
           value => ColumnarPlanner.stringResult(fn(value)),
         )
       })
-    case Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) | Columns.Outer(_, _) =>
+    case Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) | Columns.Outer(_) =>
       throw new IllegalStateException(
         s"columnar map expects ${elementColumnList(includeBooleans = false)}",
       )
@@ -502,7 +504,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.Pairs(_) =>
       throw new IllegalStateException("columnar pairs have no partitions")
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Triples(_) |
-        Columns.Strings(_) | Columns.Bools(_) | Columns.Outer(_, _) =>
+        Columns.Strings(_) | Columns.Bools(_) | Columns.Outer(_) =>
       throw new IllegalStateException("columnar op expected int pairs")
 
   private def triplesOf(columns: Columns): Vector[ColumnBatch] = columns match
@@ -510,7 +512,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.Triples(_) =>
       throw new IllegalStateException("columnar triples have no partitions")
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Pairs(_) |
-        Columns.Strings(_) | Columns.Bools(_) | Columns.Outer(_, _) =>
+        Columns.Strings(_) | Columns.Bools(_) | Columns.Outer(_) =>
       throw new IllegalStateException("columnar op expected int triples")
 
   /**
@@ -655,8 +657,8 @@ private[execution] object ColumnarInterpreter:
       parts.map(batch => Partition(BatchCodec.decodeIntPairs(batch)))
     case Columns.Triples(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeIntTriples(batch)))
-    case Columns.Outer(parts, kind) =>
-      parts.map(batch => Partition(BatchCodec.decodeOuter(batch, kind)))
+    case Columns.Outer(parts) =>
+      parts.map(batch => Partition(BatchCodec.decodeOuter(batch)))
     case Columns.Strings(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeStrings(batch)))
     case Columns.Bools(parts) =>

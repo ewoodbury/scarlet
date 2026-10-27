@@ -334,27 +334,23 @@ object BatchCodec:
         )
 
   /**
-   * Left outer rows are `(key, (left, Option[right]))`. A clear right bit is `None`. A clear key
-   * or left bit is a null in that column, which is independent of the right bit. `Right` and
-   * `Full` are not decoded.
+   * Left outer rows are `(key, (left, Option[right]))`. A clear right bit is absence: the probe
+   * side row has no partner, decoded as `None`. A clear key bit is a null key. A null value is not
+   * absence and is not representable on this path. `maxRows` limits the prefix the same way as
+   * [[decodeIntTriples]].
    */
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
-  def decodeOuter(batch: ColumnBatch, kind: OuterKind): Seq[Any] = kind match
-    case OuterKind.Left => decodeLeftOuter(batch)
-    case OuterKind.Right =>
-      throw new UnsupportedOperationException("columnar right outer join is not decoded")
-    case OuterKind.Full =>
-      throw new UnsupportedOperationException("columnar full outer join is not decoded")
+  def decodeOuter(batch: ColumnBatch): Seq[Any] = decodeOuter(batch, batch.length)
 
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
-  private def decodeLeftOuter(batch: ColumnBatch): Seq[Any] =
+  def decodeOuter(batch: ColumnBatch, maxRows: Int): Seq[Any] =
     batch.columns match
       case Seq(keys: Int32Column, left: Int32Column, right: Int32Column) =>
         require(
           keys.length == batch.length && left.length == batch.length && right.length == batch.length,
           "outer join columns disagree on length",
         )
-        val rows = batch.length
+        val rows = decodedLength(batch, maxRows)
         ColumnMetrics.decoded(rows)
         Seq.tabulate(rows) { row =>
           val rightValue = if (right.isValid(row)) Some(right.values(row)) else None

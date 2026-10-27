@@ -12,11 +12,11 @@ import java.util.Arrays
  *
  * [[openInt32]] fills one table from every build batch, then probes. A later batch is inserted
  * after an earlier batch, and a later row after an earlier row, so the chain walk is newest-first.
- * That walk is a kernel detail. `probe` writes `(key, probe value, build value)`. The caller
- * restores `(key, left, right)` when the logical left input was the build side. The table is not
- * mutated by a probe, so probes may run together. [[innerInt32]] does not use this table. A
- * non-empty build is estimated before the table is allocated. The estimate covers that table only.
- * An estimate above `buildBudgetBytes` throws `IllegalStateException`.
+ * That walk is a kernel detail. `probe` writes `(key, probe value, build value)`. The inner
+ * broadcast caller restores `(key, left, right)` when the logical left input was the build side.
+ * The table is not mutated by a probe, so probes may run together. [[innerInt32]] does not use
+ * this table. A non-empty build is estimated before the table is allocated. The estimate covers
+ * that table only. An estimate above `buildBudgetBytes` throws `IllegalStateException`.
  *
  * Each side names its key and value ordinals. The probe writes matches directly, with the row
  * index in a `var`, so the hot loop stays allocation-free like `ColumnKernel`. Output columns keep
@@ -269,10 +269,11 @@ object HashJoin:
 
   /**
    * Build table shared by every probe. `probe` writes `(key, probe value, build value)`. An empty
-   * build returns an empty batch when the probe is not preserved. `preserveProbe` keeps that
-   * column order and emits each probe row that has no build match, including a null probe key,
-   * with the build value's validity clear. The chain walk is newest-first, which is a kernel
-   * detail.
+   * build returns an empty batch when `preserveProbe` is false. `preserveProbe` keeps the probe
+   * side: each probe-side row with no partner is emitted, including a null probe key, and the
+   * build value's validity is clear. That clear bit is absence. A null value is not absence. A
+   * null build key is not inserted, so it does not match probe key 0. The chain walk is
+   * newest-first, which is a kernel detail.
    */
   final class Int32Build private (
       mask: Int,
@@ -289,6 +290,8 @@ object HashJoin:
     private[HashJoin] def insert(): Unit =
       var row = 0
       while (row < rows) {
+        // A null key stays out of the table. Its payload is 0, and inserting it would match
+        // probe key 0.
         if (Validity.isSet(buildKeyWords, row)) then
           val key = buildKeys(row)
           var slot = ColumnHash.mix(key) & mask
@@ -311,9 +314,9 @@ object HashJoin:
     def probe(side: JoinSide): ColumnBatch = probe(side, preserveProbe = false)
 
     /**
-     * `preserveProbe` appends each unmatched probe row. The build value column's validity is clear
-     * on that row. A null probe key does not match and is kept only when `preserveProbe` is set. A
-     * null probe value stays in the probe column and does not mean the build value is absent.
+     * `preserveProbe` appends each probe-side row with no partner. The build value column's
+     * validity is clear on that row. That clear bit is absence. A null probe key does not match
+     * and is kept only when `preserveProbe` is set. A null value is not absence.
      */
     def probe(side: JoinSide, preserveProbe: Boolean): ColumnBatch =
       val probeKeys = ColumnHash.int32At(side.batch, side.key)

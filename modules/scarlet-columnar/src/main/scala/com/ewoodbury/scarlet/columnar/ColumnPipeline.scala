@@ -13,9 +13,10 @@ package com.ewoodbury.scarlet.columnar
  * [[HashReduce.byKey]]. The hash join reads key column 0 and value column 1 on both sides,
  * exchanges each side, and probes one partition at a time. The broadcast join builds one table
  * from the batches chosen as the build side and probes the other batches in place. The left outer
- * broadcast join uses that table. A probe row with no build match is kept, and the build value's
- * validity bit is clear. Match order is a kernel detail. The published multiset is multiplicity,
- * values, and null semantics.
+ * broadcast join uses that table and keeps the probe side. A probe-side row with no partner is
+ * kept, and the build value's validity bit is clear. That bit is absence. A null value is not
+ * absence. Match order is a kernel detail. The published multiset is multiplicity, values, and
+ * null semantics.
  */
 object ColumnPipeline:
 
@@ -177,13 +178,14 @@ object ColumnPipeline:
     broadcast(probe, build, parallelism, buildBudgetBytes, preserveProbe = false)
 
   /**
-   * Left outer join with no exchange. The probe is the preserved side. A probe row with no build
-   * match is appended once, and the build value column's validity is clear on that row. A null
-   * probe key does not match and is kept. A null probe value stays null in the probe column.
-   * Output columns are `(key, probe value, build value)`. The caller restores `(key, left, right)`
-   * when the logical left input is the build side. An empty probe returns no batches. An empty
-   * build emits every probe row with the build value absent. `buildBudgetBytes` is the same budget
-   * as [[broadcastJoin]].
+   * Left outer join with no exchange. `probe` is the probe side. A probe-side row with no partner
+   * is appended once, and the build value's validity is clear. That clear bit is absence. A null
+   * value is not absence and is not representable on this path. Call this only when the probe and
+   * build value columns are fully valid. [[valuesFullyPresent]] reads the validity words encoding
+   * already wrote. A null probe key does not match and is kept. A null build key is not inserted,
+   * so it does not match probe key 0. Output columns are `(key, probe value, build value)`. An
+   * empty probe returns no batches. An empty build emits every probe-side row with the build value
+   * absent. `buildBudgetBytes` is the same budget as [[broadcastJoin]].
    */
   def broadcastLeftOuterJoin(
       probe: Vector[ColumnBatch],
@@ -192,6 +194,16 @@ object ColumnPipeline:
       buildBudgetBytes: Long,
   ): Vector[ColumnBatch] =
     broadcast(probe, build, parallelism, buildBudgetBytes, preserveProbe = true)
+
+  /**
+   * True when every live value cell is present. Pair batches store the value at ordinal 1. The
+   * check reads validity words that are already materialised and does not walk the rows again.
+   */
+  private[scarlet] def valuesFullyPresent(batches: Vector[ColumnBatch]): Boolean =
+    batches.forall { batch =>
+      val values = ColumnHash.int32At(batch, 1)
+      Validity.livePresent(values.validity, values.length)
+    }
 
   private def broadcast(
       probe: Vector[ColumnBatch],
