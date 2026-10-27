@@ -16,8 +16,8 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * fails a `require` guard with `IllegalArgumentException`, and that is not a fallback either. A
  * `ClassCastException` from a filter, or from a string map that declares `String` and returns
  * another value, is still a fallback, and that function may already have run. A null value on a
- * left outer join is the same fallback: the value columns are already encoded, and the kernel is
- * not chosen.
+ * left or right outer join is the same fallback: the value columns are already encoded, and the
+ * kernel is not chosen.
  */
 @SuppressWarnings(
   Array(
@@ -49,7 +49,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.Triples(parts) => parts
     case Columns.Strings(parts) => parts
     case Columns.Bools(parts) => parts
-    case Columns.Outer(parts) => parts
+    case Columns.Outer(parts, _) => parts
 
   private[execution] enum Columns:
     case Ints(parts: Vector[ColumnBatch])
@@ -59,7 +59,13 @@ private[execution] object ColumnarInterpreter:
     case Triples(parts: Vector[ColumnBatch])
     case Strings(parts: Vector[ColumnBatch])
     case Bools(parts: Vector[ColumnBatch])
-    case Outer(parts: Vector[ColumnBatch])
+
+    /**
+     * Outer-join batches stay `(key, left, right)`. `absent` tells [[BatchCodec.decodeOuter]]
+     * which value column is the `Option`. [[AbsentSide.Right]] is a left outer join.
+     * [[AbsentSide.Left]] is a right outer join.
+     */
+    case Outer(parts: Vector[ColumnBatch], absent: AbsentSide)
 
   private def selectPartition[A](
       partitions: Seq[Partition[A]],
@@ -83,8 +89,8 @@ private[execution] object ColumnarInterpreter:
         case Columns.Triples(parts) =>
           // Joins are not partition-preserving, so `take` does not reach this arm.
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeIntTriples(batch, rows))
-        case Columns.Outer(parts) =>
-          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeOuter(batch, rows))
+        case Columns.Outer(parts, absent) =>
+          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeOuter(batch, absent, rows))
         case Columns.Strings(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeStrings(batch, rows))
         case Columns.Bools(parts) =>
@@ -261,7 +267,7 @@ private[execution] object ColumnarInterpreter:
         ColumnarPlanner.parallelism,
         ScarletConf.get.broadcastBuildBudgetBytes,
       )
-      Columns.Outer(joined)
+      Columns.Outer(joined, AbsentSide.Right)
     case (
           Plan.LeftOuterJoinOp(left, right, strategy),
           PhysicalOp.HashLeftOuter(
@@ -293,11 +299,70 @@ private[execution] object ColumnarInterpreter:
         ColumnarPlanner.batchSize,
         ScarletConf.get.broadcastBuildBudgetBytes,
       )
-      Columns.Outer(joined)
+      Columns.Outer(joined, AbsentSide.Right)
+    case (
+          Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
+          PhysicalOp.BroadcastRightOuter(leftOp, rightOp),
+        ) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      // preserveAbsence keeps null keys. The left input is the build. The right input is the
+      // probe, so unmatched right rows are kept.
+      val build = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
+      val probe = pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+      rightOuter(probe, build) { (probeBatches, buildBatches) =>
+        ColumnPipeline.broadcastLeftOuterJoin(
+          probeBatches,
+          buildBatches,
+          ColumnarPlanner.parallelism,
+          ScarletConf.get.broadcastBuildBudgetBytes,
+        )
+      }
+    case (
+          Plan.RightOuterJoinOp(left, right, strategy),
+          PhysicalOp.HashRightOuter(
+            PhysicalOp.Exchange(leftOp),
+            PhysicalOp.Exchange(rightOp),
+          ),
+        ) if ColumnarPlanner.acceptsShuffleHash(strategy) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      // preserveAbsence keeps null keys. The right input is the probe side. Its exchange carries
+      // a null key. The left input is the build side. Its exchange drops a null key.
+      val build = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
+      val probe = pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+      rightOuter(probe, build) { (probeBatches, buildBatches) =>
+        ColumnPipeline.hashLeftOuterJoin(
+          probeBatches,
+          buildBatches,
+          ColumnarPlanner.shuffleWidth,
+          ColumnarPlanner.parallelism,
+          ColumnarPlanner.batchSize,
+          ScarletConf.get.broadcastBuildBudgetBytes,
+        )
+      }
     case _ =>
       throw new IllegalStateException(
         s"physical tree does not match ${plan.getClass.getSimpleName}",
       )
+
+  /**
+   * Run the left-outer kernel with `probe` as the right input and `build` as the left input, then
+   * restore `(key, left, right)`. The kernel writes `(key, probe value, build value)`, so the
+   * value columns arrive as `(right, left)`. The cleared build-value bit moves with the left
+   * column. That bit is absence. A null value is not absence, and this path cannot represent one.
+   */
+  private def rightOuter(
+      probe: Vector[ColumnBatch],
+      build: Vector[ColumnBatch],
+  )(join: (Vector[ColumnBatch], Vector[ColumnBatch]) => Vector[ColumnBatch]): Columns =
+    val valuesPresent =
+      ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
+    if (!valuesPresent) then
+      throw new ClassCastException(
+        "a null value on a right outer join stays on the row path",
+      )
+    Columns.Outer(swapValueColumns(join(probe, build)), AbsentSide.Left)
 
   private def interpretPipeline(
       plan: Plan[_],
@@ -328,7 +393,7 @@ private[execution] object ColumnarInterpreter:
         Columns.Floats(onEachMorsel(parts)(morsel => ElementPipeline.floats(morsel, steps)))
       case Columns.Strings(parts) =>
         Columns.Strings(onEachMorsel(parts)(morsel => ElementPipeline.strings(morsel, steps)))
-      case Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) | Columns.Outer(_) =>
+      case Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) | Columns.Outer(_, _) =>
         rejected
 
   private def triplePredicate(
@@ -406,7 +471,7 @@ private[execution] object ColumnarInterpreter:
             Columns.Bools(onEachMorsel(parts) { morsel =>
               BoolPipeline.filter(morsel.batch, morsel.start, morsel.length, predicate)
             })
-          case Columns.Pairs(_) | Columns.Triples(_) | Columns.Outer(_) =>
+          case Columns.Pairs(_) | Columns.Triples(_) | Columns.Outer(_, _) =>
             throw new IllegalStateException(
               s"columnar element filter expects ${elementColumnList(includeBooleans = true)}",
             )
@@ -507,7 +572,7 @@ private[execution] object ColumnarInterpreter:
           value => ColumnarPlanner.stringResult(fn(value)),
         )
       })
-    case Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) | Columns.Outer(_) =>
+    case Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) | Columns.Outer(_, _) =>
       throw new IllegalStateException(
         s"columnar map expects ${elementColumnList(includeBooleans = false)}",
       )
@@ -527,7 +592,7 @@ private[execution] object ColumnarInterpreter:
           )
         case other =>
           throw new IllegalArgumentException(
-            s"broadcast join output has ${other.size} columns",
+            s"join output has ${other.size} columns",
           )
     }
 
@@ -536,7 +601,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.Pairs(_) =>
       throw new IllegalStateException("columnar pairs have no partitions")
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Triples(_) |
-        Columns.Strings(_) | Columns.Bools(_) | Columns.Outer(_) =>
+        Columns.Strings(_) | Columns.Bools(_) | Columns.Outer(_, _) =>
       throw new IllegalStateException("columnar op expected int pairs")
 
   private def triplesOf(columns: Columns): Vector[ColumnBatch] = columns match
@@ -544,7 +609,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.Triples(_) =>
       throw new IllegalStateException("columnar triples have no partitions")
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Pairs(_) |
-        Columns.Strings(_) | Columns.Bools(_) | Columns.Outer(_) =>
+        Columns.Strings(_) | Columns.Bools(_) | Columns.Outer(_, _) =>
       throw new IllegalStateException("columnar op expected int triples")
 
   /**
@@ -689,8 +754,8 @@ private[execution] object ColumnarInterpreter:
       parts.map(batch => Partition(BatchCodec.decodeIntPairs(batch)))
     case Columns.Triples(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeIntTriples(batch)))
-    case Columns.Outer(parts) =>
-      parts.map(batch => Partition(BatchCodec.decodeOuter(batch)))
+    case Columns.Outer(parts, absent) =>
+      parts.map(batch => Partition(BatchCodec.decodeOuter(batch, absent)))
     case Columns.Strings(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeStrings(batch)))
     case Columns.Bools(parts) =>

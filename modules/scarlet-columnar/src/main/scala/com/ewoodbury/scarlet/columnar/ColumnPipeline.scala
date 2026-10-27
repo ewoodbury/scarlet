@@ -15,10 +15,12 @@ package com.ewoodbury.scarlet.columnar
  * off, so a null key is dropped. The broadcast join builds one table from the batches chosen as
  * the build side and probes the other batches in place. The left outer broadcast join uses that
  * table and keeps the probe side. The shuffle-hash left outer join exchanges both sides, carries a
- * null key on the probe side only, and builds one table per partition. A probe-side row with no
- * partner is kept, and the build value's validity bit is clear. That bit is absence. A null value
- * is not absence. Match order is a kernel detail. The published multiset is multiplicity, values,
- * and null semantics.
+ * null key on the probe side only, and builds one table per partition. A right outer join calls
+ * those same entry points with the right input as the probe and the left input as the build, then
+ * swaps the value columns back to `(key, left, right)`. A probe-side row with no partner is kept,
+ * and the build value's validity bit is clear. That bit is absence. A null value is not absence.
+ * Match order is a kernel detail. The published multiset is multiplicity, values, and null
+ * semantics.
  */
 object ColumnPipeline:
 

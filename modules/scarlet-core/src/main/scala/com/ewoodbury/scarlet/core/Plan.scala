@@ -310,8 +310,10 @@ object Plan {
    * @param right
    *   The right plan node (producing elements of type (K, W)).
    * @param joinStrategy
-   *   Stored with the plan. The row executor ignores it and always runs shuffle-hash. Broadcast
-   *   and sort-merge are not implemented for outer joins in this iteration.
+   *   Stored with the plan. The row executor ignores it and always runs shuffle-hash. The columnar
+   *   planner accepts a broadcast hint, a shuffle-hash hint, or an absent hint for int pairs. The
+   *   right input is the probe side. An absent hint uses the shuffle-hash op, matching an inner
+   *   join. A null value stays on the row path. Sort-merge is not a columnar outer join.
    * @tparam K
    *   The key type.
    * @tparam V

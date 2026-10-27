@@ -334,16 +334,18 @@ object BatchCodec:
         )
 
   /**
-   * Left outer rows are `(key, (left, Option[right]))`. A clear right bit is absence: the probe
-   * side row has no partner, decoded as `None`. A clear key bit is a null key. A null value is not
-   * absence and is not representable on this path. `maxRows` limits the prefix the same way as
-   * [[decodeIntTriples]].
+   * Outer-join rows are `(key, left, right)`. `absent` names the value column wrapped in `Option`.
+   * [[AbsentSide.Left]] returns `(key, (Option[Int], Int))`. [[AbsentSide.Right]] returns
+   * `(key, (Int, Option[Int]))`. A clear bit on that column is `None`. A clear bit on the key, or
+   * on the other value, stays null. A null value is not absence. `maxRows` limits the prefix the
+   * same way as [[decodeIntTriples]]. Full outer is not decoded here.
    */
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
-  def decodeOuter(batch: ColumnBatch): Seq[Any] = decodeOuter(batch, batch.length)
+  def decodeOuter(batch: ColumnBatch, absent: AbsentSide): Seq[Any] =
+    decodeOuter(batch, absent, batch.length)
 
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
-  def decodeOuter(batch: ColumnBatch, maxRows: Int): Seq[Any] =
+  def decodeOuter(batch: ColumnBatch, absent: AbsentSide, maxRows: Int): Seq[Any] =
     batch.columns match
       case Seq(keys: Int32Column, left: Int32Column, right: Int32Column) =>
         require(
@@ -352,14 +354,25 @@ object BatchCodec:
         )
         val rows = decodedLength(batch, maxRows)
         ColumnMetrics.decoded(rows)
+        // One column is wrapped. The other stays a present int, including a null.
+        val (missing, present, absentOnLeft) = absent match
+          case AbsentSide.Left => (left, right, true)
+          case AbsentSide.Right => (right, left, false)
         Seq.tabulate(rows) { row =>
-          val rightValue = if (right.isValid(row)) Some(right.values(row)) else None
-          (presentInt(keys, row), (presentInt(left, row), rightValue))
+          val key = presentInt(keys, row)
+          val missingValue = optionalInt(missing, row)
+          val presentValue = presentInt(present, row)
+          if (absentOnLeft) then (key, (missingValue, presentValue))
+          else (key, (presentValue, missingValue))
         }
       case _ =>
         throw new IllegalArgumentException(
           s"outer join output is not three Int32 columns: ${batch.schema}",
         )
+
+  /** A clear bit is absence. A set bit is the stored `Int`. This is the only `Option` site. */
+  private def optionalInt(column: Int32Column, row: Int): Option[Int] =
+    if (column.isValid(row)) Some(column.values(row)) else None
 
   /** A clear bit stays null. A set bit is the stored `Int`. */
   @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))

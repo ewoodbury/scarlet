@@ -30,10 +30,10 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    accepted.size shouldBe 163
-    // Right and full outer joins stay excluded. Broadcast and shuffle-hash left outer joins are
-    // accepted. The unhinted left outer fixture was already removed when broadcast was accepted.
-    excluded.size shouldBe 51
+    accepted.size shouldBe 166
+    // Full outer joins stay excluded. Broadcast, shuffle-hash, and unhinted right outer joins are
+    // accepted. The unhinted right outer fixture moved from excluded. Sort-merge has no fixture.
+    excluded.size shouldBe 50
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -427,6 +427,24 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         hashedInfo(layout),
         Some("HashLeftOuter(Exchange(Scan), Exchange(Scan))"),
       ),
+      AcceptedCase(
+        "broadcast right outer join",
+        Plan.RightOuterJoinOp(pairSource, rightPairSource, Some(Plan.JoinStrategy.Broadcast)),
+        narrowInfo(2, layout),
+        Some("BroadcastRightOuter(Scan, Scan)"),
+      ),
+      AcceptedCase(
+        "shuffle-hash right outer join",
+        Plan.RightOuterJoinOp(pairSource, rightPairSource, Some(Plan.JoinStrategy.ShuffleHash)),
+        hashedInfo(layout),
+        Some("HashRightOuter(Exchange(Scan), Exchange(Scan))"),
+      ),
+      AcceptedCase(
+        "right outer join",
+        DistCollection(pairSource).rightOuterJoin(DistCollection(rightPairSource)).plan,
+        hashedInfo(layout),
+        Some("HashRightOuter(Exchange(Scan), Exchange(Scan))"),
+      ),
       AcceptedCase("join after int aggregate", joinAfterAggregate, hashedInfo(layout), Some("HashJoin(Exchange(HashAggregate(Exchange(Scan))), Exchange(Scan))")),
       AcceptedCase("join-key filter", joinKeyFilter, hashedInfo(layout), Some("FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))")),
       AcceptedCase("join-left-value filter", joinLeftFilter, hashedInfo(layout), Some("FilterTripleLeftValue(HashJoin(Exchange(Scan), Exchange(Scan)))")),
@@ -559,10 +577,6 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         DistCollection(pairSource).sortMergeJoin(DistCollection(rightPairSource)).plan,
       ),
       ExcludedCase(
-        "right outer join",
-        DistCollection(pairSource).rightOuterJoin(DistCollection(rightPairSource)).plan,
-      ),
-      ExcludedCase(
         "full outer join",
         DistCollection(pairSource).fullOuterJoin(DistCollection(rightPairSource)).plan,
       ),
@@ -642,7 +656,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
 
   /**
    * `lower` and the action gates share one decision. A refused plan, including a sort-merge join,
-   * an outer join, and a type-changing pair map, makes every gate return `None`. An accepted
+   * a full outer join, and a type-changing pair map, makes every gate return `None`. An accepted
    * plan
    * runs `tryRun` and `tryCount`. `tryTake` runs when the physical tree keeps input partitions.
    * `trySumInt`, `trySumLong`, and `trySumDouble` run only for that numeric kind. `tryGroupedSum` equals
@@ -700,8 +714,9 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case PhysicalOp.Column(child, _) => preservesPartitions(child)
     case PhysicalOp.MapValue(child) => preservesPartitions(child)
     case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.HashJoin(_, _) |
-        PhysicalOp.HashLeftOuter(_, _) | PhysicalOp.BroadcastJoin(_, _, _) |
-        PhysicalOp.BroadcastLeftOuter(_, _) =>
+        PhysicalOp.HashLeftOuter(_, _) | PhysicalOp.HashRightOuter(_, _) |
+        PhysicalOp.BroadcastJoin(_, _, _) | PhysicalOp.BroadcastLeftOuter(_, _) |
+        PhysicalOp.BroadcastRightOuter(_, _) =>
       false
 
   private def assertRowPath[A](plan: Plan[A]): Unit =
