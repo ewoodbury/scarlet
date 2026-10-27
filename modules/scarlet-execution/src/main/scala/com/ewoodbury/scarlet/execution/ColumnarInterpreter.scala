@@ -592,7 +592,7 @@ private[execution] object ColumnarInterpreter:
           )
         case other =>
           throw new IllegalArgumentException(
-            s"broadcast join output has ${other.size} columns",
+            s"join output has ${other.size} columns",
           )
     }
 
