@@ -30,10 +30,10 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    accepted.size shouldBe 166
-    // Full outer joins stay excluded. Broadcast, shuffle-hash, and unhinted right outer joins are
-    // accepted. The unhinted right outer fixture moved from excluded. Sort-merge has no fixture.
-    excluded.size shouldBe 50
+    accepted.size shouldBe 169
+    // Broadcast, shuffle-hash, and unhinted full outer joins are accepted. The unhinted full
+    // outer fixture moved from excluded. Sort-merge has no fixture.
+    excluded.size shouldBe 49
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -445,6 +445,24 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         hashedInfo(layout),
         Some("HashRightOuter(Exchange(Scan), Exchange(Scan))"),
       ),
+      AcceptedCase(
+        "broadcast full outer join",
+        Plan.FullOuterJoinOp(pairSource, rightPairSource, Some(Plan.JoinStrategy.Broadcast)),
+        narrowInfo(2, layout),
+        Some("BroadcastFullOuter(Scan, Scan)"),
+      ),
+      AcceptedCase(
+        "shuffle-hash full outer join",
+        Plan.FullOuterJoinOp(pairSource, rightPairSource, Some(Plan.JoinStrategy.ShuffleHash)),
+        hashedInfo(layout),
+        Some("HashFullOuter(Exchange(Scan), Exchange(Scan))"),
+      ),
+      AcceptedCase(
+        "full outer join",
+        DistCollection(pairSource).fullOuterJoin(DistCollection(rightPairSource)).plan,
+        hashedInfo(layout),
+        Some("HashFullOuter(Exchange(Scan), Exchange(Scan))"),
+      ),
       AcceptedCase("join after int aggregate", joinAfterAggregate, hashedInfo(layout), Some("HashJoin(Exchange(HashAggregate(Exchange(Scan))), Exchange(Scan))")),
       AcceptedCase("join-key filter", joinKeyFilter, hashedInfo(layout), Some("FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))")),
       AcceptedCase("join-left-value filter", joinLeftFilter, hashedInfo(layout), Some("FilterTripleLeftValue(HashJoin(Exchange(Scan), Exchange(Scan)))")),
@@ -576,10 +594,6 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         "explicit sort-merge join",
         DistCollection(pairSource).sortMergeJoin(DistCollection(rightPairSource)).plan,
       ),
-      ExcludedCase(
-        "full outer join",
-        DistCollection(pairSource).fullOuterJoin(DistCollection(rightPairSource)).plan,
-      ),
       ExcludedCase("single-precision Float source", floatSource),
       ExcludedCase("single-precision Float map", floatMap),
       ExcludedCase("all-null string source", allNullStringSource),
@@ -655,8 +669,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     )
 
   /**
-   * `lower` and the action gates share one decision. A refused plan, including a sort-merge join,
-   * a full outer join, and a type-changing pair map, makes every gate return `None`. An accepted
+   * `lower` and the action gates share one decision. A refused plan, including a sort-merge join
+   * and a type-changing pair map, makes every gate return `None`. An accepted
    * plan
    * runs `tryRun` and `tryCount`. `tryTake` runs when the physical tree keeps input partitions.
    * `trySumInt`, `trySumLong`, and `trySumDouble` run only for that numeric kind. `tryGroupedSum` equals
@@ -715,8 +729,9 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case PhysicalOp.MapValue(child) => preservesPartitions(child)
     case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.HashJoin(_, _) |
         PhysicalOp.HashLeftOuter(_, _) | PhysicalOp.HashRightOuter(_, _) |
-        PhysicalOp.BroadcastJoin(_, _, _) | PhysicalOp.BroadcastLeftOuter(_, _) |
-        PhysicalOp.BroadcastRightOuter(_, _) =>
+        PhysicalOp.HashFullOuter(_, _) | PhysicalOp.BroadcastJoin(_, _, _) |
+        PhysicalOp.BroadcastLeftOuter(_, _) | PhysicalOp.BroadcastRightOuter(_, _) |
+        PhysicalOp.BroadcastFullOuter(_, _) =>
       false
 
   private def assertRowPath[A](plan: Plan[A]): Unit =

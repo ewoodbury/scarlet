@@ -209,8 +209,6 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     val refused = Seq(
       Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
       Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
-      Plan.FullOuterJoinOp(left, right, None),
-      Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
       Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
     )
     refused.foreach(plan => ColumnarPlanner.lower(plan) shouldBe None)

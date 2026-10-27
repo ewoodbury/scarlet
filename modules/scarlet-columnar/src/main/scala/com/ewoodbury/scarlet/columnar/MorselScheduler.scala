@@ -18,12 +18,34 @@ object MorselScheduler:
   def map[M, A](morsels: Vector[M], parallelism: Int)(
       worker: (Int, M) => A,
   ): Vector[A] =
+    dispatch(morsels, parallelism, byThread = false, (_, index, morsel) => worker(index, morsel))
+
+  /**
+   * Same schedule as [[map]]. The worker receives the thread id instead of the morsel index.
+   *
+   * Ids run from 0 until `min(parallelism, morsels.length)`. One thread keeps one id for every
+   * morsel it runs, including a morsel it steals. `parallelism` of 1, or a single morsel, uses id
+   * 0 on the calling thread. The call joins before it returns, so a buffer written by id can be
+   * read afterwards with plain stores.
+   */
+  def mapByThread[M, A](morsels: Vector[M], parallelism: Int)(
+      worker: (Int, M) => A,
+  ): Vector[A] =
+    dispatch(morsels, parallelism, byThread = true, (id, _, morsel) => worker(id, morsel))
+
+  private def dispatch[M, A](
+      morsels: Vector[M],
+      parallelism: Int,
+      byThread: Boolean,
+      worker: (Int, Int, M) => A,
+  ): Vector[A] =
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     if (morsels.isEmpty) then Vector.empty
     else if (parallelism == 1 || morsels.length == 1) then
       morsels.iterator.zipWithIndex.map { (morsel, index) =>
         ColumnMetrics.visit()
-        worker(index, morsel)
+        val id = if (byThread) then 0 else index
+        worker(id, index, morsel)
       }.toVector
     else
       val workers = math.min(parallelism, morsels.length)
@@ -57,7 +79,7 @@ object MorselScheduler:
       slots: Array[AtomicReference[Option[A]]],
       failure: AtomicReference[Option[Throwable]],
       morsels: Vector[M],
-      worker: (Int, M) => A,
+      worker: (Int, Int, M) => A,
   ): Unit =
     if (failure.get().isEmpty) then
       take(id, deques, failure) match
@@ -68,7 +90,7 @@ object MorselScheduler:
           }
           try
             ColumnMetrics.visit()
-            slots(index).set(Some(worker(index, morsel)))
+            slots(index).set(Some(worker(id, index, morsel)))
           catch case thrown: Throwable => failure.compareAndSet(None, Some(thrown))
           drain(id, deques, slots, failure, morsels, worker)
 

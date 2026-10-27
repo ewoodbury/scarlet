@@ -79,7 +79,15 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * right exchange carries a null key to partition 0. The left exchange drops a null key. The
  * left-outer kernel runs with those roles, then the value columns are swapped back to
  * `(key, left, right)`. Absence is the left value's clear bit. A null value stays on the row path
- * the same way. Sort-merge, and every full outer join, stay on the row path. [[tryCount]] and
+ * the same way. A full outer join on int pairs lowers for a broadcast hint, a shuffle-hash hint,
+ * or an absent hint. Broadcast is [[PhysicalOp.BroadcastFullOuter]]: the right input is built and
+ * the left input is the probe side, with no exchange. Shuffle-hash and an absent hint are
+ * [[PhysicalOp.HashFullOuter]]. Both exchanges carry a null key to partition 0. Each broadcast
+ * probe thread keeps its own matched-row bitmap, and the bitmaps are OR'd after the probes join.
+ * Each shuffle partition keeps one bitmap and emits its own unmatched build rows. A null build key
+ * is carried outside the table and emitted once. An empty probe still emits every build row.
+ * Either value's clear bit is absence. A null value stays on the row path. The matched-row bitmaps
+ * are not part of `broadcastBuildBudgetBytes`. Sort-merge stays on the row path. [[tryCount]] and
  * [[trySumInt]] fold an int filter/map chain that starts at a scan or at `keys` or `values`,
  * including an int `mapValues`, and do not write that chain. Sum folds one trailing project and
  * chains longer than four. Count folds those, chains of two to four steps, and a string scan under
@@ -142,10 +150,12 @@ object ColumnarPlanner:
    * lowers for a broadcast hint, a shuffle-hash hint, or an absent hint. An absent hint uses the
    * shuffle-hash op, matching an inner join. A right outer join on int pairs lowers for a
    * broadcast hint, a shuffle-hash hint, or an absent hint. An absent hint uses the shuffle-hash
-   * op. The left input is the build side and the right input is the probe side. Sort-merge and
-   * every full outer join return `None`. A null value does not change that shape: [[tryRun]] reads
-   * the value columns and returns `None`, and the row path runs. [[partitioning]] and [[tryRun]]
-   * follow a refusal. They also drop a lowered tree whose layout is invalid.
+   * op. The left input is the build side and the right input is the probe side. A full outer join
+   * on int pairs lowers for a broadcast hint, a shuffle-hash hint, or an absent hint. An absent
+   * hint uses the shuffle-hash op. Sort-merge returns `None`. A null value does not change that
+   * shape: [[tryRun]] reads the value columns and returns `None`, and the row path runs.
+   * [[partitioning]] and [[tryRun]] follow a refusal. They also drop a lowered tree whose layout
+   * is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -580,9 +590,9 @@ object ColumnarPlanner:
     case PhysicalOp.Column(child, _) => preservedPartitions(child)
     case PhysicalOp.MapValue(child) => preservedPartitions(child)
     case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.HashLeftOuter |
-        _: PhysicalOp.HashRightOuter | _: PhysicalOp.BroadcastJoin |
+        _: PhysicalOp.HashRightOuter | _: PhysicalOp.HashFullOuter | _: PhysicalOp.BroadcastJoin |
         _: PhysicalOp.BroadcastLeftOuter | _: PhysicalOp.BroadcastRightOuter |
-        _: PhysicalOp.Exchange =>
+        _: PhysicalOp.BroadcastFullOuter | _: PhysicalOp.Exchange =>
       None
 
   private def lowerPlan(plan: Plan[_]): Option[PhysicalOp] =
@@ -680,7 +690,30 @@ object ColumnarPlanner:
               )
             case _ => None
         case _ => None
-    // Sort-merge left or right outer, and every full outer join, stay on the row path.
+    case Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)) =>
+      (lowerPlan(left), lowerPlan(right)) match
+        case (Some(leftOp), Some(rightOp)) =>
+          (leftOp.kind, rightOp.kind) match
+            case (PhysicalOp.Kind.Pairs, PhysicalOp.Kind.Pairs) =>
+              Some(PhysicalOp.BroadcastFullOuter(left = leftOp, right = rightOp))
+            case _ => None
+        case _ => None
+    // An absent hint is shuffle-hash, the same rule as an inner join and the other outer joins.
+    // The row executor shuffle-hashes an unhinted outer join, so that plan is this op.
+    case Plan.FullOuterJoinOp(left, right, strategy) if acceptsShuffleHash(strategy) =>
+      (lowerPlan(left), lowerPlan(right)) match
+        case (Some(leftOp), Some(rightOp)) =>
+          (leftOp.kind, rightOp.kind) match
+            case (PhysicalOp.Kind.Pairs, PhysicalOp.Kind.Pairs) =>
+              Some(
+                PhysicalOp.HashFullOuter(
+                  PhysicalOp.Exchange(leftOp),
+                  PhysicalOp.Exchange(rightOp),
+                ),
+              )
+            case _ => None
+        case _ => None
+    // Sort-merge left, right, or full outer stays on the row path.
     case _: Plan.LeftOuterJoinOp[_, _, _] | _: Plan.RightOuterJoinOp[_, _, _] |
         _: Plan.FullOuterJoinOp[_, _, _] =>
       None
@@ -975,7 +1008,7 @@ object ColumnarPlanner:
     case PhysicalOp.Column(child, _) => infoOf(child).withoutPairDistribution
     case PhysicalOp.MapValue(child) => infoOf(child)
     case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.HashLeftOuter |
-        _: PhysicalOp.HashRightOuter =>
+        _: PhysicalOp.HashRightOuter | _: PhysicalOp.HashFullOuter =>
       hashed
     case PhysicalOp.BroadcastJoin(left, right, buildSide) =>
       broadcastInfo(left, right, buildSide)
@@ -983,6 +1016,8 @@ object ColumnarPlanner:
       infoOf(left).copy(layout = layoutOf(PhysicalOp.Kind.Triples))
     case PhysicalOp.BroadcastRightOuter(_, right) =>
       infoOf(right).copy(layout = layoutOf(PhysicalOp.Kind.Triples))
+    case PhysicalOp.BroadcastFullOuter(left, _) =>
+      infoOf(left).copy(layout = layoutOf(PhysicalOp.Kind.Triples))
     case PhysicalOp.Exchange(_) =>
       throw new IllegalStateException("exchange is only a child of aggregate or join")
     case PhysicalOp.Scan(kind, partitions) =>

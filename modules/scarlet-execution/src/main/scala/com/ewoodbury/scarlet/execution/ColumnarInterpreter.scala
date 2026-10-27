@@ -16,8 +16,8 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * fails a `require` guard with `IllegalArgumentException`, and that is not a fallback either. A
  * `ClassCastException` from a filter, or from a string map that declares `String` and returns
  * another value, is still a fallback, and that function may already have run. A null value on a
- * left or right outer join is the same fallback: the value columns are already encoded, and the
- * kernel is not chosen.
+ * left, right, or full outer join is the same fallback: the value columns are already encoded, and
+ * the kernel is not chosen.
  */
 @SuppressWarnings(
   Array(
@@ -63,7 +63,7 @@ private[execution] object ColumnarInterpreter:
     /**
      * Outer-join batches stay `(key, left, right)`. `absent` tells [[BatchCodec.decodeOuter]]
      * which value column is the `Option`. [[AbsentSide.Right]] is a left outer join.
-     * [[AbsentSide.Left]] is a right outer join.
+     * [[AbsentSide.Left]] is a right outer join. [[AbsentSide.Both]] is a full outer join.
      */
     case Outer(parts: Vector[ColumnBatch], absent: AbsentSide)
 
@@ -341,6 +341,47 @@ private[execution] object ColumnarInterpreter:
           ScarletConf.get.broadcastBuildBudgetBytes,
         )
       }
+    case (
+          Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
+          PhysicalOp.BroadcastFullOuter(leftOp, rightOp),
+        ) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      /* preserveAbsence keeps null keys. The left input is the probe. The right input is the
+       * build. */
+      val probe = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
+      val build = pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+      fullOuter(probe, build) { (probeBatches, buildBatches) =>
+        ColumnPipeline.broadcastFullOuterJoin(
+          probeBatches,
+          buildBatches,
+          ColumnarPlanner.parallelism,
+          ScarletConf.get.broadcastBuildBudgetBytes,
+        )
+      }
+    case (
+          Plan.FullOuterJoinOp(left, right, strategy),
+          PhysicalOp.HashFullOuter(
+            PhysicalOp.Exchange(leftOp),
+            PhysicalOp.Exchange(rightOp),
+          ),
+        ) if ColumnarPlanner.acceptsShuffleHash(strategy) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      // preserveAbsence keeps null keys. Both exchanges carry a null key. The right input is the
+      // build side. A null build key is carried outside the table.
+      val probe = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
+      val build = pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+      fullOuter(probe, build) { (probeBatches, buildBatches) =>
+        ColumnPipeline.hashFullOuterJoin(
+          probeBatches,
+          buildBatches,
+          ColumnarPlanner.shuffleWidth,
+          ColumnarPlanner.parallelism,
+          ColumnarPlanner.batchSize,
+          ScarletConf.get.broadcastBuildBudgetBytes,
+        )
+      }
     case _ =>
       throw new IllegalStateException(
         s"physical tree does not match ${plan.getClass.getSimpleName}",
@@ -363,6 +404,23 @@ private[execution] object ColumnarInterpreter:
         "a null value on a right outer join stays on the row path",
       )
     Columns.Outer(swapValueColumns(join(probe, build)), AbsentSide.Left)
+
+  /**
+   * Run a full outer join. The kernel writes `(key, probe value, build value)`. The probe is the
+   * left input, so the batch is already `(key, left, right)`. A clear bit on either value column
+   * is absence. A null value is not absence, and this path cannot represent one.
+   */
+  private def fullOuter(
+      probe: Vector[ColumnBatch],
+      build: Vector[ColumnBatch],
+  )(join: (Vector[ColumnBatch], Vector[ColumnBatch]) => Vector[ColumnBatch]): Columns =
+    val valuesPresent =
+      ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
+    if (!valuesPresent) then
+      throw new ClassCastException(
+        "a null value on a full outer join stays on the row path",
+      )
+    Columns.Outer(join(probe, build), AbsentSide.Both)
 
   private def interpretPipeline(
       plan: Plan[_],

@@ -336,9 +336,10 @@ object BatchCodec:
   /**
    * Outer-join rows are `(key, left, right)`. `absent` names the value column wrapped in `Option`.
    * [[AbsentSide.Left]] returns `(key, (Option[Int], Int))`. [[AbsentSide.Right]] returns
-   * `(key, (Int, Option[Int]))`. A clear bit on that column is `None`. A clear bit on the key, or
-   * on the other value, stays null. A null value is not absence. `maxRows` limits the prefix the
-   * same way as [[decodeIntTriples]]. Full outer is not decoded here.
+   * `(key, (Int, Option[Int]))`. [[AbsentSide.Both]] returns `(key, (Option[Int], Option[Int]))`.
+   * A clear bit on an optional column is `None`. A clear bit on the key, or on a column that is
+   * not optional, stays null. A null value is not absence. [[optionalInt]] is the only `Option`
+   * construction. `maxRows` limits the prefix the same way as [[decodeIntTriples]].
    */
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
   def decodeOuter(batch: ColumnBatch, absent: AbsentSide): Seq[Any] =
@@ -354,17 +355,19 @@ object BatchCodec:
         )
         val rows = decodedLength(batch, maxRows)
         ColumnMetrics.decoded(rows)
-        // One column is wrapped. The other stays a present int, including a null.
-        val (missing, present, absentOnLeft) = absent match
-          case AbsentSide.Left => (left, right, true)
-          case AbsentSide.Right => (right, left, false)
-        Seq.tabulate(rows) { row =>
-          val key = presentInt(keys, row)
-          val missingValue = optionalInt(missing, row)
-          val presentValue = presentInt(present, row)
-          if (absentOnLeft) then (key, (missingValue, presentValue))
-          else (key, (presentValue, missingValue))
-        }
+        absent match
+          case AbsentSide.Both =>
+            Seq.tabulate(rows) { row =>
+              (presentInt(keys, row), (optionalInt(left, row), optionalInt(right, row)))
+            }
+          case AbsentSide.Left =>
+            Seq.tabulate(rows) { row =>
+              (presentInt(keys, row), (optionalInt(left, row), presentInt(right, row)))
+            }
+          case AbsentSide.Right =>
+            Seq.tabulate(rows) { row =>
+              (presentInt(keys, row), (presentInt(left, row), optionalInt(right, row)))
+            }
       case _ =>
         throw new IllegalArgumentException(
           s"outer join output is not three Int32 columns: ${batch.schema}",
