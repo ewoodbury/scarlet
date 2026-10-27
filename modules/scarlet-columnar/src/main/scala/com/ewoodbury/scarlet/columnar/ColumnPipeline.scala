@@ -274,7 +274,8 @@ object ColumnPipeline:
    * including a null key, is emitted. An empty table emits nothing from the table. Call this only
    * when both value columns are fully valid. A null value is not absence. `buildBudgetBytes`
    * bounds the build table only. The matched-row bitmaps sit beside that table and are not part of
-   * the budget.
+   * the budget. A build with a null key also copies its present-key rows once, so the table never
+   * sees a null key; that copy is outside the budget too.
    */
   def broadcastFullOuterJoin(
       probe: Vector[ColumnBatch],
