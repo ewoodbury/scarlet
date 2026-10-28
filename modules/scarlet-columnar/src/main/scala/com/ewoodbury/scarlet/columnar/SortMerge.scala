@@ -10,8 +10,9 @@ package com.ewoodbury.scarlet.columnar
  *
  * The merge walks two cursors. The smaller key advances. On equality, [[groupEnd]] drains the
  * whole equal-key group on both sides, the cartesian product is written, and both cursors advance
- * past those groups. That drain is the only group walk. A later spilled run uses the same rule.
- * Stability is not required for the multiset. This sort is stable so equal keys keep input order.
+ * past those groups. That drain is the only group walk. [[SortMergeRuns]] applies it across every
+ * spilled run. Stability is not required for the multiset. This sort is stable so equal keys keep
+ * input order.
  *
  * Output columns are `(key, left, right)`, the same schema as the hash join. `build` is the left
  * side and `probe` is the right side. [[joinAll]] zips exchanged partitions by index. An empty
@@ -44,6 +45,24 @@ object SortMerge:
       }
       join(left, right)
     }
+
+  /**
+   * Drops null keys and returns the remaining pairs sorted by key. A spilled morsel uses this when
+   * the partition was not sorted as one side. Equal keys keep their input order.
+   */
+  private[scarlet] def sortedPairs(batch: ColumnBatch): ColumnBatch =
+    val side = sortedSide(batch)
+    if (side.length == 0) then emptyPairs
+    else
+      new ColumnBatch(
+        pairSchema,
+        Vector(
+          Int32Column.of(side.keys, Validity.allValid(side.length), side.length),
+          Int32Column
+            .of(side.values, Validity.fromWords(side.valueWords, side.length), side.length),
+        ),
+        side.length,
+      )
 
   /**
    * First row after the equal-key group that starts at `start`. The side is sorted, so the group
@@ -233,6 +252,16 @@ object SortMerge:
     }
     SortedSide(gatheredKeys, gatheredValues, gatheredWords, count)
 
+  private def emptyPairs: ColumnBatch =
+    new ColumnBatch(
+      pairSchema,
+      Vector(
+        Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0),
+        Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0),
+      ),
+      0,
+    )
+
   private def emptyJoin: ColumnBatch =
     new ColumnBatch(
       joinSchema,
@@ -243,6 +272,9 @@ object SortMerge:
       ),
       0,
     )
+
+  private val pairSchema: Vector[LogicalType] =
+    Vector(LogicalType.Int32, LogicalType.Int32)
 
   private val joinSchema: Vector[LogicalType] =
     Vector(LogicalType.Int32, LogicalType.Int32, LogicalType.Int32)
