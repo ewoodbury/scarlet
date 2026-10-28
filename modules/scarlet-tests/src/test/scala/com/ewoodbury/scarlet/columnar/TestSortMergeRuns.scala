@@ -61,7 +61,7 @@ class TestSortMergeRuns extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       val spilled = triples(join(left, right, batchSize = 2))
 
       spilled should contain theSameElementsAs rowPairs(left, right)
-      SortMergeRuns.filesWrittenForTest shouldBe 6L
+      SortMergeRuns.filesWrittenForTest shouldBe 8L
       Path.of(SortMergeRuns.lastDirectoryForTest) shouldBe dir
       SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
     }
@@ -86,7 +86,7 @@ class TestSortMergeRuns extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       spilled should contain theSameElementsAs rowPairs(left, right)
       spilled.count { case (found, _) => found == key } shouldBe leftCopies * rightCopies
       spilled.count { case (found, _) => found == 8 } shouldBe 1
-      SortMergeRuns.filesWrittenForTest shouldBe 6L
+      SortMergeRuns.filesWrittenForTest shouldBe 8L
       SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
     }
   }
@@ -159,7 +159,7 @@ class TestSortMergeRuns extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       spilled should contain theSameElementsAs rowPairs(left, right)
       spilled.count { case (key, _) => key == Int.MinValue } shouldBe 2
       spilled.count { case (key, _) => key == Int.MaxValue } shouldBe 2
-      SortMergeRuns.filesWrittenForTest shouldBe 8L
+      SortMergeRuns.filesWrittenForTest shouldBe 10L
       SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
     }
   }
@@ -201,6 +201,101 @@ class TestSortMergeRuns extends AnyFlatSpec with Matchers with BeforeAndAfterEac
 
       caught.getMessage shouldBe SortMergeRuns.MergeFailed
       SortMergeRuns.filesWrittenForTest should be > 0L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+  }
+
+  "a side wider than the fan-in" should "match the row path after several passes" in {
+    val left = (0 until 8).map(row => row -> (row + 1))
+    val right = Seq((0, 10), (3, 11), (7, 12))
+    val partition =
+      SortMergeRuns.retainedBytes(left.size) + SortMergeRuns.retainedBytes(right.size)
+    val budget = partition - 1L
+    // batchSize 1 cuts the left side into 8 runs. fanIn 2 reduces 8, 4, then 2: three passes.
+    // The right side has 3 runs: one pass leaves 2, the next leaves 1. Five passes in all.
+    // Intermediates are 7 on the left and 2 on the right, plus the 11 initial runs.
+    withConf(budget, batchSize = 1, fanIn = 2) { dir =>
+      val spilled = triples(join(left, right, batchSize = 1))
+
+      spilled should contain theSameElementsAs rowPairs(left, right)
+      SortMergeRuns.mergePassesForTest shouldBe 5L
+      SortMergeRuns.filesWrittenForTest shouldBe 20L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+  }
+
+  "a duplicate key across a pass boundary" should "emit the cartesian product once" in {
+    val key = 4
+    // batchSize 1 makes each row its own run. fanIn 2 pairs adjacent runs first, so these copies
+    // start in different pairs and meet only in a later pass.
+    val left = Seq((key, 1), (1, 10), (2, 11), (key, 2), (3, 12), (5, 13), (key, 3), (8, 14))
+    val right = Seq((key, 100), (0, 200), (key, 101), (9, 201), (key, 102), (6, 202))
+    val partition =
+      SortMergeRuns.retainedBytes(left.size) + SortMergeRuns.retainedBytes(right.size)
+    val budget = partition - 1L
+
+    withConf(budget, batchSize = 1, fanIn = 2) { dir =>
+      val spilled = triples(join(left, right, batchSize = 1))
+
+      spilled should contain theSameElementsAs rowPairs(left, right)
+      spilled.count { case (found, _) => found == key } shouldBe 9
+      SortMergeRuns.mergePassesForTest should be > 1L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+  }
+
+  "extreme keys across passes" should "match the row path" in {
+    val left = Seq(
+      (Int.MinValue, 1),
+      (0, 2),
+      (Int.MaxValue, 3),
+      (-1, 4),
+      (Int.MinValue, 5),
+      (7, 6),
+      (Int.MaxValue, 7),
+      (8, 8),
+    )
+    val right = Seq(
+      (Int.MaxValue, 9),
+      (1, 10),
+      (Int.MinValue, 11),
+      (2, 12),
+      (Int.MaxValue, 13),
+      (3, 14),
+      (Int.MinValue, 15),
+      (4, 16),
+    )
+    val partition =
+      SortMergeRuns.retainedBytes(left.size) + SortMergeRuns.retainedBytes(right.size)
+    val budget = partition - 1L
+
+    withConf(budget, batchSize = 1, fanIn = 2) { dir =>
+      val spilled = triples(join(left, right, batchSize = 1))
+
+      spilled should contain theSameElementsAs rowPairs(left, right)
+      spilled.count { case (found, _) => found == Int.MinValue } shouldBe 4
+      spilled.count { case (found, _) => found == Int.MaxValue } shouldBe 4
+      SortMergeRuns.mergePassesForTest shouldBe 6L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+  }
+
+  "a failure during a merge pass" should "delete the intermediate runs" in {
+    val left = (0 until 8).map(row => row -> (row + 1))
+    val right = (0 until 8).map(row => row -> (row + 10))
+    val partition =
+      SortMergeRuns.retainedBytes(left.size) + SortMergeRuns.retainedBytes(right.size)
+    val budget = partition - 1L
+
+    withConf(budget, batchSize = 1, fanIn = 2) { dir =>
+      SortMergeRuns.armPassFailure(2)
+      val caught = intercept[IllegalStateException] {
+        val _ = join(left, right, batchSize = 1)
+      }
+
+      caught.getMessage shouldBe SortMergeRuns.MergeFailed
+      // 16 initial runs plus 4 from the first pass. The second pass throws before it publishes.
+      SortMergeRuns.filesWrittenForTest shouldBe 20L
       SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
     }
   }
@@ -283,7 +378,7 @@ class TestSortMergeRuns extends AnyFlatSpec with Matchers with BeforeAndAfterEac
   private def confAt(budget: Long, enabled: Boolean): ScarletConf =
     originalConf.copy(spillEnabled = enabled, spillBudgetBytes = budget)
 
-  private def withConf(budget: Long, batchSize: Int)(body: Path => Unit): Unit =
+  private def withConf(budget: Long, batchSize: Int, fanIn: Int = 8)(body: Path => Unit): Unit =
     val dir = Files.createTempDirectory("scarlet-sort-merge")
     SortMergeRuns.resetForTest()
     ScarletConf.set(
@@ -296,6 +391,7 @@ class TestSortMergeRuns extends AnyFlatSpec with Matchers with BeforeAndAfterEac
         spillDirectory = dir.toString,
         spillMaxFiles = SpillStore.DefaultMaxFiles,
         spillMaxBytes = SpillStore.DefaultMaxBytes,
+        spillFanIn = fanIn,
       ),
     )
     try body(dir)

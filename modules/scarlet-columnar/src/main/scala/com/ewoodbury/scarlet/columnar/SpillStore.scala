@@ -13,11 +13,11 @@ import scala.annotation.tailrec
 /**
  * Writes column batches to a file and reads them back.
  *
- * A spill file is a header, a payload, a footer, and a CRC32 of the payload and the footer. The
- * header holds the magic `SCRSPILL`, the version, the schema, the batch count, and the footer
- * offset and length. Each footer record holds the batch's file offset, byte length, and row count.
- * Int32 and Int64 columns are stored with their validity words. A zero-row batch is legal. Every
- * other column type is refused, including a dictionary string column.
+ * A spill file is a header, a payload, a footer, and a CRC32 of the footer. The header holds the
+ * magic `SCRSPILL`, the version, the schema, the batch count, and the footer offset and length.
+ * Each footer record holds the batch's file offset, byte length, row count, and a CRC32 of that
+ * batch's bytes. Int32 and Int64 columns are stored with their validity words. A zero-row batch is
+ * legal. Every other column type is refused, including a dictionary string column.
  *
  * The bytes are written to `<id>.<pid>.tmp`, fsynced, then moved into `<id>.<pid>.spill` with an
  * atomic move. `maxFiles` and `maxBytes` are exclusive upper bounds on the files this store has
@@ -33,8 +33,10 @@ import scala.annotation.tailrec
  * [[SpillStore.withSpill]] and [[close]] delete the files this store published. Both run on
  * success, on failure, and when the body is cancelled.
  *
- * A reader currently loads the whole file into memory. That is fine for the sizes the first
- * consumer spills, and a streaming reader is a follow-up rather than an assumption.
+ * [[SpillFile.read]] returns every batch after the footer CRC and each batch CRC have been
+ * checked. [[SpillFile.batches]] checks the footer CRC before the first batch and checks each
+ * batch CRC before it yields that batch. The iterator retains the footer index, one batch, and
+ * that batch's buffer.
  */
 final class SpillStore private (
     val directory: Path,
@@ -52,9 +54,23 @@ final class SpillStore private (
     sweep(SpillStore.processAlive)
   }
 
-  def write(batches: Vector[ColumnBatch]): SpillFile = synchronized {
-    if (closed.get()) then throw new IllegalStateException("spill store is closed")
+  def write(batches: Vector[ColumnBatch]): SpillFile =
     val schema = SpillStore.preflight(batches)
+    writeStreaming(schema) { sink =>
+      batches.foreach(sink.write)
+    }
+
+  /**
+   * Publishes one spill file whose batches are written as `emit` produces them. The temp file is
+   * removed when `emit` throws, and nothing is published until the footer is in place.
+   */
+  private[columnar] def writeStreaming(
+      schema: Vector[LogicalType],
+  )(emit: SpillBatchWriter => Unit): SpillFile = synchronized {
+    if (closed.get()) then throw new IllegalStateException("spill store is closed")
+    schema.foreach { logicalType =>
+      val _ = SpillLayout.tag(logicalType)
+    }
     val records = published.get
     if (records.length + 1 >= maxFiles) then
       throw new IllegalStateException(s"spill maxFiles cap is $maxFiles")
@@ -62,7 +78,20 @@ final class SpillStore private (
     val id = UUID.randomUUID.toString
     val temporary = directory.resolve(s"$id.$pid.tmp")
     val destination = directory.resolve(s"$id.$pid.spill")
-    try SpillCodec.write(temporary, schema, batches)
+    val channel =
+      try FileChannel.open(temporary, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+      catch
+        case thrown: Throwable =>
+          val _ = Files.deleteIfExists(temporary)
+          throw thrown
+    try SpillCodec.writeChannel(channel, schema)(emit)
+    catch
+      case thrown: Throwable =>
+        try channel.close()
+        catch case _: Throwable => ()
+        val _ = Files.deleteIfExists(temporary)
+        throw thrown
+    try channel.close()
     catch
       case thrown: Throwable =>
         val _ = Files.deleteIfExists(temporary)
@@ -178,7 +207,7 @@ object SpillStore:
     }
     schema
 
-  private def supported(column: Column): Unit = column match
+  private[columnar] def supported(column: Column): Unit = column match
     case _: Int32Column => ()
     case _: Int64Column => ()
     case other =>
@@ -233,25 +262,42 @@ object SpillStore:
     if (iterator.hasNext) then collect(iterator, acc :+ iterator.next())
     else acc
 
-/** One published spill file. [[read]] checks the CRC32 before it returns batches. */
+/** One published spill file. [[read]] and [[batches]] check checksums before they return rows. */
 final class SpillFile private[columnar] (val location: Path, release: Path => Unit):
 
   def read(): Vector[ColumnBatch] = SpillCodec.read(location)
 
+  /**
+   * Batches in file order, one at a time. The footer CRC is checked before this returns the first
+   * batch. Each batch CRC is checked before that batch is returned. The channel closes when the
+   * iterator is exhausted, when a checksum fails, and when [[AutoCloseable.close]] runs.
+   */
+  def batches(): Iterator[ColumnBatch] & AutoCloseable = SpillCodec.batches(location)
+
   def delete(): Unit = release(location)
+
+/** Accepts one batch of a spill file that is still being written. */
+private[columnar] trait SpillBatchWriter:
+
+  def write(batch: ColumnBatch): Unit
 
 /** Little-endian layout shared by the writer, the reader, and the tests that corrupt a file. */
 private[columnar] object SpillLayout:
 
   val MagicText: String = "SCRSPILL"
-  val Version: Int = 1
+  val Version: Int = 2
   val Int32Tag: Int = 1
   val Int64Tag: Int = 2
-  val FooterEntryBytes: Int = 20
+
+  /** Offset, length, row count, and the CRC32 of that batch. */
+  val FooterEntryBytes: Int = 24
 
   def magic: Array[Byte] = MagicText.getBytes(StandardCharsets.US_ASCII)
 
   def headerSize(columnCount: Int): Int = 32 + columnCount * 4
+
+  /** File offset of the batch-count field. */
+  def batchCountField(columnCount: Int): Int = 16 + columnCount * 4
 
   /** File offset of the footer-offset field. */
   def footerField(columnCount: Int): Int = 20 + columnCount * 4
@@ -268,81 +314,50 @@ private[columnar] object SpillLayout:
 
 private object SpillCodec:
 
-  private final case class BatchSpan(offset: Long, length: Long, rows: Int)
+  private final case class BatchSpan(offset: Long, length: Long, rows: Int, crc: Int)
 
-  def write(temporary: Path, schema: Vector[LogicalType], batches: Vector[ColumnBatch]): Unit =
-    val channel = FileChannel.open(
-      temporary,
-      StandardOpenOption.CREATE_NEW,
-      StandardOpenOption.WRITE,
-    )
-    try
-      val header = headerBytes(schema, batches.length, 0L, 0)
-      val crc = new CRC32
-      val _ = writeFully(channel, crc, header, checksum = false)
-      val spans = writePayload(channel, crc, batches, header.length.toLong)
-      val footer = footerBytes(spans)
-      val _ = writeFully(channel, crc, footer, checksum = true)
-      val _ = writeFully(channel, crc, intBytes(crc.getValue.toInt), checksum = false)
-      patchHeader(
-        channel,
-        schema.length,
-        header.length.toLong + payloadLength(spans),
-        footer.length,
-      )
-      channel.force(true)
-    finally channel.close()
+  def writeChannel(
+      channel: FileChannel,
+      schema: Vector[LogicalType],
+  )(emit: SpillBatchWriter => Unit): Unit =
+    val header = headerBytes(schema, 0, 0L, 0)
+    val ignored = new CRC32
+    val _ = writeFully(channel, ignored, header, checksum = false)
+    val writer = new Writer(channel, schema)
+    emit(writer)
+    writer.finish()
 
   def read(location: Path): Vector[ColumnBatch] =
-    require(Files.isRegularFile(location), s"spill file is missing: $location")
-    val bytes = Files.readAllBytes(location)
-    val header = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-    require(bytes.length >= SpillLayout.headerSize(0), "truncated spill file")
-    val magic = new Array[Byte](SpillLayout.MagicText.length)
-    header.get(magic)
-    require(Arrays.equals(magic, SpillLayout.magic), "spill magic mismatch")
-    val version = header.getInt
-    require(version == SpillLayout.Version, s"spill version $version is not supported")
-    val columnCount = header.getInt
-    require(columnCount >= 0, s"column count must be >= 0, got $columnCount")
-    require(columnCount <= (Int.MaxValue - 32) / 4, "spill schema is too wide")
-    require(bytes.length >= SpillLayout.headerSize(columnCount), "truncated spill file")
-    val schema =
-      (0 until columnCount).iterator.map(_ => SpillLayout.logicalType(header.getInt)).toVector
-    val batchCount = header.getInt
-    require(batchCount >= 0, s"batch count must be >= 0, got $batchCount")
-    require(
-      batchCount <= Int.MaxValue / SpillLayout.FooterEntryBytes,
-      "spill batch count is too large",
-    )
-    val footerOffset = header.getLong
-    val footerLength = header.getInt
-    require(footerLength >= 0, s"spill footer length must be >= 0, got $footerLength")
-    require(
-      footerLength == batchCount * SpillLayout.FooterEntryBytes,
-      "spill footer length does not match the batch count",
-    )
-    val headerSize = SpillLayout.headerSize(columnCount)
-    require(footerOffset >= headerSize.toLong, "spill footer starts inside the header")
-    val crcAt = footerOffset + footerLength.toLong
-    require(crcAt >= footerOffset, "spill footer range overflows")
-    require(crcAt + 4L == bytes.length.toLong, "spill file length does not match the footer")
-    verifyCrc(bytes, headerSize, footerOffset, footerLength)
-    val spans = readFooter(bytes, footerOffset, batchCount)
-    decode(bytes, schema, spans, footerOffset)
+    val iterator = batches(location)
+    try iterator.toVector
+    finally iterator.close()
 
-  private def writePayload(
-      channel: FileChannel,
-      crc: CRC32,
-      batches: Vector[ColumnBatch],
-      origin: Long,
-  ): Vector[BatchSpan] =
-    val (_, spans) = batches.foldLeft((origin, Vector.empty[BatchSpan])) { (state, batch) =>
-      val (cursor, acc) = state
-      val written = writeBatch(channel, crc, batch)
-      (cursor + written, acc :+ BatchSpan(cursor, written, batch.length))
-    }
-    spans
+  def batches(location: Path): Iterator[ColumnBatch] & AutoCloseable =
+    require(Files.isRegularFile(location), s"spill file is missing: $location")
+    val channel = FileChannel.open(location, StandardOpenOption.READ)
+    try open(channel)
+    catch
+      case thrown: Throwable =>
+        channel.close()
+        throw thrown
+
+  private def open(channel: FileChannel): BatchIterator =
+    val size = channel.size()
+    val prefix = readFully(channel, 0L, SpillLayout.headerSize(0))
+    val columnCount = columnCountOf(prefix)
+    val headerSize = SpillLayout.headerSize(columnCount)
+    val header =
+      if (columnCount == 0) then prefix
+      else concat(prefix, readFully(channel, prefix.length.toLong, headerSize - prefix.length))
+    val parsed = parseHeader(header)
+    val crcAt = parsed.footerOffset + parsed.footerLength.toLong
+    require(crcAt >= parsed.footerOffset, "spill footer range overflows")
+    require(crcAt + 4L == size, "spill file length does not match the footer")
+    val footer = readFully(channel, parsed.footerOffset, parsed.footerLength)
+    val stored = readFully(channel, crcAt, 4)
+    verifyFooter(footer, stored)
+    val spans = readSpans(footer, parsed, headerSize)
+    new BatchIterator(channel, parsed.schema, spans)
 
   private def writeBatch(channel: FileChannel, crc: CRC32, batch: ColumnBatch): Long =
     batch.columns.foldLeft(0L) { (written, column) =>
@@ -394,9 +409,6 @@ private object SpillCodec:
     (0 until length).foreach(row => buffer.putLong(values(row)))
     writeFully(channel, crc, buffer.array(), checksum = true)
 
-  private def payloadLength(spans: Vector[BatchSpan]): Long =
-    spans.foldLeft(0L)((total, span) => total + span.length)
-
   private def headerBytes(
       schema: Vector[LogicalType],
       batchCount: Int,
@@ -422,15 +434,21 @@ private object SpillCodec:
       buffer.putLong(span.offset)
       buffer.putLong(span.length)
       buffer.putInt(span.rows)
+      buffer.putInt(span.crc)
     }
     buffer.array()
 
   private def patchHeader(
       channel: FileChannel,
       columnCount: Int,
+      batchCount: Int,
       footerOffset: Long,
       footerLength: Int,
   ): Unit =
+    val count = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
+    count.putInt(batchCount)
+    count.flip()
+    writeAt(channel, count, SpillLayout.batchCountField(columnCount).toLong)
     val buffer = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN)
     buffer.putLong(footerOffset)
     buffer.putInt(footerLength)
@@ -469,66 +487,172 @@ private object SpillCodec:
       pending = buffer.hasRemaining
     }
 
-  private def verifyCrc(
-      bytes: Array[Byte],
-      headerSize: Int,
+  private def columnCountOf(prefix: Array[Byte]): Int =
+    val header = ByteBuffer.wrap(prefix).order(ByteOrder.LITTLE_ENDIAN)
+    val magic = new Array[Byte](SpillLayout.MagicText.length)
+    header.get(magic)
+    require(Arrays.equals(magic, SpillLayout.magic), "spill magic mismatch")
+    val version = header.getInt
+    require(version == SpillLayout.Version, s"spill version $version is not supported")
+    val columnCount = header.getInt
+    require(columnCount >= 0, s"column count must be >= 0, got $columnCount")
+    require(columnCount <= (Int.MaxValue - 32) / 4, "spill schema is too wide")
+    columnCount
+
+  private final case class ParsedHeader(
+      schema: Vector[LogicalType],
+      batchCount: Int,
       footerOffset: Long,
       footerLength: Int,
-  ): Unit =
-    val region = footerOffset - headerSize + footerLength.toLong
-    require(region >= 0L && region <= Int.MaxValue.toLong, "spill checksum range is invalid")
+  )
+
+  private def parseHeader(bytes: Array[Byte]): ParsedHeader =
+    val header = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    val magic = new Array[Byte](SpillLayout.MagicText.length)
+    header.get(magic)
+    require(Arrays.equals(magic, SpillLayout.magic), "spill magic mismatch")
+    val version = header.getInt
+    require(version == SpillLayout.Version, s"spill version $version is not supported")
+    val columnCount = header.getInt
+    require(columnCount >= 0, s"column count must be >= 0, got $columnCount")
+    require(bytes.length >= SpillLayout.headerSize(columnCount), "truncated spill file")
+    val schema =
+      (0 until columnCount).iterator.map(_ => SpillLayout.logicalType(header.getInt)).toVector
+    val batchCount = header.getInt
+    require(batchCount >= 0, s"batch count must be >= 0, got $batchCount")
+    require(
+      batchCount <= Int.MaxValue / SpillLayout.FooterEntryBytes,
+      "spill batch count is too large",
+    )
+    val footerOffset = header.getLong
+    val footerLength = header.getInt
+    require(footerLength >= 0, s"spill footer length must be >= 0, got $footerLength")
+    require(
+      footerLength == batchCount * SpillLayout.FooterEntryBytes,
+      "spill footer length does not match the batch count",
+    )
+    require(
+      footerOffset >= SpillLayout.headerSize(columnCount).toLong,
+      "spill footer starts inside the header",
+    )
+    ParsedHeader(schema, batchCount, footerOffset, footerLength)
+
+  private def verifyFooter(footer: Array[Byte], storedBytes: Array[Byte]): Unit =
     val crc = new CRC32
-    crc.update(bytes, headerSize, region.toInt)
-    val stored = ByteBuffer
-      .wrap(bytes, (footerOffset + footerLength).toInt, 4)
-      .order(ByteOrder.LITTLE_ENDIAN)
-      .getInt
+    crc.update(footer)
+    val stored = ByteBuffer.wrap(storedBytes).order(ByteOrder.LITTLE_ENDIAN).getInt
     if (crc.getValue.toInt != stored) then throw new IllegalStateException("spill CRC32 mismatch")
 
-  private def readFooter(
-      bytes: Array[Byte],
-      footerOffset: Long,
-      batchCount: Int,
+  private def readSpans(
+      footer: Array[Byte],
+      parsed: ParsedHeader,
+      headerSize: Int,
   ): Vector[BatchSpan] =
-    val footerBytes = SpillLayout.FooterEntryBytes
-    val slice = Arrays.copyOfRange(
-      bytes,
-      footerOffset.toInt,
-      footerOffset.toInt + batchCount * footerBytes,
-    )
-    val cursor = new Cursor(slice)
-    (0 until batchCount).iterator.map { _ =>
-      BatchSpan(cursor.getLong, cursor.getLong, cursor.getInt)
+    val cursor = new Cursor(footer)
+    val spans = (0 until parsed.batchCount).iterator.map { _ =>
+      BatchSpan(cursor.getLong, cursor.getLong, cursor.getInt, cursor.getInt)
     }.toVector
-
-  private def decode(
-      bytes: Array[Byte],
-      schema: Vector[LogicalType],
-      spans: Vector[BatchSpan],
-      footerOffset: Long,
-  ): Vector[ColumnBatch] =
-    val headerSize = SpillLayout.headerSize(schema.length)
-    val packed = spans.foldLeft(headerSize.toLong) { (cursor, span) =>
-      require(span.offset == cursor, "spill batches are not packed")
+    require(cursor.remaining == 0, "spill footer length does not match the batch count")
+    val packed = spans.foldLeft(headerSize.toLong) { (at, span) =>
+      require(span.offset == at, "spill batches are not packed")
       require(span.length >= 0L, "spill batch length must be >= 0")
+      require(span.length <= Int.MaxValue.toLong, "spill batch is too large")
       require(span.rows >= 0, "spill row count must be >= 0")
-      val next = cursor + span.length
-      require(next <= footerOffset, "spill batch runs into the footer")
+      val next = at + span.length
+      require(next <= parsed.footerOffset, "spill batch runs into the footer")
       next
     }
-    require(packed == footerOffset, "spill payload length does not match the footer")
-    spans.map { span =>
-      require(span.length <= Int.MaxValue.toLong, "spill batch is too large")
-      val slice = Arrays.copyOfRange(
-        bytes,
-        span.offset.toInt,
-        span.offset.toInt + span.length.toInt,
-      )
-      val cursor = new Cursor(slice)
-      val columns = schema.map(logicalType => readColumn(cursor, logicalType, span.rows))
-      require(cursor.remaining == 0, "spill batch length does not match its columns")
-      new ColumnBatch(schema, columns, span.rows)
+    require(packed == parsed.footerOffset, "spill payload length does not match the footer")
+    spans
+
+  private def decode(bytes: Array[Byte], schema: Vector[LogicalType], rows: Int): ColumnBatch =
+    val cursor = new Cursor(bytes)
+    val columns = schema.map(logicalType => readColumn(cursor, logicalType, rows))
+    require(cursor.remaining == 0, "spill batch length does not match its columns")
+    new ColumnBatch(schema, columns, rows)
+
+  private def concat(prefix: Array[Byte], rest: Array[Byte]): Array[Byte] =
+    val all = new Array[Byte](prefix.length + rest.length)
+    System.arraycopy(prefix, 0, all, 0, prefix.length)
+    System.arraycopy(rest, 0, all, prefix.length, rest.length)
+    all
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def readFully(channel: FileChannel, position: Long, length: Int): Array[Byte] =
+    require(length >= 0, s"spill read length must be >= 0, got $length")
+    val bytes = new Array[Byte](length)
+    val buffer = ByteBuffer.wrap(bytes)
+    var cursor = position
+    var pending = buffer.hasRemaining
+    while (pending) {
+      val read = channel.read(buffer, cursor)
+      require(read > 0, "truncated spill file")
+      cursor += read
+      pending = buffer.hasRemaining
     }
+    bytes
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private final class Writer(channel: FileChannel, schema: Vector[LogicalType])
+      extends SpillBatchWriter:
+
+    private var spans = Vector.empty[BatchSpan]
+
+    def write(batch: ColumnBatch): Unit =
+      require(batch.schema == schema, "spill batches must share a schema")
+      batch.columns.foreach(SpillStore.supported)
+      val crc = new CRC32
+      val offset = channel.position()
+      val written = writeBatch(channel, crc, batch)
+      spans = spans :+ BatchSpan(offset, written, batch.length, crc.getValue.toInt)
+
+    def finish(): Unit =
+      if (spans.isEmpty) then throw new IllegalArgumentException("spill needs at least one batch")
+      val footerOffset = channel.position()
+      val footer = footerBytes(spans)
+      val crc = new CRC32
+      val _ = writeFully(channel, crc, footer, checksum = true)
+      val _ = writeFully(channel, crc, intBytes(crc.getValue.toInt), checksum = false)
+      patchHeader(channel, schema.length, spans.length, footerOffset, footer.length)
+      channel.force(true)
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private final class BatchIterator(
+      channel: FileChannel,
+      schema: Vector[LogicalType],
+      spans: Vector[BatchSpan],
+  ) extends Iterator[ColumnBatch]
+      with AutoCloseable:
+
+    private val records = spans.toArray
+    private var index = 0
+    private var closed = false
+
+    def hasNext: Boolean =
+      if (closed) then false
+      else if (index < records.length) then true
+      else
+        close()
+        false
+
+    def next(): ColumnBatch =
+      if (!hasNext) then throw new NoSuchElementException("spill batch iterator is exhausted")
+      val span = records(index)
+      val bytes = readFully(channel, span.offset, span.length.toInt)
+      val crc = new CRC32
+      crc.update(bytes)
+      if (crc.getValue.toInt != span.crc) then
+        close()
+        throw new IllegalStateException("spill CRC32 mismatch")
+      val batch = decode(bytes, schema, span.rows)
+      index += 1
+      if (index == records.length) then close()
+      batch
+
+    def close(): Unit =
+      if (!closed) then
+        closed = true
+        channel.close()
 
   private def readColumn(cursor: Cursor, logicalType: LogicalType, rows: Int): Column =
     val validity = readValidity(cursor, rows)

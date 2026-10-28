@@ -24,6 +24,7 @@ class TestSpillSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     conf.spillDirectory shouldBe ""
     conf.spillMaxFiles shouldBe SpillStore.DefaultMaxFiles
     conf.spillMaxBytes shouldBe SpillStore.DefaultMaxBytes
+    conf.spillFanIn shouldBe 8
     SumSpill.retainedBytes(0) shouldBe 0L
   }
 

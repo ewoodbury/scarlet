@@ -2,7 +2,7 @@ package com.ewoodbury.scarlet.columnar
 
 import java.nio.file.Path
 import java.util.Arrays
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong, AtomicReference}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong, AtomicReference}
 
 import com.ewoodbury.scarlet.core.ScarletConf
 
@@ -17,14 +17,19 @@ import com.ewoodbury.scarlet.core.ScarletConf
  *
  * Over the budget, each side is cut into morsels of `batchSize` present rows. Null keys are
  * dropped before the cut. Each morsel is sorted on its own and written to its own spill file, so
- * one file is one sorted run. The runs are not read back as a side.
+ * one file is one sorted run.
  *
- * The merge keeps one cursor per run and one batch loaded for that cursor. A cursor reads its file
- * only when its batch is exhausted. A run file holds one morsel, so that read happens once. The
- * smaller key advances. On equality the key is drained across every run on both sides, the
- * cartesian product is written, and those cursors advance. A group whose own estimate exceeds the
- * budget throws and names the key. One store closes before the next partition pair, on success and
- * on throw.
+ * Each side is then reduced to one run. A pass merges at most [[ScarletConf.spillFanIn]] runs (the
+ * default is 8) into new sorted run files, reading and writing one batch at a time. While a side
+ * has more than one run, the next pass repeats. The join merges the two remaining streams. On
+ * equality the key is drained on both streams before the cartesian product is written. A group
+ * whose own estimate exceeds the budget throws and names the key, before any row of that group is
+ * emitted. One store closes before the next partition pair, on success and on throw, and that
+ * close deletes every run, including the intermediate ones.
+ *
+ * Peak live memory is `fanIn` batches per side during a merge pass, and two batches during the
+ * join. The pass also holds the one output batch it is writing, and the join holds the equal-key
+ * group until that group is emitted or refused.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[scarlet] object SortMergeRuns:
@@ -39,7 +44,9 @@ private[scarlet] object SortMergeRuns:
   private[scarlet] val HeaderAllowance: Long = 64L
 
   private val filesWritten = new AtomicLong
+  private val mergePasses = new AtomicLong
   private val mergeFault = new AtomicBoolean(false)
+  private val failAtPass = new AtomicInteger(0)
   private val lastDirectory = new AtomicReference("")
 
   /**
@@ -83,8 +90,11 @@ private[scarlet] object SortMergeRuns:
       joinOne(left, right, batchSize, conf)
     }
 
-  /** Spill files published since the last [[resetForTest]]. */
+  /** Spill files published since the last [[resetForTest]], including intermediate runs. */
   private[scarlet] def filesWrittenForTest: Long = filesWritten.get
+
+  /** Completed merge passes since the last [[resetForTest]]. Left side passes count first. */
+  private[scarlet] def mergePassesForTest: Long = mergePasses.get
 
   /** Directory of the store most recently opened, or empty when none has been. */
   private[scarlet] def lastDirectoryForTest: String = lastDirectory.get
@@ -93,10 +103,20 @@ private[scarlet] object SortMergeRuns:
   private[scarlet] def armMergeFailure(): Unit =
     mergeFault.set(true)
 
-  /** Clears the file counter, the recorded directory, and an armed merge failure. */
+  /**
+   * The 1-based merge pass throws inside its first new run, after the temp file exists and before
+   * that run is published. Earlier passes have already published their runs.
+   */
+  private[scarlet] def armPassFailure(pass: Int): Unit =
+    require(pass > 0, s"pass must be positive, got $pass")
+    failAtPass.set(pass)
+
+  /** Clears the file counter, the pass counter, the recorded directory, and armed failures. */
   private[scarlet] def resetForTest(): Unit =
     filesWritten.set(0L)
+    mergePasses.set(0L)
     mergeFault.set(false)
+    failAtPass.set(0)
     lastDirectory.set("")
 
   private def joinOne(
@@ -117,10 +137,14 @@ private[scarlet] object SortMergeRuns:
   ): ColumnBatch =
     val directory = directoryOf(conf)
     lastDirectory.set(directory.toString)
+    val fanIn = conf.spillFanIn
+    require(fanIn >= 2, s"spillFanIn must be >= 2, got $fanIn")
     SpillStore.withSpill(directory, conf.spillMaxFiles, conf.spillMaxBytes) { store =>
       val leftRuns = writeRuns(store, left, batchSize)
       val rightRuns = writeRuns(store, right, batchSize)
-      merge(leftRuns, rightRuns, conf.spillBudgetBytes)
+      val leftFile = reduce(store, leftRuns, fanIn, batchSize)
+      val rightFile = reduce(store, rightRuns, fanIn, batchSize)
+      joinStreams(leftFile, rightFile, conf.spillBudgetBytes)
     }
 
   /**
@@ -201,30 +225,142 @@ private[scarlet] object SortMergeRuns:
     val _ = filesWritten.incrementAndGet()
     file
 
-  private def merge(
-      leftFiles: Vector[SpillFile],
-      rightFiles: Vector[SpillFile],
+  /**
+   * Merges `runs` until one file remains. A single run is already that file. An empty side stays
+   * empty. Each completed pass counts for [[mergePassesForTest]].
+   */
+  private def reduce(
+      store: SpillStore,
+      runs: Vector[SpillFile],
+      fanIn: Int,
+      batchSize: Int,
+  ): Option[SpillFile] =
+    if (runs.isEmpty) then None
+    else
+      var current = runs
+      while (current.length > 1) {
+        val pass = mergePasses.get + 1L
+        val merged = mergePass(store, current, fanIn, batchSize, pass)
+        require(
+          merged.length < current.length,
+          s"sort-merge pass made no progress from ${current.length} runs",
+        )
+        current = merged
+        val _ = mergePasses.incrementAndGet()
+      }
+      current match
+        case Vector(file) => Some(file)
+        case other =>
+          throw new IllegalStateException(s"sort-merge reduced to ${other.length} runs")
+
+  private def mergePass(
+      store: SpillStore,
+      runs: Vector[SpillFile],
+      fanIn: Int,
+      batchSize: Int,
+      pass: Long,
+  ): Vector[SpillFile] =
+    groupRuns(runs, fanIn).map { group =>
+      group match
+        case Vector(file) => file
+        case many => mergeGroup(store, many, batchSize, pass)
+    }
+
+  private def groupRuns(runs: Vector[SpillFile], fanIn: Int): Vector[Vector[SpillFile]] =
+    val groups = (runs.length + fanIn - 1) / fanIn
+    Vector.tabulate(groups) { index =>
+      val start = index * fanIn
+      runs.slice(start, math.min(start + fanIn, runs.length))
+    }
+
+  /** K-way merge of at most `fanIn` sorted runs. The output file is one sorted run. */
+  private def mergeGroup(
+      store: SpillStore,
+      files: Vector[SpillFile],
+      batchSize: Int,
+      pass: Long,
+  ): SpillFile =
+    val cursors = openCursors(files)
+    try
+      val heap = openHeap(cursors)
+      val merged = store.writeStreaming(pairSchema) { sink =>
+        failIfPass(pass)
+        writeSorted(heap, sink, batchSize)
+      }
+      val _ = filesWritten.incrementAndGet()
+      merged
+    finally
+      var id = 0
+      while (id < cursors.length) {
+        cursors(id).close()
+        id += 1
+      }
+
+  private def writeSorted(heap: KeyHeap, sink: SpillBatchWriter, batchSize: Int): Unit =
+    val bufKeys = new Array[Int](batchSize)
+    val bufValues = new Array[Int](batchSize)
+    val bufWords = Validity.allocate(batchSize)
+    var filled = 0
+    while (!heap.isEmpty) {
+      val cursor = heap.pop()
+      bufKeys(filled) = cursor.key
+      if (cursor.valuePresent) then
+        bufValues(filled) = cursor.value
+        Validity.setBit(bufWords, filled)
+      else bufValues(filled) = 0
+      filled += 1
+      cursor.advance()
+      if (cursor.ready) then heap.push(cursor.id)
+      if (filled == batchSize) then
+        sink.write(morselBatch(bufKeys, bufValues, bufWords, filled))
+        clearWords(bufWords, filled)
+        filled = 0
+    }
+    if (filled > 0) then sink.write(morselBatch(bufKeys, bufValues, bufWords, filled))
+
+  private def clearWords(words: Array[Long], filled: Int): Unit =
+    val used = (filled + 63) >>> 6
+    if (used > 0) then Arrays.fill(words, 0, used, 0L)
+
+  private def joinStreams(
+      leftFile: Option[SpillFile],
+      rightFile: Option[SpillFile],
       budget: Long,
   ): ColumnBatch =
-    val leftHeap = KeyHeap.open(leftFiles)
-    val rightHeap = KeyHeap.open(rightFiles)
+    (leftFile, rightFile) match
+      case (Some(left), Some(right)) =>
+        val leftCursor = new RunCursor(0, left)
+        val rightCursor =
+          try new RunCursor(1, right)
+          catch
+            case thrown: Throwable =>
+              leftCursor.close()
+              throw thrown
+        try joinCursors(leftCursor, rightCursor, budget)
+        finally
+          leftCursor.close()
+          rightCursor.close()
+      case _ => emptyJoin
+
+  /** Stage-1 merge of two sorted streams. A key is drained on both sides before it is emitted. */
+  private def joinCursors(left: RunCursor, right: RunCursor, budget: Long): ColumnBatch =
     val output = new OutputRows()
     val leftGroup = new GroupRows()
     val rightGroup = new GroupRows()
-    while (!leftHeap.isEmpty && !rightHeap.isEmpty) {
-      val order = Integer.compare(leftHeap.minKey, rightHeap.minKey)
+    while (left.ready && right.ready) {
+      val order = Integer.compare(left.key, right.key)
       if (order < 0) then
-        skip(leftHeap, leftHeap.minKey)
+        skipCursor(left, left.key)
         failIfArmed()
       else if (order > 0) then
-        skip(rightHeap, rightHeap.minKey)
+        skipCursor(right, right.key)
         failIfArmed()
       else
-        val key = leftHeap.minKey
+        val key = left.key
         leftGroup.clear()
         rightGroup.clear()
-        take(leftHeap, key, leftGroup)
-        take(rightHeap, key, rightGroup)
+        takeCursor(left, key, leftGroup)
+        takeCursor(right, key, rightGroup)
         val estimate = retainedBytes(leftGroup.length) + retainedBytes(rightGroup.length)
         if (estimate > budget) then refuseGroup(key, estimate, budget)
         failIfArmed()
@@ -232,34 +368,42 @@ private[scarlet] object SortMergeRuns:
     }
     output.toBatch
 
-  /** Drops every row of `key` on this side. The key is absent from the other side. */
-  private def skip(heap: KeyHeap, key: Int): Unit =
-    while (!heap.isEmpty && Integer.compare(heap.minKey, key) == 0) {
-      val cursor = heap.pop()
-      while (cursor.ready && Integer.compare(cursor.key, key) == 0) {
-        cursor.advance()
-      }
-      if (cursor.ready) then heap.push(cursor.id)
+  /** Drops every row of `key` on this stream. The key is absent from the other side. */
+  private def skipCursor(cursor: RunCursor, key: Int): Unit =
+    while (cursor.ready && Integer.compare(cursor.key, key) == 0) {
+      cursor.advance()
     }
 
-  /**
-   * Appends every row of `key` from every run. A run is sorted, so the key is a contiguous span at
-   * the cursor, and a run whose head is greater stays in the heap until this key is finished.
-   */
-  private def take(heap: KeyHeap, key: Int, group: GroupRows): Unit =
-    while (!heap.isEmpty && Integer.compare(heap.minKey, key) == 0) {
-      val cursor = heap.pop()
-      while (cursor.ready && Integer.compare(cursor.key, key) == 0) {
-        if (cursor.valuePresent) then group.add(cursor.value, present = true)
-        else group.add(0, present = false)
-        cursor.advance()
-      }
-      if (cursor.ready) then heap.push(cursor.id)
+  /** Appends every row of `key`. The stream is sorted, so the key is one contiguous span. */
+  private def takeCursor(cursor: RunCursor, key: Int, group: GroupRows): Unit =
+    while (cursor.ready && Integer.compare(cursor.key, key) == 0) {
+      if (cursor.valuePresent) then group.add(cursor.value, present = true)
+      else group.add(0, present = false)
+      cursor.advance()
     }
+
+  private def openCursors(files: Vector[SpillFile]): Array[RunCursor] =
+    val opened = files.iterator.zipWithIndex.foldLeft(Vector.empty[RunCursor]) {
+      (acc, openedFile) =>
+        val (file, id) = openedFile
+        try acc :+ new RunCursor(id, file)
+        catch
+          case thrown: Throwable =>
+            acc.foreach(_.close())
+            throw thrown
+    }
+    opened.toArray
 
   /** An armed failure has already read one key from the runs. The group is not emitted. */
   private def failIfArmed(): Unit =
     if (mergeFault.compareAndSet(true, false)) then throw new IllegalStateException(MergeFailed)
+
+  /** An armed pass failure runs after the temp file exists and before that run is published. */
+  private def failIfPass(pass: Long): Unit =
+    val armed = failAtPass.get
+    if (armed > 0 && armed.toLong == pass) then
+      failAtPass.set(0)
+      throw new IllegalStateException(MergeFailed)
 
   private def refuseGroup(key: Int, estimate: Long, budget: Long): Nothing =
     throw new IllegalStateException(
@@ -297,15 +441,20 @@ private[scarlet] object SortMergeRuns:
       0,
     )
 
-  /** One sorted run. The file is read when the cursor has no loaded row left. */
+  /**
+   * One sorted run, read one batch at a time. [[close]] releases the channel if the caller stops
+   * before the run is exhausted.
+   */
   private final class RunCursor(val id: Int, file: SpillFile):
 
+    private val source: Iterator[ColumnBatch] & AutoCloseable = file.batches()
     private var keys: Array[Int] = Array.emptyIntArray
     private var values: Array[Int] = Array.emptyIntArray
     private var words: Array[Long] = Array.emptyLongArray
     private var length: Int = 0
     private var index: Int = 0
-    private var spent: Boolean = false
+
+    def close(): Unit = source.close()
 
     def ready: Boolean =
       if (index < length) then true else refill()
@@ -327,18 +476,17 @@ private[scarlet] object SortMergeRuns:
       index += 1
 
     private def refill(): Boolean =
-      if (index < length) then true
-      else if (spent) then false
-      else
-        spent = true
-        install(load(file))
-        index < length
-
-    private def load(spilled: SpillFile): ColumnBatch =
-      spilled.read() match
-        case Vector(batch) => batch
-        case other =>
-          throw new IllegalStateException(s"spill run holds ${other.length} batches")
+      var found = false
+      var continue = true
+      while (continue) {
+        if (!source.hasNext) then continue = false
+        else
+          install(source.next())
+          if (index < length) then
+            found = true
+            continue = false
+      }
+      found
 
     private def install(batch: ColumnBatch): Unit =
       val keyColumn = ColumnHash.int32At(batch, 0)
@@ -409,17 +557,15 @@ private[scarlet] object SortMergeRuns:
       nodes(left) = nodes(right)
       nodes(right) = held
 
-  private object KeyHeap:
-
-    def open(files: Vector[SpillFile]): KeyHeap =
-      val cursors = files.iterator.zipWithIndex.map { (file, id) =>
-        new RunCursor(id, file)
-      }.toArray
-      val heap = new KeyHeap(cursors)
-      cursors.indices.foreach { id =>
-        if (cursors(id).ready) then heap.push(id)
-      }
-      heap
+  /** Pushes each cursor that has a row. Callers open at most `fanIn` cursors. */
+  private def openHeap(cursors: Array[RunCursor]): KeyHeap =
+    val heap = new KeyHeap(cursors)
+    var id = 0
+    while (id < cursors.length) {
+      if (cursors(id).ready) then heap.push(id)
+      id += 1
+    }
+    heap
 
   /** Rows of one equal-key group. The buffer is cleared before the next key. */
   private final class GroupRows:

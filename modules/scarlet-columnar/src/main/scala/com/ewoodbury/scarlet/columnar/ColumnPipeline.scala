@@ -196,9 +196,11 @@ object ColumnPipeline:
    *
    * Spill is per partition pair. When [[ScarletConf.spillEnabled]] is set and the retained-byte
    * estimate of both sorted sides is above [[ScarletConf.spillBudgetBytes]], [[SortMergeRuns]]
-   * writes each side as sorted runs and merges those runs. The store for that pair is closed
-   * before the next pair. A pair at or under the budget, and every pair while spill is off, calls
-   * [[SortMerge.join]] and writes nothing.
+   * writes each side as sorted runs and merges at most [[ScarletConf.spillFanIn]] runs at a time
+   * until one run remains per side. The join then merges those two streams. Peak live memory is
+   * `fanIn` batches per side during a merge pass, and two batches during the join. The store for
+   * that pair is closed before the next pair. A pair at or under the budget, and every pair while
+   * spill is off, calls [[SortMerge.join]] and writes nothing.
    */
   def sortMergeJoin(
       build: Vector[ColumnBatch],

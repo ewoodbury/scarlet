@@ -10,9 +10,9 @@ package com.ewoodbury.scarlet.columnar
  *
  * The merge walks two cursors. The smaller key advances. On equality, [[groupEnd]] drains the
  * whole equal-key group on both sides, the cartesian product is written, and both cursors advance
- * past those groups. That drain is the only group walk. [[SortMergeRuns]] applies it across every
- * spilled run. Stability is not required for the multiset. This sort is stable so equal keys keep
- * input order.
+ * past those groups. That drain is the only group walk. [[SortMergeRuns]] applies it to the two
+ * streams that remain after each spilled side is merged down to one run. Stability is not required
+ * for the multiset. This sort is stable so equal keys keep input order.
  *
  * Output columns are `(key, left, right)`, the same schema as the hash join. `build` is the left
  * side and `probe` is the right side. [[joinAll]] zips exchanged partitions by index. An empty

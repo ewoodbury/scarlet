@@ -53,8 +53,8 @@ final case class ScarletConf(
      * Byte budget for one grouped-sum bucket, one inner-join build table, and the sorted sides of
      * one sort-merge partition. The default is 64 MiB. A broadcast build over this budget is
      * partitioned with the probe. One partition that is still over it throws. A sort-merge
-     * partition over it is written as sorted runs. One equal-key group that is still over it
-     * throws.
+     * partition over it is written as sorted runs and merged `spillFanIn` at a time. One equal-key
+     * group that is still over it throws.
      */
     spillBudgetBytes: Long = 64L * 1024L * 1024L,
     /**
@@ -73,6 +73,13 @@ final case class ScarletConf(
      * the spill store.
      */
     spillMaxBytes: Long = 8L * 1024L * 1024L * 1024L,
+    /**
+     * Fan-in of a spilled sort-merge. At most this many sorted runs are merged at once on one
+     * side. The default is 8. A side with more runs is merged in passes until one run remains, so
+     * a pass loads at most this many batches. The join then loads one batch from each side. A
+     * value below 2 is rejected when a partition spills, because a pass would not shrink the side.
+     */
+    spillFanIn: Int = 8,
 ):
 
   /** Builds the task retry policy from this configuration. */
