@@ -83,7 +83,9 @@ final class SpillStore private (
       val _ = published.updateAndGet(current => current :+ SpillStore.Stored(destination, size))
     catch
       case thrown: Throwable =>
-        val _ = Files.deleteIfExists(destination)
+        try
+          val _ = Files.deleteIfExists(destination)
+        catch case _: java.io.IOException => ()
         throw thrown
     new SpillFile(destination, forget)
   }
@@ -104,12 +106,12 @@ final class SpillStore private (
       Files.isRegularFile(path) && SpillStore.condemned(path.getFileName.toString, pidIsAlive)
     }
     // A temp file belongs to the process in its name; a live writer keeps it.
-    removed.foreach { path =>
+    val gone = removed.filter { path =>
       try
         val _ = Files.deleteIfExists(path)
-      catch case _: Throwable => ()
-    }
-    val gone = removed.toSet
+        true
+      catch case _: Throwable => false
+    }.toSet
     val _ =
       published.updateAndGet(current => current.filterNot(record => gone.contains(record.path)))
   }
