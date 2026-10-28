@@ -88,8 +88,25 @@ private[scarlet] object SumSpill:
     val directory = directoryOf(conf)
     lastDirectory.set(directory.toString)
     SpillStore.withSpill(directory, conf.spillMaxFiles, conf.spillMaxBytes) { store =>
-      val files = writePieces(store, bucket, pieces, parallelism, batchSize)
-      merge(files.map(sumFile))
+      val parts = HashExchange.partitionAll(
+        Vector(bucket),
+        keyOrdinal = 0,
+        numPartitions = pieces,
+        parallelism = parallelism,
+      )
+      // One morsel at a time: publish, read back, sum, delete. Only the running partial and the
+      // morsel are live, and the store never holds more than one file, so `spillMaxFiles` is not
+      // a function of the row count.
+      val morsels = parts.iterator
+        .filter(part => part.length > 0)
+        .flatMap(part => ColumnBatches.slice(part, batchSize).iterator)
+      val merged = morsels.foldLeft(Option.empty[ColumnBatch]) { (accumulator, morsel) =>
+        val file = publish(store, morsel)
+        val partial = sumFile(file)
+        file.delete()
+        Some(accumulator.fold(partial)(previous => merge(Vector(previous, partial))))
+      }
+      merged.getOrElse(HashAggregate.sumInt64(bucket, keyOrdinal = 0, valueOrdinal = 1))
     }
 
   /**
@@ -114,33 +131,6 @@ private[scarlet] object SumSpill:
   private def directoryOf(conf: ScarletConf): Path =
     if (conf.spillDirectory.isEmpty) then SpillStore.defaultDirectory
     else Path.of(conf.spillDirectory)
-
-  private def writePieces(
-      store: SpillStore,
-      bucket: ColumnBatch,
-      pieces: Int,
-      parallelism: Int,
-      batchSize: Int,
-  ): Vector[SpillFile] =
-    val parts = HashExchange.partitionAll(
-      Vector(bucket),
-      keyOrdinal = 0,
-      numPartitions = pieces,
-      parallelism = parallelism,
-    )
-    parts.flatMap(part => writeMorsels(store, part, batchSize))
-
-  /**
-   * One file per morsel. [[ColumnBatches.slice]] cuts with [[ColumnBatches.cuts]], so a morsel
-   * holds at most `batchSize` rows. An empty piece is skipped. It has no rows to sum.
-   */
-  private def writeMorsels(
-      store: SpillStore,
-      part: ColumnBatch,
-      batchSize: Int,
-  ): Vector[SpillFile] =
-    if (part.length == 0) then Vector.empty
-    else ColumnBatches.slice(part, batchSize).map(morsel => publish(store, morsel))
 
   private def publish(store: SpillStore, morsel: ColumnBatch): SpillFile =
     val file = store.write(Vector(morsel))

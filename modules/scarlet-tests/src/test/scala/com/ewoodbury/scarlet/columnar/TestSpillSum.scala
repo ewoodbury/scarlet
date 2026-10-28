@@ -218,3 +218,57 @@ class TestSpillSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     batch.columns.lift(ordinal) match
       case Some(column: Int64Column) => column
       case other => fail(s"expected Int64 at $ordinal, got $other")
+
+  "spill disabled" should "ignore a tiny budget and write no files" in {
+    val batches = twoPasses
+    val memory = sum(batches)
+    val dir = Files.createTempDirectory("scarlet-sum-off")
+    SumSpill.resetForTest()
+    ScarletConf.set(
+      originalConf.copy(
+        spillEnabled = false,
+        spillBudgetBytes = 1L,
+        spillDirectory = dir.toString,
+      ),
+    )
+    try
+      groups(sum(batches)) shouldBe groups(memory)
+      SumSpill.filesWrittenForTest shouldBe 0L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    finally
+      ScarletConf.set(originalConf)
+      SumSpill.resetForTest()
+      SpillStore.listForTest(dir).foreach(path => Files.deleteIfExists(path))
+      val _ = Files.deleteIfExists(dir)
+  }
+
+  "a bucket with more morsels than the file cap" should "spill one file at a time" in {
+    val rows = 4000
+    val keys = Int32Column.of(Array.tabulate(rows)(row => row % 64), Validity.allValid(rows), rows)
+    val values = Int64Column.of(Array.tabulate(rows)(row => row.toLong), Validity.allValid(rows), rows)
+    val bucket = new ColumnBatch(
+      Vector(LogicalType.Int32, LogicalType.Int64),
+      Vector(keys, values),
+      rows,
+    )
+    val dir = Files.createTempDirectory("scarlet-sum-cap")
+    SumSpill.resetForTest()
+    ScarletConf.set(
+      originalConf.copy(
+        spillEnabled = true,
+        spillBudgetBytes = 1L,
+        spillDirectory = dir.toString,
+        spillMaxFiles = 4,
+      ),
+    )
+    try
+      val summed = SumSpill.finish(bucket, parallelism = 1, batchSize = 16, ScarletConf.get)
+      groups(Vector(summed)).size shouldBe 64
+      SumSpill.filesWrittenForTest should be > 4L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    finally
+      ScarletConf.set(originalConf)
+      SumSpill.resetForTest()
+      SpillStore.listForTest(dir).foreach(path => Files.deleteIfExists(path))
+      val _ = Files.deleteIfExists(dir)
+  }
