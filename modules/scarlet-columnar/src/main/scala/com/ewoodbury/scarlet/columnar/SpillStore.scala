@@ -51,7 +51,7 @@ final class SpillStore private (
     sweep(SpillStore.processAlive)
   }
 
-  def write(batches: Vector[ColumnBatch]): SpillFile =
+  def write(batches: Vector[ColumnBatch]): SpillFile = synchronized {
     val schema = SpillStore.preflight(batches)
     val records = published.get
     if (records.length + 1 >= maxFiles) then
@@ -70,18 +70,23 @@ final class SpillStore private (
     if (used >= maxBytes || size >= maxBytes - used) then
       val _ = Files.deleteIfExists(temporary)
       throw new IllegalStateException(s"spill maxBytes cap is $maxBytes")
-    try Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE)
+    try
+      Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE)
+      SpillStore.syncDirectory(directory)
     catch
       case thrown: Throwable =>
         val _ = Files.deleteIfExists(temporary)
         throw thrown
     val _ = published.updateAndGet(current => current :+ SpillStore.Stored(destination, size))
     new SpillFile(destination, forget)
+  }
 
   /** Drops one published file and frees its share of the caps. */
   private def forget(location: Path): Unit =
-    val _ = published.updateAndGet(current => current.filterNot(_.path == location))
-    val _ = Files.deleteIfExists(location)
+    try
+      val _ = Files.deleteIfExists(location)
+    finally
+      val _ = published.updateAndGet(current => current.filterNot(_.path == location))
 
   /**
    * Deletes temp files and spill files whose process is gone. The constructor calls this with the
@@ -91,6 +96,7 @@ final class SpillStore private (
     val removed = SpillStore.listFiles(directory).filter { path =>
       Files.isRegularFile(path) && SpillStore.condemned(path.getFileName.toString, pidIsAlive)
     }
+    // A temp file belongs to the process in its name; a live writer keeps it.
     removed.foreach { path =>
       val _ = Files.deleteIfExists(path)
     }
@@ -102,7 +108,9 @@ final class SpillStore private (
   def close(): Unit =
     val records = published.getAndSet(Vector.empty)
     records.foreach { record =>
-      val _ = Files.deleteIfExists(record.path)
+      try
+        val _ = Files.deleteIfExists(record.path)
+      catch case _: java.io.IOException => ()
     }
 
 object SpillStore:
@@ -163,20 +171,38 @@ object SpillStore:
       throw new IllegalArgumentException(s"${other.logicalType} columns cannot be spilled")
 
   private def condemned(name: String, pidIsAlive: Long => Boolean): Boolean =
-    if (name.endsWith(".tmp")) then true
-    else
-      name match
-        case FinalName(_, digits) =>
-          parsePid(digits) match
-            case Some(pid) => !pidIsAlive(pid)
-            case None => false
-        case _ => false
+    val trimmed = if (name.endsWith(".tmp")) then name.dropRight(4) else name
+    val digits =
+      if (name.endsWith(".tmp")) then
+        trimmed.lastIndexOf('.') match
+          case at if at >= 0 => Some(trimmed.substring(at + 1))
+          case _ => None
+      else
+        name match
+          case FinalName(_, found) => Some(found)
+          case _ => None
+    digits.flatMap(parsePid) match
+      case Some(pid) => !pidIsAlive(pid)
+      case None =>
+        // A temp file without a pid cannot be attributed; leave it for a human.
+        false
 
   private def parsePid(digits: String): Option[Long] =
     if (digits.length > 19) then None
     else
       try Some(java.lang.Long.parseLong(digits))
       catch case _: NumberFormatException => None
+
+  /**
+   * Forces the directory entry after a rename, so a crash cannot lose the file's name. Not every
+   * platform allows opening a directory for read, so a failure here is not fatal.
+   */
+  private[columnar] def syncDirectory(directory: Path): Unit =
+    try
+      val channel = FileChannel.open(directory, StandardOpenOption.READ)
+      try channel.force(true)
+      finally channel.close()
+    catch case _: java.io.IOException => ()
 
   /** Lists the files in a spill directory. Tests use this to assert cleanup. */
   private[scarlet] def listForTest(directory: Path): Vector[Path] = listFiles(directory)

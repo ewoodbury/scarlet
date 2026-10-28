@@ -158,3 +158,52 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
       SpillStore.listForTest(dir) shouldBe empty
     }
   }
+
+  test("the byte cap is exclusive at the exact file size") {
+    withDir { dir =>
+      val batch = intBatch((0 until 100).toSeq)
+      val probe = SpillStore.open(dir, maxFiles = 100, maxBytes = 1L << 20)
+      val size =
+        try Files.size(probe.write(Vector(batch)).location)
+        finally probe.close()
+      SpillStore.listForTest(dir).foreach(path => Files.deleteIfExists(path))
+
+      val fits = SpillStore.open(dir, maxFiles = 100, maxBytes = size + 1L)
+      try fits.write(Vector(batch)) should not be null
+      finally fits.close()
+
+      val exact = SpillStore.open(dir, maxFiles = 100, maxBytes = size)
+      try an[IllegalStateException] should be thrownBy exact.write(Vector(batch))
+      finally exact.close()
+    }
+  }
+
+  test("sweeps dead pid files and keeps live ones") {
+    withDir { dir =>
+      val live = dir.resolve(s"live.${ProcessHandle.current().pid}.spill")
+      val dead = dir.resolve("dead.999999999.spill")
+      val liveTemp = dir.resolve(s"busy.${ProcessHandle.current().pid}.tmp")
+      val deadTemp = dir.resolve("stale.999999999.tmp")
+      Seq(live, dead, liveTemp, deadTemp).foreach(path => Files.write(path, Array[Byte](1, 2, 3)))
+
+      val store = SpillStore.open(dir)
+      try
+        Files.exists(live) shouldBe true
+        Files.exists(liveTemp) shouldBe true
+        Files.exists(dead) shouldBe false
+        Files.exists(deadTemp) shouldBe false
+      finally
+        store.close()
+        Seq(live, liveTemp).foreach(path => Files.deleteIfExists(path))
+    }
+  }
+
+  test("a second close is a no-op") {
+    withDir { dir =>
+      val store = SpillStore.open(dir)
+      store.write(Vector(intBatch(Seq(1))))
+      store.close()
+      store.close()
+      SpillStore.listForTest(dir) shouldBe empty
+    }
+  }
