@@ -79,32 +79,40 @@ final class SpillStore private (
       case thrown: Throwable =>
         val _ = Files.deleteIfExists(temporary)
         throw thrown
-    val _ = published.updateAndGet(current => current :+ SpillStore.Stored(destination, size))
+    try
+      val _ = published.updateAndGet(current => current :+ SpillStore.Stored(destination, size))
+    catch
+      case thrown: Throwable =>
+        val _ = Files.deleteIfExists(destination)
+        throw thrown
     new SpillFile(destination, forget)
   }
 
   /** Drops one published file and frees its share of the caps. */
   private def forget(location: Path): Unit =
-    try
-      val _ = Files.deleteIfExists(location)
-    finally
-      val _ = published.updateAndGet(current => current.filterNot(_.path == location))
+    // Untrack only after the file is gone. A failed delete keeps the record so `close` can retry
+    // and the caps still count the bytes.
+    val _ = Files.deleteIfExists(location)
+    val _ = published.updateAndGet(current => current.filterNot(_.path == location))
 
   /**
    * Deletes temp files and spill files whose process is gone. The constructor calls this with the
    * operating system's liveness check before any write.
    */
-  def sweep(pidIsAlive: Long => Boolean): Unit =
+  def sweep(pidIsAlive: Long => Boolean): Unit = synchronized {
     val removed = SpillStore.listFiles(directory).filter { path =>
       Files.isRegularFile(path) && SpillStore.condemned(path.getFileName.toString, pidIsAlive)
     }
     // A temp file belongs to the process in its name; a live writer keeps it.
     removed.foreach { path =>
-      val _ = Files.deleteIfExists(path)
+      try
+        val _ = Files.deleteIfExists(path)
+      catch case _: Throwable => ()
     }
     val gone = removed.toSet
     val _ =
       published.updateAndGet(current => current.filterNot(record => gone.contains(record.path)))
+  }
 
   /** Deletes every file this store has published. A second call is a no-op. */
   def close(): Unit =
