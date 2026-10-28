@@ -1,11 +1,25 @@
 package com.ewoodbury.scarlet.columnar
 
 import java.nio.file.{Files, Path}
+import java.nio.{ByteBuffer, ByteOrder}
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 final class TestSpillStore extends AnyFunSuite with Matchers:
+
+  private def corruptBatch(location: Path, batch: Int, count: Int): Unit =
+    val bytes = Files.readAllBytes(location)
+    val entry = SpillLayout.FooterEntryBytes
+    val footerAt = bytes.length - 4 - count * entry
+    val cursor = ByteBuffer
+      .wrap(bytes, footerAt + batch * entry, entry)
+      .order(ByteOrder.LITTLE_ENDIAN)
+    val offset = cursor.getLong
+    val length = cursor.getLong.toInt
+    val at = offset.toInt + length / 2
+    bytes(at) = (bytes(at) ^ 0xff).toByte
+    Files.write(location, bytes)
 
   private def tempDir(): Path =
     Files.createTempDirectory("scarlet-spill-test")
@@ -82,6 +96,47 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
         val read = store.write(batches).read()
         read.map(_.length) shouldBe Seq(1, 0, 2)
         assertSame(read, batches)
+      finally store.close()
+    }
+  }
+
+  test("batches yields one batch at a time and agrees with read") {
+    withDir { dir =>
+      val batches = Vector(
+        intBatch(Seq(1, 2, 3)),
+        nullableIntBatch(Seq(Some(4), None, Some(6))),
+        intBatch(Seq.empty),
+        intBatch(Seq(7)),
+      )
+      val store = SpillStore.open(dir)
+      try
+        val file = store.write(batches)
+        val iterator = file.batches()
+        try
+          iterator.hasNext shouldBe true
+          iterator.hasNext shouldBe true
+          val streamed = Vector(iterator.next(), iterator.next(), iterator.next(), iterator.next())
+          iterator.hasNext shouldBe false
+          assertSame(streamed, batches)
+          assertSame(file.read(), batches)
+        finally iterator.close()
+      finally store.close()
+    }
+  }
+
+  test("batches throws on a bad checksum before returning that batch") {
+    withDir { dir =>
+      val batches = Vector(intBatch(Seq(1, 2, 3)), intBatch(Seq(4, 5, 6, 7, 8)))
+      val store = SpillStore.open(dir)
+      try
+        val file = store.write(batches)
+        corruptBatch(file.location, batch = 1, count = 2)
+        val iterator = file.batches()
+        try
+          val first = iterator.next()
+          assertSame(Vector(first), Vector(batches.head))
+          an[IllegalStateException] should be thrownBy iterator.next()
+        finally iterator.close()
       finally store.close()
     }
   }

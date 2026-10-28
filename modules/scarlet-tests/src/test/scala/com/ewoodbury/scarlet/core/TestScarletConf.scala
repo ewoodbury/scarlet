@@ -25,6 +25,7 @@ class TestScarletConf extends AnyFlatSpec with Matchers with BeforeAndAfterEach 
     conf.spillDirectory shouldBe ""
     conf.spillMaxFiles shouldBe 1024
     conf.spillMaxBytes shouldBe 8L * 1024L * 1024L * 1024L
+    conf.spillFanIn shouldBe 8
   }
 
   it should "allow overriding fault tolerance configuration" in {
