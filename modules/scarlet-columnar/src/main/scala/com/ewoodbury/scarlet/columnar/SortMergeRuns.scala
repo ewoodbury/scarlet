@@ -27,9 +27,11 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * emitted. One store closes before the next partition pair, on success and on throw, and that
  * close deletes every run, including the intermediate ones.
  *
- * Peak live memory is `fanIn` batches per side during a merge pass, and two batches during the
- * join. The pass also holds the one output batch it is writing, and the join holds the equal-key
- * group until that group is emitted or refused.
+ * A pass holds at most `fanIn` input batches per side plus the one output batch it is writing, and
+ * the final join holds two streams plus the equal-key group until it is emitted or refused. That
+ * bounds the merge machinery, not the operator: the exchange has already materialised both sides
+ * and the joined result is materialised too, so peak query memory is both inputs plus the result
+ * plus those `fanIn` batches. Spill keeps the merge from adding the whole side on top.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[scarlet] object SortMergeRuns:
@@ -263,7 +265,12 @@ private[scarlet] object SortMergeRuns:
     groupRuns(runs, fanIn).map { group =>
       group match
         case Vector(file) => file
-        case many => mergeGroup(store, many, batchSize, pass)
+        case many =>
+          val merged = mergeGroup(store, many, batchSize, pass)
+          // The inputs are consumed. Delete them now so initial and intermediate runs do not
+          // coexist against `spillMaxFiles` and `spillMaxBytes`.
+          many.foreach(_.delete())
+          merged
     }
 
   private def groupRuns(runs: Vector[SpillFile], fanIn: Int): Vector[Vector[SpillFile]] =

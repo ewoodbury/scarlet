@@ -378,7 +378,12 @@ class TestSortMergeRuns extends AnyFlatSpec with Matchers with BeforeAndAfterEac
   private def confAt(budget: Long, enabled: Boolean): ScarletConf =
     originalConf.copy(spillEnabled = enabled, spillBudgetBytes = budget)
 
-  private def withConf(budget: Long, batchSize: Int, fanIn: Int = 8)(body: Path => Unit): Unit =
+  private def withConf(
+      budget: Long,
+      batchSize: Int,
+      fanIn: Int = 8,
+      maxFiles: Int = SpillStore.DefaultMaxFiles,
+  )(body: Path => Unit): Unit =
     val dir = Files.createTempDirectory("scarlet-sort-merge")
     SortMergeRuns.resetForTest()
     ScarletConf.set(
@@ -389,7 +394,7 @@ class TestSortMergeRuns extends AnyFlatSpec with Matchers with BeforeAndAfterEac
         spillEnabled = true,
         spillBudgetBytes = budget,
         spillDirectory = dir.toString,
-        spillMaxFiles = SpillStore.DefaultMaxFiles,
+        spillMaxFiles = maxFiles,
         spillMaxBytes = SpillStore.DefaultMaxBytes,
         spillFanIn = fanIn,
       ),
@@ -405,3 +410,19 @@ class TestSortMergeRuns extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       val _ = Files.deleteIfExists(path)
     }
     val _ = Files.deleteIfExists(dir)
+
+  "a merge with more runs than the file cap allows at once" should "delete each pass's input" in {
+    val left = (0 until 16).map(row => row -> (row + 1))
+    val right = (0 until 16).map(row => row -> (row + 10))
+    val partition =
+      SortMergeRuns.retainedBytes(left.size) + SortMergeRuns.retainedBytes(right.size)
+    val budget = partition - 1L
+    // 16 initial runs per side (32 files), fan-in 2. The cap fits the initial runs and one
+    // pass's outputs only if each pass deletes its inputs.
+    withConf(budget, batchSize = 1, fanIn = 2, maxFiles = 40) { dir =>
+      val spilled = triples(join(left, right, batchSize = 1))
+      spilled should contain theSameElementsAs rowPairs(left, right)
+      SortMergeRuns.mergePassesForTest should be > 1L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+  }
