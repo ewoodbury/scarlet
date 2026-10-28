@@ -15,17 +15,19 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * [[HashReduce.byKey]]. The hash join reads key column 0 and value column 1 on both sides,
  * exchanges each side, and probes one partition at a time. Those exchanges leave `carryNullKeys`
  * off, so a null key is dropped. The broadcast join builds one table from the batches chosen as
- * the build side and probes the other batches in place. The left outer broadcast join uses that
- * table and keeps the probe side. The shuffle-hash left outer join exchanges both sides, carries a
- * null key on the probe side only, and builds one table per partition. A right outer join calls
- * those same entry points with the right input as the probe and the left input as the build, then
- * swaps the value columns back to `(key, left, right)`. A probe-side row with no partner is kept,
- * and the build value's validity bit is clear. That bit is absence. A null value is not absence.
- * Match order is a kernel detail. The published multiset is multiplicity, values, and null
- * semantics. A full outer join probes the left input and also emits build rows no probe matched.
- * Broadcast gives each probe thread its own bitmap and ORs them after the probes join. Shuffle
- * keeps one bitmap per partition and finishes that partition immediately. Null build keys are
- * carried outside the table and emitted once. Those bitmaps are not part of the build budget.
+ * the build side and probes the other batches in place. When spill is on and that table's estimate
+ * exceeds the spill budget, the build and the probe are partitioned and each build partition is
+ * spilled. Outer joins do not. The left outer broadcast join uses that table and keeps the probe
+ * side. The shuffle-hash left outer join exchanges both sides, carries a null key on the probe
+ * side only, and builds one table per partition. A right outer join calls those same entry points
+ * with the right input as the probe and the left input as the build, then swaps the value columns
+ * back to `(key, left, right)`. A probe-side row with no partner is kept, and the build value's
+ * validity bit is clear. That bit is absence. A null value is not absence. Match order is a kernel
+ * detail. The published multiset is multiplicity, values, and null semantics. A full outer join
+ * probes the left input and also emits build rows no probe matched. Broadcast gives each probe
+ * thread its own bitmap and ORs them after the probes join. Shuffle keeps one bitmap per partition
+ * and finishes that partition immediately. Null build keys are carried outside the table and
+ * emitted once. Those bitmaps are not part of the build budget.
  */
 object ColumnPipeline:
 
@@ -182,14 +184,21 @@ object ColumnPipeline:
 
   /**
    * Inner join with no exchange. `probe` and `build` are already chosen. One table is filled from
-   * every build batch, then each probe batch is probed in place. The result is one batch per probe
-   * batch. Output columns are `(key, probe value, build value)`. The caller restores
-   * `(key, left, right)` when the logical left input is the build side. Multiplicity, values, and
-   * null semantics are the result. Order inside a batch is unspecified here. The kernel walks each
-   * build chain newest-first, which is a kernel detail. An empty probe returns no batches and does
-   * not allocate a table. An empty build returns one empty batch per probe batch.
-   * `buildBudgetBytes` bounds the build table only. An estimate above that bound throws
-   * `IllegalStateException` before the table is allocated.
+   * every build batch, then each probe batch is probed in place. In memory the result is one batch
+   * per probe batch; a spilled join returns one concatenated batch instead. Output columns are
+   * `(key, probe value, build value)`. The caller restores `(key, left, right)` when the logical
+   * left input is the build side. Multiplicity, values, and null semantics are the result. Order
+   * inside a batch is unspecified here. The kernel walks each build chain newest-first, which is a
+   * kernel detail. An empty probe returns no batches and does not allocate a table. An empty build
+   * returns one empty batch per probe batch. `buildBudgetBytes` bounds the build table only. An
+   * estimate above that bound throws `IllegalStateException` before the table is allocated.
+   *
+   * Spill is a separate budget. When [[ScarletConf.spillEnabled]] is set and
+   * [[HashJoin.retainedBuildBytes]] is above [[ScarletConf.spillBudgetBytes]], [[JoinSpill]]
+   * partitions both sides, writes one file per build partition, and probes each partition under
+   * that spill budget. The concatenated batches are returned only after every partition is probed.
+   * A partition that is still over the budget throws. An empty probe still returns no batches and
+   * writes nothing. Outer joins do not call this method.
    */
   def broadcastJoin(
       probe: Vector[ColumnBatch],
@@ -197,7 +206,10 @@ object ColumnPipeline:
       parallelism: Int,
       buildBudgetBytes: Long,
   ): Vector[ColumnBatch] =
-    broadcast(probe, build, parallelism, buildBudgetBytes, preserveProbe = false)
+    val conf = ScarletConf.get
+    if (probe.nonEmpty && JoinSpill.exceeds(build, conf)) then
+      JoinSpill.finish(probe, build, parallelism, conf)
+    else broadcast(probe, build, parallelism, buildBudgetBytes, preserveProbe = false)
 
   /**
    * Left outer join with no exchange. `probe` is the probe side. A probe-side row with no partner
