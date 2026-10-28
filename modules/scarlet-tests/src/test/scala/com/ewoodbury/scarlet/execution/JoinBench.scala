@@ -74,7 +74,7 @@ object JoinBench:
 
     def runnable: Boolean = failure.isEmpty
 
-  private[execution] final case class Observation(digest: JoinDigest.Digest, batches: Long)
+  private[execution] final case class Observation(digest: JoinDigest.Digest, batches: Long, visits: Long)
 
   def main(args: Array[String]): Unit =
     val started = System.nanoTime()
@@ -197,7 +197,7 @@ object JoinBench:
         try
           ScarletRuntime.get.shuffle.clear()
           val digest = JoinCases.digest(spec)
-          Observation(digest, sink.batchCount)
+          Observation(digest, sink.batchCount, sink.visitCount)
         finally ColumnMetrics.restore(previous)
       }
     finally ScarletConf.set(baseline)
@@ -276,13 +276,13 @@ object JoinBench:
     attempt(item.spec, threads, columnar = false) match
       case Left(thrown) => Left(thrown)
       case Right(observed) =>
-        requirePath(item, columnar = false, threads, observed.batches)
+        requirePath(item, columnar = false, threads, observed.batches, observed.visits)
         if (!item.accepted) then Right(observed.digest)
         else
           attempt(item.spec, threads, columnar = true) match
             case Left(thrown) => Left(thrown)
             case Right(other) =>
-              requirePath(item, columnar = true, threads, other.batches)
+              requirePath(item, columnar = true, threads, other.batches, other.visits)
               requireAgree(item, observed.digest, other.digest, "before", threads)
               Right(observed.digest)
 
@@ -330,7 +330,7 @@ object JoinBench:
       phase: String,
   ): JoinDigest.Digest =
     val observed = digestOf(item.spec, threads, columnar)
-    requirePath(item, columnar, threads, observed.batches)
+    requirePath(item, columnar, threads, observed.batches, observed.visits)
     require(
       observed.digest.total == item.spec.expectedPairs,
       s"${item.spec.name} $phase ${layoutName(columnar)} t$threads " +
@@ -388,7 +388,7 @@ object JoinBench:
         val started = System.nanoTime()
         val pairs = JoinCases.count(item.spec)
         val elapsed = System.nanoTime() - started
-        requirePath(item, columnar, threads, sink.batchCount)
+        requirePath(item, columnar, threads, sink.batchCount, sink.visitCount)
         val expected = item.digest.getOrElse(JoinDigest.empty).total
         require(
           pairs == expected,
@@ -398,12 +398,18 @@ object JoinBench:
       finally ColumnMetrics.restore(previous)
     }
 
-  private def requirePath(item: Measured, columnar: Boolean, threads: Int, batches: Long): Unit =
+  private def requirePath(
+      item: Measured,
+      columnar: Boolean,
+      threads: Int,
+      batches: Long,
+      visits: Long,
+  ): Unit =
     val layout = layoutName(columnar)
     if (columnar) then
       require(
-        batches > 0L,
-        s"${item.spec.name} $layout t$threads published no column batch",
+        batches > 0L && visits > 0L,
+        s"${item.spec.name} $layout t$threads published $batches column batches and ran $visits kernels",
       )
     else
       require(
@@ -435,7 +441,7 @@ object JoinBench:
                           ScarletRuntime.get.shuffle.clear()
                           JoinCases.count(item.spec)
                         }
-                        requirePath(item, columnar, threads, sink.batchCount)
+                        requirePath(item, columnar, threads, sink.batchCount, sink.visitCount)
                         val expected = item.digest.getOrElse(JoinDigest.empty).total
                         require(pairs == expected, s"${item.spec.name} alloc pairs $pairs")
                         item.allocBytes(layoutIndex(columnar))(widthIndex(threads))(round) = bytes
