@@ -319,6 +319,35 @@ removed: it could not safely reconstruct arbitrary user functions. Retry is hone
 - Retry tests set `baseRetryDelayMs = 1L` or they take seconds.
 - Test logs are silenced to WARN via `modules/scarlet-tests/src/test/resources/log4j2-test.xml`.
 
+## Outer joins
+
+An outer join marks an absent side by clearing that value column's validity bit. Absence is never
+a sentinel key or value, so a real `0` and a real null stay distinguishable from "no partner".
+
+The rules that hold for every kind:
+
+- **Key matching.** A null key never matches. A null key on the preserved side is still emitted,
+  with the other side absent. A null key on the other side is dropped, because no row can match
+  it. Inside the shuffle, the preserved side's exchange carries a null key to partition 0 so the
+  row survives to the task; every other exchange keeps dropping null keys.
+- **Values.** A null *value* is not absence and the columnar outer path cannot represent it yet.
+  A plan whose probe or build value column contains a null stays on the row path, for all three
+  kinds.
+- **Layout.** The published batch is always `(key, left, right)`. Left outer leaves the right
+  column absent, right outer leaves the left column absent, and full outer can leave either or
+  both. A right outer over a left-built table swaps the two value columns back before publishing.
+- **Full outer tracking.** Broadcast keeps one matched-row bitmap per probe thread and ORs them
+  after the probes join; shuffle keeps one bitmap per partition and emits that partition's
+  leftovers immediately. A null build key is carried outside the table and emitted once. An empty
+  probe still emits every build row.
+- **Hints.** Left, right and full outer on int pairs lower for an absent, shuffle-hash or broadcast
+  hint. Sort-merge stays on the row path for every kind. The row executor always shuffle-hashes an
+  outer join and ignores the hint.
+- **Budget.** `broadcastBuildBudgetBytes` bounds the build table only. The matched-row bitmaps sit
+  beside it. When the build contains a null key, the present-key rows are also copied once, and
+  that copy is outside the budget as well.
+- **Order.** Unspecified, as for inner joins.
+
 ## Known limitations (deferred work)
 
 Roadmap and sequencing are tracked externally; the headline items:
@@ -332,7 +361,6 @@ Roadmap and sequencing are tracked externally; the headline items:
   hint records both children and builds the right input. A later cost-based pass may build the
   left input. The build table must fit in `broadcastBuildBudgetBytes`. The row-path sort-merge
   join is a hash grouping wearing a sort-merge name; a true typed sort-merge join is deferred.
-  A left, right, or full outer join on int pairs lowers for an absent hint, a shuffle-hash hint,
-  or a broadcast hint. Sort-merge stays on the row path. A null value on an outer join stays on
-  the row path. The row executor always shuffle-hashes an outer join and does not consult
-  `joinStrategy`.
+  Outer-join coverage and its rules are in "Outer joins" above.
+- Nothing spills. Every columnar path assumes its working set fits in memory; the budget can only
+  refuse. Spill is the prerequisite for sort-merge on sorted runs.
