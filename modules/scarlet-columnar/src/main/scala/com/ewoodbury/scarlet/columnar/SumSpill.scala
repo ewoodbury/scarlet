@@ -94,9 +94,10 @@ private[scarlet] object SumSpill:
         numPartitions = pieces,
         parallelism = parallelism,
       )
-      // One morsel at a time: publish, read back, sum, delete. Only the running partial and the
-      // morsel are live, and the store never holds more than one file, so `spillMaxFiles` is not
-      // a function of the row count.
+      // One morsel at a time: publish, read back, sum, delete. The store holds at most one file,
+      // so `spillMaxFiles` is not a function of the row count. The sub-partitioned pieces and
+      // their morsels are already materialised by the exchange and the slice, so live memory is
+      // still one bucket plus the running partial; this loop does not add to it.
       val morsels = parts.iterator
         .filter(part => part.length > 0)
         .flatMap(part => ColumnBatches.slice(part, batchSize).iterator)

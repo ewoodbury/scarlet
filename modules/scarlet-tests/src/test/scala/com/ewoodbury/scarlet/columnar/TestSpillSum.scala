@@ -272,3 +272,24 @@ class TestSpillSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       SpillStore.listForTest(dir).foreach(path => Files.deleteIfExists(path))
       val _ = Files.deleteIfExists(dir)
   }
+
+  "a spill write that exceeds the byte cap" should "leave no file behind" in {
+    val dir = Files.createTempDirectory("scarlet-sum-cap-bytes")
+    SumSpill.resetForTest()
+    ScarletConf.set(
+      originalConf.copy(
+        spillEnabled = true,
+        spillBudgetBytes = 1L,
+        spillDirectory = dir.toString,
+        spillMaxBytes = 16L,
+      ),
+    )
+    try
+      an[IllegalStateException] should be thrownBy sum(twoPasses)
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    finally
+      ScarletConf.set(originalConf)
+      SumSpill.resetForTest()
+      SpillStore.listForTest(dir).foreach(path => Files.deleteIfExists(path))
+      val _ = Files.deleteIfExists(dir)
+  }
