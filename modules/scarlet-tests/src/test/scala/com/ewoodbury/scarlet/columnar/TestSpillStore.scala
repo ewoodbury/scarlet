@@ -207,3 +207,11 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
       SpillStore.listForTest(dir) shouldBe empty
     }
   }
+
+  test("a closed store refuses a write") {
+    withDir { dir =>
+      val store = SpillStore.open(dir)
+      store.close()
+      an[IllegalStateException] should be thrownBy store.write(Vector(intBatch(Seq(1))))
+    }
+  }

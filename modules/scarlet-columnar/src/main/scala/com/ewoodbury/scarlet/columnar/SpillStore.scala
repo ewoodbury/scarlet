@@ -43,6 +43,7 @@ final class SpillStore private (
 ) extends AutoCloseable:
 
   private val published = new AtomicReference(Vector.empty[SpillStore.Stored])
+  private val closed = new java.util.concurrent.atomic.AtomicBoolean(false)
 
   locally {
     require(maxFiles > 0, s"maxFiles must be > 0, got $maxFiles")
@@ -52,6 +53,7 @@ final class SpillStore private (
   }
 
   def write(batches: Vector[ColumnBatch]): SpillFile = synchronized {
+    if (closed.get()) then throw new IllegalStateException("spill store is closed")
     val schema = SpillStore.preflight(batches)
     val records = published.get
     if (records.length + 1 >= maxFiles) then
@@ -106,11 +108,13 @@ final class SpillStore private (
 
   /** Deletes every file this store has published. A second call is a no-op. */
   def close(): Unit =
-    val records = published.getAndSet(Vector.empty)
+    val records = synchronized {
+      if (closed.getAndSet(true)) then Vector.empty else published.getAndSet(Vector.empty)
+    }
     records.foreach { record =>
       try
         val _ = Files.deleteIfExists(record.path)
-      catch case _: java.io.IOException => ()
+      catch case _: Throwable => ()
     }
 
 object SpillStore:
