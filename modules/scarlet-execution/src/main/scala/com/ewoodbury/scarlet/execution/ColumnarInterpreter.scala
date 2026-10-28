@@ -220,6 +220,24 @@ private[execution] object ColumnarInterpreter:
         ),
       )
     case (
+          Plan.JoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
+          PhysicalOp.SortMergeJoin(
+            PhysicalOp.Exchange(leftOp),
+            PhysicalOp.Exchange(rightOp),
+          ),
+        ) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      Columns.Triples(
+        ColumnPipeline.sortMergeJoin(
+          pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence)),
+          pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence)),
+          ColumnarPlanner.shuffleWidth,
+          ColumnarPlanner.parallelism,
+          ColumnarPlanner.batchSize,
+        ),
+      )
+    case (
           Plan.JoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
           PhysicalOp.BroadcastJoin(leftOp, rightOp, buildSide),
         ) =>

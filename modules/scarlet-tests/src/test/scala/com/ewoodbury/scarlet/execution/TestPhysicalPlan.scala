@@ -238,12 +238,19 @@ class TestPhysicalPlan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.lower(pairs.mapValues[Int, Int, String](_.toString).plan) shouldBe rowPath
   }
 
-  it should "broadcast the right side, keep one batch per probe partition, and refuse sort-merge" in {
+  it should "broadcast the right side, keep one batch per probe partition, and sort-merge int pairs" in {
     val probe = DistCollection.ofIntPairs(Array(1, 2, 1), Array(10, 20, 11), 3)
     val build = DistCollection.ofIntPairs(Array(1, 1), Array(100, 101), 1)
     val broadcast = probe.broadcastJoin(build)
     shape(broadcast) shouldBe "BroadcastJoin(Scan, Scan)"
-    ColumnarPlanner.lower(probe.sortMergeJoin(build).plan) shouldBe rowPath
+    val sortMerge = probe.sortMergeJoin(build)
+    shape(sortMerge) shouldBe "SortMergeJoin(Exchange(Scan), Exchange(Scan))"
+    ColumnarPlanner.tryTake(sortMerge.plan, 1) shouldBe None
+    val lowered = ColumnarPlanner.lower(sortMerge.plan).getOrElse(fail("sort-merge was refused"))
+    intercept[IllegalArgumentException] {
+      ColumnarInterpreter.interpret(sortMerge.plan, lowered, Some(0))
+    }.getMessage should include("a partition selector cannot run a join")
+    sortMerge.collect() should contain theSameElementsAs probe.shuffleHashJoin(build).collect()
 
     val parts = ColumnarPlanner.tryRun(broadcast.plan).getOrElse(fail("broadcast was refused"))
     parts.length shouldBe 3

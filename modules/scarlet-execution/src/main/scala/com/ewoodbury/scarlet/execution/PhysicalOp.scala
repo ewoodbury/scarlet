@@ -11,10 +11,10 @@ import com.ewoodbury.scarlet.core.Partition
  * Other filters and projects remain one node per step. [[PhysicalOp.Project]] and `Pipeline` keep
  * the child kind. [[PhysicalOp.Column]] narrows a pair to one int column and shares its arrays.
  * [[PhysicalOp.MapValue]] rewrites an int value and keeps the pair. [[PhysicalOp.Exchange]] sits
- * under [[PhysicalOp.HashAggregate]] and on each side of [[PhysicalOp.HashJoin]] and
- * [[PhysicalOp.HashLeftOuter]] and [[PhysicalOp.HashRightOuter]] and [[PhysicalOp.HashFullOuter]].
- * Those kernels perform the shuffle. Interpreting the boundary on its own does not.
- * [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.BroadcastLeftOuter]],
+ * under [[PhysicalOp.HashAggregate]] and on each side of [[PhysicalOp.HashJoin]],
+ * [[PhysicalOp.SortMergeJoin]], [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]], and
+ * [[PhysicalOp.HashFullOuter]]. Those kernels perform the shuffle. Interpreting the boundary on
+ * its own does not. [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.BroadcastLeftOuter]],
  * [[PhysicalOp.BroadcastRightOuter]], and [[PhysicalOp.BroadcastFullOuter]] have no exchange.
  * [[PhysicalOp.BuildSide]] chooses which logical child of an inner broadcast join is built. The
  * planner records the right child. A later cost-based pass may choose the left child. The other
@@ -42,6 +42,14 @@ enum PhysicalOp:
   case Exchange(child: PhysicalOp)
   case HashAggregate(child: PhysicalOp)
   case HashJoin(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * In-memory sort-merge inner join of int pairs. `left` and `right` are exchanges with the same
+   * partition count. Each partition is sorted by key and merged. Null keys are dropped on both
+   * sides before the sort. A null payload of `0` does not match key `0`. Output columns are
+   * `(key, left, right)`. One batch per partition. Outer joins do not use this node.
+   */
+  case SortMergeJoin(left: PhysicalOp, right: PhysicalOp)
 
   /**
    * Shuffle-hash left outer join. `left` and `right` are exchanges. The left input is the probe
@@ -127,6 +135,7 @@ enum PhysicalOp:
     case MapValue(_) => PhysicalOp.Kind.Pairs
     case HashAggregate(_) => PhysicalOp.Kind.Pairs
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
+    case SortMergeJoin(_, _) => PhysicalOp.Kind.Triples
     case HashLeftOuter(_, _) => PhysicalOp.Kind.Triples
     case HashRightOuter(_, _) => PhysicalOp.Kind.Triples
     case BroadcastJoin(_, _, _) => PhysicalOp.Kind.Triples
@@ -151,6 +160,7 @@ enum PhysicalOp:
     case MapValue(child) => s"MapValue(${child.shape})"
     case HashAggregate(child) => s"HashAggregate(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
+    case SortMergeJoin(left, right) => s"SortMergeJoin(${left.shape}, ${right.shape})"
     case HashLeftOuter(left, right) => s"HashLeftOuter(${left.shape}, ${right.shape})"
     case HashRightOuter(left, right) => s"HashRightOuter(${left.shape}, ${right.shape})"
     case BroadcastJoin(left, right, _) => s"BroadcastJoin(${left.shape}, ${right.shape})"

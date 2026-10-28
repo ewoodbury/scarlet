@@ -14,20 +14,22 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * columns. An empty input is `numPartitions` empty sum batches, the same convention as
  * [[HashReduce.byKey]]. The hash join reads key column 0 and value column 1 on both sides,
  * exchanges each side, and probes one partition at a time. Those exchanges leave `carryNullKeys`
- * off, so a null key is dropped. The broadcast join builds one table from the batches chosen as
- * the build side and probes the other batches in place. When spill is on and that table's estimate
- * exceeds the spill budget, the build and the probe are partitioned and each build partition is
- * spilled. Outer joins do not. The left outer broadcast join uses that table and keeps the probe
- * side. The shuffle-hash left outer join exchanges both sides, carries a null key on the probe
- * side only, and builds one table per partition. A right outer join calls those same entry points
- * with the right input as the probe and the left input as the build, then swaps the value columns
- * back to `(key, left, right)`. A probe-side row with no partner is kept, and the build value's
- * validity bit is clear. That bit is absence. A null value is not absence. Match order is a kernel
- * detail. The published multiset is multiplicity, values, and null semantics. A full outer join
- * probes the left input and also emits build rows no probe matched. Broadcast gives each probe
- * thread its own bitmap and ORs them after the probes join. Shuffle keeps one bitmap per partition
- * and finishes that partition immediately. Null build keys are carried outside the table and
- * emitted once. Those bitmaps are not part of the build budget.
+ * off, so a null key is dropped. The sort-merge join uses that same exchange on both sides, sorts
+ * each bucket, and merges it. [[HashExchange.partitionAll]] concatenates a bucket with
+ * [[ColumnBatches.concat]] and keeps an empty bucket's index. The broadcast join builds one table
+ * from the batches chosen as the build side and probes the other batches in place. When spill is
+ * on and that table's estimate exceeds the spill budget, the build and the probe are partitioned
+ * and each build partition is spilled. Outer joins do not. The left outer broadcast join uses that
+ * table and keeps the probe side. The shuffle-hash left outer join exchanges both sides, carries a
+ * null key on the probe side only, and builds one table per partition. A right outer join calls
+ * those same entry points with the right input as the probe and the left input as the build, then
+ * swaps the value columns back to `(key, left, right)`. A probe-side row with no partner is kept,
+ * and the build value's validity bit is clear. That bit is absence. A null value is not absence.
+ * Match order is a kernel detail. The published multiset is multiplicity, values, and null
+ * semantics. A full outer join probes the left input and also emits build rows no probe matched.
+ * Broadcast gives each probe thread its own bitmap and ORs them after the probes join. Shuffle
+ * keeps one bitmap per partition and finishes that partition immediately. Null build keys are
+ * carried outside the table and emitted once. Those bitmaps are not part of the build budget.
  */
 object ColumnPipeline:
 
@@ -181,6 +183,36 @@ object ColumnPipeline:
         HashJoin.JoinSide(probeBatch, key = 0, value = 1),
       )
     }
+
+  /**
+   * Inner sort-merge join of int pairs. Both sides are sliced and hash-partitioned with one
+   * partition count. [[HashExchange.partitionAll]] drops a null key, concatenates each bucket with
+   * [[ColumnBatches.concat]], and leaves an empty bucket at its index. [[SortMerge.joinAll]]
+   * merges bucket `i` with bucket `i`. The kernel drops a null key again before sorting, so a null
+   * payload of `0` does not match key `0`. Output columns are `(key, left, right)`. One batch per
+   * partition. Keys inside a batch follow the sort. The cartesian product of one equal-key group
+   * is written before either cursor moves on.
+   */
+  def sortMergeJoin(
+      build: Vector[ColumnBatch],
+      probe: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    val buildBuckets = HashExchange.partitionAll(
+      sliceAll(build, batchSize),
+      keyOrdinal = 0,
+      numPartitions,
+      parallelism,
+    )
+    val probeBuckets = HashExchange.partitionAll(
+      sliceAll(probe, batchSize),
+      keyOrdinal = 0,
+      numPartitions,
+      parallelism,
+    )
+    SortMerge.joinAll(buildBuckets, probeBuckets)
 
   /**
    * Inner join with no exchange. `probe` and `build` are already chosen. One table is filled from

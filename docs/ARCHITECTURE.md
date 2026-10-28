@@ -63,7 +63,7 @@ asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors
 
 ### Columnar completion contract
 
-The following 169 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
+The following 170 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
 `Unknown(2)` denotes the two source partitions in the small contract fixtures; aggregate and join
 outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are exact.
 
@@ -80,6 +80,7 @@ outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are 
 | Pair `keys`, `values`, int `mapValues`, mapped key/value columns, filtered int `mapValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `Project(Key(Scan))`, `Project(Value(Scan))`, `FilterValue(MapValue(Scan))` |
 | Int `reduceByKey`, after a value filter or int `mapValues`, and nested reduction | `Columnar` | `HashAggregate(Exchange(Scan))`, `HashAggregate(Exchange(FilterValue(Scan)))`, `HashAggregate(Exchange(MapValue(Scan)))`, `HashAggregate(Exchange(HashAggregate(Exchange(Scan))))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
+| Explicit sort-merge int join. Both sides are hash-partitioned, sorted inside each partition, and merged. Null keys are dropped before the sort. Outer sort-merge stays on the row path | `Columnar` | `SortMergeJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit broadcast int join. The planner builds the right input. A later pass may build the left. Neither side is exchanged. Order is unspecified | `Columnar` | `BroadcastJoin(Scan, Scan)` |
 | Broadcast left outer int join. The planner builds the right input. The left input is the probe side, and the op records no left build. Absence is a probe-side row with no partner: the right value's validity bit is clear. A null value is not absence and stays on the row path | `Columnar` | `BroadcastLeftOuter(Scan, Scan)` |
 | Shuffle-hash left outer int join, including an absent hint. The left input is the probe side. Its exchange carries a null key to partition 0. The right exchange drops a null key. Each partition builds one table under the broadcast budget. A null value stays on the row path. Sort-merge stays on the row path | `Columnar` | `HashLeftOuter(Exchange(Scan), Exchange(Scan))` |
@@ -182,11 +183,11 @@ the pair type, such as `(Int, Int) => (Long, Int)`, is excluded: `partitioning`,
 `tryGroupedSum` stay on the row path. The structural peel label is still
 `GroupedSum(MapPair(Scan))`.
 
-These 49 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+These 48 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
 `sortBy`, map on join triples, a general tuple filter on join triples, non-Int `mapValues`,
 string/double pair projection or pair filters, string/double-key `groupByKey`, `reduceByKey`, and
-join, explicit sort-merge joins, single-precision
+join, single-precision
 `Float` sources/maps, all-null strings, empty generic sources without a type descriptor, and
 element maps that do not preserve the column type.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then
@@ -356,11 +357,13 @@ Roadmap and sequencing are tracked externally; the headline items:
   shuffle write per stage.
 - Fusion has no cost model or general predicate pushdown. `collect` decodes every output row into a
   `Seq`.
-- The columnar path does not implement sort-merge join. That hint stays on the row path. A join
-  with no hint, or with shuffle-hash, lowers to the columnar hash join. An explicit broadcast
-  hint records both children and builds the right input. A later cost-based pass may build the
-  left input. The build table must fit in `broadcastBuildBudgetBytes`. The row-path sort-merge
-  join is a hash grouping wearing a sort-merge name; a true typed sort-merge join is deferred.
-  Outer-join coverage and its rules are in "Outer joins" above.
+- An explicit sort-merge hint on int pairs lowers to an in-memory sort-merge join. Both sides use
+  the hash exchange, then each partition is sorted and merged. Null keys are dropped before the
+  sort. Outer sort-merge and non-int keys stay on the row path. Sorted runs on spill are not
+  implemented. A join with no hint, or with shuffle-hash, lowers to the columnar hash join. An
+  explicit broadcast hint records both children and builds the right input. A later cost-based
+  pass may build the left input. The build table must fit in `broadcastBuildBudgetBytes`. When
+  columnar execution is off, the row-path sort-merge task still groups by key. Outer-join coverage
+  and its rules are in "Outer joins" above.
 - Nothing spills. Every columnar path assumes its working set fits in memory; the budget can only
   refuse. Spill is the prerequisite for sort-merge on sorted runs.
