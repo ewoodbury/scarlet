@@ -43,6 +43,28 @@ final case class ScarletConf(
     columnarExecution: Boolean = true,
     /** Rows per morsel on the columnar path. */
     columnarBatchSize: Int = 8192,
+    /**
+     * When true, a grouped-sum bucket whose estimated table exceeds `spillBudgetBytes` is spilled.
+     * Off by default, so a sum stays in memory.
+     */
+    spillEnabled: Boolean = false,
+    /** Byte budget for one post-exchange grouped-sum bucket. The default is 64 MiB. */
+    spillBudgetBytes: Long = 64L * 1024L * 1024L,
+    /**
+     * Directory for grouped-sum spill files. Empty selects the spill store default,
+     * `java.io.tmpdir/scarlet-spill`, which is outside the repository.
+     */
+    spillDirectory: String = "",
+    /**
+     * Exclusive cap on files one spilled sum bucket may publish. The default is 1024, the same cap
+     * as the spill store. A store may publish at most one file fewer than this.
+     */
+    spillMaxFiles: Int = 1024,
+    /**
+     * Exclusive cap on bytes one spilled sum bucket may publish. The default is 8 GiB, the same
+     * cap as the spill store.
+     */
+    spillMaxBytes: Long = 8L * 1024L * 1024L * 1024L,
 ):
 
   /** Builds the task retry policy from this configuration. */

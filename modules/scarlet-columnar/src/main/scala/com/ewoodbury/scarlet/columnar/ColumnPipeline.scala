@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import com.ewoodbury.scarlet.core.ScarletConf
+
 /**
  * Multi-batch sum and inner join.
  *
@@ -121,6 +123,14 @@ object ColumnPipeline:
   /**
    * Exchanges one combined partial vector. `combine` runs once. An empty input returns before that
    * call, so the kernel is not asked to build partials.
+   *
+   * Each bucket is summed with [[HashAggregate.sumInt64]]. Spill is off unless
+   * [[ScarletConf.spillEnabled]] is set. A bucket whose [[SumSpill.retainedBytes]] estimate is
+   * above [[ScarletConf.spillBudgetBytes]] is sub-partitioned, written morsel by morsel, and
+   * folded with [[HashAggregate.mergeSumPartials]]. That path runs one bucket at a time, so the
+   * bucket's files are deleted before the next bucket opens a store. A run whose buckets all fit
+   * stays on [[MorselScheduler]], including when spill is enabled and none of them exceed the
+   * budget. `reduceByKey` and min/max do not reach this method.
    */
   private def runSum(
       batches: Vector[ColumnBatch],
@@ -134,10 +144,15 @@ object ColumnPipeline:
     if (batches.isEmpty) then Vector.fill(numPartitions)(emptySum)
     else
       val combined = combine(batches)
-      val buckets = HashExchange.partitionAll(combined, keyOrdinal = 0, numPartitions, parallelism)
-      MorselScheduler.map(buckets, parallelism) { (_, bucket) =>
-        HashAggregate.sumInt64(bucket, keyOrdinal = 0, valueOrdinal = 1)
-      }
+      val buckets =
+        HashExchange.partitionAll(combined, keyOrdinal = 0, numPartitions, parallelism)
+      val conf = ScarletConf.get
+      if (buckets.exists(bucket => SumSpill.exceeds(bucket, conf))) then
+        buckets.map(bucket => SumSpill.finish(bucket, parallelism, batchSize, conf))
+      else
+        MorselScheduler.map(buckets, parallelism) { (_, bucket) =>
+          HashAggregate.sumInt64(bucket, keyOrdinal = 0, valueOrdinal = 1)
+        }
 
   def innerJoin(
       build: Vector[ColumnBatch],
