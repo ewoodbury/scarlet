@@ -44,25 +44,31 @@ final case class ScarletConf(
     /** Rows per morsel on the columnar path. */
     columnarBatchSize: Int = 8192,
     /**
-     * When true, a grouped-sum bucket whose estimated table exceeds `spillBudgetBytes` is spilled.
-     * Off by default, so a sum stays in memory.
+     * When true, a grouped-sum bucket or an inner broadcast join build whose estimate exceeds
+     * `spillBudgetBytes` is spilled. Off by default, so both stay in memory. Outer joins do not
+     * read this flag.
      */
     spillEnabled: Boolean = false,
-    /** Byte budget for one post-exchange grouped-sum bucket. The default is 64 MiB. */
+    /**
+     * Byte budget for one grouped-sum bucket, and for one inner-join build table. The default is
+     * 64 MiB. A broadcast build over this budget is partitioned with the probe. One partition that
+     * is still over it throws.
+     */
     spillBudgetBytes: Long = 64L * 1024L * 1024L,
     /**
-     * Directory for grouped-sum spill files. Empty selects the spill store default,
+     * Directory for spill files. Empty selects the spill store default,
      * `java.io.tmpdir/scarlet-spill`, which is outside the repository.
      */
     spillDirectory: String = "",
     /**
-     * Exclusive cap on files one spilled sum bucket may publish. The default is 1024, the same cap
-     * as the spill store. A store may publish at most one file fewer than this.
+     * Exclusive cap on files one spill store may publish. The default is 1024, the same cap as the
+     * spill store. A store may publish at most one file fewer than this. A spilled join caps its
+     * partition count at one less than this, one file per partition.
      */
     spillMaxFiles: Int = 1024,
     /**
-     * Exclusive cap on bytes one spilled sum bucket may publish. The default is 8 GiB, the same
-     * cap as the spill store.
+     * Exclusive cap on bytes one spill store may publish. The default is 8 GiB, the same cap as
+     * the spill store.
      */
     spillMaxBytes: Long = 8L * 1024L * 1024L * 1024L,
 ):
