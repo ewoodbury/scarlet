@@ -126,11 +126,13 @@ lazy val `scarlet-execution` = (project in file("modules/scarlet-execution"))
   .dependsOn(`scarlet-api`, `scarlet-core`, `scarlet-runtime`, `scarlet-columnar`)
 
 // Column batches. No dependency on the logical plan or the row executor.
+// ScarletConf is the sum-spill switch. Plan types in core are not referenced here.
 lazy val `scarlet-columnar` = (project in file("modules/scarlet-columnar"))
   .settings(
     name := "scarlet-columnar",
     commonSettings
   )
+  .dependsOn(`scarlet-core`)
 
 // Test module aggregating all tests
 lazy val `scarlet-tests` = (project in file("modules/scarlet-tests"))

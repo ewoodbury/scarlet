@@ -20,6 +20,11 @@ class TestScarletConf extends AnyFlatSpec with Matchers with BeforeAndAfterEach 
     conf.baseRetryDelayMs shouldBe 1000L
     conf.maxRetryDelayMs shouldBe 30000L
     conf.broadcastBuildBudgetBytes shouldBe 64L * 1024L * 1024L
+    conf.spillEnabled shouldBe false
+    conf.spillBudgetBytes shouldBe 64L * 1024L * 1024L
+    conf.spillDirectory shouldBe ""
+    conf.spillMaxFiles shouldBe 1024
+    conf.spillMaxBytes shouldBe 8L * 1024L * 1024L * 1024L
   }
 
   it should "allow overriding fault tolerance configuration" in {
