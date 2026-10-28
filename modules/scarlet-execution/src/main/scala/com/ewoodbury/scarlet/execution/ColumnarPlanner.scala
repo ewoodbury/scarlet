@@ -146,16 +146,17 @@ object ColumnarPlanner:
   /**
    * The physical tree for `plan`, without running it. `None` means the row path, including an
    * element chain whose project does not declare the column's type. A join lowers when its hint is
-   * absent, shuffle-hash, or broadcast. Sort-merge returns `None`. A left outer join on int pairs
-   * lowers for a broadcast hint, a shuffle-hash hint, or an absent hint. An absent hint uses the
-   * shuffle-hash op, matching an inner join. A right outer join on int pairs lowers for a
-   * broadcast hint, a shuffle-hash hint, or an absent hint. An absent hint uses the shuffle-hash
-   * op. The left input is the build side and the right input is the probe side. A full outer join
-   * on int pairs lowers for a broadcast hint, a shuffle-hash hint, or an absent hint. An absent
-   * hint uses the shuffle-hash op. Sort-merge returns `None`. A null value does not change that
-   * shape: [[tryRun]] reads the value columns and returns `None`, and the row path runs.
-   * [[partitioning]] and [[tryRun]] follow a refusal. They also drop a lowered tree whose layout
-   * is invalid.
+   * absent, shuffle-hash, or broadcast. An explicit sort-merge hint on int pairs lowers to
+   * [[PhysicalOp.SortMergeJoin]]. Any other sort-merge, including an outer join, returns `None`. A
+   * left outer join on int pairs lowers for a broadcast hint, a shuffle-hash hint, or an absent
+   * hint. An absent hint uses the shuffle-hash op, matching an inner join. A right outer join on
+   * int pairs lowers for a broadcast hint, a shuffle-hash hint, or an absent hint. An absent hint
+   * uses the shuffle-hash op. The left input is the build side and the right input is the probe
+   * side. A full outer join on int pairs lowers for a broadcast hint, a shuffle-hash hint, or an
+   * absent hint. An absent hint uses the shuffle-hash op. Sort-merge outer joins return `None`. A
+   * null value does not change that shape: [[tryRun]] reads the value columns and returns `None`,
+   * and the row path runs. [[partitioning]] and [[tryRun]] follow a refusal. They also drop a
+   * lowered tree whose layout is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -589,10 +590,11 @@ object ColumnarPlanner:
     case PhysicalOp.Pipeline(child, _) => preservedPartitions(child)
     case PhysicalOp.Column(child, _) => preservedPartitions(child)
     case PhysicalOp.MapValue(child) => preservedPartitions(child)
-    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.HashLeftOuter |
-        _: PhysicalOp.HashRightOuter | _: PhysicalOp.HashFullOuter | _: PhysicalOp.BroadcastJoin |
-        _: PhysicalOp.BroadcastLeftOuter | _: PhysicalOp.BroadcastRightOuter |
-        _: PhysicalOp.BroadcastFullOuter | _: PhysicalOp.Exchange =>
+    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.SortMergeJoin |
+        _: PhysicalOp.HashLeftOuter | _: PhysicalOp.HashRightOuter | _: PhysicalOp.HashFullOuter |
+        _: PhysicalOp.BroadcastJoin | _: PhysicalOp.BroadcastLeftOuter |
+        _: PhysicalOp.BroadcastRightOuter | _: PhysicalOp.BroadcastFullOuter |
+        _: PhysicalOp.Exchange =>
       None
 
   private def lowerPlan(plan: Plan[_]): Option[PhysicalOp] =
@@ -601,8 +603,9 @@ object ColumnarPlanner:
     else lowerPlan(base).flatMap(child => lowerElementSteps(child, steps))
 
   /**
-   * Columnar joins are hash joins. No hint, shuffle-hash, and broadcast all qualify. Sort-merge
-   * does not. Broadcast records the right input as the build side; see [[joinOf]].
+   * Columnar hash joins. No hint, shuffle-hash, and broadcast all qualify. Sort-merge is
+   * [[PhysicalOp.SortMergeJoin]], not this predicate. Broadcast records the right input as the
+   * build side; see [[joinOf]].
    */
   private[execution] def acceptsHashJoin(strategy: Option[Plan.JoinStrategy]): Boolean =
     strategy match
@@ -635,6 +638,19 @@ object ColumnarPlanner:
             Some(PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)))
           case _ => None
       }
+    case Plan.JoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)) =>
+      (lowerPlan(left), lowerPlan(right)) match
+        case (Some(leftOp), Some(rightOp)) =>
+          (leftOp.kind, rightOp.kind) match
+            case (PhysicalOp.Kind.Pairs, PhysicalOp.Kind.Pairs) =>
+              Some(
+                PhysicalOp.SortMergeJoin(
+                  PhysicalOp.Exchange(leftOp),
+                  PhysicalOp.Exchange(rightOp),
+                ),
+              )
+            case _ => None
+        case _ => None
     case Plan.JoinOp(left, right, strategy) if acceptsHashJoin(strategy) =>
       (lowerPlan(left), lowerPlan(right)) match
         case (Some(leftOp), Some(rightOp)) =>
@@ -1007,8 +1023,8 @@ object ColumnarPlanner:
     case PhysicalOp.Pipeline(child, _) => infoOf(child)
     case PhysicalOp.Column(child, _) => infoOf(child).withoutPairDistribution
     case PhysicalOp.MapValue(child) => infoOf(child)
-    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.HashLeftOuter |
-        _: PhysicalOp.HashRightOuter | _: PhysicalOp.HashFullOuter =>
+    case _: PhysicalOp.HashAggregate | _: PhysicalOp.HashJoin | _: PhysicalOp.SortMergeJoin |
+        _: PhysicalOp.HashLeftOuter | _: PhysicalOp.HashRightOuter | _: PhysicalOp.HashFullOuter =>
       hashed
     case PhysicalOp.BroadcastJoin(left, right, buildSide) =>
       broadcastInfo(left, right, buildSide)
