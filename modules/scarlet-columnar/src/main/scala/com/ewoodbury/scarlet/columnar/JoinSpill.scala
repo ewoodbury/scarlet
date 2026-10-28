@@ -28,6 +28,10 @@ import com.ewoodbury.scarlet.core.ScarletConf
  *
  * Only [[ColumnPipeline.broadcastJoin]] calls this. Shuffle-hash inner join, outer joins, and
  * sort-merge do not.
+ *
+ * Both sides are partitioned before any file is written, so peak heap is the two inputs plus one
+ * partition's table, not the inputs plus the whole build table. The inputs are already resident
+ * when a join is planned; this path bounds the table, not the data.
  */
 private[scarlet] object JoinSpill:
 
@@ -73,6 +77,10 @@ private[scarlet] object JoinSpill:
         val buildParts = exchange(build, parts, parallelism)
         val probeParts = exchange(probe, parts, parallelism)
         val files = buildParts.map(part => spillPartition(store, part, batchSize))
+        require(
+          probeParts.length == files.length,
+          s"join spill produced ${files.length} build partitions and ${probeParts.length} probe partitions",
+        )
         // Probe after every build file is published. The vector below is local until every
         // partition has been probed; the concatenated batch is what the caller receives.
         val outputs = probeParts.zip(files).zipWithIndex.map { case ((probePart, spilled), part) =>

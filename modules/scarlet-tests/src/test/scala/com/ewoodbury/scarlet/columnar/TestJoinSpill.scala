@@ -274,3 +274,30 @@ class TestJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       val _ = Files.deleteIfExists(path)
     }
     val _ = Files.deleteIfExists(dir)
+
+  "an empty probe" should "write no file even when the build is over budget" in {
+    val build = Vector(BatchCodec.intPairs((0 until 50).map(key => (key, key + 1))))
+    val budget = HashJoin.retainedBuildBytes(buildRows(build)) - 1L
+
+    withConf(budget, batchSize = 1, broadcastBudget = 1L) { dir =>
+      join(Vector.empty, build) shouldBe Vector.empty[ColumnBatch]
+      JoinSpill.filesWrittenForTest shouldBe 0L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+  }
+
+  "a build split into more than two partitions" should "still match the in-memory join" in {
+    val build = Vector(BatchCodec.intPairs((0 until 200).map(key => (key, key + 1000))))
+    val probe = Vector(BatchCodec.intPairs((0 until 200).map(key => (key, key + 7))))
+    val memory = join(probe, build)
+    val rows = buildRows(build)
+    // Four partitions of 50 rows each; the budget fits one such partition, so the split is real.
+    val budget = HashJoin.retainedBuildBytes(rows / 4)
+
+    withConf(budget, batchSize = 16, broadcastBudget = 1L) { dir =>
+      val spilled = join(probe, build)
+      triples(spilled).sorted shouldBe triples(memory).sorted
+      JoinSpill.filesWrittenForTest should be >= 3L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+  }

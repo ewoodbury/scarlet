@@ -184,8 +184,9 @@ object ColumnPipeline:
 
   /**
    * Inner join with no exchange. `probe` and `build` are already chosen. One table is filled from
-   * every build batch, then each probe batch is probed in place. The result is one batch per probe
-   * batch. Output columns are `(key, probe value, build value)`. The caller restores
+   * every build batch, then each probe batch is probed in place. In memory the result is one batch
+   * per probe batch; a spilled join returns one concatenated batch instead. Output columns are
+   * `(key, probe value, build value)`. The caller restores
    * `(key, left, right)` when the logical left input is the build side. Multiplicity, values, and
    * null semantics are the result. Order inside a batch is unspecified here. The kernel walks each
    * build chain newest-first, which is a kernel detail. An empty probe returns no batches and does
