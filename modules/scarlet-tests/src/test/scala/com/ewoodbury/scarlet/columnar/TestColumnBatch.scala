@@ -431,6 +431,29 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     BatchCodec.decodeStrings(batch) shouldBe Seq("a", "z")
   }
 
+  "zero-row batches" should "return a fresh instance from each schema constructor" in {
+    checkFresh(
+      () => ColumnBatches.emptyIntLongSum,
+      Vector(LogicalType.Int32, LogicalType.Int64),
+    )
+    checkFresh(
+      () => ColumnBatches.emptyIntPairs,
+      Vector(LogicalType.Int32, LogicalType.Int32),
+    )
+    checkFresh(
+      () => ColumnBatches.emptyLongPairs,
+      Vector(LogicalType.Int64, LogicalType.Int64),
+    )
+    checkFresh(
+      () => ColumnBatches.emptyIntJoin,
+      Vector(LogicalType.Int32, LogicalType.Int32, LogicalType.Int32),
+    )
+    checkFresh(
+      () => ColumnBatches.emptyLongJoin,
+      Vector(LogicalType.Int64, LogicalType.Int64, LogicalType.Int64),
+    )
+  }
+
   "batch construction" should "reject a column that does not match the schema or the row count" in {
     val one = Int32Column(Seq(1))
     val two = Int32Column(Seq(1, 2))
@@ -442,6 +465,25 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       new ColumnBatch(Vector(LogicalType.Int32, LogicalType.Int32), Vector(one, two), length = 1)
     }
   }
+
+  private def checkFresh(build: () => ColumnBatch, schema: Vector[LogicalType]): Unit =
+    val left = build()
+    val right = build()
+    left should not be theSameInstanceAs(right)
+    left.length shouldBe 0
+    right.length shouldBe 0
+    left.schema shouldBe schema
+    right.schema shouldBe schema
+    left.columns.iterator.zip(right.columns.iterator).zip(schema.iterator).foreach {
+      case ((first, second), logicalType) =>
+        first should not be theSameInstanceAs(second)
+        first.logicalType shouldBe logicalType
+        first.length shouldBe 0
+        second.length shouldBe 0
+        // A zero-length value array is shared and cannot be mutated; only the column wrapper and
+        // the validity words are per-instance.
+        first.validity.words should not be theSameInstanceAs(second.validity.words)
+    }
 
   private def int32(batch: ColumnBatch): Int32Column = batch.columns match
     case Seq(column: Int32Column) => column

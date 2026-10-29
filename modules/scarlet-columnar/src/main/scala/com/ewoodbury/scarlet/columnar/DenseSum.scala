@@ -394,7 +394,7 @@ private[columnar] object DenseSum:
       failAt = -1
       require(minKey == 0, "direct compaction requires a zero origin")
       val rows = touchedCount
-      if (rows == 0) then emptySum
+      if (rows == 0) then ColumnBatches.emptyIntLongSum
       else
         val span = maxSeen - minSeen + 1
         if (rows == span) then compactSpan(minSeen, span)
@@ -442,7 +442,7 @@ private[columnar] object DenseSum:
     def compact(): ColumnBatch =
       failAt = -1
       val rows = touchedCount
-      if (rows == 0) then emptySum
+      if (rows == 0) then ColumnBatches.emptyIntLongSum
       else if (nullSums == 0 && rows == keyRange) then compactFull(rows)
       else if (nullSums == 0 && maxSeen >= 0) then compactWindow(minSeen, maxSeen, rows)
       else compactPartial(rows)
@@ -974,8 +974,3 @@ private[columnar] object DenseSum:
     throw new IllegalStateException(
       s"key $key outside dense window starting at $base of length $limit",
     )
-
-  private def emptySum: ColumnBatch =
-    val keys = Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0)
-    val values = Int64Column.of(Array.emptyLongArray, Validity.allValid(0), 0)
-    new ColumnBatch(Vector(LogicalType.Int32, LogicalType.Int64), Vector(keys, values), 0)

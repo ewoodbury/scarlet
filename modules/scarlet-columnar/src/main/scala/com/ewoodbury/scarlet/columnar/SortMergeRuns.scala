@@ -215,7 +215,7 @@ private[scarlet] object SortMergeRuns:
     SpillStore.withSpill(directory, conf.spillMaxFiles, conf.spillMaxBytes) { store =>
       val (leftPresent, leftNulls) = splitNullKeys(left)
       val (rightPresent, rightNulls) =
-        if (preserveRight) then splitNullKeys(right) else (right, emptyPairs)
+        if (preserveRight) then splitNullKeys(right) else (right, ColumnBatches.emptyIntPairs)
       val leftRuns = writeRuns(store, leftPresent, batchSize)
       val rightRuns = writeRuns(store, rightPresent, batchSize)
       val leftFile = reduce(store, leftRuns, fanIn, batchSize)
@@ -449,10 +449,12 @@ private[scarlet] object SortMergeRuns:
           leftCursor.close()
           rightCursor.close()
       case (Some(left), None) =>
-        if (preserveLeft) then emitFile(left, onLeft = true, budget) else emptyJoin
+        if (preserveLeft) then emitFile(left, onLeft = true, budget)
+        else ColumnBatches.emptyIntJoin
       case (None, Some(right)) =>
-        if (preserveRight) then emitFile(right, onLeft = false, budget) else emptyJoin
-      case (None, None) => emptyJoin
+        if (preserveRight) then emitFile(right, onLeft = false, budget)
+        else ColumnBatches.emptyIntJoin
+      case (None, None) => ColumnBatches.emptyIntJoin
 
   /**
    * One sorted run, emitted as unmatched rows. A group over the budget names its key and throws.
@@ -591,7 +593,7 @@ private[scarlet] object SortMergeRuns:
       if (!Validity.isSet(keyWords, row)) then nulls += 1
       row += 1
     }
-    if (nulls == 0) then (batch, emptyPairs)
+    if (nulls == 0) then (batch, ColumnBatches.emptyIntPairs)
     else
       val present = width - nulls
       val presentKeys = new Array[Int](present)
@@ -640,7 +642,7 @@ private[scarlet] object SortMergeRuns:
 
   /** One outer row per null-key pair. The key bit stays clear. The other value is absent. */
   private def nullSideRows(nullPairs: ColumnBatch, onLeft: Boolean): ColumnBatch =
-    if (nullPairs.length == 0) then emptyJoin
+    if (nullPairs.length == 0) then ColumnBatches.emptyIntJoin
     else
       val values = ColumnHash.int32At(nullPairs, 1)
       val count = values.length
@@ -702,27 +704,6 @@ private[scarlet] object SortMergeRuns:
 
   private val joinSchema: Vector[LogicalType] =
     Vector(LogicalType.Int32, LogicalType.Int32, LogicalType.Int32)
-
-  private def emptyPairs: ColumnBatch =
-    new ColumnBatch(
-      pairSchema,
-      Vector(
-        Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0),
-        Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0),
-      ),
-      0,
-    )
-
-  private def emptyJoin: ColumnBatch =
-    new ColumnBatch(
-      joinSchema,
-      Vector(
-        Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0),
-        Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0),
-        Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0),
-      ),
-      0,
-    )
 
   /**
    * One sorted run, read one batch at a time. [[close]] releases the channel if the caller stops
@@ -949,7 +930,7 @@ private[scarlet] object SortMergeRuns:
       }
 
     def toBatch: ColumnBatch =
-      if (count == 0) then emptyJoin
+      if (count == 0) then ColumnBatches.emptyIntJoin
       else
         new ColumnBatch(
           joinSchema,

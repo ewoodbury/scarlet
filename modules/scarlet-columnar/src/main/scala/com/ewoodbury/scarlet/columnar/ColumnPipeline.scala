@@ -149,7 +149,7 @@ object ColumnPipeline:
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
-    if (batches.isEmpty) then Vector.fill(numPartitions)(emptySum)
+    if (batches.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyIntLongSum)
     else
       val combined = combine(batches)
       val buckets =
@@ -649,11 +649,6 @@ object ColumnPipeline:
       MorselScheduler.map(probe, parallelism) { (_, probeBatch) =>
         table.probe(HashJoin.JoinSide(probeBatch, key = 0, value = 1), preserveProbe)
       }
-
-  private def emptySum: ColumnBatch =
-    val keys = Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0)
-    val values = Int64Column.of(Array.emptyLongArray, Validity.allValid(0), 0)
-    new ColumnBatch(Vector(LogicalType.Int32, LogicalType.Int64), Vector(keys, values), 0)
 
   private def bucketAt(buckets: Vector[ColumnBatch], part: Int): ColumnBatch =
     buckets.lift(part).getOrElse {

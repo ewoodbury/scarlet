@@ -31,7 +31,8 @@ private[scarlet] object Morsels:
  *
  * A slice shorter than or equal to `batchSize` is the input batch itself. Concatenation of one
  * batch, or of only empty batches, returns the head batch. Copied ranges keep values and validity.
- * [[Morsels.of]] uses the same cuts and does not copy.
+ * [[Morsels.of]] uses the same cuts and does not copy. It also owns the zero-row batch constructor
+ * for each schema.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object ColumnBatches:
@@ -80,6 +81,52 @@ object ColumnBatches:
         append(parts.map(part => ColumnKernel.columnAt(part, ordinal)), total)
       }.toVector
       new ColumnBatch(head.schema, columns, total)
+
+  /** Zero-row `(Int32 key, Int64 measure)`. A fresh batch on every call. */
+  private[columnar] def emptyIntLongSum: ColumnBatch =
+    new ColumnBatch(
+      Vector(LogicalType.Int32, LogicalType.Int64),
+      Vector(emptyInt32, emptyInt64),
+      0,
+    )
+
+  /** Zero-row `(Int32, Int32)` pairs. A fresh batch on every call. */
+  private[columnar] def emptyIntPairs: ColumnBatch =
+    new ColumnBatch(
+      Vector(LogicalType.Int32, LogicalType.Int32),
+      Vector(emptyInt32, emptyInt32),
+      0,
+    )
+
+  /** Zero-row `(Int64, Int64)` pairs. A fresh batch on every call. */
+  private[columnar] def emptyLongPairs: ColumnBatch =
+    new ColumnBatch(
+      Vector(LogicalType.Int64, LogicalType.Int64),
+      Vector(emptyInt64, emptyInt64),
+      0,
+    )
+
+  /** Zero-row `(Int32 key, Int32, Int32)` join. A fresh batch on every call. */
+  private[columnar] def emptyIntJoin: ColumnBatch =
+    new ColumnBatch(
+      Vector(LogicalType.Int32, LogicalType.Int32, LogicalType.Int32),
+      Vector(emptyInt32, emptyInt32, emptyInt32),
+      0,
+    )
+
+  /** Zero-row `(Int64 key, Int64, Int64)` join. A fresh batch on every call. */
+  private[columnar] def emptyLongJoin: ColumnBatch =
+    new ColumnBatch(
+      Vector(LogicalType.Int64, LogicalType.Int64, LogicalType.Int64),
+      Vector(emptyInt64, emptyInt64, emptyInt64),
+      0,
+    )
+
+  private def emptyInt32: Int32Column =
+    Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0)
+
+  private def emptyInt64: Int64Column =
+    Int64Column.of(Array.emptyLongArray, Validity.allValid(0), 0)
 
   private def copy(batch: ColumnBatch, start: Int, length: Int): ColumnBatch =
     val columns = batch.columns.map(column => copyColumn(column, start, length))

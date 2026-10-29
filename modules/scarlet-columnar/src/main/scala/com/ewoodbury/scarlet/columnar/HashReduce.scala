@@ -27,7 +27,7 @@ object HashReduce:
     val keys = ColumnHash.int32At(batch, keyOrdinal)
     val values = ColumnHash.int32At(batch, valueOrdinal)
     require(keys.length == values.length, "key and value columns differ in length")
-    if (keys.length == 0) then emptyPairs
+    if (keys.length == 0) then ColumnBatches.emptyIntPairs
     else reduce(keys, values, op)
 
   /**
@@ -44,7 +44,7 @@ object HashReduce:
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
-    if (batches.isEmpty) then Vector.fill(numPartitions)(emptyPairs)
+    if (batches.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs)
     else
       val combined = PartialCombine.perBatch(
         batches,
@@ -64,11 +64,6 @@ object HashReduce:
       table.scanDense(keys, values)
     else table.scanSparse(keys, values)
     table.compact()
-
-  private def emptyPairs: ColumnBatch =
-    val keys = Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0)
-    val values = Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0)
-    new ColumnBatch(Vector(LogicalType.Int32, LogicalType.Int32), Vector(keys, values), 0)
 
   private final class Table(capacity: Int, op: IntBinOp):
     private val mask: Int = capacity - 1

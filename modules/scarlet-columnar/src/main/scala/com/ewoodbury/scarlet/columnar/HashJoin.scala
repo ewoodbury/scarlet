@@ -40,7 +40,7 @@ object HashJoin:
     val probeValues = ColumnHash.int32At(probe.batch, probe.value)
     require(buildKeys.length == buildValues.length, "build key and value columns differ in length")
     require(probeKeys.length == probeValues.length, "probe key and value columns differ in length")
-    if (buildKeys.length == 0 || probeKeys.length == 0) then emptyJoin
+    if (buildKeys.length == 0 || probeKeys.length == 0) then ColumnBatches.emptyIntJoin
     else indexed(buildKeys, buildValues).write(probeKeys, probeValues)
 
   /**
@@ -210,7 +210,7 @@ object HashJoin:
           }
         row += 1
       }
-      if (filled == 0) then emptyJoin
+      if (filled == 0) then ColumnBatches.emptyIntJoin
       else publish(outKeys, outBuild, outProbe, buildWords, probeWords, outCapacity, filled)
 
   private def publish(
@@ -261,17 +261,6 @@ object HashJoin:
   private def growWords(words: Array[Long], rowCapacity: Int): Array[Long] =
     val needed = (rowCapacity + 63) >>> 6
     if (words.length == needed) words else Arrays.copyOf(words, needed)
-
-  private def emptyJoin: ColumnBatch =
-    new ColumnBatch(
-      Vector(LogicalType.Int32, LogicalType.Int32, LogicalType.Int32),
-      Vector(
-        Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0),
-        Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0),
-        Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0),
-      ),
-      0,
-    )
 
   /**
    * Build table shared by every probe. `probe` writes `(key, probe value, build value)`. An empty
@@ -331,7 +320,7 @@ object HashJoin:
         probeKeys.length == probeValues.length,
         "probe key and value columns differ in length",
       )
-      if (probeKeys.length == 0 || (rows == 0 && !preserveProbe)) then emptyJoin
+      if (probeKeys.length == 0 || (rows == 0 && !preserveProbe)) then ColumnBatches.emptyIntJoin
       else writeProbe(probeKeys, probeValues, preserveProbe)
 
     private def writeProbe(
@@ -424,7 +413,7 @@ object HashJoin:
           }
         row += 1
       }
-      if (filled == 0) then emptyJoin
+      if (filled == 0) then ColumnBatches.emptyIntJoin
       // publish takes its value arrays as (first, second). Passing probe first writes
       // (key, probe, build), which the broadcast path turns into (key, left, right).
       else
@@ -568,7 +557,7 @@ object HashJoin:
           }
         row += 1
       }
-      if (filled == 0) then emptyJoin
+      if (filled == 0) then ColumnBatches.emptyIntJoin
       else
         publish(
           outKeys,
@@ -690,7 +679,7 @@ object HashJoin:
     val values = ColumnHash.int32At(batch, 1)
     require(keys.length == values.length, "build key and value columns differ in length")
     val count = keys.length
-    if (count == 0) then emptyJoin
+    if (count == 0) then ColumnBatches.emptyIntJoin
     else
       val outKeys = Arrays.copyOf(keys.values, count)
       val outProbe = new Array[Int](count)
