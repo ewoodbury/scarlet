@@ -206,16 +206,21 @@ a pair that stays `(Int, Int)` is also excluded from `lower` and
 fixture reports a layout when `lower` refuses the plan. `partitioning` is defined exactly when
 the plan is accepted: `lower` returns a physical tree and that tree's layout is valid.
 
-A join lowers when its hint is absent, shuffle-hash, or broadcast. Sort-merge is not implemented
-on the columnar path: that hint makes `lower` return `None`, and `partitioning` reports no layout.
-The absent hint and shuffle-hash stay the columnar hash join above. Broadcast records both
-children and builds the right input. A later cost-based pass may build the left input instead.
-The other child is probed in place, so the join itself adds no exchange. Output distribution
-follows that probe side. Output columns stay `(key, left, right)`. Multiplicity, values, and
-null semantics match the shuffle-hash join. Order is unspecified. The build table is estimated
-before it is allocated and must fit in `broadcastBuildBudgetBytes` (64 MiB). That budget covers
-the table only. An estimate above it fails the action. The inputs are already evaluated, so the
-failure does not fall back to the row path. A probe subtree can still contain its own exchange,
+A join lowers when its hint is absent, shuffle-hash, broadcast, or sort-merge. An inner
+sort-merge of int pairs is accepted: `lower` returns a physical tree and `partitioning` reports
+a layout. Outer sort-merge, and sort-merge on a non-int key, are refused. Those plans make
+`lower` return `None`, and `partitioning` reports no layout. The absent hint and shuffle-hash
+stay the columnar hash join above. Broadcast records both children and builds the right input.
+A later cost-based pass may build the left input instead.
+For a broadcast join, the other child is probed in place, so the join itself adds no exchange.
+Output distribution follows that probe side. A sort-merge join is
+`SortMergeJoin(Exchange, Exchange)`, and its distribution follows the key hash on both sides.
+When columnar execution is off, the row-path sort-merge task still groups by key.
+Output columns stay `(key, left, right)`. Multiplicity, values, and null semantics match the
+shuffle-hash join. Order is unspecified. The broadcast build table is estimated before it is
+allocated and must fit in `broadcastBuildBudgetBytes` (64 MiB). That budget covers the table
+only. An estimate above it fails the action. The inputs are already evaluated, so the failure
+does not fall back to the row path. A broadcast probe subtree can still contain its own exchange,
 for example an aggregate that feeds the join.
 
 `collect`, `foreach`, `reduce`, `fold`, and `aggregate` are deliberate boxed exits: they consume
@@ -349,6 +354,16 @@ The rules that hold for every kind:
   that copy is outside the budget as well.
 - **Order.** Unspecified, as for inner joins.
 
+## Spill
+
+Grouped sum, an inner broadcast join's build, and sort-merge joins spill when `spillEnabled`
+is on. `spillBudgetBytes` is the in-memory trigger. The flag defaults off. `spillMaxFiles` and
+`spillMaxBytes` cap one spill store.
+
+At or under `spillBudgetBytes`, and whenever `spillEnabled` is off, a sort-merge partition stays
+in memory. Over the budget, with spill on, each side is written as sorted runs and merged
+`spillFanIn` at a time.
+
 ## Known limitations (deferred work)
 
 Roadmap and sequencing are tracked externally; the headline items:
@@ -357,13 +372,5 @@ Roadmap and sequencing are tracked externally; the headline items:
   shuffle write per stage.
 - Fusion has no cost model or general predicate pushdown. `collect` decodes every output row into a
   `Seq`.
-- An explicit sort-merge hint on int pairs lowers to an in-memory sort-merge join. Both sides use
-  the hash exchange, then each partition is sorted and merged. Null keys are dropped before the
-  sort. Outer sort-merge and non-int keys stay on the row path. Sorted runs on spill are not
-  implemented. A join with no hint, or with shuffle-hash, lowers to the columnar hash join. An
-  explicit broadcast hint records both children and builds the right input. A later cost-based
-  pass may build the left input. The build table must fit in `broadcastBuildBudgetBytes`. When
-  columnar execution is off, the row-path sort-merge task still groups by key. Outer-join coverage
-  and its rules are in "Outer joins" above.
-- Nothing spills. Every columnar path assumes its working set fits in memory; the budget can only
-  refuse. Spill is the prerequisite for sort-merge on sorted runs.
+- The sort-merge operator still materialises its inputs and its result.
+- A shuffle-hash join does not spill.
