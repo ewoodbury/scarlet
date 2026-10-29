@@ -46,6 +46,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.Longs(parts) => parts
     case Columns.Floats(parts) => parts
     case Columns.Pairs(parts) => parts
+    case Columns.LongPairs(parts) => parts
     case Columns.Triples(parts) => parts
     case Columns.Strings(parts) => parts
     case Columns.Bools(parts) => parts
@@ -56,6 +57,7 @@ private[execution] object ColumnarInterpreter:
     case Longs(parts: Vector[ColumnBatch])
     case Floats(parts: Vector[ColumnBatch])
     case Pairs(parts: Vector[ColumnBatch])
+    case LongPairs(parts: Vector[ColumnBatch])
     case Triples(parts: Vector[ColumnBatch])
     case Strings(parts: Vector[ColumnBatch])
     case Bools(parts: Vector[ColumnBatch])
@@ -86,6 +88,8 @@ private[execution] object ColumnarInterpreter:
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeFloat64s(batch, rows))
         case Columns.Pairs(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeIntPairs(batch, rows))
+        case Columns.LongPairs(parts) =>
+          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeLongPairs(batch, rows))
         case Columns.Triples(parts) =>
           // Joins are not partition-preserving, so `take` does not reach this arm.
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeIntTriples(batch, rows))
@@ -126,6 +130,7 @@ private[execution] object ColumnarInterpreter:
           val encoded =
             if (preserveAbsence) then encodeGroupedPairs(selected) else encodePairs(selected)
           Columns.Pairs(encoded)
+        case PhysicalOp.Kind.LongPairs => Columns.LongPairs(encodeLongPairs(selected))
         case PhysicalOp.Kind.Strings => Columns.Strings(encodeStrings(selected))
         case PhysicalOp.Kind.Bools => Columns.Bools(encodeBools(selected))
         case PhysicalOp.Kind.Triples =>
@@ -198,6 +203,24 @@ private[execution] object ColumnarInterpreter:
       Columns.Pairs(
         HashReduce.byKey(
           pairsOf(interpret(source, child, selectedPartition, preserveAbsence)),
+          ColumnarPlanner.shuffleWidth,
+          ColumnarPlanner.parallelism,
+          ColumnarPlanner.batchSize,
+          (left, right) => op(left, right),
+        ),
+      )
+    case (
+          Plan.ReduceByKeyOp(source, reduceFunc),
+          PhysicalOp.LongHashAggregate(PhysicalOp.Exchange(child)),
+        ) =>
+      // Boundary guard: take refuses an aggregate, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
+      // Named erasure boundary. Grouped long-pair reduction declares `(Long, Long) => Long`.
+      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+      val op = reduceFunc.asInstanceOf[(Long, Long) => Long]
+      Columns.LongPairs(
+        LongHashReduce.byKey(
+          longPairsOf(interpret(source, child, selectedPartition, preserveAbsence)),
           ColumnarPlanner.shuffleWidth,
           ColumnarPlanner.parallelism,
           ColumnarPlanner.batchSize,
@@ -550,7 +573,8 @@ private[execution] object ColumnarInterpreter:
         Columns.Floats(onEachMorsel(parts)(morsel => ElementPipeline.floats(morsel, steps)))
       case Columns.Strings(parts) =>
         Columns.Strings(onEachMorsel(parts)(morsel => ElementPipeline.strings(morsel, steps)))
-      case Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) | Columns.Outer(_, _) =>
+      case Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.Triples(_) |
+          Columns.Outer(_, _) =>
         rejected
 
   private def triplePredicate(
@@ -628,7 +652,8 @@ private[execution] object ColumnarInterpreter:
             Columns.Bools(onEachMorsel(parts) { morsel =>
               BoolPipeline.filter(morsel.batch, morsel.start, morsel.length, predicate)
             })
-          case Columns.Pairs(_) | Columns.Triples(_) | Columns.Outer(_, _) =>
+          case Columns.Pairs(_) | Columns.LongPairs(_) | Columns.Triples(_) |
+              Columns.Outer(_, _) =>
             throw new IllegalStateException(
               s"columnar element filter expects ${elementColumnList(includeBooleans = true)}",
             )
@@ -729,7 +754,8 @@ private[execution] object ColumnarInterpreter:
           value => ColumnarPlanner.stringResult(fn(value)),
         )
       })
-    case Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) | Columns.Outer(_, _) =>
+    case Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.Triples(_) |
+        Columns.Outer(_, _) =>
       throw new IllegalStateException(
         s"columnar map expects ${elementColumnList(includeBooleans = false)}",
       )
@@ -757,8 +783,8 @@ private[execution] object ColumnarInterpreter:
     case Columns.Pairs(parts) if parts.nonEmpty => parts
     case Columns.Pairs(_) =>
       throw new IllegalStateException("columnar pairs have no partitions")
-    case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Triples(_) |
-        Columns.Strings(_) | Columns.Bools(_) | Columns.Outer(_, _) =>
+    case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.LongPairs(_) |
+        Columns.Triples(_) | Columns.Strings(_) | Columns.Bools(_) | Columns.Outer(_, _) =>
       throw new IllegalStateException("columnar op expected int pairs")
 
   private def triplesOf(columns: Columns): Vector[ColumnBatch] = columns match
@@ -766,7 +792,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.Triples(_) =>
       throw new IllegalStateException("columnar triples have no partitions")
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Pairs(_) |
-        Columns.Strings(_) | Columns.Bools(_) | Columns.Outer(_, _) =>
+        Columns.LongPairs(_) | Columns.Strings(_) | Columns.Bools(_) | Columns.Outer(_, _) =>
       throw new IllegalStateException("columnar op expected int triples")
 
   /**
@@ -868,6 +894,27 @@ private[execution] object ColumnarInterpreter:
   private def encodePairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
     encodePairPartitions(partitions, rows => BatchCodec.intPairs(rows))
 
+  private def encodeLongPairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+    import com.ewoodbury.scarlet.core.LongPairArrays
+
+    partitions.map { partition =>
+      partition.data match
+        case pairs: LongPairArrays => BatchCodec.copiedLongPairs(pairs.keys, pairs.values)
+        case other =>
+          // Named erasure boundary. Classification already selected `(Long, Long)` elements.
+          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+          val rows = other.asInstanceOf[Iterable[(Long, Long)]]
+          BatchCodec.longPairs(rows)
+    }.toVector
+
+  private def longPairsOf(columns: Columns): Vector[ColumnBatch] = columns match
+    case Columns.LongPairs(parts) if parts.nonEmpty => parts
+    case Columns.LongPairs(_) =>
+      throw new IllegalStateException("columnar long pairs have no partitions")
+    case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Pairs(_) |
+        Columns.Triples(_) | Columns.Strings(_) | Columns.Bools(_) | Columns.Outer(_, _) =>
+      throw new IllegalStateException("columnar op expected long pairs")
+
   /**
    * Pair encode for grouped sum. [[BatchCodec.intPairsPreservingAbsence]] keeps a null component
    * absent and rejects any other non-int cell. An owned pair array has no nulls and is copied like
@@ -909,6 +956,8 @@ private[execution] object ColumnarInterpreter:
       parts.map(batch => Partition(BatchCodec.decodeFloat64s(batch)))
     case Columns.Pairs(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeIntPairs(batch)))
+    case Columns.LongPairs(parts) =>
+      parts.map(batch => Partition(BatchCodec.decodeLongPairs(batch)))
     case Columns.Triples(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeIntTriples(batch)))
     case Columns.Outer(parts, absent) =>

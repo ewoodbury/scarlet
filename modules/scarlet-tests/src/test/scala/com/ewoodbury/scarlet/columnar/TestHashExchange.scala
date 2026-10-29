@@ -194,6 +194,103 @@ class TestHashExchange extends AnyFlatSpec with Matchers:
     }
   }
 
+  "partitionInt64" should "use Long.hashCode and keep a null value with its row" in {
+    val wide = (1L << 32) + 1L
+    val keys = Int64Column.of(
+      Array(wide, Long.MinValue, Long.MaxValue, -3L, 1L),
+      Validity.pack(5, row => row != 4),
+      5,
+    )
+    val values = Int64Column.of(
+      Array(10L, 20L, 30L, 40L, 99L),
+      Validity.pack(5, row => row != 2),
+      5,
+    )
+    val batch = new ColumnBatch(
+      Vector(LogicalType.Int64, LogicalType.Int64),
+      Vector(keys, values),
+      5,
+    )
+    val width = 4
+    val dropped = HashExchange.partitionInt64(batch, keyOrdinal = 0, numPartitions = width)
+
+    dropped.map(_.length).sum shouldBe 4
+    val found = dropped.zipWithIndex.flatMap { (part, index) =>
+      val keyColumn = int64(part, 0)
+      val valueColumn = int64(part, 1)
+      (0 until part.length).map { row =>
+        keyColumn.isValid(row) shouldBe true
+        val value = if (valueColumn.isValid(row)) Some(valueColumn.values(row)) else None
+        (keyColumn.values(row), value, index)
+      }
+    }
+    found should contain theSameElementsAs Seq(
+      (wide, Some(10L), Math.floorMod(java.lang.Long.hashCode(wide), width)),
+      (Long.MinValue, Some(20L), Math.floorMod(java.lang.Long.hashCode(Long.MinValue), width)),
+      (Long.MaxValue, None, Math.floorMod(java.lang.Long.hashCode(Long.MaxValue), width)),
+      (-3L, Some(40L), Math.floorMod(java.lang.Long.hashCode(-3L), width)),
+    )
+    Math.floorMod(wide, width) shouldBe 1
+    Math.floorMod(java.lang.Long.hashCode(wide), width) shouldBe 0
+    Math.floorMod(java.lang.Long.hashCode(Long.MinValue), width) shouldBe 0
+
+    val carried = HashExchange.partitionInt64(
+      batch,
+      keyOrdinal = 0,
+      numPartitions = width,
+      carryNullKeys = true,
+    )
+    carried.map(_.length).sum shouldBe 5
+    val zero = carried.headOption.getOrElse(fail("missing partition 0"))
+    val nullKey = int64(zero, 0)
+    val nullRows = (0 until zero.length).filterNot(nullKey.isValid)
+    nullRows shouldBe Seq(zero.length - 1)
+    nullKey.values(nullRows.headOption.getOrElse(fail("missing null key"))) shouldBe 1L
+  }
+
+  "partitionAllInt64" should "place keys by Long.hashCode across batches" in {
+    val wide = (1L << 32) + 1L
+    val heavy = longPairs((1 to 8).map(row => (wide, row.toLong)))
+    val lights = Vector(
+      longPairs(Seq((Long.MinValue, 1L))),
+      longPairs(Seq((-3L, 2L))),
+      longPairs(Seq((Long.MaxValue, 3L))),
+    )
+    val parts = HashExchange.partitionAllInt64(
+      heavy +: lights,
+      keyOrdinal = 0,
+      numPartitions = 4,
+      parallelism = 2,
+    )
+
+    parts.length shouldBe 4
+    parts.map(_.length).sum shouldBe 11
+    parts.zipWithIndex.foreach { (part, index) =>
+      val keyColumn = int64(part, 0)
+      (0 until part.length).foreach { row =>
+        Math.floorMod(java.lang.Long.hashCode(keyColumn.values(row)), 4) shouldBe index
+      }
+    }
+  }
+
+  it should "share one long-key partition when every key is present" in {
+    val batch = longPairs(Seq((1L, 10L), (2L, 20L)))
+    val parts = HashExchange.partitionInt64(batch, keyOrdinal = 0, numPartitions = 1)
+
+    parts.length shouldBe 1
+    parts.headOption.getOrElse(fail("missing batch")) should be theSameInstanceAs batch
+  }
+
+  private def longPairs(rows: Seq[(Long, Long)]): ColumnBatch = {
+    val keys = Int64Column(rows.map(_._1))
+    val values = Int64Column(rows.map(_._2))
+    new ColumnBatch(
+      Vector(LogicalType.Int64, LogicalType.Int64),
+      Vector(keys, values),
+      rows.length,
+    )
+  }
+
   private def bucket(parts: Vector[ColumnBatch], key: Int): ColumnBatch =
     parts.lift(Math.floorMod(key, parts.length)).getOrElse(fail(s"missing bucket for $key"))
 

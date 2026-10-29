@@ -21,6 +21,7 @@ class TestColumnarKinds extends AnyFlatSpec with Matchers:
     descriptorOrdinal(Plan.SourceDescriptor.Pairs) shouldBe 4
     descriptorOrdinal(Plan.SourceDescriptor.Strings) shouldBe 5
     descriptorOrdinal(Plan.SourceDescriptor.Bools) shouldBe 6
+    descriptorOrdinal(Plan.SourceDescriptor.LongPairs) shouldBe 7
     kindOrdinal(PhysicalOp.Kind.Ints) shouldBe 0
     kindOrdinal(PhysicalOp.Kind.Longs) shouldBe 1
     kindOrdinal(PhysicalOp.Kind.Floats) shouldBe 2
@@ -28,8 +29,9 @@ class TestColumnarKinds extends AnyFlatSpec with Matchers:
     kindOrdinal(PhysicalOp.Kind.Triples) shouldBe 4
     kindOrdinal(PhysicalOp.Kind.Strings) shouldBe 5
     kindOrdinal(PhysicalOp.Kind.Bools) shouldBe 6
-    Plan.SourceDescriptor.values.length shouldBe 7
-    PhysicalOp.Kind.values.length shouldBe 7
+    kindOrdinal(PhysicalOp.Kind.LongPairs) shouldBe 7
+    Plan.SourceDescriptor.values.length shouldBe 8
+    PhysicalOp.Kind.values.length shouldBe 8
   }
 
 inline def descriptorOrdinal(inline descriptor: Plan.SourceDescriptor): Int =
@@ -41,6 +43,7 @@ inline def descriptorOrdinal(inline descriptor: Plan.SourceDescriptor): Int =
     case Plan.SourceDescriptor.Pairs => 4
     case Plan.SourceDescriptor.Strings => 5
     case Plan.SourceDescriptor.Bools => 6
+    case Plan.SourceDescriptor.LongPairs => 7
 
 inline def kindOrdinal(inline kind: PhysicalOp.Kind): Int =
   inline kind match
@@ -51,3 +54,4 @@ inline def kindOrdinal(inline kind: PhysicalOp.Kind): Int =
     case PhysicalOp.Kind.Triples => 4
     case PhysicalOp.Kind.Strings => 5
     case PhysicalOp.Kind.Bools => 6
+    case PhysicalOp.Kind.LongPairs => 7
