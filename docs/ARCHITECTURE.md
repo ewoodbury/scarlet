@@ -63,7 +63,7 @@ asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors
 
 ### Columnar completion contract
 
-The following 176 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
+The following 178 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. That is 176 previous fixtures, plus the unhinted long-pair join moved from the excluded list and one explicit shuffle-hash long join. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
 `Unknown(2)` denotes the two source partitions in the small contract fixtures; aggregate and join
 outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are exact.
 
@@ -82,6 +82,7 @@ outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are 
 | Int `reduceByKey`, after a value filter or int `mapValues`, and nested reduction | `Columnar` | `HashAggregate(Exchange(Scan))`, `HashAggregate(Exchange(FilterValue(Scan)))`, `HashAggregate(Exchange(MapValue(Scan)))`, `HashAggregate(Exchange(HashAggregate(Exchange(Scan))))` |
 | Long `reduceByKey` | `Columnar` | `LongHashAggregate(Exchange(Scan))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
+| Automatic or explicit shuffle-hash long join. Both sides are exchanged on `Long.hashCode`. A null key is dropped. A null value stays on the row path. There is no spill and no build budget. Broadcast, sort-merge, and outer joins on long keys stay on the row path | `Columnar` | `LongHashJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge int join. Both sides are hash-partitioned, sorted inside each partition, and merged. Null keys are dropped before the sort | `Columnar` | `SortMergeJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge left outer int join. Both sides are hash-partitioned. The left exchange carries a null key to partition 0. The right exchange drops a null key. A null key does not match. A preserved null key publishes a clear key bit. Absence is the right value's clear bit. A null value stays on the row path | `Columnar` | `SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge right outer int join. The right exchange carries a null key. The left exchange drops one. The left-outer walk runs on swapped inputs, then the value columns are swapped back to `(key, left, right)`. Absence is the left value's clear bit. A null value stays on the row path | `Columnar` | `SortMergeRightOuter(Exchange(Scan), Exchange(Scan))` |
@@ -169,11 +170,12 @@ covered by `TestLongColumnar` (`wrap Long.MaxValue + 1 and sum an empty collecti
 `Iterable[String]` keeps `SourceDescriptor.Unknown`: a non-empty iterable is classified from its
 first string, and an empty iterable has no witness and stays on the row path.
 
-`groupedSum` is columnar for an `(Int, Int)` source. A `(Long, Long)` scan and `reduceByKey` on
-that scan are columnar. `groupedSum` of a long pair stays on the row path. String
-`groupByKey` and string `join` are refused. Also refused, and already listed with the contract
-fixtures: `distinct`, `partitionBy`, `sortBy`, `groupByKey`, and joins on any key that is not an
-int column. `min` and `max` are not in the API. Nullable long and boolean sources have no
+`groupedSum` is columnar for an `(Int, Int)` source. A `(Long, Long)` scan, `reduceByKey` on
+that scan, and an inner shuffle-hash join of that scan are columnar. `groupedSum` of a long pair
+stays on the row path. Broadcast, sort-merge, and outer joins on long keys stay on the row path.
+String `groupByKey` and string `join` are refused. Also refused, and already listed with the contract
+fixtures: `distinct`, `partitionBy`, `sortBy`, `groupByKey`, and joins on a string or double key.
+`min` and `max` are not in the API. Nullable long and boolean sources have no
 descriptor.
 
 Fused `groupedSum` is action-level. It is not a `Plan` node and not a `PhysicalOp`.
@@ -189,14 +191,18 @@ the pair type, such as `(Int, Int) => (Long, Int)`, is excluded: `partitioning`,
 `tryGroupedSum` stay on the row path. The structural peel label is still
 `GroupedSum(MapPair(Scan))`.
 
-These 53 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+These 52 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
 `sortBy`, map on join triples, a general tuple filter on join triples, non-Int `mapValues`,
 string/double pair projection or pair filters, string/double-key `groupByKey`, `reduceByKey`, and
 join, long-pair `keys`, `values`, `mapValues`, an element map, `filter`, `filterKeys`,
-`filterValues`, `groupedSum`, `sortBy`, and join (`take` of a long-pair scan is accepted),
+`filterValues`, `groupedSum`, and `sortBy` (`take` of a long-pair scan is accepted, and an
+unhinted or shuffle-hash inner join of long pairs is accepted),
 single-precision `Float` sources/maps, all-null strings, empty generic sources without a type
 descriptor, and element maps that do not preserve the column type.
+That is 53 previous exclusions, minus the unhinted long join. 53 - 1 = 52. Long broadcast,
+sort-merge, and outer joins stay on the row path. They are covered by execution tests, not
+contract fixtures, because the contract does not track the int refusals either.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then
 `toString`, and a type-changing map inside a three-step chain), a `Long` mapped to `Int` or
 `String`, a `Double` mapped to `Int`, a `Boolean` mapped to `Boolean` or to `Int`, a boolean
@@ -213,12 +219,18 @@ a pair that stays `(Int, Int)` is also excluded from `lower` and
 fixture reports a layout when `lower` refuses the plan. `partitioning` is defined exactly when
 the plan is accepted: `lower` returns a physical tree and that tree's layout is valid.
 
-A join lowers when its hint is absent, shuffle-hash, broadcast, or sort-merge. An inner
+A join of int pairs lowers when its hint is absent, shuffle-hash, broadcast, or sort-merge. An inner
 sort-merge of int pairs is accepted: `lower` returns a physical tree and `partitioning` reports
 a layout. A left, right, or full outer sort-merge of int pairs is accepted the same way.
 Sort-merge on a non-int key is refused. That plan makes
-`lower` return `None`, and `partitioning` reports no layout. The absent hint and shuffle-hash
-stay the columnar hash join above. Broadcast records both children and builds the right input.
+`lower` return `None`, and `partitioning` reports no layout. For int pairs, the absent hint and
+shuffle-hash stay the columnar hash join above. A `(Long, Long)` inner join with an absent hint
+or an explicit shuffle-hash hint lowers to `LongHashJoin(Exchange, Exchange)`. Both sides are
+exchanged on `Long.hashCode`. A null key is dropped on both sides. Output columns are
+`(key, left, right)`. There is no spill and no build budget. A broadcast hint, a sort-merge hint,
+and every outer join on long keys stay on the row path. Those plans are covered by execution
+tests, not contract fixtures, because the contract does not track the int refusals either.
+Broadcast of int pairs records both children and builds the right input.
 A later cost-based pass may build the left input instead.
 For a broadcast join, the other child is probed in place, so the join itself adds no exchange.
 Output distribution follows that probe side. A sort-merge join is
@@ -360,7 +372,7 @@ The rules that hold for every kind:
   probe still emits every build row.
 - **Hints.** Left, right, and full outer on int pairs lower for an absent, shuffle-hash, or
   broadcast hint. Left, right, and full outer sort-merge of int pairs also lower for an explicit
-  sort-merge hint. A non-int key stays on the row path. The row executor always shuffle-hashes an
+  sort-merge hint. A non-int key, including a long key, stays on the row path. The row executor always shuffle-hashes an
   outer join and ignores the hint.
 - **Budget.** `broadcastBuildBudgetBytes` bounds the build table only. The matched-row bitmaps sit
   beside it. When the build contains a null key, the present-key rows are also copied once, and
@@ -387,5 +399,5 @@ Roadmap and sequencing are tracked externally; the headline items:
 - Fusion has no cost model or general predicate pushdown. `collect` decodes every output row into a
   `Seq`.
 - The sort-merge operator still materialises its inputs and its result.
-- A shuffle-hash join does not spill.
+- A shuffle-hash join does not spill. The long-key inner join is the same: no spill and no build budget.
 - Long hash reduce never spills; an input that does not fit stays in memory.
