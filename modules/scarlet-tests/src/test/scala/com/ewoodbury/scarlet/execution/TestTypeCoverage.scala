@@ -142,6 +142,7 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       Plan.SourceDescriptor.Pairs,
       Plan.SourceDescriptor.Strings,
       Plan.SourceDescriptor.Bools,
+      Plan.SourceDescriptor.LongPairs,
     )
     PhysicalOp.Kind.values.toSet shouldBe Set(
       PhysicalOp.Kind.Ints,
@@ -151,10 +152,11 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       PhysicalOp.Kind.Triples,
       PhysicalOp.Kind.Strings,
       PhysicalOp.Kind.Bools,
+      PhysicalOp.Kind.LongPairs,
     )
   }
 
-  "grouped sum" should "fold int pairs and refuse a long pair source" in {
+  "grouped sum" should "fold int pairs and scan long pairs without summing them" in {
     val pairs = DistCollection.ofIntPairs(Array(1, 1, 2), Array(10, 5, 20), Partitions)
     val summed = rowPath(pairs.groupedSum)
     summed shouldBe 35L
@@ -165,8 +167,23 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.trySumLong(pairs.plan) shouldBe Option.empty[Long]
     ColumnarPlanner.trySumDouble(pairs.plan) shouldBe Option.empty[Double]
 
-    val longPairs = DistCollection(Seq((1L, 10), (1L, 5)), Partitions)
-    refuse(longPairs.plan)
+    // `(Long, Int)` is not a long-pair column. It stays on the row path.
+    val mixed = DistCollection(Seq((1L, 10), (1L, 5)), Partitions)
+    refuse(mixed.plan)
+
+    val longPairs = DistCollection(Seq((1L, 10L), (1L, 5L)), Partitions)
+    ColumnarPlanner.lower(longPairs.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.LongPairs)
+    ColumnarPlanner.partitioning(longPairs.plan).isDefined shouldBe true
+    ColumnarPlanner.tryRun(longPairs.plan).isDefined shouldBe true
+    ColumnarPlanner.tryCount(longPairs.plan) shouldBe Some(2L)
+    ColumnarPlanner.trySumInt(longPairs.plan) shouldBe Option.empty[Long]
+    ColumnarPlanner.trySumLong(longPairs.plan) shouldBe Option.empty[Long]
+    ColumnarPlanner.trySumDouble(longPairs.plan) shouldBe Option.empty[Double]
+    val taken = rowPath(longPairs.take(Prefix))
+    longPairs.take(Prefix) shouldBe taken
+    ColumnarPlanner.tryTake(longPairs.plan, Prefix).map(_.toList) shouldBe Some(taken)
+    ColumnarPlanner.tryGroupedSum(longPairs.plan) shouldBe Option.empty[Long]
+    longPairs.collect().toList should contain theSameElementsAs rowPath(longPairs.collect().toList)
   }
 
   "string keys" should "keep groupByKey and join on the row path" in {

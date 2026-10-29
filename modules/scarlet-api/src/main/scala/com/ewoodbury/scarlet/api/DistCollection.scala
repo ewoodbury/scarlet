@@ -598,6 +598,23 @@ object DistCollection:
     }
 
   /**
+   * Partitions primitive `(Long, Long)` keys and values. Each partition is a
+   * [[com.ewoodbury.scarlet.core.LongPairArrays]] copy of its range and does not expose those
+   * arrays. The descriptor is [[com.ewoodbury.scarlet.core.Plan.SourceDescriptor.LongPairs]].
+   */
+  def ofLongPairs(
+      keys: Array[Long],
+      values: Array[Long],
+      numPartitions: Int,
+  ): DistCollection[(Long, Long)] =
+    import com.ewoodbury.scarlet.core.LongPairArrays
+
+    LongPairArrays.requireSameLength(keys, values)
+    splitSource(keys.length, numPartitions, Plan.SourceDescriptor.LongPairs) { (start, end) =>
+      LongPairArrays.fromOwned(keys.slice(start, end), values.slice(start, end))
+    }
+
+  /**
    * Splits `length` into exactly `numPartitions` contiguous ranges, preserving order. The first
    * `length % numPartitions` ranges receive one extra index. `numPartitions` must be positive.
    */

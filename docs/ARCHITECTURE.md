@@ -63,7 +63,7 @@ asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors
 
 ### Columnar completion contract
 
-The following 173 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
+The following 176 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
 `Unknown(2)` denotes the two source partitions in the small contract fixtures; aggregate and join
 outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are exact.
 
@@ -77,8 +77,10 @@ outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are 
 | String source, scalar filter/map, filter-map run, dictionary equality filter and mapped dictionary result | `Utf8Dict` | `Scan`, `Filter(Scan)`, `Project(Scan)`, `Pipeline2(Scan)`, `Filter(Scan)`, `Project(Filter(Scan))` respectively |
 | Int-pair source and row/key/value filters | `Columnar` | `Scan`, `FilterRow(Scan)`, `FilterKey(Scan)`, `FilterValue(Scan)` |
 | Empty typed int-pair source | `Columnar` | `Scan` |
+| Long-pair source, including an empty source | `Columnar` | `Scan` |
 | Pair `keys`, `values`, int `mapValues`, mapped key/value columns, filtered int `mapValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `Project(Key(Scan))`, `Project(Value(Scan))`, `FilterValue(MapValue(Scan))` |
 | Int `reduceByKey`, after a value filter or int `mapValues`, and nested reduction | `Columnar` | `HashAggregate(Exchange(Scan))`, `HashAggregate(Exchange(FilterValue(Scan)))`, `HashAggregate(Exchange(MapValue(Scan)))`, `HashAggregate(Exchange(HashAggregate(Exchange(Scan))))` |
+| Long `reduceByKey` | `Columnar` | `LongHashAggregate(Exchange(Scan))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge int join. Both sides are hash-partitioned, sorted inside each partition, and merged. Null keys are dropped before the sort | `Columnar` | `SortMergeJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge left outer int join. Both sides are hash-partitioned. The left exchange carries a null key to partition 0. The right exchange drops a null key. A null key does not match. A preserved null key publishes a clear key bit. Absence is the right value's clear bit. A null value stays on the row path | `Columnar` | `SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))` |
@@ -167,7 +169,8 @@ covered by `TestLongColumnar` (`wrap Long.MaxValue + 1 and sum an empty collecti
 `Iterable[String]` keeps `SourceDescriptor.Unknown`: a non-empty iterable is classified from its
 first string, and an empty iterable has no witness and stays on the row path.
 
-`groupedSum` is columnar for an `(Int, Int)` source. A long pair source is not. String
+`groupedSum` is columnar for an `(Int, Int)` source. A `(Long, Long)` scan and `reduceByKey` on
+that scan are columnar. `groupedSum` of a long pair stays on the row path. String
 `groupByKey` and string `join` are refused. Also refused, and already listed with the contract
 fixtures: `distinct`, `partitionBy`, `sortBy`, `groupByKey`, and joins on any key that is not an
 int column. `min` and `max` are not in the API. Nullable long and boolean sources have no
@@ -186,13 +189,14 @@ the pair type, such as `(Int, Int) => (Long, Int)`, is excluded: `partitioning`,
 `tryGroupedSum` stay on the row path. The structural peel label is still
 `GroupedSum(MapPair(Scan))`.
 
-These 48 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+These 53 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
 `sortBy`, map on join triples, a general tuple filter on join triples, non-Int `mapValues`,
 string/double pair projection or pair filters, string/double-key `groupByKey`, `reduceByKey`, and
-join, single-precision
-`Float` sources/maps, all-null strings, empty generic sources without a type descriptor, and
-element maps that do not preserve the column type.
+join, long-pair `keys`, `values`, `mapValues`, an element map, `filter`, `filterKeys`,
+`filterValues`, `groupedSum`, `sortBy`, and join (`take` of a long-pair scan is accepted),
+single-precision `Float` sources/maps, all-null strings, empty generic sources without a type
+descriptor, and element maps that do not preserve the column type.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then
 `toString`, and a type-changing map inside a three-step chain), a `Long` mapped to `Int` or
 `String`, a `Double` mapped to `Int`, a `Boolean` mapped to `Boolean` or to `Int`, a boolean
@@ -237,7 +241,8 @@ the plan itself.
 
 Bounded `take` applies to accepted partition-preserving plans: int, long, double, boolean, and string sources with
 their supported element filters or maps; int-pair sources with row/key/value filters, `keys`/`values`,
-and int `mapValues`. Boolean take is filter and scan only. It visits those partitions in order and decodes only the remaining requested
+and int `mapValues`; and a long-pair scan. Boolean take is filter and scan only. Long-pair take is
+that scan. Take visits the accepted partitions in order and decodes only the remaining requested
 prefix. A reduce, join, or other exchange/aggregate shape stays on the row path because its output
 requires processing the complete upstream input before the first result is known.
 
@@ -366,7 +371,8 @@ The rules that hold for every kind:
 
 Grouped sum, an inner broadcast join's build, and sort-merge joins spill when `spillEnabled`
 is on. `spillBudgetBytes` is the in-memory trigger. The flag defaults off. `spillMaxFiles` and
-`spillMaxBytes` cap one spill store.
+`spillMaxBytes` cap one spill store. Long hash reduce never spills; an input that does not fit
+stays in memory.
 
 At or under `spillBudgetBytes`, and whenever `spillEnabled` is off, a sort-merge partition stays
 in memory. Over the budget, with spill on, each side is written as sorted runs and merged
@@ -382,3 +388,4 @@ Roadmap and sequencing are tracked externally; the headline items:
   `Seq`.
 - The sort-merge operator still materialises its inputs and its result.
 - A shuffle-hash join does not spill.
+- Long hash reduce never spills; an input that does not fit stays in memory.

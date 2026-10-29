@@ -6,7 +6,7 @@ import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import com.ewoodbury.scarlet.core.{DoubleArrays, IntArrays, IntPairArrays}
+import com.ewoodbury.scarlet.core.{DoubleArrays, IntArrays, IntPairArrays, LongPairArrays}
 
 class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -181,6 +181,30 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
         BatchCodec.copiedIntPairs(Array(1), Array(10, 20))
       }
       ownedUnequal.getMessage shouldBe s"requirement failed: ${IntPairArrays.LengthMismatch}"
+    }
+  }
+
+  it should "copy primitive long-pair arrays into the columns" in {
+    val keys = Array(1L, Long.MinValue)
+    val values = Array(10L, Long.MaxValue)
+    val owned = LongPairArrays(keys, values)
+    ColumnMetrics.withSink(new CountingSink) {
+      val copied = BatchCodec.copiedLongPairs(owned.keys, owned.values)
+      ColumnMetrics.primitiveEncodeCount shouldBe 1L
+      val (left, right) = longPair(copied)
+
+      left.values should not be theSameInstanceAs(owned.keys)
+      right.values should not be theSameInstanceAs(owned.values)
+      keys(0) = 7L
+      values(1) = 8L
+      owned.keys(0) = 7L
+      owned.values(1) = 8L
+      BatchCodec.decodeLongPairs(copied) shouldBe Seq((1L, 10L), (Long.MinValue, Long.MaxValue))
+      LongPairArrays.LengthMismatch shouldBe IntPairArrays.LengthMismatch
+      val caught = intercept[IllegalArgumentException] {
+        BatchCodec.copiedLongPairs(Array(1L), Array.empty[Long])
+      }
+      caught.getMessage shouldBe s"requirement failed: ${LongPairArrays.LengthMismatch}"
     }
   }
 
@@ -434,6 +458,10 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   private def intPair(batch: ColumnBatch): (Int32Column, Int32Column) = batch.columns match
     case Seq(keys: Int32Column, values: Int32Column) => (keys, values)
     case other => fail(s"expected two Int32 columns, got $other")
+
+  private def longPair(batch: ColumnBatch): (Int64Column, Int64Column) = batch.columns match
+    case Seq(keys: Int64Column, values: Int64Column) => (keys, values)
+    case other => fail(s"expected two Int64 columns, got $other")
 
   private def utf8(batch: ColumnBatch): DictUtf8Column =
     batch.columns.lift(0) match

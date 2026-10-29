@@ -414,10 +414,89 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
     }
   }
 
+  "LongPairArrays" should "iterate pairs in order and copy its arrays" in {
+    val keys = Array(1L, 2L)
+    val values = Array(10L, 20L)
+    val pairs = LongPairArrays(keys, values)
+    keys(0) = 9L
+    values(1) = 9L
+
+    pairs.toList shouldEqual List((1L, 10L), (2L, 20L))
+    pairs.knownSize shouldEqual 2
+    pairs.keys should not be theSameInstanceAs(keys)
+    pairs.values should not be theSameInstanceAs(values)
+    LongPairArrays(Array.empty[Long], Array.empty[Long]).toList shouldEqual Nil
+    val caught = intercept[IllegalArgumentException] {
+      LongPairArrays(Array(1L), Array.empty[Long])
+    }
+    caught.getMessage shouldBe longLengthMismatchMessage
+    val owned = intercept[IllegalArgumentException] {
+      LongPairArrays.fromOwned(Array(1L), Array(10L, 20L))
+    }
+    owned.getMessage shouldBe longLengthMismatchMessage
+  }
+
+  "DistCollection.ofLongPairs" should "copy key and value ranges and still iterate" in {
+    val keys = Array(1L, 2L, 1L, 3L, 2L)
+    val values = Array(10L, 20L, 5L, 7L, 1L)
+    val dc = DistCollection.ofLongPairs(keys, values, 2)
+    keys(0) = 0L
+    values(4) = 0L
+
+    partitionSizes(dc) shouldEqual Seq(3, 2)
+    sourceDescriptor(dc) shouldEqual Plan.SourceDescriptor.LongPairs
+    dc.collect() shouldEqual Seq((1L, 10L), (2L, 20L), (1L, 5L), (3L, 7L), (2L, 1L))
+    sourceData(dc).foreach {
+      case stored: LongPairArrays =>
+        stored.keys should not be theSameInstanceAs(keys)
+        stored.values should not be theSameInstanceAs(values)
+      case other => fail(s"expected LongPairArrays, got $other")
+    }
+  }
+
+  it should "produce exactly N empty long-pair partitions" in {
+    val dc = DistCollection.ofLongPairs(Array.empty[Long], Array.empty[Long], 3)
+
+    partitionSizes(dc) shouldEqual Seq(0, 0, 0)
+    dc.collect() shouldEqual Seq.empty[(Long, Long)]
+    dc.count() shouldEqual 0L
+    sourceData(dc).foreach {
+      case stored: LongPairArrays => stored.knownSize shouldEqual 0
+      case other => fail(s"expected LongPairArrays, got $other")
+    }
+  }
+
+  it should "reject unequal long key and value arrays" in {
+    val caught = intercept[IllegalArgumentException] {
+      DistCollection.ofLongPairs(Array(1L, 2L), Array(1L), 1)
+    }
+    caught.getMessage shouldBe longLengthMismatchMessage
+  }
+
+  it should "reject a longer long value array before slicing hides it" in {
+    val caught = intercept[IllegalArgumentException] {
+      DistCollection.ofLongPairs(Array(1L), Array(1L, 2L), 1)
+    }
+    caught.getMessage shouldBe longLengthMismatchMessage
+  }
+
+  it should "reject a non-positive long-pair partition count" in {
+    val caught = intercept[IllegalArgumentException] {
+      DistCollection.ofLongPairs(Array(1L), Array(2L), 0)
+    }
+    caught.getMessage shouldBe partitionCountMessage
+    an[IllegalArgumentException] should be thrownBy {
+      DistCollection.ofLongPairs(Array(1L), Array(2L), -3)
+    }
+  }
+
   private val partitionCountMessage = "requirement failed: Number of partitions must be positive."
 
   private val lengthMismatchMessage =
     s"requirement failed: ${IntPairArrays.LengthMismatch}"
+
+  private val longLengthMismatchMessage =
+    s"requirement failed: ${LongPairArrays.LengthMismatch}"
 
   private def sourceData[A](dc: DistCollection[A]): Seq[Iterable[A]] = dc.plan match {
     case Plan.Source(partitions, _) => partitions.map(_.data)

@@ -145,6 +145,20 @@ object BatchCodec:
       Int32Column.of(Arrays.copyOf(values, rows), Validity.allValid(rows), rows),
     )
 
+  /**
+   * Copies `keys` and `values` into two `Int64` columns. Unequal lengths are rejected with the
+   * same sentence as [[intPairs]]. The column does not retain either array. See [[copiedIntPairs]]
+   * for why the arrays are copied rather than adopted.
+   */
+  private[scarlet] def copiedLongPairs(keys: Array[Long], values: Array[Long]): ColumnBatch =
+    require(keys.length == values.length, LengthMismatch)
+    val rows = keys.length
+    ColumnMetrics.primitiveEncode()
+    longPairBatch(
+      Int64Column.of(Arrays.copyOf(keys, rows), Validity.allValid(rows), rows),
+      Int64Column.of(Arrays.copyOf(values, rows), Validity.allValid(rows), rows),
+    )
+
   /** One fill of each column. `size` then the iterator, so a `Seq` is not copied twice. */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   def intPairs(values: Iterable[(Int, Int)]): ColumnBatch =
@@ -299,6 +313,27 @@ object BatchCodec:
       require(left.isValid(row) && right.isValid(row), s"null Int32 pair at row $row")
       (left.values(row), right.values(row))
     }
+
+  /**
+   * Boxed `(Long, Long)` pairs. A null component stays absent. `productElement` does not unbox, so
+   * a null is not stored as `0`. This does not call [[ColumnMetrics.primitiveEncode]].
+   */
+  private[scarlet] def longPairs(values: Iterable[(Long, Long)]): ColumnBatch =
+    fillLongPairs(values)
+
+  def decodeLongPairs(batch: ColumnBatch): Seq[(Long, Long)] =
+    decodeLongPairs(batch, batch.length)
+
+  /**
+   * Reads a long-pair batch. A clear bit is a null `Long`, including a null value left by
+   * `reduceByKey`. This does not call [[decodeIntPairs]]. A clear key bit is also a null, so a
+   * source that classified from a later present pair can round-trip.
+   */
+  def decodeLongPairs(batch: ColumnBatch, maxRows: Int): Seq[(Long, Long)] =
+    val (left, right) = longPair(batch)
+    val rows = decodedLength(batch, maxRows)
+    ColumnMetrics.decoded(rows)
+    Seq.tabulate(rows)(row => erasedLongPair(longRef(left, row), longRef(right, row)))
 
   /**
    * Join rows are `(key, build value, probe value)`. A null stays an error: the decoded `Int`
@@ -536,6 +571,83 @@ object BatchCodec:
         val found = other.asInstanceOf[AnyRef].getClass.getName
         throw new IllegalArgumentException(s"grouped sum expected an Int $role, found $found")
 
+  /**
+   * Fills both long columns in one pass. A null component is absent. Any other non-long cell
+   * fails. The absence bitmap is allocated only after the first null, so a fully present pair
+   * column stays all-valid.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def fillLongPairs(values: Iterable[(Long, Long)]): ColumnBatch =
+    val count = values.size
+    val leftValues = new Array[Long](count)
+    val rightValues = new Array[Long](count)
+    val rows = values.iterator
+    var row = 0
+    var leftAbsent = Option.empty[Array[Boolean]]
+    var rightAbsent = Option.empty[Array[Boolean]]
+    while (row < count) {
+      val pair = rows.next()
+      leftAbsent = writeLongComponent(pair, 0, leftValues, leftAbsent, count, row)
+      rightAbsent = writeLongComponent(pair, 1, rightValues, rightAbsent, count, row)
+      row += 1
+    }
+    longPairBatch(
+      Int64Column.of(leftValues, componentValidity(leftAbsent, count), count),
+      Int64Column.of(rightValues, componentValidity(rightAbsent, count), count),
+    )
+
+  /**
+   * Writes a present `Long`. A null cell marks the row absent. Any other non-long cell fails.
+   *
+   * Named erasure boundary. The cell is the erased field of a `(Long, Long)`. `productElement`
+   * does not unbox, so a null stays absent. A non-null cell is a reference, so the class test is
+   * safe.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def writeLongComponent(
+      pair: (Long, Long),
+      ordinal: Int,
+      into: Array[Long],
+      absent: Option[Array[Boolean]],
+      width: Int,
+      row: Int,
+  ): Option[Array[Boolean]] =
+    pair.productElement(ordinal) match
+      case null =>
+        val flags = absent.getOrElse(new Array[Boolean](width))
+        flags(row) = true
+        Some(flags)
+      case value: Long =>
+        into(row) = value
+        absent
+      case other =>
+        val found = other.asInstanceOf[AnyRef].getClass.getName
+        throw new ClassCastException(s"columnar long pair expected a Long, found $found")
+
+  /**
+   * A present cell is the stored long. A clear bit is a null reference, not `0`.
+   *
+   * The return type stays `java.lang.Long`. A `scala.Long` return unboxes that null to `0`.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def longRef(column: Int64Column, row: Int): java.lang.Long =
+    if (column.isValid(row)) java.lang.Long.valueOf(column.values(row)) else null
+
+  /**
+   * Named erasure boundary. The decoded tuple has to carry a null component so a reduced null
+   * value matches the row path. Building it from `java.lang.Long` keeps the null from becoming
+   * `0`.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
+  private def erasedLongPair(key: java.lang.Long, value: java.lang.Long): (Long, Long) =
+    Tuple2(key, value).asInstanceOf[(Long, Long)]
+
   private def componentValidity(absent: Option[Array[Boolean]], width: Int): Validity =
     absent match
       case None => Validity.allValid(width)
@@ -556,6 +668,13 @@ object BatchCodec:
   private def pairBatch(left: Int32Column, right: Int32Column): ColumnBatch =
     new ColumnBatch(
       schema = Vector(LogicalType.Int32, LogicalType.Int32),
+      columns = Vector(left, right),
+      length = left.length,
+    )
+
+  private def longPairBatch(left: Int64Column, right: Int64Column): ColumnBatch =
+    new ColumnBatch(
+      schema = Vector(LogicalType.Int64, LogicalType.Int64),
       columns = Vector(left, right),
       length = left.length,
     )
@@ -595,6 +714,12 @@ object BatchCodec:
       case Seq(left: Int32Column, right: Int32Column) => (left, right)
       case _ =>
         throw new IllegalArgumentException(s"expected two Int32 columns, got ${batch.schema}")
+
+  private def longPair(batch: ColumnBatch): (Int64Column, Int64Column) =
+    batch.columns match
+      case Seq(left: Int64Column, right: Int64Column) => (left, right)
+      case _ =>
+        throw new IllegalArgumentException(s"expected two Int64 columns, got ${batch.schema}")
 
   private def decodedLength(batch: ColumnBatch, maxRows: Int): Int =
     require(maxRows >= 0, s"maximum decoded rows must be >= 0, got $maxRows")

@@ -11,8 +11,8 @@ import com.ewoodbury.scarlet.core.Partition
  * Other filters and projects remain one node per step. [[PhysicalOp.Project]] and `Pipeline` keep
  * the child kind. [[PhysicalOp.Column]] narrows a pair to one int column and shares its arrays.
  * [[PhysicalOp.MapValue]] rewrites an int value and keeps the pair. [[PhysicalOp.Exchange]] sits
- * under [[PhysicalOp.HashAggregate]] and on each side of [[PhysicalOp.HashJoin]],
- * [[PhysicalOp.SortMergeJoin]], [[PhysicalOp.SortMergeLeftOuter]],
+ * under [[PhysicalOp.HashAggregate]] and [[PhysicalOp.LongHashAggregate]], and on each side of
+ * [[PhysicalOp.HashJoin]], [[PhysicalOp.SortMergeJoin]], [[PhysicalOp.SortMergeLeftOuter]],
  * [[PhysicalOp.SortMergeRightOuter]], [[PhysicalOp.SortMergeFullOuter]],
  * [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]], and [[PhysicalOp.HashFullOuter]].
  * Those kernels perform the shuffle. Interpreting the boundary on its own does not.
@@ -43,6 +43,13 @@ enum PhysicalOp:
   case Pipeline(child: PhysicalOp, length: Int)
   case Exchange(child: PhysicalOp)
   case HashAggregate(child: PhysicalOp)
+
+  /**
+   * In-memory hash reduce of `(Long, Long)` pairs. `child` is an [[Exchange]]. The kernel
+   * partial-reduces, partitions with `Long.hashCode`, and reduces each bucket. There is no spill
+   * path. Output kind is [[PhysicalOp.Kind.LongPairs]].
+   */
+  case LongHashAggregate(child: PhysicalOp)
   case HashJoin(left: PhysicalOp, right: PhysicalOp)
 
   /**
@@ -165,6 +172,7 @@ enum PhysicalOp:
     case Column(_, _) => PhysicalOp.Kind.Ints
     case MapValue(_) => PhysicalOp.Kind.Pairs
     case HashAggregate(_) => PhysicalOp.Kind.Pairs
+    case LongHashAggregate(_) => PhysicalOp.Kind.LongPairs
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
     case SortMergeJoin(_, _) => PhysicalOp.Kind.Triples
     case SortMergeLeftOuter(_, _) => PhysicalOp.Kind.Triples
@@ -193,6 +201,7 @@ enum PhysicalOp:
       s"$label(${child.shape})"
     case MapValue(child) => s"MapValue(${child.shape})"
     case HashAggregate(child) => s"HashAggregate(${child.shape})"
+    case LongHashAggregate(child) => s"LongHashAggregate(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
     case SortMergeJoin(left, right) => s"SortMergeJoin(${left.shape}, ${right.shape})"
     case SortMergeLeftOuter(left, right) => s"SortMergeLeftOuter(${left.shape}, ${right.shape})"
@@ -208,7 +217,7 @@ enum PhysicalOp:
 
 object PhysicalOp:
   enum Kind:
-    case Ints, Longs, Floats, Pairs, Triples, Strings, Bools
+    case Ints, Longs, Floats, Pairs, Triples, Strings, Bools, LongPairs
 
   /** Which logical child of a broadcast join fills the build table. */
   enum BuildSide:
