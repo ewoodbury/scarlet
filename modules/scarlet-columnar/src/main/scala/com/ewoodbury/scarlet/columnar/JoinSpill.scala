@@ -1,6 +1,5 @@
 package com.ewoodbury.scarlet.columnar
 
-import java.nio.file.Path
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong, AtomicReference}
 
 import com.ewoodbury.scarlet.core.ScarletConf
@@ -68,10 +67,10 @@ private[scarlet] object JoinSpill:
     if (probe.isEmpty) then Vector.empty
     else
       val rows = checkedRows(build)
-      val parts = pieceCount(rows, HashJoin.retainedBuildBytes(rows), conf)
+      val parts = SpillStore.splitCount(rows, HashJoin.retainedBuildBytes(rows), conf)
       val batchSize = conf.columnarBatchSize
       require(batchSize > 0, s"batch size must be positive, got $batchSize")
-      val directory = directoryOf(conf)
+      val directory = SpillStore.directory(conf)
       lastDirectory.set(directory.toString)
       SpillStore.withSpill(directory, conf.spillMaxFiles, conf.spillMaxBytes) { store =>
         val buildParts = exchange(build, parts, parallelism)
@@ -163,29 +162,6 @@ private[scarlet] object JoinSpill:
   private def failIfArmed(part: Int): Unit =
     if (part > 0 && probeFault.compareAndSet(true, false)) then
       throw new IllegalStateException(ProbeFailed)
-
-  /**
-   * How many ways to split a build that is over budget.
-   *
-   * Two when the build has at least two rows, so the exchange actually partitions. The count grows
-   * with `estimate / budget` and stops at the row count, because `floorMod` cannot put two copies
-   * of one key in different partitions, and at `maxFiles - 1`, so each partition can be published.
-   * A hot key still lands in one partition.
-   */
-  private def pieceCount(rows: Int, estimated: Long, conf: ScarletConf): Int =
-    val room = math.max(1, conf.spillMaxFiles - 1)
-    val cap = math.min(math.max(rows, 1), room)
-    val splits = divideCeil(estimated, math.max(conf.spillBudgetBytes, 1L))
-    val wanted = if (rows >= 2) math.max(2, splits) else 1
-    math.min(wanted, cap)
-
-  private def divideCeil(numerator: Long, denominator: Long): Int =
-    val quotient = math.max(0L, (numerator + denominator - 1L) / denominator)
-    if (quotient > Int.MaxValue.toLong) Int.MaxValue else quotient.toInt
-
-  private def directoryOf(conf: ScarletConf): Path =
-    if (conf.spillDirectory.isEmpty) then SpillStore.defaultDirectory
-    else Path.of(conf.spillDirectory)
 
   private def checkedRows(build: Vector[ColumnBatch]): Int =
     val rows = rowCount(build)

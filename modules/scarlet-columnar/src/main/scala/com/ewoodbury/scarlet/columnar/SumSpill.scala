@@ -1,6 +1,5 @@
 package com.ewoodbury.scarlet.columnar
 
-import java.nio.file.Path
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong, AtomicReference}
 
 import com.ewoodbury.scarlet.core.ScarletConf
@@ -84,21 +83,21 @@ private[scarlet] object SumSpill:
       batchSize: Int,
       conf: ScarletConf,
   ): ColumnBatch =
-    val pieces = pieceCount(bucket.length, retainedBytes(bucket.length), conf)
-    val directory = directoryOf(conf)
+    val parts = SpillStore.splitCount(bucket.length, retainedBytes(bucket.length), conf)
+    val directory = SpillStore.directory(conf)
     lastDirectory.set(directory.toString)
     SpillStore.withSpill(directory, conf.spillMaxFiles, conf.spillMaxBytes) { store =>
-      val parts = HashExchange.partitionAll(
+      val split = HashExchange.partitionAll(
         Vector(bucket),
         keyOrdinal = 0,
-        numPartitions = pieces,
+        numPartitions = parts,
         parallelism = parallelism,
       )
       // One morsel at a time: publish, read back, sum, delete. The store holds at most one file,
       // so `spillMaxFiles` is not a function of the row count. The sub-partitioned pieces and
       // their morsels are already materialised by the exchange and the slice, so live memory is
       // still one bucket plus the running partial; this loop does not add to it.
-      val morsels = parts.iterator
+      val morsels = split.iterator
         .filter(part => part.length > 0)
         .flatMap(part => ColumnBatches.slice(part, batchSize).iterator)
       val merged = morsels.foldLeft(Option.empty[ColumnBatch]) { (accumulator, morsel) =>
@@ -109,29 +108,6 @@ private[scarlet] object SumSpill:
       }
       merged.getOrElse(HashAggregate.sumInt64(bucket, keyOrdinal = 0, valueOrdinal = 1))
     }
-
-  /**
-   * How many ways to split a bucket that is over budget.
-   *
-   * Two when the bucket has at least two rows, so the exchange actually sub-partitions. The count
-   * grows with `estimate / budget` and stops at the row count, because `floorMod` cannot put two
-   * copies of one key in different pieces, and at `maxFiles - 1`, so each piece can be published.
-   * A hot key still lands in one piece. Morsels of that piece are what `sumInt64` sees.
-   */
-  private def pieceCount(rows: Int, estimated: Long, conf: ScarletConf): Int =
-    val room = math.max(1, conf.spillMaxFiles - 1)
-    val cap = math.min(math.max(rows, 1), room)
-    val splits = divideCeil(estimated, math.max(conf.spillBudgetBytes, 1L))
-    val wanted = if (rows >= 2) math.max(2, splits) else 1
-    math.min(wanted, cap)
-
-  private def divideCeil(numerator: Long, denominator: Long): Int =
-    val quotient = math.max(0L, (numerator + denominator - 1L) / denominator)
-    if (quotient > Int.MaxValue.toLong) Int.MaxValue else quotient.toInt
-
-  private def directoryOf(conf: ScarletConf): Path =
-    if (conf.spillDirectory.isEmpty) then SpillStore.defaultDirectory
-    else Path.of(conf.spillDirectory)
 
   private def publish(store: SpillStore, morsel: ColumnBatch): SpillFile =
     val file = store.write(Vector(morsel))
