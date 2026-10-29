@@ -28,9 +28,9 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * comes from the case's declared hint and sizes. The columnar value is `broadcast` when the
  * physical tree is a broadcast join, and `shuffle-hash` otherwise. An outer join's row path is
  * always `shuffle-hash`: the row executor ignores the hint. The columnar path follows the hint.
- * Absent is `unhinted` and still shuffle-hashes. Sort-merge stays on the row path. A null value
- * lowers to an outer shape and then stays on the row path; that case publishes no column batch,
- * so the run fails it instead of labeling the row path as columnar.
+ * Absent is `unhinted` and still shuffle-hashes. An outer sort-merge stays on the row path.
+ * A null value lowers to an outer shape and then stays on the row path; that case publishes no
+ * column batch, so the run fails it instead of labeling the row path as columnar.
  * `broadcastJoinThreshold` and `enableSortMergeJoin` are restored after every case.
  *
  * `runMain` executes in the sbt JVM. `Test / fork` is left false, so absolute times carry sbt and

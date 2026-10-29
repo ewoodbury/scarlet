@@ -61,47 +61,48 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * Order is unspecified. The build table is estimated before it is allocated. That estimate covers
  * the table only, not the rest of the query. An estimate above `broadcastBuildBudgetBytes` throws
  * `IllegalStateException`. Both inputs are already evaluated, so [[tryRun]] does not turn that
- * failure into a row-path fallback. Sort-merge is not implemented: that hint makes `lower` return
- * `None`, so the plan stays on the row path. Output width for a shuffle-hash join or an aggregate
- * is `defaultShufflePartitions`. A broadcast join's output follows the probe side, whichever child
- * that is; `take` still refuses a join, so the prefix path does not use that count. A left outer
- * join on int pairs lowers for a broadcast hint, a shuffle-hash hint, or an absent hint. Broadcast
- * is [[PhysicalOp.BroadcastLeftOuter]]: the right input is built and the left input is the probe
- * side, with no exchange. Shuffle-hash and an absent hint are [[PhysicalOp.HashLeftOuter]]. An
- * absent hint is the same choice an inner join makes. The row executor shuffle-hashes an unhinted
- * outer join, so that plan is the shuffle op. The left exchange carries a null key to partition 0.
- * The right exchange drops a null key. A probe-side row with no partner keeps the left value and
- * clears the right value's validity bit. That bit is absence. A null value is not absence and is
- * not representable here: interpretation reads the value columns' validity words and leaves the
- * plan on the row path. A right outer join on int pairs lowers for the same three hints. Broadcast
- * is [[PhysicalOp.BroadcastRightOuter]]: the left input is built and the right input is the probe
- * side, with no exchange. Shuffle-hash and an absent hint are [[PhysicalOp.HashRightOuter]]. The
- * right exchange carries a null key to partition 0. The left exchange drops a null key. The
- * left-outer kernel runs with those roles, then the value columns are swapped back to
- * `(key, left, right)`. Absence is the left value's clear bit. A null value stays on the row path
- * the same way. A full outer join on int pairs lowers for a broadcast hint, a shuffle-hash hint,
- * or an absent hint. Broadcast is [[PhysicalOp.BroadcastFullOuter]]: the right input is built and
- * the left input is the probe side, with no exchange. Shuffle-hash and an absent hint are
- * [[PhysicalOp.HashFullOuter]]. Both exchanges carry a null key to partition 0. Each broadcast
- * probe thread keeps its own matched-row bitmap, and the bitmaps are OR'd after the probes join.
- * Each shuffle partition keeps one bitmap and emits its own unmatched build rows. A null build key
- * is carried outside the table and emitted once. An empty probe still emits every build row.
- * Either value's clear bit is absence. A null value stays on the row path. The matched-row bitmaps
- * are not part of `broadcastBuildBudgetBytes`. Sort-merge stays on the row path. [[tryCount]] and
- * [[trySumInt]] fold an int filter/map chain that starts at a scan or at `keys` or `values`,
- * including an int `mapValues`, and do not write that chain. Sum folds one trailing project and
- * chains longer than four. Count folds those, chains of two to four steps, and a string scan under
- * only dictionary literal filters. That string fold reads the scan `lower` built. A string shape
- * that is not that chain reads the finished batches. [[trySumLong]] folds a long filter/map chain
- * the same way, and the sum wraps. [[trySumDouble]] folds at most four steps. Sum of `keys`,
- * `values`, or an int `mapValues` with no further element chain reads the pair column in that
- * morsel loop and does not build the projection. [[tryGroupedSum]] runs
- * [[ColumnPipeline.sumByKey]] on a typed pair source and folds the `Int64` group sums. A preceding
- * `FilterOp`, `filterKeys`, `filterValues`, or pair `MapOp` is applied inside that partial scan,
- * so the action does not build those pairs. [[groupedSumPeel]] labels those walked steps. It is
- * not an action shape and not a physical node. A source descriptor supplies the type when all
- * partitions are empty. It does not decode. `collect` still does. A pair `MapOp` stays on the row
- * path for `collect` and `reduceByKey`, and [[partitioning]] reports no layout for it.
+ * failure into a row-path fallback. An inner sort-merge on int pairs lowers. Outer sort-merge and
+ * a non-int key make `lower` return `None`, so those plans stay on the row path. Output width for
+ * a shuffle-hash join or an aggregate is `defaultShufflePartitions`. A broadcast join's output
+ * follows the probe side, whichever child that is; `take` still refuses a join, so the prefix path
+ * does not use that count. A left outer join on int pairs lowers for a broadcast hint, a
+ * shuffle-hash hint, or an absent hint. Broadcast is [[PhysicalOp.BroadcastLeftOuter]]: the right
+ * input is built and the left input is the probe side, with no exchange. Shuffle-hash and an
+ * absent hint are [[PhysicalOp.HashLeftOuter]]. An absent hint is the same choice an inner join
+ * makes. The row executor shuffle-hashes an unhinted outer join, so that plan is the shuffle op.
+ * The left exchange carries a null key to partition 0. The right exchange drops a null key. A
+ * probe-side row with no partner keeps the left value and clears the right value's validity bit.
+ * That bit is absence. A null value is not absence and is not representable here: interpretation
+ * reads the value columns' validity words and leaves the plan on the row path. A right outer join
+ * on int pairs lowers for the same three hints. Broadcast is [[PhysicalOp.BroadcastRightOuter]]:
+ * the left input is built and the right input is the probe side, with no exchange. Shuffle-hash
+ * and an absent hint are [[PhysicalOp.HashRightOuter]]. The right exchange carries a null key to
+ * partition 0. The left exchange drops a null key. The left-outer kernel runs with those roles,
+ * then the value columns are swapped back to `(key, left, right)`. Absence is the left value's
+ * clear bit. A null value stays on the row path the same way. A full outer join on int pairs
+ * lowers for a broadcast hint, a shuffle-hash hint, or an absent hint. Broadcast is
+ * [[PhysicalOp.BroadcastFullOuter]]: the right input is built and the left input is the probe
+ * side, with no exchange. Shuffle-hash and an absent hint are [[PhysicalOp.HashFullOuter]]. Both
+ * exchanges carry a null key to partition 0. Each broadcast probe thread keeps its own matched-row
+ * bitmap, and the bitmaps are OR'd after the probes join. Each shuffle partition keeps one bitmap
+ * and emits its own unmatched build rows. A null build key is carried outside the table and
+ * emitted once. An empty probe still emits every build row. Either value's clear bit is absence. A
+ * null value stays on the row path. The matched-row bitmaps are not part of
+ * `broadcastBuildBudgetBytes`. Sort-merge stays on the row path. [[tryCount]] and [[trySumInt]]
+ * fold an int filter/map chain that starts at a scan or at `keys` or `values`, including an int
+ * `mapValues`, and do not write that chain. Sum folds one trailing project and chains longer than
+ * four. Count folds those, chains of two to four steps, and a string scan under only dictionary
+ * literal filters. That string fold reads the scan `lower` built. A string shape that is not that
+ * chain reads the finished batches. [[trySumLong]] folds a long filter/map chain the same way, and
+ * the sum wraps. [[trySumDouble]] folds at most four steps. Sum of `keys`, `values`, or an int
+ * `mapValues` with no further element chain reads the pair column in that morsel loop and does not
+ * build the projection. [[tryGroupedSum]] runs [[ColumnPipeline.sumByKey]] on a typed pair source
+ * and folds the `Int64` group sums. A preceding `FilterOp`, `filterKeys`, `filterValues`, or pair
+ * `MapOp` is applied inside that partial scan, so the action does not build those pairs.
+ * [[groupedSumPeel]] labels those walked steps. It is not an action shape and not a physical node.
+ * A source descriptor supplies the type when all partitions are empty. It does not decode.
+ * `collect` still does. A pair `MapOp` stays on the row path for `collect` and `reduceByKey`, and
+ * [[partitioning]] reports no layout for it.
  *
  * An [[com.ewoodbury.scarlet.core.IntArrays]], [[com.ewoodbury.scarlet.core.LongArrays]],
  * [[com.ewoodbury.scarlet.core.BoolArrays]], [[com.ewoodbury.scarlet.core.DoubleArrays]],

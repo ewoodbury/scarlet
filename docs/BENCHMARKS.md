@@ -173,3 +173,119 @@ The stage study on the same machine, in a separate process, times the partial al
 keys: one thread p50 16.207 ms, p95 16.492, max 17.802; four threads p50 4.783, p95 6.946, max
 8.288. Shuffled keys: one thread p50 23.113, p95 26.148, max 26.675; four threads p50 6.453,
 p95 11.415, max 11.926.
+
+## Spill
+
+`SpillBench` times grouped sum and sort-merge with spill off, with spill on at the default
+budget, and with spill on at a 64 KiB stress budget. It is a `main` in `scarlet-tests`.
+`make test` does not run it, and it does not assert on timing.
+
+### Run
+
+```shell
+sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.SpillBench"
+```
+
+Stderr prints the run notes and a markdown table. Stdout is one JSON object per line. The object
+below is the field shape. Its numbers are placeholders, not a measurement:
+
+```text
+{"schema":"spill-bench-2","case":"grouped-sum","spill":false,"mode":"off","budget_bytes":67108864,"threads":1,"rows":1000000,"rounds":5,"p50_ms":0.000,"p95_ms":0.000,"max_ms":0.000,"files_written":0,"merge_passes":0,"checksum":0}
+```
+
+`spill` is `true` or `false`. `mode` is `off`, `default`, or `stress`. `budget_bytes` is the
+`spillBudgetBytes` installed for that row. `merge_passes` stays 0 for grouped sum, because that
+path has no pass counter. sbt may still prefix lines. The objects themselves have no label.
+
+### Method
+
+Both cases use `columnarBatchSize` 8192, two source partitions, and two shuffle partitions.
+Sort-merge keeps `spillFanIn` at its default, 8. The spill directory is a fresh directory under
+`java.io.tmpdir`, named for this bench. `spillMaxFiles` and `spillMaxBytes` are pinned to the
+`ScarletConf` defaults.
+
+There are two budgets. The default is 64 MiB, which is what `spillBudgetBytes` is when nobody
+sets it. Spill is enabled on that row. These inputs fit in the 64 MiB budget, so no files are
+written. Off runs first in the same JVM, so that row does not measure the overhead of enabling
+spill. The stress budget is 64 KiB. It is small enough that every exchanged grouped-sum bucket,
+and both sides of every sort-merge partition, spill. The stress row is a worst case. The
+default-budget row runs at width 1. Off and stress run at widths 1 and 4. Off installs the
+default budget and does not consult it, so the table leaves that cell blank.
+
+Grouped sum calls `DistCollection.ofIntPairs(...).groupedSum` on 1e6 rows. Keys are
+`row % 16384`. The partial sum folds each source partition before the spill check, so the
+exchanged bucket is what has to exceed the budget. At 16384 groups the stress budget is exceeded.
+The same bucket fits in 64 MiB. A key set of 1024 still fits in 64 KiB and stays in memory.
+
+Sort-merge calls `DistCollection.sortMergeJoin` on 147456 rows per side. Keys run from 0 and split
+evenly across the two shuffle partitions, so each side of a partition is nine morsels of 8192,
+one past the fan-in. The two sides together exceed 64 KiB and fit in 64 MiB. The merge depth is
+two: nine runs, a fan-in of 8, then one more pass to finish the side.
+
+Two warmup rounds are discarded. Five rounds are measured. Percentiles are nearest-rank: the
+1-based rank is `ceil(p / 100 * n)`, with no interpolation. For 5 samples, p50 is rank 3, p95 is
+rank 5, and max is rank 5. p95 is the largest sample.
+
+The counters have to show the path before a time is kept. A `CountingSink` is installed outside
+the timer. Every columnar run must publish at least one column batch, and the row oracle must
+publish none, so a silent fall back to the row path fails the run. `SumSpill.resetForTest` runs
+before each grouped attempt. `SortMergeRuns.resetForTest` runs before each sort-merge attempt.
+Stress must publish the file count the harness derives from that row sizing: one morsel file per
+piece of each spilled bucket, and, for sort-merge, one file per initial run plus one file per
+merged group, on each side of each partition. Off and the default budget must publish zero files.
+A sort-merge stress run must also complete the derived pass count. A miss fails the run, and no
+table is printed.
+
+`files_written` is a publish count, not a live-file count. `SumSpill` deletes each file before
+the next morsel, so the store holds one. The sort-merge `merge_passes` figure is the summed
+counter over partitions and sides. Two partitions, two sides, and two passes are 8 completions.
+The merge depth is two.
+
+Before warmup, the stress result is compared with the in-memory columnar result and with the row
+path (`columnarExecution` false). Grouped sum compares the folded total. Sort-merge checks every
+joined row against the generators (`left = key + 1`, `right = key * 3 + 7`, one row per key) and
+compares an order-independent mix of `(key, left, right)`. Each measured result is compared
+again. The comparison sits outside the timer. A mismatch fails the run.
+
+`runMain` executes in the sbt JVM. `Test / fork` is left false, so absolute times carry sbt and
+JIT noise. Comparisons within one run are the signal. Widths 1 and 4 share one JVM. Off runs
+before the default budget, then stress.
+
+### Baseline
+
+Recorded on an Apple M1 Pro (8 cores), OpenJDK 64-Bit Server VM 17.0.16, through `sbt` with
+`Test / fork` left false, on 2026-10-28. Absolute numbers carry sbt and JIT noise. The comparison
+that matters is within this run.
+
+| case | spill | budget | threads | rows | p50 ms | p95 ms | max ms | files_written | merge_passes |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| grouped-sum | off | — | 1 | 1000000 | 16.521 | 18.530 | 18.530 | 0 | 0 |
+| grouped-sum | off | — | 4 | 1000000 | 8.530 | 19.557 | 19.557 | 0 | 0 |
+| grouped-sum | on | 64 MiB | 1 | 1000000 | 16.072 | 18.081 | 18.081 | 0 | 0 |
+| grouped-sum | on | 64 KiB | 1 | 1000000 | 234.846 | 251.688 | 251.688 | 22 | 0 |
+| grouped-sum | on | 64 KiB | 4 | 1000000 | 235.964 | 271.095 | 271.095 | 22 | 0 |
+| sort-merge | off | — | 1 | 147456 | 25.660 | 54.609 | 54.609 | 0 | 0 |
+| sort-merge | off | — | 4 | 147456 | 11.363 | 19.016 | 19.016 | 0 | 0 |
+| sort-merge | on | 64 MiB | 1 | 147456 | 11.563 | 12.339 | 12.339 | 0 | 0 |
+| sort-merge | on | 64 KiB | 1 | 147456 | 492.002 | 536.562 | 536.562 | 44 | 8 |
+| sort-merge | on | 64 KiB | 4 | 147456 | 513.245 | 542.938 | 542.938 | 44 | 8 |
+
+Grouped sum with spill off is 16.521 ms at one thread and 8.530 ms at four. Spill is enabled at
+the default 64 MiB budget and these inputs fit, so that row writes no files and measures 16.072 ms
+at one thread. The 64 KiB stress row is 234.846 ms at one thread and 235.964 ms at four.
+Sort-merge with spill off is 25.660 ms and 11.363 ms. Spill is enabled at the default budget and
+these inputs fit, so that row writes no files and measures 11.563 ms. At 64 KiB it is 492.002 ms
+and 513.245 ms. Off runs first in the same JVM, so the default-budget times are not the overhead
+of enabling spill. The stress row is a worst case.
+
+File and pass counts on the stress rows stay put when the width changes. Those rows show no width
+scaling here, and the bench does not attribute the cost. Grouped sum publishes 22 files.
+Sort-merge publishes 44 files and 8 merge passes. The grouped checksum is `499999500000`. The
+sort-merge checksum is `7877949609597362176`, over 147456 pairs. Each matches the generators, the
+in-memory columnar result, and the row path.
+
+The table does not measure whole-operator memory. A spilled sort-merge merges at most
+`spillFanIn` runs at a time, and the inputs and the joined result are still materialised.
+Shuffle-hash joins are absent from the table. They do not spill. The inner broadcast build does
+spill, and this bench does not run it. p95 is the largest of the five samples, so it is not a
+stable tail.
