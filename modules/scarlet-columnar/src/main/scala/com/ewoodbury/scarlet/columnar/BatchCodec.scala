@@ -472,15 +472,17 @@ object BatchCodec:
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def requireLiveRows(words: Array[Long], live: Int): Unit =
-    val fullWords = live >>> 6
+    val fullWords = Validity.liveWords(live)
     var index = 0
     while (index < fullWords) {
-      if (words(index) != -1L) then failNull(words, index << 6, live)
+      if (words(index) != -1L) then failNull(words, Validity.wordStart(index), live)
       index += 1
     }
-    val tail = live & 63
-    if (tail != 0 && (words(fullWords) & ((1L << tail) - 1L)) != (1L << tail) - 1L) then
-      failNull(words, fullWords << 6, live)
+    val tail = Validity.tailBits(live)
+    if (tail != 0) then
+      val mask = Validity.tailMask(tail)
+      if ((words(fullWords) & mask) != mask) then
+        failNull(words, Validity.wordStart(fullWords), live)
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def failNull(words: Array[Long], from: Int, live: Int): Nothing =

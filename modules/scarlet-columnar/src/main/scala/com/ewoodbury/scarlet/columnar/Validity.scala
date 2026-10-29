@@ -17,6 +17,29 @@ final class Validity private (val words: Array[Long], val capacity: Int):
 
 object Validity:
 
+  /** Word that holds bit `bit`. */
+  private[columnar] inline def wordIndex(bit: Int): Int = bit >>> 6
+
+  /** First bit index of word `word`. */
+  private[columnar] inline def wordStart(word: Int): Int = word << 6
+
+  /** Position of `bit` inside its word, from 0 to 63. */
+  private[columnar] inline def bitOffset(bit: Int): Int = bit & 63
+
+  /** Count of complete 64-bit words in a prefix of `live` rows. */
+  private[columnar] inline def liveWords(live: Int): Int = live >>> 6
+
+  /** Rows past the last full word of a prefix of `live` rows, from 0 to 63. */
+  private[columnar] inline def tailBits(live: Int): Int = live & 63
+
+  /**
+   * The low `bits` bits set. `bits` is 0 to 63, and `bits == 0` yields `0L`. A count of 64 wraps
+   * to a zero-bit shift: the JVM masks the shift distance, so `1L << 64` is `1L << 0`. Callers
+   * that need a full word keep a `width == 64` guard and do not pass 64 here.
+   */
+  private[columnar] inline def tailMask(bits: Int): Long =
+    (1L << bits) - 1L
+
   /**
    * Returns true when every row in `[0, live)` is present, and false when any of those rows is
    * null. `live == 0` returns true. Bits at index `live` and beyond are ignored, so a filter
@@ -29,7 +52,7 @@ object Validity:
     if (live == 0) then true
     else
       val words = validity.words
-      val fullWords = live >>> 6
+      val fullWords = liveWords(live)
       var index = 0
       var dense = true
       while (index < fullWords && dense) {
@@ -38,8 +61,11 @@ object Validity:
       }
       if (!dense) then false
       else
-        val tail = live & 63
-        tail == 0 || (words(fullWords) & ((1L << tail) - 1L)) == (1L << tail) - 1L
+        val tail = tailBits(live)
+        if (tail == 0) then true
+        else
+          val mask = tailMask(tail)
+          (words(fullWords) & mask) == mask
 
   /**
    * Every bit in `[start, start + length)` is set. An empty range is present. The caller keeps the
@@ -53,12 +79,12 @@ object Validity:
       val end = start + length
       var row = start
       var dense = true
-      while (dense && row < end && (row & 63) != 0) {
+      while (dense && row < end && bitOffset(row) != 0) {
         dense = isSet(words, row)
         row += 1
       }
       while (dense && end - row >= 64) {
-        if (words(row >>> 6) != -1L) then dense = false
+        if (words(wordIndex(row)) != -1L) then dense = false
         row += 64
       }
       while (dense && row < end) {
@@ -69,12 +95,12 @@ object Validity:
 
   /** Row is in range and `words` covers it. Kernels use this on the hot path. */
   private[columnar] inline def isSet(words: Array[Long], row: Int): Boolean =
-    ((words(row >>> 6) >>> (row & 63)) & 1L) != 0L
+    ((words(wordIndex(row)) >>> bitOffset(row)) & 1L) != 0L
 
   /** Sets bit `row`. The caller guarantees `row` is inside the bitmap. */
   private[columnar] inline def setBit(words: Array[Long], row: Int): Unit =
-    val wordIndex = row >>> 6
-    words(wordIndex) = words(wordIndex) | (1L << (row & 63))
+    val index = wordIndex(row)
+    words(index) = words(index) | (1L << bitOffset(row))
 
   private[columnar] def allocate(capacity: Int): Array[Long] =
     require(capacity >= 0, s"capacity must be >= 0, got $capacity")
@@ -96,18 +122,18 @@ object Validity:
     require(capacity >= 0, s"capacity must be >= 0, got $capacity")
     require(live >= 0 && live <= capacity, s"live $live outside capacity $capacity")
     val words = new Array[Long](wordCount(capacity))
-    val fullWords = live >>> 6
+    val fullWords = liveWords(live)
     Arrays.fill(words, 0, fullWords, -1L)
-    val tail = live & 63
-    if (tail != 0) then words(fullWords) = (1L << tail) - 1L
+    val tail = tailBits(live)
+    if (tail != 0) then words(fullWords) = tailMask(tail)
     new Validity(words, capacity)
 
   def allValid(capacity: Int): Validity =
     require(capacity >= 0, s"capacity must be >= 0, got $capacity")
     val words = new Array[Long](wordCount(capacity))
     Arrays.fill(words, -1L)
-    val tail = capacity & 63
-    if (tail != 0) then words(words.length - 1) = (1L << tail) - 1L
+    val tail = tailBits(capacity)
+    if (tail != 0) then words(liveWords(capacity)) = tailMask(tail)
     new Validity(words, capacity)
 
   /** `present(row) == true` means row `row` is not null. */
@@ -115,9 +141,7 @@ object Validity:
     require(capacity >= 0, s"capacity must be >= 0, got $capacity")
     val words = new Array[Long](wordCount(capacity))
     (0 until capacity).foreach { row =>
-      if (present(row)) then
-        val wordIndex = row >>> 6
-        words(wordIndex) = words(wordIndex) | (1L << (row & 63))
+      if (present(row)) then setBit(words, row)
     }
     new Validity(words, capacity)
 

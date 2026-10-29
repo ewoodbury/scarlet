@@ -30,15 +30,15 @@ private[columnar] object ColumnHash:
     if (live != column.validity.capacity) then false
     else
       val words = column.validity.words
-      val fullWords = live >>> 6
+      val fullWords = Validity.liveWords(live)
       var index = 0
       var dense = true
       while (index < fullWords && dense) {
         if (words(index) != -1L) then dense = false
         index += 1
       }
-      val tail = live & 63
-      if (dense && tail != 0) then words(fullWords) == (1L << tail) - 1L else dense
+      val tail = Validity.tailBits(live)
+      if (dense && tail != 0) then words(fullWords) == Validity.tailMask(tail) else dense
 
   def int32At(batch: ColumnBatch, ordinal: Int): Int32Column =
     ColumnKernel.asInt32(ColumnKernel.columnAt(batch, ordinal), ordinal)
