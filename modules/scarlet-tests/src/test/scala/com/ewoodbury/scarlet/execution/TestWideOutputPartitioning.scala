@@ -16,6 +16,11 @@ class TestWideOutputPartitioning extends AnyFlatSpec with Matchers with BeforeAn
 
   private val originalConf = ScarletConf.get
 
+  override def beforeEach(): Unit = {
+    super.beforeEach()
+    ExecutionModuleSupport.initialize()
+  }
+
   override def afterEach(): Unit = {
     ScarletRuntime.get.shuffle.clear()
     ScarletConf.set(originalConf)

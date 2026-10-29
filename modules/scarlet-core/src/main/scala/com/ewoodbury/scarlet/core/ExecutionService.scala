@@ -55,8 +55,8 @@ trait ExecutionService {
  * here.
  */
 object ExecutionService {
-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  @volatile private var current: ExecutionService = new ExecutionService {
+
+  private val placeholder: ExecutionService = new ExecutionService {
     def execute[A](plan: Plan[A]): Seq[A] = {
       throw new UnsupportedOperationException(
         "No execution service registered. Please ensure the execution module is properly initialized.",
@@ -106,9 +106,43 @@ object ExecutionService {
     }
   }
 
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  @volatile private var current: ExecutionService = placeholder
+
+  /**
+   * Serializes [[set]] and [[registerIfEmpty]]. [[get]] and [[unregistered]] stay lock-free and
+   * read the volatile reference.
+   */
+  private val registration = new Object
+
   def get: ExecutionService = current
 
-  def set(service: ExecutionService): Unit = {
-    current = service
-  }
+  /** Replaces the installed service. Shares [[registration]] with [[registerIfEmpty]]. */
+  def set(service: ExecutionService): Unit =
+    registration.synchronized {
+      current = service
+    }
+
+  /**
+   * Installs `service` when [[get]] is still the placeholder. Returns whether this call installed
+   * it. A concurrent [[set]] cannot land between the check and the write.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+  private[scarlet] def registerIfEmpty(service: ExecutionService): Boolean =
+    registration.synchronized {
+      if (current eq placeholder) {
+        current = service
+        true
+      } else {
+        false
+      }
+    }
+
+  /**
+   * True while [[get]] is still the placeholder installed before any service is registered.
+   * Identity, not structural equality: a different implementation is registered even when it also
+   * rejects execution.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+  private[scarlet] def unregistered: Boolean = current eq placeholder
 }

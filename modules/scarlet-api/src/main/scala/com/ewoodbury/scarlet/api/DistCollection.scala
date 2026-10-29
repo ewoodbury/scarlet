@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.api
 
+import java.lang.reflect.InvocationTargetException
+
 import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan}
 
 /**
@@ -15,9 +17,6 @@ import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan}
  *   The type of elements in the collection.
  */
 final case class DistCollection[A](plan: Plan[A]):
-
-  // Initialize execution service on first use
-  DistCollection.ensureExecutionServiceInitialized()
 
   // --- Helper to view the plan ---
   override def toString: String = s"DistCollection(plan = $plan)"
@@ -352,14 +351,14 @@ final case class DistCollection[A](plan: Plan[A]):
    * the computation using the registered ExecutionService.
    */
   def collect(): Iterable[A] =
-    ExecutionService.get.execute(this.plan)
+    DistCollection.service.execute(this.plan)
 
   /**
    * Action: Executes the plan and returns the count of elements. This triggers computation. A
    * columnar plan counts column lengths and does not build a `Seq`.
    */
   def count(): Long =
-    ExecutionService.get.count(this.plan)
+    DistCollection.service.count(this.plan)
 
   /**
    * Action: Sums an `Int` collection as a `Long`, a `Long` collection as a `Long`, or a `Double`
@@ -380,13 +379,13 @@ final case class DistCollection[A](plan: Plan[A]):
    * operator.
    */
   def groupedSum(using ev: A =:= (Int, Int)): Long =
-    ExecutionService.get.groupedSum(kvPlan)
+    DistCollection.service.groupedSum(kvPlan)
 
   /**
    * Action: Executes the plan and returns the first n elements. This triggers computation.
    */
   def take(n: Int): List[A] =
-    ExecutionService.get.take(this.plan, n).toList
+    DistCollection.service.take(this.plan, n).toList
 
   /**
    * Action: Executes the plan and returns the first element. This triggers computation.
@@ -413,7 +412,7 @@ final case class DistCollection[A](plan: Plan[A]):
    * per-partition accumulators. Empty input returns `zero` without invoking either function.
    */
   def aggregate[B](zero: B)(seqOp: (B, A) => B, combOp: (B, B) => B): B = {
-    val partitions = ExecutionService.get.executePartitions(this.plan)
+    val partitions = DistCollection.service.executePartitions(this.plan)
     if (partitions.forall(_.data.isEmpty)) zero
     else
       partitions
@@ -462,39 +461,49 @@ object DistCollection:
 
   object SumOf:
     given SumOf[Int, Long] with
-      def apply(plan: Plan[Int]): Long = ExecutionService.get.sumInt(plan)
+      def apply(plan: Plan[Int]): Long = service.sumInt(plan)
 
     given SumOf[Long, Long] with
-      def apply(plan: Plan[Long]): Long = ExecutionService.get.sumLong(plan)
+      def apply(plan: Plan[Long]): Long = service.sumLong(plan)
 
     given SumOf[Double, Double] with
-      def apply(plan: Plan[Double]): Double = ExecutionService.get.sumDouble(plan)
+      def apply(plan: Plan[Double]): Double = service.sumDouble(plan)
 
-  // Lazy initialization to ensure execution service is available
-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  @volatile private var initialized = false
-
-  private def ensureExecutionServiceInitialized(): Unit = {
-    if (!initialized) {
-      synchronized {
-        if (!initialized) {
-          // Try to initialize the execution module if available on classpath
-          try {
-            val clazz = Class.forName("com.ewoodbury.scarlet.execution.ExecutionModuleInit")
-            val method = clazz.getMethod("initialize")
-            method.invoke(null)
-          } catch {
-            case _: ClassNotFoundException =>
-              // Execution module not on classpath - user must provide their own ExecutionService
-              ()
-            case _: Exception =>
-              // Other initialization errors - log but continue
-              ()
-          }
-          initialized = true
-        }
+  /**
+   * Loads the execution module while the registry is still empty. A missing module leaves
+   * registration to the caller. A load that throws is not cached, so the next action retries it.
+   * The module's `initialize` is idempotent. The cause of an [[InvocationTargetException]] from
+   * that call is rethrown.
+   */
+  // `initialize` is static, so the reflective receiver is null.
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private lazy val serviceLoaded: Unit = {
+    val module =
+      try Some(Class.forName("com.ewoodbury.scarlet.execution.ExecutionModuleInit"))
+      catch {
+        case _: ClassNotFoundException => None
+      }
+    module.foreach { clazz =>
+      val method = clazz.getMethod("initialize")
+      try {
+        method.invoke(null)
+        ()
+      } catch {
+        case wrapped: InvocationTargetException =>
+          throw wrapped.getCause
       }
     }
+  }
+
+  /**
+   * The registered service. Skips the module load when a service is already installed, so a custom
+   * service is never reached through a broken module.
+   */
+  private def service: ExecutionService = {
+    if (ExecutionService.unregistered) {
+      serviceLoaded
+    }
+    ExecutionService.get
   }
 
   /**
