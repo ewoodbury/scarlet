@@ -1,6 +1,5 @@
 package com.ewoodbury.scarlet.columnar
 
-import java.nio.file.Path
 import java.util.Arrays
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong, AtomicReference}
 
@@ -209,7 +208,7 @@ private[scarlet] object SortMergeRuns:
       conf: ScarletConf,
       preserveRight: Boolean,
   ): ColumnBatch =
-    val directory = directoryOf(conf)
+    val directory = SpillStore.directory(conf)
     lastDirectory.set(directory.toString)
     val fanIn = conf.spillFanIn
     require(fanIn >= 2, s"spillFanIn must be >= 2, got $fanIn")
@@ -237,7 +236,7 @@ private[scarlet] object SortMergeRuns:
       batchSize: Int,
       conf: ScarletConf,
   ): ColumnBatch =
-    val directory = directoryOf(conf)
+    val directory = SpillStore.directory(conf)
     lastDirectory.set(directory.toString)
     val fanIn = conf.spillFanIn
     require(fanIn >= 2, s"spillFanIn must be >= 2, got $fanIn")
@@ -574,10 +573,6 @@ private[scarlet] object SortMergeRuns:
       s"sort-merge group for key $key retains about $estimate bytes, " +
         s"above the budget of $budget bytes",
     )
-
-  private def directoryOf(conf: ScarletConf): Path =
-    if (conf.spillDirectory.isEmpty) then SpillStore.defaultDirectory
-    else Path.of(conf.spillDirectory)
 
   /**
    * Present-key rows, then null-key rows. `None` of the null side is an empty pair batch, and the

@@ -10,6 +10,8 @@ import java.util.{Arrays, UUID}
 
 import scala.annotation.tailrec
 
+import com.ewoodbury.scarlet.core.ScarletConf
+
 /**
  * Writes column batches to a file and reads them back.
  *
@@ -167,6 +169,32 @@ object SpillStore:
   /** `java.io.tmpdir/scarlet-spill`. Never a directory inside the repository. */
   def defaultDirectory: Path =
     Path.of(System.getProperty("java.io.tmpdir"), "scarlet-spill")
+
+  /**
+   * How many ways to split a side that is over budget.
+   *
+   * Two when there are at least two rows, so the exchange actually partitions. The count grows
+   * with `estimate / budget`. The count is capped at the row count because a hash split cannot
+   * divide one key (a hot key still lands in one piece), and capped at `spillMaxFiles - 1` because
+   * every piece publishes at least one file.
+   */
+  private[scarlet] def splitCount(rows: Int, estimated: Long, conf: ScarletConf): Int =
+    val room = math.max(1, conf.spillMaxFiles - 1)
+    val cap = math.min(math.max(rows, 1), room)
+    val splits = divideCeil(estimated, math.max(conf.spillBudgetBytes, 1L))
+    val wanted = if (rows >= 2) math.max(2, splits) else 1
+    math.min(wanted, cap)
+
+  /** `spillDirectory` when set, otherwise [[defaultDirectory]]. */
+  private[scarlet] def directory(conf: ScarletConf): Path =
+    if (conf.spillDirectory.isEmpty) then defaultDirectory
+    else Path.of(conf.spillDirectory)
+
+  private def divideCeil(numerator: Long, denominator: Long): Int =
+    // `numerator + denominator - 1` can wrap for an input far beyond `Int` rows; unreachable from
+    // the retained-bytes estimates, and left byte-identical on purpose.
+    val quotient = math.max(0L, (numerator + denominator - 1L) / denominator)
+    if (quotient > Int.MaxValue.toLong) Int.MaxValue else quotient.toInt
 
   def open(directory: Path, maxFiles: Int, maxBytes: Long): SpillStore =
     new SpillStore(directory, maxFiles, maxBytes)

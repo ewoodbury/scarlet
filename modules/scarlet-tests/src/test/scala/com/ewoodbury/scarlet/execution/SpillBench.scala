@@ -263,8 +263,9 @@ object SpillBench:
     math.max(1, math.min(count, rank)) - 1
 
   /**
-   * How many ways a stress bucket is split. This is the sizing `SumSpill` publishes from: at least
-   * two pieces, `ceil(estimate / budget)`, and no more than the row count or `spillMaxFiles - 1`.
+   * How many ways a stress bucket is split. Independent oracle for the bench, mirroring
+   * [[SpillStore.splitCount]]: at least two pieces, `ceil(estimate / budget)`, and no more than
+   * the row count or `spillMaxFiles - 1`.
    */
   private def pieceCount(rows: Int, estimated: Long, budget: Long): Int =
     val room = math.max(1, confDefaults.spillMaxFiles - 1)
