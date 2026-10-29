@@ -11,6 +11,8 @@ import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
+import SortMergeOuterFixture.{canonical, collect}
+
 /**
  * Left outer join against the row-path `leftOuterJoin`. The row executor ignores the strategy
  * hint and always shuffle-hashes, so turning columnar execution off is the oracle.
@@ -155,9 +157,9 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     )
     parts.length shouldBe 1
     val batch = parts.headOption.getOrElse(fail("missing probe batch"))
-    val keys = int32(batch, 0)
-    val left = int32(batch, 1)
-    val right = int32(batch, 2)
+    val keys = BatchColumns.int32(batch, 0)
+    val left = BatchColumns.int32(batch, 1)
+    val right = BatchColumns.int32(batch, 2)
 
     val rows = (0 until batch.length).map { row =>
       val key = if (keys.isValid(row)) Some(keys.values(row)) else None
@@ -354,9 +356,9 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     )
     parts.length shouldBe 4
     val rows = parts.zipWithIndex.flatMap { (batch, part) =>
-      val keys = int32(batch, 0)
-      val left = int32(batch, 1)
-      val right = int32(batch, 2)
+      val keys = BatchColumns.int32(batch, 0)
+      val left = BatchColumns.int32(batch, 1)
+      val right = BatchColumns.int32(batch, 2)
       (0 until batch.length).map { row =>
         val key = if (keys.isValid(row)) Some(keys.values(row)) else None
         (part, key, left.isValid(row), right.isValid(row))
@@ -481,10 +483,8 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     val spilled = withSpill(budget) { dir =>
       val rows = canonical(collectCurrent(plan))
       assertOuterBits(plan, AbsentSide.Right, rows)
-      SortMergeRuns.filesWrittenForTest should be >= 28L
-      SortMergeRuns.mergePassesForTest should be > 1L
-      Path.of(SortMergeRuns.lastDirectoryForTest) shouldBe dir
-      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+      // 96/32 covers two executions (collectCurrent and assertOuterBits's interpret). 20/8 and 2/0 are single executions.
+      SortMergeOuterFixture.assertSpill(dir, 96L, 32L)
       rows
     }
     spilled should contain theSameElementsAs memory
@@ -510,10 +510,7 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
 
     val spilledEmptyLeft = withSpill(budget) { dir =>
       val rows = canonical(collectCurrent(emptyLeft))
-      SortMergeRuns.filesWrittenForTest should be > 0L
-      SortMergeRuns.mergePassesForTest should be > 1L
-      Path.of(SortMergeRuns.lastDirectoryForTest) shouldBe dir
-      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+      SortMergeOuterFixture.assertSpill(dir, 20L, 8L)
       rows
     }
     spilledEmptyLeft.isEmpty shouldBe true
@@ -521,8 +518,8 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     val spilledKept = withSpill(budget) { dir =>
       val rows = canonical(collectCurrent(emptyRight))
       assertOuterBits(emptyRight, AbsentSide.Right, rows)
-      SortMergeRuns.filesWrittenForTest should be > 0L
-      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+      // 40/16 covers two executions (collectCurrent and assertOuterBits's interpret). 20/8 and 2/0 are single executions.
+      SortMergeOuterFixture.assertSpill(dir, 40L, 16L)
       rows
     }
     spilledKept should contain theSameElementsAs kept
@@ -592,31 +589,6 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
   private def sameRows(actual: Seq[Any], expected: Seq[Any]): org.scalatest.Assertion =
     actual should contain theSameElementsAs expected
 
-  private def collect(plan: Plan[_], columnar: Boolean): Seq[Any] =
-    ScarletConf.set(originalConf.copy(columnarExecution = columnar))
-    ScarletRuntime.get.shuffle.clear()
-    DistCollection(plan).collect().toSeq
-
-  /** `(key, left, right)` with a null key or left value as `None`, so a null is not unboxed. */
-  @SuppressWarnings(
-    Array(
-      "org.wartremover.warts.Any",
-      "org.wartremover.warts.AsInstanceOf",
-      "org.wartremover.warts.Null",
-      "org.wartremover.warts.Product",
-    ),
-  )
-  private def canonical(rows: Seq[Any]): Seq[(Option[Int], Option[Int], Option[Int])] =
-    rows.map { row =>
-      val outer = row.asInstanceOf[Product]
-      val values = outer.productElement(1).asInstanceOf[Product]
-      (
-        cell(outer.productElement(0)),
-        cell(values.productElement(0)),
-        cell(values.productElement(1)),
-      )
-    }
-
   /**
    * True when a collected outer row has a null at `ordinal` of the value pair. Ordinal 0 is the
    * probe value. Ordinal 1 is the build value, which the row path wraps in `Some`.
@@ -640,14 +612,6 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
             case _ => false
         case _ => false
     }
-
-  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null", "org.wartremover.warts.Product"))
-  private def cell(value: Any): Option[Int] = value match
-    case null => None
-    case number: Int => Some(number)
-    case Some(number: Int) => Some(number)
-    case None => None
-    case other => fail(s"expected an int cell, found $other")
 
   @SuppressWarnings(
     Array(
@@ -702,7 +666,3 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
   private def withSpill[A](budget: Long)(body: Path => A): A =
     SortMergeOuterFixture.withSpill(shuffledConf, budget)(body)
 
-  private def int32(batch: ColumnBatch, ordinal: Int): Int32Column =
-    batch.columns.lift(ordinal) match
-      case Some(column: Int32Column) => column
-      case other => fail(s"expected Int32 at $ordinal, got $other")

@@ -5,8 +5,10 @@ import java.nio.file.{Files, Path}
 import org.scalatest.Assertions
 import org.scalatest.matchers.should.Matchers
 
+import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
+import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
  * Shared rows and spill harness for the three outer sort-merge suites. The assertions are the
@@ -71,6 +73,34 @@ object SortMergeOuterFixture extends Assertions with Matchers:
     }
     fromBits
 
+  /**
+   * Collects `plan` after setting columnar execution. Other settings stay as the caller left
+   * them. This uses the current [[ScarletConf]]. Every caller establishes the suite baseline
+   * first; this does not reinstall a saved base.
+   */
+  private[execution] def collect(plan: Plan[_], columnar: Boolean): Seq[Any] =
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = columnar))
+    ScarletRuntime.get.shuffle.clear()
+    DistCollection(plan).collect().toSeq
+
+  /**
+   * Pins the spill counters for one outer sort-merge case. The recorded directory is non-empty
+   * and still present. No spill files remain in it. [[withSpill]] deletes the tree after the
+   * case returns, and these counters are read before `withSpill`'s finally reset. A missing
+   * directory fails here: [[SpillStore.listForTest]] returns empty for a missing path.
+   */
+  private[execution] def assertSpill(
+      dir: Path,
+      files: Long,
+      passes: Long,
+  ): org.scalatest.Assertion =
+    SortMergeRuns.filesWrittenForTest shouldBe files
+    SortMergeRuns.mergePassesForTest shouldBe passes
+    SortMergeRuns.lastDirectoryForTest.nonEmpty shouldBe true
+    Path.of(SortMergeRuns.lastDirectoryForTest) shouldBe dir
+    Files.isDirectory(dir) shouldBe true
+    SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+
   def withSpill[A](base: ScarletConf, budget: Long)(body: Path => A): A =
     val dir = Files.createTempDirectory("scarlet-sort-merge-outer")
     val saved = ScarletConf.get
@@ -97,20 +127,15 @@ object SortMergeOuterFixture extends Assertions with Matchers:
     val _ = Files.deleteIfExists(dir)
 
   private def bitRows(batch: ColumnBatch): Seq[(Option[Int], Option[Int], Option[Int])] =
-    val keys = int32(batch, 0)
-    val left = int32(batch, 1)
-    val right = int32(batch, 2)
+    val keys = BatchColumns.int32(batch, 0)
+    val left = BatchColumns.int32(batch, 1)
+    val right = BatchColumns.int32(batch, 2)
     (0 until batch.length).map { row =>
       (bit(keys, row), bit(left, row), bit(right, row))
     }
 
   private def bit(column: Int32Column, row: Int): Option[Int] =
     if (column.isValid(row)) Some(column.values(row)) else None
-
-  private def int32(batch: ColumnBatch, ordinal: Int): Int32Column =
-    batch.columns.lift(ordinal) match
-      case Some(column: Int32Column) => column
-      case other => fail(s"expected Int32 at $ordinal, got $other")
 
   /** `(key, left, right)` with a null key or value as `None`, so a null is not unboxed. */
   @SuppressWarnings(
@@ -121,7 +146,7 @@ object SortMergeOuterFixture extends Assertions with Matchers:
       "org.wartremover.warts.Product",
     ),
   )
-  private def canonical(rows: Seq[Any]): Seq[(Option[Int], Option[Int], Option[Int])] =
+  private[execution] def canonical(rows: Seq[Any]): Seq[(Option[Int], Option[Int], Option[Int])] =
     rows.map { row =>
       val outer = row.asInstanceOf[Product]
       val values = outer.productElement(1).asInstanceOf[Product]
@@ -133,7 +158,7 @@ object SortMergeOuterFixture extends Assertions with Matchers:
     }
 
   @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null", "org.wartremover.warts.Product"))
-  private def cell(value: Any): Option[Int] = value match
+  private[execution] def cell(value: Any): Option[Int] = value match
     case null => None
     case number: Int => Some(number)
     case Some(number: Int) => Some(number)
