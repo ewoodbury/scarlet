@@ -16,6 +16,10 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
 
   private val originalConf = ScarletConf.get
 
+  override def beforeEach(): Unit =
+    super.beforeEach()
+    ExecutionModuleSupport.initialize()
+
   override def afterEach(): Unit =
     ColumnMetrics.restore(NoOpSink)
     ScarletRuntime.get.shuffle.clear()

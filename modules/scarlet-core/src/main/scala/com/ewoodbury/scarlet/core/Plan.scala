@@ -74,9 +74,14 @@ object Plan {
       extends Plan[(K, V)]
 
   /**
-   * The initial data source. For this local version, it holds an Iterable directly.
-   * `() => Iterable[A]` makes it lazier, ensuring the source data isn't iterated until execution
-   * starts.
+   * The initial data source. It stores the `Seq[Partition[A]]` it is given and does not copy it.
+   * The `DistCollection` factories copy record data (`slice` / `fromOwned`) before those
+   * partitions are built.
+   *
+   * @param partitions
+   *   The partitions this source stores.
+   * @param descriptor
+   *   Type information for empty partitions and checks against non-empty data.
    */
   case class Source[A](
       partitions: Seq[Partition[A]],

@@ -137,18 +137,16 @@ class DefaultExecutionService extends ExecutionService {
 }
 
 /**
- * Auto-registration of the default execution service. This gets called when the execution module
- * is loaded.
+ * Registers the default execution service when the execution module is loaded. A service already
+ * installed in [[com.ewoodbury.scarlet.core.ExecutionService]] is left in place.
  */
 object DefaultExecutionService {
-  // Register the service when this object is first accessed
-  private lazy val registration = {
-    ExecutionService.set(new DefaultExecutionService())
-  }
 
-  // Ensure the registration happens by calling this method
+  /**
+   * Installs this service only while the registry still holds its unregistered placeholder.
+   * Repeated calls are idempotent.
+   */
   def initialize(): Unit = {
-    // Force the lazy initialization to run
-    registration
+    val _ = ExecutionService.registerIfEmpty(new DefaultExecutionService())
   }
 }
