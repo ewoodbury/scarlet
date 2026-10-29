@@ -30,7 +30,7 @@ object LongHashReduce:
     val keys = ColumnHash.int64At(batch, keyOrdinal)
     val values = ColumnHash.int64At(batch, valueOrdinal)
     require(keys.length == values.length, "key and value columns differ in length")
-    if (keys.length == 0) then emptyPairs
+    if (keys.length == 0) then ColumnBatches.emptyLongPairs
     else reduce(keys, values, op)
 
   /**
@@ -48,7 +48,7 @@ object LongHashReduce:
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
-    if (batches.isEmpty) then Vector.fill(numPartitions)(emptyPairs)
+    if (batches.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyLongPairs)
     else
       val combined = PartialCombine.perBatch(
         batches,
@@ -69,11 +69,6 @@ object LongHashReduce:
       table.scanDense(keys, values)
     else table.scanSparse(keys, values)
     table.compact()
-
-  private def emptyPairs: ColumnBatch =
-    val keys = Int64Column.of(Array.emptyLongArray, Validity.allValid(0), 0)
-    val values = Int64Column.of(Array.emptyLongArray, Validity.allValid(0), 0)
-    new ColumnBatch(Vector(LogicalType.Int64, LogicalType.Int64), Vector(keys, values), 0)
 
   /** Empty slot, a present value, or a null value that has not yet met another value. */
   private val empty: Byte = 0

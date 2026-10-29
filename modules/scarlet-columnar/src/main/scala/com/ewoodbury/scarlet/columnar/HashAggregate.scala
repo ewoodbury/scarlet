@@ -83,7 +83,7 @@ object HashAggregate:
     val keys = ColumnHash.int32At(batch, keyOrdinal)
     val values = ColumnHash.int32At(batch, valueOrdinal)
     require(keys.length == values.length, "key and value columns differ in length")
-    if (keys.length == 0) then emptySum
+    if (keys.length == 0) then ColumnBatches.emptyIntLongSum
     else
       val table = new GroupTable(ColumnHash.tableSize(keys.length), SumOnly)
       val slot = new PairSlot
@@ -255,7 +255,7 @@ object HashAggregate:
     val keys = ColumnHash.int32At(batch, keyOrdinal)
     val values = ColumnHash.int64At(batch, valueOrdinal)
     require(keys.length == values.length, "key and value columns differ in length")
-    if (keys.length == 0) then emptySum
+    if (keys.length == 0) then ColumnBatches.emptyIntLongSum
     else
       val table = new GroupTable(ColumnHash.tableSize(keys.length), SumOnly)
       if (ColumnHash.fullyPresent(keys) && ColumnHash.fullyPresent(values)) then
@@ -284,7 +284,7 @@ object HashAggregate:
       keyOrdinal: Int,
       valueOrdinal: Int,
   ): ColumnBatch =
-    if (partials.isEmpty) then emptySum
+    if (partials.isEmpty) then ColumnBatches.emptyIntLongSum
     else
       val batches = partials.toArray
       val table = new GroupTable(mergeSeed(widestPartial(batches)), SumOnly)
@@ -479,7 +479,7 @@ object HashAggregate:
       map: ColumnKernel.Int32Map,
   ): ColumnBatch =
     require(keys.length == values.length, "key and value columns differ in length")
-    if (keys.length == 0) then emptySum
+    if (keys.length == 0) then ColumnBatches.emptyIntLongSum
     else
       val table = new GroupTable(capacity, SumOnly)
       val end = keys.length
@@ -1003,9 +1003,6 @@ object HashAggregate:
         slots = Arrays.copyOf(slots, grown)
       slots(occupied) = slot
       occupied += 1
-
-  private def emptySum: ColumnBatch =
-    empty(Vector(LogicalType.Int32, LogicalType.Int64))
 
   private def empty(types: Vector[LogicalType]): ColumnBatch =
     val columns = types.map { logicalType =>

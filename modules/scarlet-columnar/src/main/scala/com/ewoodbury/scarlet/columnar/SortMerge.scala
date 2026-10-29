@@ -32,7 +32,7 @@ object SortMerge:
   def join(build: ColumnBatch, probe: ColumnBatch): ColumnBatch =
     val left = sortedSide(build)
     val right = sortedSide(probe)
-    if (left.length == 0 || right.length == 0) then emptyJoin
+    if (left.length == 0 || right.length == 0) then ColumnBatches.emptyIntJoin
     else emit(left, right, matchCount(left, right))
 
   /**
@@ -83,7 +83,7 @@ object SortMerge:
    */
   private[scarlet] def sortedPairs(batch: ColumnBatch): ColumnBatch =
     val side = sortedSide(batch)
-    if (side.length == 0) then emptyPairs
+    if (side.length == 0) then ColumnBatches.emptyIntPairs
     else
       new ColumnBatch(
         pairSchema,
@@ -125,7 +125,7 @@ object SortMerge:
     total
 
   private def emit(left: SortedSide, right: SortedSide, rows: Int): ColumnBatch =
-    if (rows == 0) then emptyJoin
+    if (rows == 0) then ColumnBatches.emptyIntJoin
     else
       val keys = new Array[Int](rows)
       val leftValues = new Array[Int](rows)
@@ -305,7 +305,7 @@ object SortMerge:
       leftNulls.length,
       rightNulls.length,
     )
-    if (rows == 0) then emptyJoin
+    if (rows == 0) then ColumnBatches.emptyIntJoin
     else writeOuter(leftSide, rightSide, preserveRight, leftNulls, rightNulls, rows)
 
   private def countOuter(
@@ -525,27 +525,6 @@ object SortMerge:
         )
       case other =>
         throw new IllegalArgumentException(s"join output has ${other.size} columns")
-
-  private def emptyPairs: ColumnBatch =
-    new ColumnBatch(
-      pairSchema,
-      Vector(
-        Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0),
-        Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0),
-      ),
-      0,
-    )
-
-  private def emptyJoin: ColumnBatch =
-    new ColumnBatch(
-      joinSchema,
-      Vector(
-        Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0),
-        Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0),
-        Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0),
-      ),
-      0,
-    )
 
   private val pairSchema: Vector[LogicalType] =
     Vector(LogicalType.Int32, LogicalType.Int32)

@@ -25,7 +25,7 @@ object LongHashJoin:
     val probeValues = ColumnHash.int64At(probe.batch, probe.value)
     require(buildKeys.length == buildValues.length, "build key and value columns differ in length")
     require(probeKeys.length == probeValues.length, "probe key and value columns differ in length")
-    if (buildKeys.length == 0 || probeKeys.length == 0) then emptyJoin
+    if (buildKeys.length == 0 || probeKeys.length == 0) then ColumnBatches.emptyLongJoin
     else indexed(buildKeys, buildValues).write(probeKeys, probeValues)
 
   private def indexed(buildKeys: Int64Column, buildValues: Int64Column): BuildTable =
@@ -117,7 +117,7 @@ object LongHashJoin:
           }
         row += 1
       }
-      if (filled == 0) then emptyJoin
+      if (filled == 0) then ColumnBatches.emptyLongJoin
       else publish(outKeys, outBuild, outProbe, buildWords, probeWords, outCapacity, filled)
 
     private def slotOf(key: Long): Int =
@@ -150,14 +150,3 @@ object LongHashJoin:
   private def growWords(words: Array[Long], rowCapacity: Int): Array[Long] =
     val needed = (rowCapacity + 63) >>> 6
     if (words.length == needed) words else Arrays.copyOf(words, needed)
-
-  private def emptyJoin: ColumnBatch =
-    new ColumnBatch(
-      Vector(LogicalType.Int64, LogicalType.Int64, LogicalType.Int64),
-      Vector(
-        Int64Column.of(Array.emptyLongArray, Validity.allValid(0), 0),
-        Int64Column.of(Array.emptyLongArray, Validity.allValid(0), 0),
-        Int64Column.of(Array.emptyLongArray, Validity.allValid(0), 0),
-      ),
-      0,
-    )
