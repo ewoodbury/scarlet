@@ -12,16 +12,18 @@ import com.ewoodbury.scarlet.core.Partition
  * the child kind. [[PhysicalOp.Column]] narrows a pair to one int column and shares its arrays.
  * [[PhysicalOp.MapValue]] rewrites an int value and keeps the pair. [[PhysicalOp.Exchange]] sits
  * under [[PhysicalOp.HashAggregate]] and on each side of [[PhysicalOp.HashJoin]],
- * [[PhysicalOp.SortMergeJoin]], [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]], and
- * [[PhysicalOp.HashFullOuter]]. Those kernels perform the shuffle. Interpreting the boundary on
- * its own does not. [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.BroadcastLeftOuter]],
+ * [[PhysicalOp.SortMergeJoin]], [[PhysicalOp.SortMergeLeftOuter]],
+ * [[PhysicalOp.SortMergeRightOuter]], [[PhysicalOp.SortMergeFullOuter]],
+ * [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]], and [[PhysicalOp.HashFullOuter]].
+ * Those kernels perform the shuffle. Interpreting the boundary on its own does not.
+ * [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.BroadcastLeftOuter]],
  * [[PhysicalOp.BroadcastRightOuter]], and [[PhysicalOp.BroadcastFullOuter]] have no exchange.
  * [[PhysicalOp.BuildSide]] chooses which logical child of an inner broadcast join is built. The
  * planner records the right child. A later cost-based pass may choose the left child. The other
- * child is probed in place. A left outer join always builds the right input. The left input is the
- * probe side. A right outer join always builds the left input and probes the right. A probe-side
- * row with no partner clears the build value's validity bit. That bit is absence. A null value is
- * not absence.
+ * child is probed in place. A hash or broadcast left outer join always builds the right input. The
+ * left input is the probe side. A hash or broadcast right outer join always builds the left input
+ * and probes the right. A probe-side row with no partner clears the build value's validity bit.
+ * That bit is absence. A null value is not absence. A sort-merge outer join has no build table.
  */
 enum PhysicalOp:
   case Scan(sourceKind: PhysicalOp.Kind, partitions: Seq[Partition[_]])
@@ -50,6 +52,35 @@ enum PhysicalOp:
    * `(key, left, right)`. One batch per partition. Outer joins do not use this node.
    */
   case SortMergeJoin(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * Sort-merge left outer join of int pairs. `left` and `right` are exchanges with the same
+   * partition count. The left exchange carries a null key to partition 0. The right exchange drops
+   * a null key. Each partition is sorted by present key and merged. A null key does not match. A
+   * left row with no right partner is kept, including a null key, and the right value's validity
+   * bit is clear. That bit is absence. A preserved null key publishes a clear bit on the key
+   * column. A null value is not absence and stays on the row path. Output columns are
+   * `(key, left, right)`. One batch per partition.
+   */
+  case SortMergeLeftOuter(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * Sort-merge right outer join of int pairs. `left` and `right` are exchanges. The right exchange
+   * carries a null key to partition 0. The left exchange drops a null key. The left-outer walk
+   * runs with the inputs swapped, then the value columns are swapped back to `(key, left, right)`.
+   * Absence is the left value's clear bit. A null value stays on the row path. Output columns are
+   * `(key, left, right)`. One batch per partition.
+   */
+  case SortMergeRightOuter(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * Sort-merge full outer join of int pairs. `left` and `right` are exchanges. Both exchanges
+   * carry a null key to partition 0. A group on only one side is emitted, with the other value
+   * absent. A null key on either side is emitted once and does not match. An empty side emits
+   * every row of the other side. Either value's clear bit is absence. A null value stays on the
+   * row path. Output columns are `(key, left, right)`. One batch per partition.
+   */
+  case SortMergeFullOuter(left: PhysicalOp, right: PhysicalOp)
 
   /**
    * Shuffle-hash left outer join. `left` and `right` are exchanges. The left input is the probe
@@ -136,6 +167,9 @@ enum PhysicalOp:
     case HashAggregate(_) => PhysicalOp.Kind.Pairs
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
     case SortMergeJoin(_, _) => PhysicalOp.Kind.Triples
+    case SortMergeLeftOuter(_, _) => PhysicalOp.Kind.Triples
+    case SortMergeRightOuter(_, _) => PhysicalOp.Kind.Triples
+    case SortMergeFullOuter(_, _) => PhysicalOp.Kind.Triples
     case HashLeftOuter(_, _) => PhysicalOp.Kind.Triples
     case HashRightOuter(_, _) => PhysicalOp.Kind.Triples
     case BroadcastJoin(_, _, _) => PhysicalOp.Kind.Triples
@@ -161,6 +195,9 @@ enum PhysicalOp:
     case HashAggregate(child) => s"HashAggregate(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
     case SortMergeJoin(left, right) => s"SortMergeJoin(${left.shape}, ${right.shape})"
+    case SortMergeLeftOuter(left, right) => s"SortMergeLeftOuter(${left.shape}, ${right.shape})"
+    case SortMergeRightOuter(left, right) => s"SortMergeRightOuter(${left.shape}, ${right.shape})"
+    case SortMergeFullOuter(left, right) => s"SortMergeFullOuter(${left.shape}, ${right.shape})"
     case HashLeftOuter(left, right) => s"HashLeftOuter(${left.shape}, ${right.shape})"
     case HashRightOuter(left, right) => s"HashRightOuter(${left.shape}, ${right.shape})"
     case BroadcastJoin(left, right, _) => s"BroadcastJoin(${left.shape}, ${right.shape})"

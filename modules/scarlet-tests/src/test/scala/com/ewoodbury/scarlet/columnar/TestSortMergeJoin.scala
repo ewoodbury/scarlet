@@ -201,7 +201,7 @@ class TestSortMergeJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     largest should be > smallest
   }
 
-  it should "refuse sort-merge unless both sides are int pairs" in {
+  it should "accept sort-merge only when both sides are int pairs" in {
     val strings = DistCollection(Seq("a" -> 1), 1).sortMergeJoin(DistCollection(Seq("a" -> 2), 1))
     val doubles = DistCollection(Seq(1.0 -> 1), 1).sortMergeJoin(DistCollection(Seq(1.0 -> 2), 1))
     val pairs = DistCollection.ofIntPairs(Array(1), Array(2), 1).plan
@@ -210,11 +210,24 @@ class TestSortMergeJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       Plan.RightOuterJoinOp(pairs, pairs, Some(Plan.JoinStrategy.SortMerge)),
       Plan.FullOuterJoinOp(pairs, pairs, Some(Plan.JoinStrategy.SortMerge)),
     )
+    val shapes = Seq(
+      "SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))",
+      "SortMergeRightOuter(Exchange(Scan), Exchange(Scan))",
+      "SortMergeFullOuter(Exchange(Scan), Exchange(Scan))",
+    )
 
     ColumnarPlanner.lower(strings.plan) shouldBe None
     ColumnarPlanner.lower(doubles.plan) shouldBe None
-    outers.foreach { plan =>
-      ColumnarPlanner.lower(plan) shouldBe None
+    refuseOuter(
+      DistCollection(Seq("a" -> 1), 1).plan,
+      DistCollection(Seq("a" -> 2), 1).plan,
+    )
+    refuseOuter(
+      DistCollection(Seq(1.0 -> 1), 1).plan,
+      DistCollection(Seq(1.0 -> 2), 1).plan,
+    )
+    outers.zip(shapes).foreach { (plan, shape) =>
+      ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(shape)
     }
     ColumnarPlanner.tryTake(strings.plan, 1) shouldBe None
     val hinted = DistCollection.ofIntPairs(Array(1), Array(2), 1)
@@ -229,6 +242,16 @@ class TestSortMergeJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       "HashJoin(Exchange(Scan), Exchange(Scan))",
     )
   }
+
+  private def refuseOuter[K, V, W](left: Plan[(K, V)], right: Plan[(K, W)]): Unit =
+    val hinted = Some(Plan.JoinStrategy.SortMerge)
+    Seq(
+      Plan.LeftOuterJoinOp(left, right, hinted),
+      Plan.RightOuterJoinOp(left, right, hinted),
+      Plan.FullOuterJoinOp(left, right, hinted),
+    ).foreach { outer =>
+      ColumnarPlanner.lower(outer) shouldBe None
+    }
 
   private def agree(left: Seq[(Int, Int)], right: Seq[(Int, Int)], parts: Int): Unit =
     columnarPairs(left, right, parts) should contain theSameElementsAs rowPairs(left, right, parts)

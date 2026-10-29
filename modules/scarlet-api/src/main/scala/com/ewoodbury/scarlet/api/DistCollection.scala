@@ -248,8 +248,8 @@ final case class DistCollection[A](plan: Plan[A]):
    * emitted once with `None`. A null key never matches: a left null is kept with `None`, and a
    * right null matches nothing. Order is unspecified. The row executor always shuffle-hashes; a
    * strategy hint on the plan is ignored there. The columnar planner runs an int-pair left outer
-   * join for an absent hint, a shuffle-hash hint, or a broadcast hint. Returns a new
-   * DistCollection representing the joined data. Does not trigger computation.
+   * join for an absent hint, a shuffle-hash hint, a broadcast hint, or an explicit sort-merge
+   * hint. Returns a new DistCollection representing the joined data. Does not trigger computation.
    */
   def leftOuterJoin[K, V, W](other: DistCollection[(K, W)])(using
       ev: A =:= (K, V),
@@ -262,8 +262,8 @@ final case class DistCollection[A](plan: Plan[A]):
    * emitted once with `None`. A null key never matches: a right null is kept with `None`, and a
    * left null matches nothing. Order is unspecified. The row executor always shuffle-hashes; a
    * strategy hint on the plan is ignored there. The columnar planner runs an int-pair right outer
-   * join for an absent hint, a shuffle-hash hint, or a broadcast hint. Returns a new
-   * DistCollection representing the joined data. Does not trigger computation.
+   * join for an absent hint, a shuffle-hash hint, a broadcast hint, or an explicit sort-merge
+   * hint. Returns a new DistCollection representing the joined data. Does not trigger computation.
    */
   def rightOuterJoin[K, V, W](other: DistCollection[(K, W)])(using
       ev: A =:= (K, V),
@@ -278,7 +278,7 @@ final case class DistCollection[A](plan: Plan[A]):
    * `(Some(v), None)`, and each right null row is emitted once as `(None, Some(w))`. Order is
    * unspecified. The row executor always shuffle-hashes; a strategy hint on the plan is ignored
    * there. The columnar planner runs an int-pair full outer join for an absent hint, a
-   * shuffle-hash hint, or a broadcast hint. Sort-merge stays on the row path. Returns a new
+   * shuffle-hash hint, a broadcast hint, or an explicit sort-merge hint. Returns a new
    * DistCollection representing the joined data. Does not trigger computation.
    */
   def fullOuterJoin[K, V, W](other: DistCollection[(K, W)])(using
