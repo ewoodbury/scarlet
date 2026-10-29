@@ -369,6 +369,40 @@ object BatchCodec:
         )
 
   /**
+   * Long-key join rows are `(key, left, right)`. A null stays an error: the decoded `Long` would
+   * otherwise be the stored zero. A full decode checks live bits by word; a prefix decode checks
+   * only the rows it returns. Spare capacity past `length` is ignored. This does not call
+   * [[decodeIntTriples]].
+   */
+  def decodeLongTriples(batch: ColumnBatch): Seq[(Long, (Long, Long))] =
+    decodeLongTriples(batch, batch.length)
+
+  def decodeLongTriples(batch: ColumnBatch, maxRows: Int): Seq[(Long, (Long, Long))] =
+    batch.columns match
+      case Seq(keys: Int64Column, left: Int64Column, right: Int64Column) =>
+        require(
+          keys.length == batch.length && left.length == batch.length && right.length == batch.length,
+          "join columns disagree on length",
+        )
+        val rows = decodedLength(batch, maxRows)
+        if (rows == batch.length) then
+          requireLive(keys)
+          requireLive(left)
+          requireLive(right)
+        else
+          requireLivePrefix(keys, rows)
+          requireLivePrefix(left, rows)
+          requireLivePrefix(right, rows)
+        ColumnMetrics.decoded(rows)
+        Seq.tabulate(rows) { row =>
+          (keys.values(row), (left.values(row), right.values(row)))
+        }
+      case _ =>
+        throw new IllegalArgumentException(
+          s"join output is not three Int64 columns: ${batch.schema}",
+        )
+
+  /**
    * Outer-join rows are `(key, left, right)`. `absent` names the value column wrapped in `Option`.
    * [[AbsentSide.Left]] returns `(key, (Option[Int], Int))`. [[AbsentSide.Right]] returns
    * `(key, (Int, Option[Int]))`. [[AbsentSide.Both]] returns `(key, (Option[Int], Option[Int]))`.
@@ -426,14 +460,14 @@ object BatchCodec:
     }
 
   /** Throws once, naming the first clear live bit. Bits at `length` and beyond are not live. */
-  private def requireLive(column: Int32Column): Unit =
+  private def requireLive(column: Column): Unit =
     requireLiveRows(column.validity.words, column.length)
 
   /**
    * Same word check as [[requireLive]], limited to the decoded prefix. The tail word is masked to
    * `rows`, so the scan does not walk one bit at a time.
    */
-  private def requireLivePrefix(column: Int32Column, rows: Int): Unit =
+  private def requireLivePrefix(column: Column, rows: Int): Unit =
     requireLiveRows(column.validity.words, rows)
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))

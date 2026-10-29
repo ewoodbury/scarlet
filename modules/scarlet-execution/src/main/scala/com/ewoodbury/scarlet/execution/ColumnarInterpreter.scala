@@ -17,7 +17,7 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * `ClassCastException` from a filter, or from a string map that declares `String` and returns
  * another value, is still a fallback, and that function may already have run. A null value on a
  * left, right, or full outer join is the same fallback: the value columns are already encoded, and
- * the kernel is not chosen.
+ * the kernel is not chosen. A null value on a long inner join is that fallback too.
  */
 @SuppressWarnings(
   Array(
@@ -48,6 +48,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.Pairs(parts) => parts
     case Columns.LongPairs(parts) => parts
     case Columns.Triples(parts) => parts
+    case Columns.LongTriples(parts) => parts
     case Columns.Strings(parts) => parts
     case Columns.Bools(parts) => parts
     case Columns.Outer(parts, _) => parts
@@ -59,6 +60,7 @@ private[execution] object ColumnarInterpreter:
     case Pairs(parts: Vector[ColumnBatch])
     case LongPairs(parts: Vector[ColumnBatch])
     case Triples(parts: Vector[ColumnBatch])
+    case LongTriples(parts: Vector[ColumnBatch])
     case Strings(parts: Vector[ColumnBatch])
     case Bools(parts: Vector[ColumnBatch])
 
@@ -93,6 +95,9 @@ private[execution] object ColumnarInterpreter:
         case Columns.Triples(parts) =>
           // Joins are not partition-preserving, so `take` does not reach this arm.
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeIntTriples(batch, rows))
+        case Columns.LongTriples(parts) =>
+          // Joins are not partition-preserving, so `take` does not reach this arm.
+          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeLongTriples(batch, rows))
         case Columns.Outer(parts, absent) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeOuter(batch, absent, rows))
         case Columns.Strings(parts) =>
@@ -133,7 +138,7 @@ private[execution] object ColumnarInterpreter:
         case PhysicalOp.Kind.LongPairs => Columns.LongPairs(encodeLongPairs(selected))
         case PhysicalOp.Kind.Strings => Columns.Strings(encodeStrings(selected))
         case PhysicalOp.Kind.Bools => Columns.Bools(encodeBools(selected))
-        case PhysicalOp.Kind.Triples =>
+        case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples =>
           throw new IllegalStateException(
             s"physical tree does not match ${plan.getClass.getSimpleName}",
           )
@@ -237,6 +242,32 @@ private[execution] object ColumnarInterpreter:
         ColumnPipeline.innerJoin(
           pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence)),
           pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence)),
+          ColumnarPlanner.shuffleWidth,
+          ColumnarPlanner.parallelism,
+          ColumnarPlanner.batchSize,
+        ),
+      )
+    case (
+          Plan.JoinOp(left, right, strategy),
+          PhysicalOp.LongHashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
+        ) if ColumnarPlanner.acceptsShuffleHash(strategy) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      val leftBatches = longPairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence))
+      val rightBatches = longPairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence))
+      // Validity words are already on the columns. A null value is not a decoded long, so the
+      // kernel is not chosen.
+      val valuesPresent =
+        ColumnPipeline.longValuesFullyPresent(leftBatches) &&
+          ColumnPipeline.longValuesFullyPresent(rightBatches)
+      if (!valuesPresent) then
+        throw new ClassCastException(
+          "a null value on a long inner join stays on the row path",
+        )
+      Columns.LongTriples(
+        ColumnPipeline.longInnerJoin(
+          leftBatches,
+          rightBatches,
           ColumnarPlanner.shuffleWidth,
           ColumnarPlanner.parallelism,
           ColumnarPlanner.batchSize,
@@ -574,7 +605,7 @@ private[execution] object ColumnarInterpreter:
       case Columns.Strings(parts) =>
         Columns.Strings(onEachMorsel(parts)(morsel => ElementPipeline.strings(morsel, steps)))
       case Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.Triples(_) |
-          Columns.Outer(_, _) =>
+          Columns.LongTriples(_) | Columns.Outer(_, _) =>
         rejected
 
   private def triplePredicate(
@@ -653,7 +684,7 @@ private[execution] object ColumnarInterpreter:
               BoolPipeline.filter(morsel.batch, morsel.start, morsel.length, predicate)
             })
           case Columns.Pairs(_) | Columns.LongPairs(_) | Columns.Triples(_) |
-              Columns.Outer(_, _) =>
+              Columns.LongTriples(_) | Columns.Outer(_, _) =>
             throw new IllegalStateException(
               s"columnar element filter expects ${elementColumnList(includeBooleans = true)}",
             )
@@ -755,7 +786,7 @@ private[execution] object ColumnarInterpreter:
         )
       })
     case Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.Triples(_) |
-        Columns.Outer(_, _) =>
+        Columns.LongTriples(_) | Columns.Outer(_, _) =>
       throw new IllegalStateException(
         s"columnar map expects ${elementColumnList(includeBooleans = false)}",
       )
@@ -784,7 +815,8 @@ private[execution] object ColumnarInterpreter:
     case Columns.Pairs(_) =>
       throw new IllegalStateException("columnar pairs have no partitions")
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.LongPairs(_) |
-        Columns.Triples(_) | Columns.Strings(_) | Columns.Bools(_) | Columns.Outer(_, _) =>
+        Columns.Triples(_) | Columns.LongTriples(_) | Columns.Strings(_) | Columns.Bools(_) |
+        Columns.Outer(_, _) =>
       throw new IllegalStateException("columnar op expected int pairs")
 
   private def triplesOf(columns: Columns): Vector[ColumnBatch] = columns match
@@ -792,7 +824,8 @@ private[execution] object ColumnarInterpreter:
     case Columns.Triples(_) =>
       throw new IllegalStateException("columnar triples have no partitions")
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Pairs(_) |
-        Columns.LongPairs(_) | Columns.Strings(_) | Columns.Bools(_) | Columns.Outer(_, _) =>
+        Columns.LongPairs(_) | Columns.LongTriples(_) | Columns.Strings(_) | Columns.Bools(_) |
+        Columns.Outer(_, _) =>
       throw new IllegalStateException("columnar op expected int triples")
 
   /**
@@ -912,7 +945,8 @@ private[execution] object ColumnarInterpreter:
     case Columns.LongPairs(_) =>
       throw new IllegalStateException("columnar long pairs have no partitions")
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Pairs(_) |
-        Columns.Triples(_) | Columns.Strings(_) | Columns.Bools(_) | Columns.Outer(_, _) =>
+        Columns.Triples(_) | Columns.LongTriples(_) | Columns.Strings(_) | Columns.Bools(_) |
+        Columns.Outer(_, _) =>
       throw new IllegalStateException("columnar op expected long pairs")
 
   /**
@@ -960,6 +994,10 @@ private[execution] object ColumnarInterpreter:
       parts.map(batch => Partition(BatchCodec.decodeLongPairs(batch)))
     case Columns.Triples(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeIntTriples(batch)))
+    case Columns.LongTriples(parts) =>
+      // Named erasure boundary for the long join. The decoded rows are `(Long, (Long, Long))`.
+      // [[ColumnarPlanner.runLowered]] casts the partition sequence to the plan's element type.
+      parts.map(batch => Partition(BatchCodec.decodeLongTriples(batch)))
     case Columns.Outer(parts, absent) =>
       parts.map(batch => Partition(BatchCodec.decodeOuter(batch, absent)))
     case Columns.Strings(parts) =>

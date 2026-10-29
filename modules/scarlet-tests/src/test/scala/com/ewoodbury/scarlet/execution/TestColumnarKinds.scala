@@ -30,8 +30,9 @@ class TestColumnarKinds extends AnyFlatSpec with Matchers:
     kindOrdinal(PhysicalOp.Kind.Strings) shouldBe 5
     kindOrdinal(PhysicalOp.Kind.Bools) shouldBe 6
     kindOrdinal(PhysicalOp.Kind.LongPairs) shouldBe 7
+    kindOrdinal(PhysicalOp.Kind.LongTriples) shouldBe 8
     Plan.SourceDescriptor.values.length shouldBe 8
-    PhysicalOp.Kind.values.length shouldBe 8
+    PhysicalOp.Kind.values.length shouldBe 9
   }
 
 inline def descriptorOrdinal(inline descriptor: Plan.SourceDescriptor): Int =
@@ -55,3 +56,4 @@ inline def kindOrdinal(inline kind: PhysicalOp.Kind): Int =
     case PhysicalOp.Kind.Strings => 5
     case PhysicalOp.Kind.Bools => 6
     case PhysicalOp.Kind.LongPairs => 7
+    case PhysicalOp.Kind.LongTriples => 8
