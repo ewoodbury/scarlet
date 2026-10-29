@@ -46,7 +46,7 @@ final case class ScarletConf(
     /**
      * When true, a grouped-sum bucket, an inner broadcast build, or a sort-merge partition whose
      * estimate exceeds `spillBudgetBytes` is spilled. Off by default, so each stays in memory.
-     * Outer joins do not read this flag.
+     * Outer hash and broadcast joins do not read this flag; an outer sort-merge does.
      */
     spillEnabled: Boolean = false,
     /**

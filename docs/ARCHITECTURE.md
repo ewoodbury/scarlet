@@ -63,7 +63,7 @@ asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors
 
 ### Columnar completion contract
 
-The following 170 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
+The following 173 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
 `Unknown(2)` denotes the two source partitions in the small contract fixtures; aggregate and join
 outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are exact.
 
@@ -80,14 +80,17 @@ outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are 
 | Pair `keys`, `values`, int `mapValues`, mapped key/value columns, filtered int `mapValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `Project(Key(Scan))`, `Project(Value(Scan))`, `FilterValue(MapValue(Scan))` |
 | Int `reduceByKey`, after a value filter or int `mapValues`, and nested reduction | `Columnar` | `HashAggregate(Exchange(Scan))`, `HashAggregate(Exchange(FilterValue(Scan)))`, `HashAggregate(Exchange(MapValue(Scan)))`, `HashAggregate(Exchange(HashAggregate(Exchange(Scan))))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
-| Explicit sort-merge int join. Both sides are hash-partitioned, sorted inside each partition, and merged. Null keys are dropped before the sort. Outer sort-merge stays on the row path | `Columnar` | `SortMergeJoin(Exchange(Scan), Exchange(Scan))` |
+| Explicit sort-merge int join. Both sides are hash-partitioned, sorted inside each partition, and merged. Null keys are dropped before the sort | `Columnar` | `SortMergeJoin(Exchange(Scan), Exchange(Scan))` |
+| Explicit sort-merge left outer int join. Both sides are hash-partitioned. The left exchange carries a null key to partition 0. The right exchange drops a null key. A null key does not match. A preserved null key publishes a clear key bit. Absence is the right value's clear bit. A null value stays on the row path | `Columnar` | `SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))` |
+| Explicit sort-merge right outer int join. The right exchange carries a null key. The left exchange drops one. The left-outer walk runs on swapped inputs, then the value columns are swapped back to `(key, left, right)`. Absence is the left value's clear bit. A null value stays on the row path | `Columnar` | `SortMergeRightOuter(Exchange(Scan), Exchange(Scan))` |
+| Explicit sort-merge full outer int join. Both exchanges carry a null key to partition 0. A group on only one side is emitted. An empty side emits every row of the other side. Either value's clear bit is absence. A null value stays on the row path | `Columnar` | `SortMergeFullOuter(Exchange(Scan), Exchange(Scan))` |
 | Explicit broadcast int join. The planner builds the right input. A later pass may build the left. Neither side is exchanged. Order is unspecified | `Columnar` | `BroadcastJoin(Scan, Scan)` |
 | Broadcast left outer int join. The planner builds the right input. The left input is the probe side, and the op records no left build. Absence is a probe-side row with no partner: the right value's validity bit is clear. A null value is not absence and stays on the row path | `Columnar` | `BroadcastLeftOuter(Scan, Scan)` |
-| Shuffle-hash left outer int join, including an absent hint. The left input is the probe side. Its exchange carries a null key to partition 0. The right exchange drops a null key. Each partition builds one table under the broadcast budget. A null value stays on the row path. Sort-merge stays on the row path | `Columnar` | `HashLeftOuter(Exchange(Scan), Exchange(Scan))` |
+| Shuffle-hash left outer int join, including an absent hint. The left input is the probe side. Its exchange carries a null key to partition 0. The right exchange drops a null key. Each partition builds one table under the broadcast budget. A null value stays on the row path | `Columnar` | `HashLeftOuter(Exchange(Scan), Exchange(Scan))` |
 | Broadcast right outer int join. The planner builds the left input and probes the right. The left-outer kernel runs, then the value columns are swapped back to `(key, left, right)`. Absence is the left value's clear bit. A null value stays on the row path | `Columnar` | `BroadcastRightOuter(Scan, Scan)` |
-| Shuffle-hash right outer int join, including an absent hint. The right input is the probe side. Its exchange carries a null key to partition 0. The left exchange drops a null key. Each partition builds the left bucket, probes, and swaps the value columns. A null value stays on the row path. Sort-merge stays on the row path | `Columnar` | `HashRightOuter(Exchange(Scan), Exchange(Scan))` |
+| Shuffle-hash right outer int join, including an absent hint. The right input is the probe side. Its exchange carries a null key to partition 0. The left exchange drops a null key. Each partition builds the left bucket, probes, and swaps the value columns. A null value stays on the row path | `Columnar` | `HashRightOuter(Exchange(Scan), Exchange(Scan))` |
 | Broadcast full outer int join. The right input is built. The left input is probed in place. Each probe thread keeps its own matched-row bitmap, and the bitmaps are OR'd after the probes join. A clear bit emits that build row with the left value absent. Null build keys are carried outside the table and emitted once. An empty probe still emits every build row. A null value stays on the row path. The bitmaps are not part of `broadcastBuildBudgetBytes` | `Columnar` | `BroadcastFullOuter(Scan, Scan)` |
-| Shuffle-hash full outer int join, including an absent hint. Both exchanges carry a null key to partition 0. Each partition keeps one bitmap and emits its own unmatched build rows. There is no cross-partition OR. Sort-merge stays on the row path | `Columnar` | `HashFullOuter(Exchange(Scan), Exchange(Scan))` |
+| Shuffle-hash full outer int join, including an absent hint. Both exchanges carry a null key to partition 0. Each partition keeps one bitmap and emits its own unmatched build rows. There is no cross-partition OR | `Columnar` | `HashFullOuter(Exchange(Scan), Exchange(Scan))` |
 | Join after an int aggregate | `Columnar` | `HashJoin(Exchange(HashAggregate(Exchange(Scan))), Exchange(Scan))` |
 | Int join key/left-value/right-value filters | `Columnar` | `FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))`, `FilterTripleLeftValue(HashJoin(Exchange(Scan), Exchange(Scan)))`, `FilterTripleRightValue(HashJoin(Exchange(Scan), Exchange(Scan)))` |
 
@@ -208,13 +211,17 @@ the plan is accepted: `lower` returns a physical tree and that tree's layout is 
 
 A join lowers when its hint is absent, shuffle-hash, broadcast, or sort-merge. An inner
 sort-merge of int pairs is accepted: `lower` returns a physical tree and `partitioning` reports
-a layout. Outer sort-merge, and sort-merge on a non-int key, are refused. Those plans make
+a layout. A left, right, or full outer sort-merge of int pairs is accepted the same way.
+Sort-merge on a non-int key is refused. That plan makes
 `lower` return `None`, and `partitioning` reports no layout. The absent hint and shuffle-hash
 stay the columnar hash join above. Broadcast records both children and builds the right input.
 A later cost-based pass may build the left input instead.
 For a broadcast join, the other child is probed in place, so the join itself adds no exchange.
 Output distribution follows that probe side. A sort-merge join is
-`SortMergeJoin(Exchange, Exchange)`, and its distribution follows the key hash on both sides.
+`SortMergeJoin(Exchange, Exchange)`. Outer sort-merge is `SortMergeLeftOuter(Exchange, Exchange)`,
+`SortMergeRightOuter(Exchange, Exchange)`, or `SortMergeFullOuter(Exchange, Exchange)`.
+Distribution follows the key hash on both sides. A preserved side carries a null key to
+partition 0. Absence is a clear bit on the absent value column. A null value stays on the row path.
 When columnar execution is off, the row-path sort-merge task still groups by key.
 Output columns stay `(key, left, right)`. Multiplicity, values, and null semantics match the
 shuffle-hash join. Order is unspecified. The broadcast build table is estimated before it is
@@ -346,8 +353,9 @@ The rules that hold for every kind:
   after the probes join; shuffle keeps one bitmap per partition and emits that partition's
   leftovers immediately. A null build key is carried outside the table and emitted once. An empty
   probe still emits every build row.
-- **Hints.** Left, right and full outer on int pairs lower for an absent, shuffle-hash or broadcast
-  hint. Sort-merge stays on the row path for every kind. The row executor always shuffle-hashes an
+- **Hints.** Left, right, and full outer on int pairs lower for an absent, shuffle-hash, or
+  broadcast hint. Left, right, and full outer sort-merge of int pairs also lower for an explicit
+  sort-merge hint. A non-int key stays on the row path. The row executor always shuffle-hashes an
   outer join and ignores the hint.
 - **Budget.** `broadcastBuildBudgetBytes` bounds the build table only. The matched-row bitmaps sit
   beside it. When the build contains a null key, the present-key rows are also copied once, and

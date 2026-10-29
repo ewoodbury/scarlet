@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import java.nio.file.Path
+
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -24,6 +26,7 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
   override def afterEach(): Unit =
     ScarletRuntime.get.shuffle.clear()
     ScarletConf.set(originalConf)
+    SortMergeRuns.resetForTest()
     ()
 
   "broadcast left outer join" should "match the row path for matches and unmatched probe rows" in {
@@ -206,12 +209,17 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
         succeed
       case other => fail(s"shuffle left outer did not exchange both sides: $other")
     ColumnarPlanner.lower(unhinted).map(_.shape) shouldBe Some(shuffleShape)
-    val refused = Seq(
-      Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
-      Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
-      Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
+    val sortMerge = Seq(
+      Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)) ->
+        "SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))",
+      Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)) ->
+        "SortMergeRightOuter(Exchange(Scan), Exchange(Scan))",
+      Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)) ->
+        "SortMergeFullOuter(Exchange(Scan), Exchange(Scan))",
     )
-    refused.foreach(plan => ColumnarPlanner.lower(plan) shouldBe None)
+    sortMerge.foreach { case (plan, shape) =>
+      ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(shape)
+    }
   }
 
   "shuffle-hash left outer join" should "match the row path for matches and unmatched probe rows" in {
@@ -447,6 +455,117 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     columnar should contain theSameElementsAs canonical(collect(plan, columnar = false))
   }
 
+  "sort-merge left outer join" should "match the row path in memory and over spilled runs" in {
+    val plan = Plan.LeftOuterJoinOp(
+      source(Seq(sortMergeLeftRows)),
+      source(Seq(sortMergeRightRows)),
+      Some(Plan.JoinStrategy.SortMerge),
+    )
+    val budget = SortMergeRuns.retainedBytes(2) + SortMergeRuns.retainedBytes(1)
+    SortMergeRuns.retainedBytes(4) + SortMergeRuns.retainedBytes(3) should be > budget
+
+    ScarletConf.set(shuffledConf)
+    SortMergeRuns.resetForTest()
+    val lowered = ColumnarPlanner.lower(plan).getOrElse(fail("sort-merge left outer did not lower"))
+    lowered.kind shouldBe PhysicalOp.Kind.Triples
+    lowered.shape shouldBe "SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))"
+    val memory = canonical(collect(plan, columnar = true))
+    val row = canonical(collect(plan, columnar = false))
+    memory should contain theSameElementsAs row
+    assertLeftShape(memory)
+    ScarletConf.set(shuffledConf)
+    val fromBits = assertOuterBits(plan, AbsentSide.Right, memory)
+    assertLeftShape(fromBits)
+    SortMergeRuns.filesWrittenForTest shouldBe 0L
+
+    val spilled = withSpill(budget) { dir =>
+      val rows = canonical(collectCurrent(plan))
+      assertOuterBits(plan, AbsentSide.Right, rows)
+      SortMergeRuns.filesWrittenForTest should be >= 28L
+      SortMergeRuns.mergePassesForTest should be > 1L
+      Path.of(SortMergeRuns.lastDirectoryForTest) shouldBe dir
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+      rows
+    }
+    spilled should contain theSameElementsAs memory
+  }
+
+  it should "emit only the preserved side when a side is empty" in {
+    val noRows = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 4).plan
+    val left = source(Seq(spreadKeys(100, 7)))
+    val right = source(Seq(spreadKeys(500, 9)))
+    val budget = SortMergeRuns.retainedBytes(1)
+    SortMergeRuns.retainedBytes(3) should be > budget
+    val emptyLeft = Plan.LeftOuterJoinOp(noRows, right, Some(Plan.JoinStrategy.SortMerge))
+    val emptyRight = Plan.LeftOuterJoinOp(left, noRows, Some(Plan.JoinStrategy.SortMerge))
+    val both = Plan.LeftOuterJoinOp(noRows, noRows, Some(Plan.JoinStrategy.SortMerge))
+
+    ScarletConf.set(shuffledConf)
+    canonical(collect(emptyLeft, columnar = true)).isEmpty shouldBe true
+    val kept = canonical(collect(emptyRight, columnar = true))
+    kept should contain theSameElementsAs canonical(collect(emptyRight, columnar = false))
+    kept.count(_._1.isEmpty) shouldBe 1
+    kept.forall(_._3.isEmpty) shouldBe true
+    canonical(collect(both, columnar = true)).isEmpty shouldBe true
+
+    val spilledEmptyLeft = withSpill(budget) { dir =>
+      val rows = canonical(collectCurrent(emptyLeft))
+      SortMergeRuns.filesWrittenForTest should be > 0L
+      SortMergeRuns.mergePassesForTest should be > 1L
+      Path.of(SortMergeRuns.lastDirectoryForTest) shouldBe dir
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+      rows
+    }
+    spilledEmptyLeft.isEmpty shouldBe true
+
+    val spilledKept = withSpill(budget) { dir =>
+      val rows = canonical(collectCurrent(emptyRight))
+      assertOuterBits(emptyRight, AbsentSide.Right, rows)
+      SortMergeRuns.filesWrittenForTest should be > 0L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+      rows
+    }
+    spilledKept should contain theSameElementsAs kept
+
+    val spilledBoth = withSpill(budget) { dir =>
+      val rows = canonical(collectCurrent(both))
+      SortMergeRuns.filesWrittenForTest shouldBe 0L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+      assertOuterBits(both, AbsentSide.Right, Seq.empty)
+      rows
+    }
+    spilledBoth.isEmpty shouldBe true
+  }
+
+  it should "keep a null value on the row path" in {
+    val left = source(Seq(Seq(1 -> 10, pair(Some(2), None))))
+    val right = source(Seq(Seq(1 -> 100)))
+    val plan = Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge))
+    ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
+      "SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))",
+    )
+    ColumnarPlanner.tryRun(plan) shouldBe None
+    canonical(collect(plan, columnar = true)) should contain theSameElementsAs canonical(
+      collect(plan, columnar = false),
+    )
+    val probe = BatchCodec.nullableIntPairs(Seq((Some(1), Some(10)), (Some(2), None)))
+    val build = BatchCodec.nullableIntPairs(Seq((Some(1), Some(100))))
+    val refused = intercept[IllegalArgumentException] {
+      ColumnPipeline.sortMergeLeftOuterJoin(
+        Vector(probe),
+        Vector(build),
+        numPartitions = 1,
+        parallelism = 1,
+        batchSize = 8,
+      )
+    }
+    refused.getMessage should include("fully present")
+    val kernel = intercept[IllegalArgumentException] {
+      SortMerge.leftOuter(probe, build)
+    }
+    kernel.getMessage should include("fully present")
+  }
+
   private def shuffledConf: ScarletConf =
     originalConf.copy(columnarExecution = true, defaultShufflePartitions = 4)
 
@@ -545,6 +664,43 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
       case Some(present) => Int.box(present)
       case None => null
     Tuple2(boxedKey, boxedValue).asInstanceOf[(Int, Int)]
+
+  private def sortMergeLeftRows: Seq[(Int, Int)] =
+    SortMergeOuterFixture.sortMergeLeftRows
+
+  private def sortMergeRightRows: Seq[(Int, Int)] =
+    SortMergeOuterFixture.sortMergeRightRows
+
+  private def spreadKeys(base: Int, nullValue: Int): Seq[(Int, Int)] =
+    SortMergeOuterFixture.spreadKeys(base, nullValue)
+
+  private def assertLeftShape(rows: Seq[(Option[Int], Option[Int], Option[Int])]): Unit =
+    rows.count(row => row._1.isEmpty && row._2.contains(7) && row._3.isEmpty) shouldBe 1
+    rows.exists(row => row._1.isEmpty && row._3.isDefined) shouldBe false
+    rows.exists(row => row._3.contains(9)) shouldBe false
+    rows.exists(row => row._1.contains(12)) shouldBe false
+    rows.filter(_._1.contains(0)) should contain theSameElementsAs Seq(
+      (Some(0), Some(100), Some(500)),
+      (Some(0), Some(200), Some(500)),
+    )
+    rows.filter(_._1.contains(8)) should contain theSameElementsAs Seq(
+      (Some(8), Some(400), None),
+    )
+    rows.count(_._1.contains(1)) shouldBe 2
+
+  private def assertOuterBits(
+      plan: Plan[_],
+      absent: AbsentSide,
+      expected: Seq[(Option[Int], Option[Int], Option[Int])],
+  ): Seq[(Option[Int], Option[Int], Option[Int])] =
+    SortMergeOuterFixture.assertOuterBits(plan, absent, expected, "left outer")
+
+  private def collectCurrent(plan: Plan[_]): Seq[Any] =
+    ScarletRuntime.get.shuffle.clear()
+    DistCollection(plan).collect().toSeq
+
+  private def withSpill[A](budget: Long)(body: Path => A): A =
+    SortMergeOuterFixture.withSpill(shuffledConf, budget)(body)
 
   private def int32(batch: ColumnBatch, ordinal: Int): Int32Column =
     batch.columns.lift(ordinal) match

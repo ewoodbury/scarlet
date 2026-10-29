@@ -400,6 +400,87 @@ private[execution] object ColumnarInterpreter:
           ScarletConf.get.broadcastBuildBudgetBytes,
         )
       }
+    case (
+          Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
+          PhysicalOp.SortMergeLeftOuter(
+            PhysicalOp.Exchange(leftOp),
+            PhysicalOp.Exchange(rightOp),
+          ),
+        ) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      // preserveAbsence keeps null keys. The left exchange carries a null key. The right exchange
+      // drops one. The kernel publishes (key, left, right).
+      val probe = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
+      val build = pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+      val valuesPresent =
+        ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
+      if (!valuesPresent) then
+        throw new ClassCastException(
+          "a null value on a left outer join stays on the row path",
+        )
+      Columns.Outer(
+        ColumnPipeline.sortMergeLeftOuterJoin(
+          probe,
+          build,
+          ColumnarPlanner.shuffleWidth,
+          ColumnarPlanner.parallelism,
+          ColumnarPlanner.batchSize,
+        ),
+        AbsentSide.Right,
+      )
+    case (
+          Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
+          PhysicalOp.SortMergeRightOuter(
+            PhysicalOp.Exchange(leftOp),
+            PhysicalOp.Exchange(rightOp),
+          ),
+        ) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      // preserveAbsence keeps null keys. The kernel swaps the value columns back. Do not swap
+      // again here.
+      val leftBatches = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
+      val rightBatches =
+        pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+      val valuesPresent =
+        ColumnPipeline.valuesFullyPresent(leftBatches) &&
+          ColumnPipeline.valuesFullyPresent(rightBatches)
+      if (!valuesPresent) then
+        throw new ClassCastException(
+          "a null value on a right outer join stays on the row path",
+        )
+      Columns.Outer(
+        ColumnPipeline.sortMergeRightOuterJoin(
+          leftBatches,
+          rightBatches,
+          ColumnarPlanner.shuffleWidth,
+          ColumnarPlanner.parallelism,
+          ColumnarPlanner.batchSize,
+        ),
+        AbsentSide.Left,
+      )
+    case (
+          Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
+          PhysicalOp.SortMergeFullOuter(
+            PhysicalOp.Exchange(leftOp),
+            PhysicalOp.Exchange(rightOp),
+          ),
+        ) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      // preserveAbsence keeps null keys. Both exchanges carry a null key.
+      val probe = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
+      val build = pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+      fullOuter(probe, build) { (probeBatches, buildBatches) =>
+        ColumnPipeline.sortMergeFullOuterJoin(
+          probeBatches,
+          buildBatches,
+          ColumnarPlanner.shuffleWidth,
+          ColumnarPlanner.parallelism,
+          ColumnarPlanner.batchSize,
+        )
+      }
     case _ =>
       throw new IllegalStateException(
         s"physical tree does not match ${plan.getClass.getSimpleName}",

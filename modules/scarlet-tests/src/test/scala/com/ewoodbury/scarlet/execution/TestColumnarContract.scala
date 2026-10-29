@@ -30,10 +30,9 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    accepted.size shouldBe 170
-    // Broadcast, shuffle-hash, unhinted full outer, and explicit sort-merge inner joins are
-    // accepted. The sort-merge inner fixture moved from excluded. Outer sort-merge stays refused
-    // and has no separate fixture.
+    accepted.size shouldBe 173
+    // Broadcast, shuffle-hash, unhinted, and explicit sort-merge joins are accepted, including
+    // left, right, and full outer. Excluded stays the row-path shapes.
     excluded.size shouldBe 48
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
@@ -479,6 +478,24 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         hashedInfo(layout),
         Some("HashFullOuter(Exchange(Scan), Exchange(Scan))"),
       ),
+      AcceptedCase(
+        "sort-merge left outer join",
+        Plan.LeftOuterJoinOp(pairSource, rightPairSource, Some(Plan.JoinStrategy.SortMerge)),
+        hashedInfo(layout),
+        Some("SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))"),
+      ),
+      AcceptedCase(
+        "sort-merge right outer join",
+        Plan.RightOuterJoinOp(pairSource, rightPairSource, Some(Plan.JoinStrategy.SortMerge)),
+        hashedInfo(layout),
+        Some("SortMergeRightOuter(Exchange(Scan), Exchange(Scan))"),
+      ),
+      AcceptedCase(
+        "sort-merge full outer join",
+        Plan.FullOuterJoinOp(pairSource, rightPairSource, Some(Plan.JoinStrategy.SortMerge)),
+        hashedInfo(layout),
+        Some("SortMergeFullOuter(Exchange(Scan), Exchange(Scan))"),
+      ),
       AcceptedCase("join after int aggregate", joinAfterAggregate, hashedInfo(layout), Some("HashJoin(Exchange(HashAggregate(Exchange(Scan))), Exchange(Scan))")),
       AcceptedCase("join-key filter", joinKeyFilter, hashedInfo(layout), Some("FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))")),
       AcceptedCase("join-left-value filter", joinLeftFilter, hashedInfo(layout), Some("FilterTripleLeftValue(HashJoin(Exchange(Scan), Exchange(Scan)))")),
@@ -681,8 +698,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     )
 
   /**
-   * `lower` and the action gates share one decision. A refused plan, including an outer sort-merge
-   * join and a type-changing pair map, makes every gate return `None`. An accepted
+   * `lower` and the action gates share one decision. A refused plan, including a non-int
+   * sort-merge and a type-changing pair map, makes every gate return `None`. An accepted
    * plan
    * runs `tryRun` and `tryCount`. `tryTake` runs when the physical tree keeps input partitions.
    * `trySumInt`, `trySumLong`, and `trySumDouble` run only for that numeric kind. `tryGroupedSum` equals
@@ -740,8 +757,9 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case PhysicalOp.Column(child, _) => preservesPartitions(child)
     case PhysicalOp.MapValue(child) => preservesPartitions(child)
     case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.HashJoin(_, _) |
-        PhysicalOp.SortMergeJoin(_, _) | PhysicalOp.HashLeftOuter(_, _) |
-        PhysicalOp.HashRightOuter(_, _) |
+        PhysicalOp.SortMergeJoin(_, _) | PhysicalOp.SortMergeLeftOuter(_, _) |
+        PhysicalOp.SortMergeRightOuter(_, _) | PhysicalOp.SortMergeFullOuter(_, _) |
+        PhysicalOp.HashLeftOuter(_, _) | PhysicalOp.HashRightOuter(_, _) |
         PhysicalOp.HashFullOuter(_, _) | PhysicalOp.BroadcastJoin(_, _, _) |
         PhysicalOp.BroadcastLeftOuter(_, _) | PhysicalOp.BroadcastRightOuter(_, _) |
         PhysicalOp.BroadcastFullOuter(_, _) =>

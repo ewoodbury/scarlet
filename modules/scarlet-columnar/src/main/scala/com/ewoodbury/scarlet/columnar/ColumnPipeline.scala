@@ -15,22 +15,24 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * [[HashReduce.byKey]]. The hash join reads key column 0 and value column 1 on both sides,
  * exchanges each side, and probes one partition at a time. Those exchanges leave `carryNullKeys`
  * off, so a null key is dropped. The sort-merge join uses that same exchange on both sides, sorts
- * each bucket, and merges it. A bucket over the spill budget is merged from sorted runs instead.
- * [[HashExchange.partitionAll]] concatenates a bucket with [[ColumnBatches.concat]] and keeps an
- * empty bucket's index. The broadcast join builds one table from the batches chosen as the build
- * side and probes the other batches in place. When spill is on and that table's estimate exceeds
- * the spill budget, the build and the probe are partitioned and each build partition is spilled.
- * Outer joins do not. The left outer broadcast join uses that table and keeps the probe side. The
- * shuffle-hash left outer join exchanges both sides, carries a null key on the probe side only,
- * and builds one table per partition. A right outer join calls those same entry points with the
- * right input as the probe and the left input as the build, then swaps the value columns back to
- * `(key, left, right)`. A probe-side row with no partner is kept, and the build value's validity
- * bit is clear. That bit is absence. A null value is not absence. Match order is a kernel detail.
- * The published multiset is multiplicity, values, and null semantics. A full outer join probes the
- * left input and also emits build rows no probe matched. Broadcast gives each probe thread its own
- * bitmap and ORs them after the probes join. Shuffle keeps one bitmap per partition and finishes
- * that partition immediately. Null build keys are carried outside the table and emitted once.
- * Those bitmaps are not part of the build budget.
+ * each bucket, and merges it. A bucket over the spill budget is merged from sorted runs instead. A
+ * sort-merge outer join uses the same hash exchange, not a range partition, and carries a null key
+ * on each preserved side. [[HashExchange.partitionAll]] concatenates a bucket with
+ * [[ColumnBatches.concat]] and keeps an empty bucket's index. The broadcast join builds one table
+ * from the batches chosen as the build side and probes the other batches in place. When spill is
+ * on and that table's estimate exceeds the spill budget, the build and the probe are partitioned
+ * and each build partition is spilled. Broadcast and shuffle-hash outer joins do not spill. The
+ * left outer broadcast join uses that table and keeps the probe side. The shuffle-hash left outer
+ * join exchanges both sides, carries a null key on the probe side only, and builds one table per
+ * partition. A right outer join calls those same entry points with the right input as the probe
+ * and the left input as the build, then swaps the value columns back to `(key, left, right)`. A
+ * probe-side row with no partner is kept, and the build value's validity bit is clear. That bit is
+ * absence. A null value is not absence. Match order is a kernel detail. The published multiset is
+ * multiplicity, values, and null semantics. A full outer join probes the left input and also emits
+ * build rows no probe matched. Broadcast gives each probe thread its own bitmap and ORs them after
+ * the probes join. Shuffle keeps one bitmap per partition and finishes that partition immediately.
+ * Null build keys are carried outside the table and emitted once. Those bitmaps are not part of
+ * the build budget.
  */
 object ColumnPipeline:
 
@@ -222,6 +224,125 @@ object ColumnPipeline:
       parallelism,
     )
     SortMergeRuns.joinAll(buildBuckets, probeBuckets, batchSize, ScarletConf.get)
+
+  /**
+   * Left outer sort-merge of int pairs. Both sides are sliced and hash-partitioned with one
+   * partition count. The left exchange carries a null key to partition 0. The right exchange drops
+   * a null key. [[SortMerge.leftOuter]] merges bucket `i` with bucket `i`. A null key does not
+   * match. A left row with no right partner is kept, including a null key, and the right value's
+   * bit is clear. That bit is absence. A preserved null key publishes a clear bit on the key
+   * column. A null value is not absence. Call this only when both value columns are fully valid.
+   *
+   * Spill follows [[sortMergeJoin]]. Preserved null keys are removed before any run is written and
+   * emitted once after the two reduced runs are joined. With spill off, or under the budget, this
+   * calls [[SortMerge.leftOuter]] and writes nothing.
+   */
+  def sortMergeLeftOuterJoin(
+      left: Vector[ColumnBatch],
+      right: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    require(
+      valuesFullyPresent(left) && valuesFullyPresent(right),
+      "a left outer join needs fully present value columns",
+    )
+    sortMergeOuter(
+      left,
+      right,
+      numPartitions,
+      parallelism,
+      batchSize,
+      carryLeft = true,
+      carryRight = false,
+      SortMergeRuns.OuterKind.Left,
+    )
+
+  /**
+   * Right outer sort-merge. The right exchange carries a null key. The left exchange drops one.
+   * [[SortMerge.rightOuter]] runs the left-outer walk on swapped inputs and swaps the value
+   * columns back to `(key, left, right)`. This method does not swap again. Absence is the left
+   * value's clear bit. Call this only when both value columns are fully valid.
+   */
+  def sortMergeRightOuterJoin(
+      left: Vector[ColumnBatch],
+      right: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    require(
+      valuesFullyPresent(left) && valuesFullyPresent(right),
+      "a right outer join needs fully present value columns",
+    )
+    sortMergeOuter(
+      left,
+      right,
+      numPartitions,
+      parallelism,
+      batchSize,
+      carryLeft = false,
+      carryRight = true,
+      SortMergeRuns.OuterKind.Right,
+    )
+
+  /**
+   * Full outer sort-merge. Both exchanges carry a null key to partition 0. A group on only one
+   * side is emitted, and an empty side emits every row of the other side. Either value's clear bit
+   * is absence. Call this only when both value columns are fully valid.
+   */
+  def sortMergeFullOuterJoin(
+      left: Vector[ColumnBatch],
+      right: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    require(
+      valuesFullyPresent(left) && valuesFullyPresent(right),
+      "a full outer join needs fully present value columns",
+    )
+    sortMergeOuter(
+      left,
+      right,
+      numPartitions,
+      parallelism,
+      batchSize,
+      carryLeft = true,
+      carryRight = true,
+      SortMergeRuns.OuterKind.Full,
+    )
+
+  /**
+   * Hash-partitions both sides, then runs the outer merge. `carryLeft` and `carryRight` name which
+   * side keeps a null key. This is [[HashExchange.partitionAll]], not a range partition.
+   */
+  private def sortMergeOuter(
+      left: Vector[ColumnBatch],
+      right: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+      carryLeft: Boolean,
+      carryRight: Boolean,
+      kind: SortMergeRuns.OuterKind,
+  ): Vector[ColumnBatch] =
+    val leftBuckets = HashExchange.partitionAll(
+      sliceAll(left, batchSize),
+      keyOrdinal = 0,
+      numPartitions,
+      parallelism,
+      carryNullKeys = carryLeft,
+    )
+    val rightBuckets = HashExchange.partitionAll(
+      sliceAll(right, batchSize),
+      keyOrdinal = 0,
+      numPartitions,
+      parallelism,
+      carryNullKeys = carryRight,
+    )
+    SortMergeRuns.joinOuterAll(leftBuckets, rightBuckets, batchSize, ScarletConf.get, kind)
 
   /**
    * Inner join with no exchange. `probe` and `build` are already chosen. One table is filled from

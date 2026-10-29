@@ -287,7 +287,8 @@ object Plan {
    *   Stored with the plan. The row executor ignores it and always runs shuffle-hash. The columnar
    *   planner accepts a broadcast hint, a shuffle-hash hint, or an absent hint for int pairs. The
    *   left input is the probe side. An absent hint uses the shuffle-hash op, matching an inner
-   *   join. A null value stays on the row path. Sort-merge is not a columnar outer join.
+   *   join. A null value stays on the row path. An explicit sort-merge hint on int pairs lowers to
+   *   `SortMergeLeftOuter`.
    * @tparam K
    *   The key type.
    * @tparam V
@@ -313,7 +314,8 @@ object Plan {
    *   Stored with the plan. The row executor ignores it and always runs shuffle-hash. The columnar
    *   planner accepts a broadcast hint, a shuffle-hash hint, or an absent hint for int pairs. The
    *   right input is the probe side. An absent hint uses the shuffle-hash op, matching an inner
-   *   join. A null value stays on the row path. Sort-merge is not a columnar outer join.
+   *   join. A null value stays on the row path. An explicit sort-merge hint on int pairs lowers to
+   *   `SortMergeRightOuter`.
    * @tparam K
    *   The key type.
    * @tparam V
@@ -342,7 +344,7 @@ object Plan {
    *   Stored with the plan. The row executor ignores it and always runs shuffle-hash. The columnar
    *   planner accepts a broadcast hint, a shuffle-hash hint, or an absent hint for int pairs. The
    *   left input is the probe side. An absent hint uses the shuffle-hash op. A null value stays on
-   *   the row path. Sort-merge is not a columnar full outer join.
+   *   the row path. An explicit sort-merge hint on int pairs lowers to `SortMergeFullOuter`.
    * @tparam K
    *   The key type.
    * @tparam V

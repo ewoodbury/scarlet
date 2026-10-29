@@ -28,7 +28,8 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * comes from the case's declared hint and sizes. The columnar value is `broadcast` when the
  * physical tree is a broadcast join, and `shuffle-hash` otherwise. An outer join's row path is
  * always `shuffle-hash`: the row executor ignores the hint. The columnar path follows the hint.
- * Absent is `unhinted` and still shuffle-hashes. An outer sort-merge stays on the row path.
+ * Absent is `unhinted` and still shuffle-hashes. These cases do not exercise an outer sort-merge;
+ * that hint lowers on the columnar path now, and the row path still shuffle-hashes it.
  * A null value lowers to an outer shape and then stays on the row path; that case publishes no
  * column batch, so the run fails it instead of labeling the row path as columnar.
  * `broadcastJoinThreshold` and `enableSortMergeJoin` are restored after every case.
@@ -202,7 +203,10 @@ object JoinBench:
       }
     finally ScarletConf.set(baseline)
 
-  /** `None` when the hint keeps the plan on the row path. Sort-merge is the remaining refusal. */
+  /**
+   * Lowered shape. `None` means `lower` left the plan on the row path. Sort-merge of int pairs,
+   * including an outer join, lowers.
+   */
   private[execution] def columnarShape(spec: JoinCases.JoinSpec): Option[String] =
     val saved = ScarletConf.get
     try
