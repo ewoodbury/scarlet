@@ -63,10 +63,10 @@ asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors
 
 ### Columnar completion contract
 
-The following 179 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. `sortByIntKey` of an int-pair scan moves from the excluded list into this table. This is a move, not a new fixture. 178 + 1 = 179. The excluded list drops from 54 to 53, and the total stays 232. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
+The following 180 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. `sortByLongKey` of a long-pair scan moves from the excluded list into this table. This is a move, not a new fixture. 179 + 1 = 180. The excluded list drops from 53 to 52. 180 + 52 = 232. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
 `Unknown(2)` denotes the two source partitions in the small contract fixtures. Aggregate and join
-outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. `sortByIntKey` uses
-`Range(defaultShufflePartitions, Seq(0))` and `Sorted(Seq(0), Seq(true))`. That ordering tag is
+outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. `sortByIntKey` and `sortByLongKey`
+use `Range(defaultShufflePartitions, Seq(0))` and `Sorted(Seq(0), Seq(true))`. That ordering tag is
 ascending by effective key: a null key orders as zero and stays null. Shape strings are exact.
 
 | Accepted plan shape | Layout | `PhysicalOp.shape` |
@@ -78,7 +78,8 @@ ascending by effective key: a null key orders as zero and stays null. Shape stri
 | Five- and six-step int, long, double, and string runs | `Columnar` for int/long/double; `Utf8Dict` for string | `Project(Pipeline4(Scan))`, `Pipeline2(Pipeline4(Scan))` |
 | String source, scalar filter/map, filter-map run, dictionary equality filter and mapped dictionary result | `Utf8Dict` | `Scan`, `Filter(Scan)`, `Project(Scan)`, `Pipeline2(Scan)`, `Filter(Scan)`, `Project(Filter(Scan))` respectively |
 | Int-pair source and row/key/value filters | `Columnar` | `Scan`, `FilterRow(Scan)`, `FilterKey(Scan)`, `FilterValue(Scan)` |
-| `sortByIntKey` of an int-pair scan. Each source partition is sorted by effective key, then rank-merged into `defaultShufflePartitions`. A null key orders as zero and stays null. A null value is retained. Ties keep input order. Output partition sizes differ by at most one, and each partition is sorted. Distribution is `Range(defaultShufflePartitions, Seq(0))` and ordering is `Sorted(Seq(0), Seq(true))`, ascending by that effective key. A filter, map, mapValues, projection, or any other non-scan child stays on the row path. A filter above the sort stays on the row path | `Columnar` | `SortByIntKey(Scan)` |
+| `sortByIntKey` of an int-pair scan. Each source partition is sorted by effective key, then rank-merged into `defaultShufflePartitions`. A null key orders as zero and stays null. A null value is retained. Ties keep input order. Output partition sizes differ by at most one, each partition is sorted, and concatenation is globally sorted. Distribution is `Range(defaultShufflePartitions, Seq(0))` and ordering is `Sorted(Seq(0), Seq(true))`, ascending by that effective key. A filter, map, mapValues, projection, or any other non-scan child stays on the row path. A filter above the sort stays on the row path | `Columnar` | `SortByIntKey(Scan)` |
+| `sortByLongKey` of a long-pair scan. Rank boundaries match `sortByIntKey`. A null key orders as zero and stays null. A null value is retained. Ties keep input order. Distribution is `Range(defaultShufflePartitions, Seq(0))` and ordering is `Sorted(Seq(0), Seq(true))`. A filter, map, mapValues, projection, or any other non-scan child stays on the row path. A filter above the sort stays on the row path. There is no spill. An input over the budget uses this in-memory split and can run out of memory | `Columnar` | `SortByLongKey(Scan)` |
 | Empty typed int-pair source | `Columnar` | `Scan` |
 | Long-pair source, including an empty source | `Columnar` | `Scan` |
 | Pair `keys`, `values`, int `mapValues`, mapped key/value columns, filtered int `mapValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `Project(Key(Scan))`, `Project(Value(Scan))`, `FilterValue(MapValue(Scan))` |
@@ -119,7 +120,7 @@ writes its column, and count then reads the finished batch lengths.
 `take` uses these same physical shapes for partition-preserving plans; it scans in partition order
 and decodes only the requested prefix. The contract checks an int `Pipeline2(Scan)` and pair
 `FilterValue(Scan)` with `tryTake`. A boolean filter chain uses the same prefix decode.
-How `sortByIntKey` handles `take` is stated once, under bounded `take`.
+How `sortByIntKey` and `sortByLongKey` handle `take` is stated once, under bounded `take`.
 
 ### Boolean support
 
@@ -175,8 +176,9 @@ covered by `TestLongColumnar` (`wrap Long.MaxValue + 1 and sum an empty collecti
 first string, and an empty iterable has no witness and stays on the row path.
 
 `groupedSum` is columnar for an `(Int, Int)` source. A `(Long, Long)` scan, `reduceByKey` on
-that scan, and an inner shuffle-hash join of that scan are columnar. `groupedSum` of a long pair
-stays on the row path. Broadcast, sort-merge, and outer joins on long keys stay on the row path.
+that scan, an inner shuffle-hash join of that scan, and `sortByLongKey` of that scan are columnar.
+`groupedSum` of a long pair stays on the row path. Broadcast, sort-merge, and outer joins on long
+keys stay on the row path. A long sort does not spill.
 String `groupByKey` and string `join` are refused. Also refused, and already listed with the contract
 fixtures: `distinct`, `partitionBy`, `sortBy`, `groupByKey`, and joins on a string or double key.
 `min` and `max` are not in the API. Nullable long and boolean sources have no
@@ -195,20 +197,19 @@ the pair type, such as `(Int, Int) => (Long, Int)`, is excluded: `partitioning`,
 `tryGroupedSum` stay on the row path. The structural peel label is still
 `GroupedSum(MapPair(Scan))`.
 
-These 53 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+These 52 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
-`sortBy`, `sortByLongKey`, map on join triples, a general tuple filter on join
+`sortBy`, map on join triples, a general tuple filter on join
 triples, non-Int `mapValues`, string/double pair projection or pair filters, string/double-key
 `groupByKey`, `reduceByKey`, and join, long-pair `keys`, `values`, `mapValues`, an element map,
 `filter`, `filterKeys`, `filterValues`, `groupedSum`, and `sortBy` (`take` of a long-pair scan is
 accepted, and an unhinted or shuffle-hash inner join of long pairs is accepted),
 single-precision `Float` sources/maps, all-null strings, empty generic sources without a type
 descriptor, and element maps that do not preserve the column type.
-That is 54 previous exclusions. `sortByIntKey` moves to the accepted list. This is a move, not a
-new fixture. 54 - 1 = 53. Accepted moves from 178 to 179, and the total stays 232.
-`sortByLongKey` stays a row-path shape. Long broadcast,
-sort-merge, and outer joins stay on the row path. They are covered by execution tests, not
-contract fixtures, because the contract does not track the int refusals either.
+That is 53 previous exclusions. `sortByLongKey` moves to the accepted list. This is a move, not a
+new fixture. 53 - 1 = 52. Accepted moves from 179 to 180. 180 + 52 = 232.
+Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by execution
+tests, not contract fixtures, because the contract does not track the int refusals either.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then
 `toString`, and a type-changing map inside a three-step chain), a `Long` mapped to `Int` or
 `String`, a `Double` mapped to `Int`, a `Boolean` mapped to `Boolean` or to `Int`, a boolean
@@ -263,9 +264,10 @@ and int `mapValues`; and a long-pair scan. Boolean take is filter and scan only.
 that scan. Take visits the accepted partitions in order and decodes only the remaining requested
 prefix. A reduce, join, or other exchange/aggregate shape stays on the row path because its output
 requires processing the complete upstream input before the first result is known.
-`sortByIntKey` of an int-pair scan is not partition-preserving. Take runs the whole sort, then
-decodes the requested prefix across the sorted output partitions in order. `take(0)` returns empty
-without running.
+`sortByIntKey` of an int-pair scan and `sortByLongKey` of a long-pair scan are not
+partition-preserving. Take runs the whole sort, then decodes the requested prefix across the
+sorted output partitions in order. `take(0)` returns empty without running. Long-pair decode
+already keeps a null key and a null value, so the long sort uses that decoder.
 
 On the row path, narrow-only plans compile to a one-stage graph and flow through the same path
 as wide plans.
@@ -405,6 +407,11 @@ then scattered by rank, and the result matches the in-memory rank split. One inp
 still sorted in memory. At or under the budget, and whenever spill is off, that in-memory split
 runs and writes nothing.
 
+A long-pair `sortByLongKey` does not spill. The physical op stays `SortByLongKey`, and the
+in-memory rank split runs even when `spillEnabled` is on and the input is over `spillBudgetBytes`.
+That input can exhaust memory. This is the same limit as the long-key inner join, which has no
+spill and no build budget.
+
 ## Known limitations (deferred work)
 
 Roadmap and sequencing are tracked externally; the headline items:
@@ -415,4 +422,5 @@ Roadmap and sequencing are tracked externally; the headline items:
   `Seq`.
 - The sort-merge operator still materialises its inputs and its result.
 - A shuffle-hash join does not spill. The long-key inner join is the same: no spill and no build budget.
+- A long-pair sort does not spill. Over the budget it uses the in-memory path and can run out of memory. The long-key inner join has the same limit.
 - Long hash reduce never spills; an input that does not fit stays in memory.

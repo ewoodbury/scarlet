@@ -80,8 +80,10 @@ private[execution] object ColumnarInterpreter:
 
   /**
    * Decode `columns`. Int pairs use [[BatchCodec.decodeIntPairsPreservingAbsence]] only for
-   * [[PhysicalOp.SortByIntKey]]. Every other op uses [[BatchCodec.decodeIntPairs]], which rejects
-   * a clear bit.
+   * [[PhysicalOp.SortByIntKey]]. Every other int-pair op uses [[BatchCodec.decodeIntPairs]], which
+   * rejects a clear bit. Long pairs use [[BatchCodec.decodeLongPairs]], which already keeps a
+   * clear bit. [[PhysicalOp.SortByLongKey]] returns long pairs, so collect and take use that
+   * decoder and do not call the int-pair function.
    */
   private[execution] def decodeFor(columns: Columns, op: PhysicalOp): Seq[Partition[_]] =
     decodeWith(columns, intPairDecoder(op))
@@ -93,9 +95,19 @@ private[execution] object ColumnarInterpreter:
   private[execution] def decodePrefixFor(columns: Columns, limit: Int, op: PhysicalOp): Seq[Any] =
     decodePrefixWith(columns, limit, intPairDecoder(op))
 
+  /**
+   * Int-pair decoder for `op`. [[PhysicalOp.SortByLongKey]] is its own arm. Long-pair decode does
+   * not call the returned function, and this arm must not fall through to
+   * [[BatchCodec.decodeIntPairs]], which rejects a clear bit.
+   */
   private def intPairDecoder(op: PhysicalOp): (ColumnBatch, Int) => Seq[(Int, Int)] =
     op match
       case _: PhysicalOp.SortByIntKey => BatchCodec.decodeIntPairsPreservingAbsence
+      case _: PhysicalOp.SortByLongKey =>
+        (_, _) =>
+          throw new IllegalStateException(
+            "SortByLongKey is decoded as long pairs, not int pairs",
+          )
       case _ => (batch, rows) => BatchCodec.decodeIntPairs(batch, rows)
 
   private[execution] def decodePrefix(columns: Columns, limit: Int): Seq[Any] =
@@ -577,6 +589,21 @@ private[execution] object ColumnarInterpreter:
         ScarletConf.get,
       )
       Columns.Pairs(sorted)
+    case (Plan.SortByLongKeyOp(source), PhysicalOp.SortByLongKey(child)) =>
+      // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
+      // Long-pair encode always keeps a null key and a null value. preserveAbsence is passed for
+      // symmetry with the int sort. It does not change the long encode. decodeLongPairs keeps
+      // those nulls on the way out. RankSplitRuns is int-only. Over the budget this stays in
+      // memory.
+      val batches =
+        longPairsOf(interpret(source, child, selectedPartition = None, preserveAbsence = true))
+      val sorted = RankSplitLong.sortAndSplit(
+        batches,
+        ColumnarPlanner.shuffleWidth,
+        ColumnarPlanner.parallelism,
+      )
+      Columns.LongPairs(sorted)
     case _ =>
       throw new IllegalStateException(
         s"physical tree does not match ${plan.getClass.getSimpleName}",

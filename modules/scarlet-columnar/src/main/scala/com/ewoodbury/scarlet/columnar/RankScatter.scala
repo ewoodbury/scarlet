@@ -1,18 +1,12 @@
 package com.ewoodbury.scarlet.columnar
 
 /**
- * Rank boundaries shared by the in-memory split and the spilled split.
+ * Int-pair scatter. Boundaries are [[RankBounds]], which [[RankScatterLong]] uses as well. The
+ * columns are the only difference.
  *
- * Global rank `r` is written into output partition `r * partitions / rows`. Both factors are
- * non-negative, and `/` is integer division. That quotient is the inverse of the partition start:
- * partition `i` starts at `ceil(i * rows / partitions)`, computed as
- * `(i * rows + partitions - 1) / partitions`. `part == partitions` is `rows`. Sizes differ by at
- * most one. [[RankSplit]] and [[RankSplitRuns]] both call [[scatter]], so the boundaries are one
- * piece of code.
- *
- * `ready` is polled before each row. `write` appends that row to the sink it is given. A null
- * payload is the caller's concern: the sink stores a key or a value only when the present flag is
- * set.
+ * [[RankSplit]] and [[RankSplitRuns]] both call [[scatter]]. `ready` is polled before each row.
+ * `write` appends that row to the sink it is given. A null payload is the caller's concern: the
+ * sink stores a key or a value only when the present flag is set.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[columnar] object RankScatter:
@@ -45,45 +39,13 @@ private[columnar] object RankScatter:
       partitions: Int,
       ready: () => Boolean,
   )(write: Sink => Unit): Vector[ColumnBatch] =
-    val sizes = outputSizes(rows, partitions)
+    val sizes = RankBounds.outputSizes(rows, partitions)
     val sinks = Array.tabulate(partitions)(bucket => new Sink(sizes(bucket)))
-    var rank = 0
-    var part = 0
-    while (ready()) {
-      while (part + 1 < partitions && rank >= firstRank(part + 1, rows, partitions)) {
-        part += 1
-      }
-      write(sinks(part))
-      rank += 1
-    }
-    require(rank == rows, s"rank split wrote $rank rows and counted $rows")
+    RankBounds.place(rows, partitions, ready)(part => write(sinks(part)))
     Vector.tabulate(partitions) { bucket =>
       if (sizes(bucket) == 0) then ColumnBatches.emptyIntPairs
       else sinks(bucket).toBatch
     }
-
-  /**
-   * First global rank of output partition `part`. `part == partitions` is `rows`.
-   *
-   * The value is `ceil(part * rows / partitions)`, as integer division
-   * `(part * rows + partitions - 1) / partitions`.
-   */
-  private def firstRank(part: Int, rows: Int, partitions: Int): Int =
-    val rank = (part.toLong * rows.toLong + partitions.toLong - 1L) / partitions.toLong
-    rank.toInt
-
-  private def outputSizes(rows: Int, partitions: Int): Array[Int] =
-    val sizes = new Array[Int](partitions)
-    var part = 0
-    var total = 0
-    while (part < partitions) {
-      val size = firstRank(part + 1, rows, partitions) - firstRank(part, rows, partitions)
-      sizes(part) = size
-      total += size
-      part += 1
-    }
-    require(total == rows, s"rank split sized $total rows and counted $rows")
-    sizes
 
   /** One output partition. `write` is one row, and it does not read a missing payload. */
   final class Sink(val size: Int):

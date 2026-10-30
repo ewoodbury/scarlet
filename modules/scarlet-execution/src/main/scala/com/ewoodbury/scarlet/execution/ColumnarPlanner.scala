@@ -23,8 +23,9 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * catches it and returns `None`, and the row path runs the whole plan. Any unsupported node
  * (union, flatMap, distinct, generic sortBy, a map that is not fed by `Int`, `Long`, `Double`, or
  * `String`, any `Boolean` map, and the rest) makes the whole plan ineligible, so a supported
- * prefix is not executed on its own. `sortByIntKey` of an int-pair scan is the exception: it
- * lowers to a rank split. A null key orders as zero and stays null.
+ * prefix is not executed on its own. `sortByIntKey` of an int-pair scan and `sortByLongKey` of a
+ * long-pair scan lower to a rank split. A null key orders as zero and stays null. A long sort does
+ * not spill: over the budget it stays in memory.
  *
  * [[lower]] and interpretation walk the same logical plan. The physical node records the operator
  * and not the function, so each logical node is matched to the node [[lower]] built for it. A
@@ -133,9 +134,9 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * `take` has a separate bounded path for accepted partition-preserving shapes: it interprets one
  * source partition at a time in order and decodes only the remaining requested values. Plans with
  * an exchange or aggregate stay on the row path because their output cannot be produced with this
- * narrow short-circuit. An int-key sort of a pair scan is not partition-preserving. Take runs the
- * whole sort, then decodes the requested prefix across the sorted output partitions in order.
- * `take(0)` returns empty without running.
+ * narrow short-circuit. An int-key or long-key sort of a pair scan is not partition-preserving.
+ * Take runs the whole sort, then decodes the requested prefix across the sorted output partitions
+ * in order. Long-pair decode already keeps a null. `take(0)` returns empty without running.
  *
  * [[ColumnarInterpreter]] runs that lowered tree and encodes the source partitions.
  */
@@ -176,9 +177,9 @@ object ColumnarPlanner:
    * the build side and the right input is the probe side. A full outer join on int pairs lowers
    * for a broadcast hint, a shuffle-hash hint, an absent hint, or a sort-merge hint. An absent
    * hint uses the shuffle-hash op. A null value does not change that shape: [[tryRun]] reads the
-   * value columns and returns `None`, and the row path runs. [[Plan.SortByIntKeyOp]] lowers only
-   * when its child is a scan of int pairs, to [[PhysicalOp.SortByIntKey]]. Any other child, and
-   * any parent of that sort, stays on the row path. [[partitioning]] and [[tryRun]] follow a
+   * value columns and returns `None`, and the row path runs. [[SortLowering]] accepts a typed key
+   * sort only for a scan of the matching pair kind. Any other child, and any parent of that sort,
+   * stays on the row path. A long sort does not spill. [[partitioning]] and [[tryRun]] follow a
    * refusal. They also drop a lowered tree whose layout is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
@@ -210,10 +211,10 @@ object ColumnarPlanner:
 
   /**
    * Run an accepted plan until its first `n` results are available. Partition-preserving plans
-   * interpret one source partition at a time. An int-key sort is not partition-preserving: the
-   * whole sort runs, then only the requested prefix is decoded across the output partitions in
-   * order. An exchange, aggregate, or join is refused. `n <= 0` returns empty without running.
-   * `ClassCastException` falls back to `None`.
+   * interpret one source partition at a time. An int-key or long-key sort is not
+   * partition-preserving: the whole sort runs, then only the requested prefix is decoded across
+   * the output partitions in order. An exchange, aggregate, or join is refused. `n <= 0` returns
+   * empty without running. `ClassCastException` falls back to `None`.
    */
   def tryTake[A](plan: Plan[A], n: Int): Option[Seq[A]] =
     if (n <= 0) then Some(Seq.empty[A])
@@ -226,7 +227,7 @@ object ColumnarPlanner:
 
   private def takeAccepted(plan: Plan[_], op: PhysicalOp, n: Int): Option[Seq[Any]] =
     op match
-      case _: PhysicalOp.SortByIntKey =>
+      case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey =>
         Some(
           ColumnarInterpreter.decodePrefixFor(ColumnarInterpreter.interpret(plan, op), n, op),
         )
@@ -615,10 +616,10 @@ object ColumnarPlanner:
 
   /**
    * Partition count when `op` keeps input order and the input partition count. `None` is an
-   * exchange, aggregate, join, or int-key sort. A sort's output width is the shuffle width, so
-   * take runs the whole sort instead of reading one input partition. A `(Long, Long)` scan keeps
-   * its partitions, and `take` decodes that prefix. `take` must not read one partition of a wide
-   * op and present it as the result.
+   * exchange, aggregate, join, or key sort. A sort's output width is the shuffle width, so take
+   * runs the whole sort instead of reading one input partition. A `(Long, Long)` scan keeps its
+   * partitions, and `take` decodes that prefix. `take` must not read one partition of a wide op
+   * and present it as the result.
    */
   private def preservedPartitions(op: PhysicalOp): Option[Int] = op match
     case PhysicalOp.Scan(_, partitions) => Some(partitions.length)
@@ -633,7 +634,8 @@ object ColumnarPlanner:
         _: PhysicalOp.SortMergeFullOuter | _: PhysicalOp.HashLeftOuter |
         _: PhysicalOp.HashRightOuter | _: PhysicalOp.HashFullOuter | _: PhysicalOp.BroadcastJoin |
         _: PhysicalOp.BroadcastLeftOuter | _: PhysicalOp.BroadcastRightOuter |
-        _: PhysicalOp.BroadcastFullOuter | _: PhysicalOp.Exchange | _: PhysicalOp.SortByIntKey =>
+        _: PhysicalOp.BroadcastFullOuter | _: PhysicalOp.Exchange | _: PhysicalOp.SortByIntKey |
+        _: PhysicalOp.SortByLongKey =>
       None
 
   private def lowerPlan(plan: Plan[_]): Option[PhysicalOp] =
@@ -642,15 +644,12 @@ object ColumnarPlanner:
     else lowerChild(base).flatMap(child => lowerElementSteps(child, steps))
 
   /**
-   * Lower `plan` when a parent can wrap it. A [[PhysicalOp.SortByIntKey]] child is refused, so a
+   * Lower `plan` when a parent can wrap it. [[SortLowering.acceptsAsChild]] refuses a sort, so a
    * filter, join, aggregate, or projection above a sort stays on the row path. The sort itself is
    * lowered by [[lowerPlan]].
    */
   private def lowerChild(plan: Plan[_]): Option[PhysicalOp] =
-    lowerPlan(plan).filter {
-      case _: PhysicalOp.SortByIntKey => false
-      case _ => true
-    }
+    lowerPlan(plan).filter(SortLowering.acceptsAsChild)
 
   /**
    * Columnar hash joins. No hint, shuffle-hash, and broadcast all qualify. Sort-merge is
@@ -778,10 +777,9 @@ object ColumnarPlanner:
     case Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)) =>
       sortMergeJoinOf(left, right, PhysicalOp.SortMergeFullOuter.apply)
     case Plan.SortByIntKeyOp(source) =>
-      lowerPlan(source) match
-        case Some(scan @ PhysicalOp.Scan(PhysicalOp.Kind.Pairs, _)) =>
-          Some(PhysicalOp.SortByIntKey(scan))
-        case _ => None
+      SortLowering.lowerInt(source, lowerPlan)
+    case Plan.SortByLongKeyOp(source) =>
+      SortLowering.lowerLong(source, lowerPlan)
     // A strategy the cases above do not accept stays on the row path.
     case _: Plan.LeftOuterJoinOp[_, _, _] | _: Plan.RightOuterJoinOp[_, _, _] |
         _: Plan.FullOuterJoinOp[_, _, _] =>
@@ -1106,12 +1104,8 @@ object ColumnarPlanner:
     case PhysicalOp.Pipeline(child, _) => infoOf(child)
     case PhysicalOp.Column(child, _) => infoOf(child).withoutPairDistribution
     case PhysicalOp.MapValue(child) => infoOf(child)
-    case _: PhysicalOp.SortByIntKey =>
-      PartitioningInfo(
-        Distribution.Range(shuffleWidth, PartitioningInfo.RowKeyOrdinals),
-        OrderingTag.Sorted(PartitioningInfo.RowKeyOrdinals, Seq(true)),
-        layoutOf(PhysicalOp.Kind.Pairs),
-      )
+    case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey =>
+      SortLowering.info(shuffleWidth, layoutOf(PhysicalOp.Kind.Pairs))
     case _: PhysicalOp.HashAggregate | _: PhysicalOp.LongHashAggregate | _: PhysicalOp.HashJoin |
         _: PhysicalOp.SortMergeJoin | _: PhysicalOp.SortMergeLeftOuter |
         _: PhysicalOp.SortMergeRightOuter | _: PhysicalOp.SortMergeFullOuter |

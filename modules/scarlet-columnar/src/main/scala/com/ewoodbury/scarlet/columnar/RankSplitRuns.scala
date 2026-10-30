@@ -12,7 +12,8 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * value, and one validity byte, plus [[HeaderAllowance]] for that batch's array headers. Validity
  * is stored in bits; charging a byte rounds it up. An empty batch is zero. Spill stays off unless
  * [[ScarletConf.spillEnabled]] is set. A vector at or under the budget calls
- * [[RankSplit.sortAndSplit]] and writes nothing.
+ * [[RankSplit.sortAndSplit]] and writes nothing. A long-pair sort does not call this path. That
+ * sort stays in memory over the budget and can run out of memory.
  *
  * Over the budget, each input batch is one source partition. It is sorted whole, by calling
  * [[RankSplit.sortAndSplit]] on that batch alone, and written as one spill file through the

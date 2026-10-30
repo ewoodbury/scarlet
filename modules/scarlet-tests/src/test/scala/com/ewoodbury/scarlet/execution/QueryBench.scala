@@ -16,8 +16,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
- * Times one query per supported columnar type, plus both grouped-key patterns. Not a test, and
- * not part of `make test`.
+ * Times one query per supported columnar type, plus both grouped-key patterns and an int-pair and
+ * long-pair sort. Not a test, and not part of `make test`.
  *
  * Each query is built once. The timed region is the action. The scalar checksum is compared after
  * the timer stops. A local loop produces that scalar, and one row-path execution must match it
@@ -148,6 +148,13 @@ object QueryBench:
     val strings = DistCollection.ofStrings(texts, sourcePartitions).filterStringEquals("k42")
     val flags = Array.tabulate(elementRows)(row => (row & 1) == 0)
     val bools = DistCollection.ofBools(flags, sourcePartitions).filter(identity)
+    val sortKeys = permutation(elementRows)
+    require(!isSorted(sortKeys), "sort keys stayed in order")
+    val intSort = DistCollection.ofIntPairs(sortKeys, generated, sourcePartitions).sortByIntKey
+    val longSortKeys = widen(sortKeys)
+    val longSortValues = widen(generated)
+    val longSort =
+      DistCollection.ofLongPairs(longSortKeys, longSortValues, sourcePartitions).sortByLongKey
     val (repeating, shuffled, groupedTotal) = groupedSources()
     val repeatFold = sourceGroupFold(repeating)
     val shuffledFold = sourceGroupFold(shuffled)
@@ -166,6 +173,22 @@ object QueryBench:
       real("double", elementRows, "Filter(Scan)", doubleSum, positive.plan, positive.sum),
       whole("string", elementRows, "Filter(Scan)", expectString(), strings.plan, strings.count()),
       whole("boolean", elementRows, "Filter(Scan)", expectBools(), bools.plan, bools.count()),
+      whole(
+        "int-sort-key",
+        elementRows,
+        "SortByIntKey(Scan)",
+        expectSortedInts(sortKeys, generated),
+        intSort.plan,
+        checksumIntPairs(intSort.collect()),
+      ),
+      whole(
+        "long-sort-key",
+        elementRows,
+        "SortByLongKey(Scan)",
+        expectSortedLongs(longSortKeys, longSortValues),
+        longSort.plan,
+        checksumLongPairs(longSort.collect()),
+      ),
       grouped("grouped-repeat", repeating, repeatFold.hash),
       grouped("grouped-shuffled", shuffled, shuffledFold.hash),
       openGrouped("grouped-sparse", sparse),
@@ -794,6 +817,72 @@ object QueryBench:
     }
     count
 
+  private def permutation(rows: Int): Array[Int] =
+    val keys = Array.tabulate(rows)(identity)
+    fisherYates(keys, 0, rows, new Random(lcgSeed.toLong))
+    keys
+
+  private def isSorted(keys: Array[Int]): Boolean =
+    var index = 1
+    var ordered = true
+    while (index < keys.length && ordered) {
+      if (keys(index - 1) > keys(index)) then ordered = false
+      index += 1
+    }
+    ordered
+
+  private def widen(values: Array[Int]): Array[Long] =
+    val widened = new Array[Long](values.length)
+    var index = 0
+    while (index < values.length) {
+      widened(index) = values(index).toLong
+      index += 1
+    }
+    widened
+
+  /** Local stable sort, then a rolling mix of key then value. Runs outside the timer. */
+  private def expectSortedInts(keys: Array[Int], values: Array[Int]): Long =
+    val order = Array.tabulate(keys.length)(identity)
+    scala.util.Sorting.stableSort(order, (left: Int, right: Int) => keys(left) < keys(right))
+    checksumOrdered(order, row => keys(row).toLong, row => values(row).toLong)
+
+  /** Local stable sort, then a rolling mix of key then value. Runs outside the timer. */
+  private def expectSortedLongs(keys: Array[Long], values: Array[Long]): Long =
+    val order = Array.tabulate(keys.length)(identity)
+    scala.util.Sorting.stableSort(order, (left: Int, right: Int) => keys(left) < keys(right))
+    checksumOrdered(order, row => keys(row), row => values(row))
+
+  private def checksumOrdered(order: Array[Int], keyAt: Int => Long, valueAt: Int => Long): Long =
+    var index = 0
+    var hash = 0L
+    while (index < order.length) {
+      val row = order(index)
+      hash = hash * 31L + keyAt(row)
+      hash = hash * 31L + valueAt(row)
+      index += 1
+    }
+    hash
+
+  private def checksumIntPairs(rows: Iterable[(Int, Int)]): Long =
+    val iterator = rows.iterator
+    var hash = 0L
+    while (iterator.hasNext) {
+      val pair = iterator.next()
+      hash = hash * 31L + pair._1.toLong
+      hash = hash * 31L + pair._2.toLong
+    }
+    hash
+
+  private def checksumLongPairs(rows: Iterable[(Long, Long)]): Long =
+    val iterator = rows.iterator
+    var hash = 0L
+    while (iterator.hasNext) {
+      val pair = iterator.next()
+      hash = hash * 31L + pair._1
+      hash = hash * 31L + pair._2
+    }
+    hash
+
   private def expectBools(): Long =
     var index = 0
     var count = 0L
@@ -838,6 +927,8 @@ object QueryBench:
       "Grouped checksums fold (key * 31) xor the per-group sum, in key order. The row oracle " +
       "reads the pairs. The columnar check reads sumByKey. Both run before warmup and after " +
       "the measured rounds, at each width.\n" +
+      "Sort queries checksum the collected key then value, mixed by 31, in output order. The " +
+      "expected value is a local stable sort of the same pairs, computed before timing.\n" +
       "alloc_mb is the nearest-rank p50 of process-wide thread bytes, in decimal megabytes " +
       "(bytes / 1e6). The probe excludes itself. A short-lived worker missed between reads is " +
       "absent. The same estimate is reported for row and columnar, at both widths.\n" +

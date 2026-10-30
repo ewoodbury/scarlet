@@ -69,6 +69,8 @@ for the run and shut down at the end. This is not a fresh-JVM isolation.
 | `double` | `Filter(Scan)` | `ofDoubles.filter(_ > 0.0).sum` |
 | `string` | `Filter(Scan)` | dictionary `filterStringEquals("k42")`, then `count`, on `ofStrings` |
 | `boolean` | `Filter(Scan)` | `ofBools.filter(identity)`, then `count` |
+| `int-sort-key` | `SortByIntKey(Scan)` | `ofIntPairs` sorted by key, then a checksum of the key/value sequence |
+| `long-sort-key` | `SortByLongKey(Scan)` | the same pairs widened to long, sorted by key, then the same checksum |
 | `grouped-repeat` | `GroupedSum(Scan)` | `groupedSum` on keys `row % 1024`, in order |
 | `grouped-shuffled` | `GroupedSum(Scan)` | the same key multiset per morsel, in shuffled order |
 | `grouped-sparse` | `GroupedSum(Scan)` | 1024 groups spread over `0` until `300000` |
@@ -82,6 +84,13 @@ Strings are `k0` through `k999`, chosen by `row % 1000`, so the column has 1000 
 The filter keeps `k42`.
 
 Booleans are true on even rows. `filter(identity)` keeps those rows.
+
+Sort keys are a Fisher-Yates permutation of `0` until `1000000`, seeded by `0x12345678` through
+`java.util.Random`. Values are the shared generator. Long keys and values are those ints widened.
+The keys are unique, so the sorted order is one sequence. The checksum is a rolling mix,
+`hash * 31 + key` then `hash * 31 + value`, over the collected pairs. A local stable sort computes
+the expected checksum before timing. The comparison is outside the timer. The timed action includes
+the plan, the rank split, the decode, and that mix. There is no timing assertion.
 
 Grouped values are the row index. Repeating keys are `row % 1024` in that order. The batch size
 is a multiple of 1024, so each full morsel repeats one key sequence and the merge hits cached
@@ -173,6 +182,35 @@ The stage study on the same machine, in a separate process, times the partial al
 keys: one thread p50 16.207 ms, p95 16.492, max 17.802; four threads p50 4.783, p95 6.946, max
 8.288. Shuffled keys: one thread p50 23.113, p95 26.148, max 26.675; four threads p50 6.453,
 p95 11.415, max 11.926.
+
+## Sort
+
+Recorded on the same Apple M1 Pro (8 cores), OpenJDK 64-Bit Server VM 17.0.16, through `sbt` with
+`Test / fork` left false, on 2026-10-29. The preamble printed
+`java=OpenJDK 64-Bit Server VM 17.0.16+0`. Absolute numbers carry sbt and JIT noise. The
+comparison that matters is within this run. The 2026-10-24 table above is unchanged. These are
+the only new queries.
+
+| query | layout | threads | rows | p50 ms | p95 ms | max ms | alloc mb |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| int-sort-key | columnar | 1 | 1000000 | 177.365 | 265.825 | 275.893 | 133.394 |
+| int-sort-key | columnar | 4 | 1000000 | 114.129 | 195.572 | 231.478 | 133.396 |
+| int-sort-key | row | 1 | 1000000 | 866.004 | 1066.000 | 1127.953 | 455.994 |
+| int-sort-key | row | 4 | 1000000 | 676.104 | 774.692 | 832.530 | 455.937 |
+| long-sort-key | columnar | 1 | 1000000 | 190.047 | 268.126 | 301.522 | 173.392 |
+| long-sort-key | columnar | 4 | 1000000 | 124.295 | 197.910 | 228.596 | 173.393 |
+| long-sort-key | row | 1 | 1000000 | 977.116 | 1126.654 | 1151.228 | 503.998 |
+| long-sort-key | row | 4 | 1000000 | 652.861 | 790.086 | 907.320 | 503.931 |
+
+Both queries share checksum `-2192214190940607341`. The long pairs are the int pairs widened, and
+the keys are unique, so the sorted sequences match. Columnar p50 was below the row p50 at both
+widths. Two samples sit above p95. The harness compared each checksum to a local stable sort
+outside the timer. The run rejected nothing.
+
+An earlier study reported 6-11x for a prototype of the sort kernel. This table times the
+production path. The timed action includes the plan and the rank split, then the decode and the
+checksum mix. A long-pair sort does not spill. Over the budget it stays on this in-memory path
+and can run out of memory.
 
 ## Spill
 
