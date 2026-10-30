@@ -390,14 +390,20 @@ The rules that hold for every kind:
 
 ## Spill
 
-Grouped sum, an inner broadcast join's build, and sort-merge joins spill when `spillEnabled`
-is on. `spillBudgetBytes` is the in-memory trigger. The flag defaults off. `spillMaxFiles` and
-`spillMaxBytes` cap one spill store. Long hash reduce never spills; an input that does not fit
-stays in memory.
+Grouped sum, an inner broadcast join's build, sort-merge joins, and an int-pair `sortByIntKey`
+spill when `spillEnabled` is on. `spillBudgetBytes` is the in-memory trigger. The flag defaults
+off. `spillMaxFiles` and `spillMaxBytes` cap one spill store. Long hash reduce never spills; an
+input that does not fit stays in memory.
 
 At or under `spillBudgetBytes`, and whenever `spillEnabled` is off, a sort-merge partition stays
 in memory. Over the budget, with spill on, each side is written as sorted runs and merged
 `spillFanIn` at a time.
+
+An int-pair `sortByIntKey` keeps the physical op `SortByIntKey`. Over the budget, each input
+partition is sorted, written as one run, and released. Runs are merged `spillFanIn` at a time,
+then scattered by rank, and the result matches the in-memory rank split. One input partition is
+still sorted in memory. At or under the budget, and whenever spill is off, that in-memory split
+runs and writes nothing.
 
 ## Known limitations (deferred work)
 
