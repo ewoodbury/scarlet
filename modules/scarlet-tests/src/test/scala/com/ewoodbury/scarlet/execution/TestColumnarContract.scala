@@ -30,17 +30,16 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 176 previous accepted fixtures. The unhinted long-pair join moves out of the excluded list,
-    // and an explicit shuffle-hash long-pair join is added. 176 + 1 + 1 = 178.
-    accepted.size shouldBe 178
-    // Broadcast, shuffle-hash, unhinted, and explicit sort-merge joins of int pairs are accepted,
-    // including left, right, and full outer. 52 previous exclusions. sortByIntKey and
-    // sortByLongKey are both new exclusions: the columnar planner does not match either node.
-    // 52 + 2 = 54.
+    // 178 previous accepted fixtures. sortByIntKey moves from the excluded list. This is a move,
+    // not a new fixture. 178 + 1 = 179.
+    accepted.size shouldBe 179
+    // 54 previous exclusions. sortByIntKey moves to the accepted list. This is a move, not a new
+    // fixture. 54 - 1 = 53. sortByLongKey stays excluded. The total stays 178 + 54 = 232.
     // Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by
     // execution tests, not contract fixtures, because the contract does not track the int
     // refusals either.
-    excluded.size shouldBe 54
+    excluded.size shouldBe 53
+    (accepted.size + excluded.size) shouldBe 232
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -424,6 +423,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       AcceptedCase("int pair row filter", pairRowFilter, narrowInfo(2, layout), Some("FilterRow(Scan)"), Some(50L)),
       AcceptedCase("int pair key filter", pairKeyFilter, narrowInfo(2, layout), Some("FilterKey(Scan)"), Some(50L)),
       AcceptedCase("int pair value filter", pairValueFilter, narrowInfo(2, layout), Some("FilterValue(Scan)"), Some(50L)),
+      AcceptedCase(
+        "int sortByIntKey",
+        Plan.SortByIntKeyOp(pairSource),
+        rangeSortedInfo(layout),
+        Some("SortByIntKey(Scan)"),
+      ),
       AcceptedCase("int pair keys", keys, narrowInfo(2, layout), Some("Key(Scan)")),
       AcceptedCase("int pair values", values, narrowInfo(2, layout), Some("Value(Scan)")),
       AcceptedCase("int mapValues", mapValues, narrowInfo(2, layout), Some("MapValue(Scan)")),
@@ -634,7 +639,6 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ExcludedCase("groupByKey int", Plan.GroupByKeyOp(pairSource)),
       ExcludedCase("cogroup", Plan.CoGroupOp(pairSource, rightPairSource)),
       ExcludedCase("sortBy", Plan.SortByOp(intSource, (value: Int) => value, Ordering.Int)),
-      ExcludedCase("sortByIntKey", Plan.SortByIntKeyOp(pairSource)),
       ExcludedCase("sortByLongKey", Plan.SortByLongKeyOp(longPairSource)),
       ExcludedCase("map on triples", tripleMapped),
       ExcludedCase("generic triple filter", genericTripleFilter),
@@ -742,12 +746,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
 
   /**
    * `lower` and the action gates share one decision. A refused plan, including a non-int
-   * sort-merge and a type-changing pair map, makes every gate return `None`. An accepted
-   * plan
-   * runs `tryRun` and `tryCount`. `tryTake` runs when the physical tree keeps input partitions.
-   * `trySumInt`, `trySumLong`, and `trySumDouble` run only for that numeric kind. `tryGroupedSum` equals
-   * `groupedSum` for an accepted grouped pair source and for an accepted row, key, or value
-   * filter of one, and is `None` for every other accepted plan. The peel label follows
+   * sort-merge and a type-changing pair map, makes every gate return `None`. An accepted plan
+   * runs `tryRun` and `tryCount`. `tryTake` runs when the physical tree keeps input partitions,
+   * and for an int-key sort, which runs the whole sort and then decodes the prefix.
+   * `trySumInt`, `trySumLong`, and `trySumDouble` run only for that numeric kind. `tryGroupedSum`
+   * equals `groupedSum` for an accepted grouped pair source and for an accepted row, key, or
+   * value filter of one, and is `None` for every other accepted plan. The peel label follows
    * [[expectedGroupedPeel]]. A pair map that stays `(Int, Int)` is outside these lists:
    * [[ColumnarPlanner.lower]] refuses it and [[ColumnarPlanner.tryGroupedSum]] still succeeds.
    */
@@ -764,7 +768,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     ColumnarPlanner.trySumInt(plan).isDefined shouldBe lowered.exists(sumsInts)
     ColumnarPlanner.trySumLong(plan).isDefined shouldBe lowered.exists(sumsLongs)
     ColumnarPlanner.trySumDouble(plan).isDefined shouldBe lowered.exists(sumsFloats)
-    ColumnarPlanner.tryTake(plan, 1).isDefined shouldBe lowered.exists(preservesPartitions)
+    ColumnarPlanner.tryTake(plan, 1).isDefined shouldBe lowered.exists(acceptsTake)
     if (accepted) then
       val peel = expectedGroupedPeel(plan)
       ColumnarPlanner.tryGroupedSum(plan) shouldBe groupedSum
@@ -809,8 +813,13 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.HashLeftOuter(_, _) | PhysicalOp.HashRightOuter(_, _) |
         PhysicalOp.HashFullOuter(_, _) | PhysicalOp.BroadcastJoin(_, _, _) |
         PhysicalOp.BroadcastLeftOuter(_, _) | PhysicalOp.BroadcastRightOuter(_, _) |
-        PhysicalOp.BroadcastFullOuter(_, _) =>
+        PhysicalOp.BroadcastFullOuter(_, _) | PhysicalOp.SortByIntKey(_) =>
       false
+
+  /** An int-key sort is not partition-preserving, and `tryTake` still runs it. */
+  private def acceptsTake(op: PhysicalOp): Boolean = op match
+    case _: PhysicalOp.SortByIntKey => true
+    case other => preservesPartitions(other)
 
   private def assertRowPath[A](plan: Plan[A]): Unit =
     ColumnarPlanner.partitioning(plan) shouldBe Option.empty[PartitioningInfo]
@@ -967,6 +976,13 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
 
   private def narrowInfo(width: Int, layout: Layout): PartitioningInfo =
     PartitioningInfo(Distribution.Unknown(width), OrderingTag.Unsorted, layout)
+
+  private def rangeSortedInfo(layout: Layout): PartitioningInfo =
+    PartitioningInfo(
+      Distribution.Range(ScarletConf.get.defaultShufflePartitions, PartitioningInfo.RowKeyOrdinals),
+      OrderingTag.Sorted(PartitioningInfo.RowKeyOrdinals, Seq(true)),
+      layout,
+    )
 
   private def hashedInfo(layout: Layout): PartitioningInfo =
     PartitioningInfo(

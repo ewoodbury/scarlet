@@ -63,9 +63,11 @@ asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors
 
 ### Columnar completion contract
 
-The following 178 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. That is 176 previous fixtures, plus the unhinted long-pair join moved from the excluded list and one explicit shuffle-hash long join. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
-`Unknown(2)` denotes the two source partitions in the small contract fixtures; aggregate and join
-outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are exact.
+The following 179 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. `sortByIntKey` of an int-pair scan moves from the excluded list into this table. This is a move, not a new fixture. 178 + 1 = 179. The excluded list drops from 54 to 53, and the total stays 232. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
+`Unknown(2)` denotes the two source partitions in the small contract fixtures. Aggregate and join
+outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. `sortByIntKey` uses
+`Range(defaultShufflePartitions, Seq(0))` and `Sorted(Seq(0), Seq(true))`. That ordering tag is
+ascending by effective key: a null key orders as zero and stays null. Shape strings are exact.
 
 | Accepted plan shape | Layout | `PhysicalOp.shape` |
 |---|---|---|
@@ -76,6 +78,7 @@ outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. Shape strings are 
 | Five- and six-step int, long, double, and string runs | `Columnar` for int/long/double; `Utf8Dict` for string | `Project(Pipeline4(Scan))`, `Pipeline2(Pipeline4(Scan))` |
 | String source, scalar filter/map, filter-map run, dictionary equality filter and mapped dictionary result | `Utf8Dict` | `Scan`, `Filter(Scan)`, `Project(Scan)`, `Pipeline2(Scan)`, `Filter(Scan)`, `Project(Filter(Scan))` respectively |
 | Int-pair source and row/key/value filters | `Columnar` | `Scan`, `FilterRow(Scan)`, `FilterKey(Scan)`, `FilterValue(Scan)` |
+| `sortByIntKey` of an int-pair scan. Each source partition is sorted by effective key, then rank-merged into `defaultShufflePartitions`. A null key orders as zero and stays null. A null value is retained. Ties keep input order. Output partition sizes differ by at most one, and each partition is sorted. Distribution is `Range(defaultShufflePartitions, Seq(0))` and ordering is `Sorted(Seq(0), Seq(true))`, ascending by that effective key. A filter, map, mapValues, projection, or any other non-scan child stays on the row path. A filter above the sort stays on the row path | `Columnar` | `SortByIntKey(Scan)` |
 | Empty typed int-pair source | `Columnar` | `Scan` |
 | Long-pair source, including an empty source | `Columnar` | `Scan` |
 | Pair `keys`, `values`, int `mapValues`, mapped key/value columns, filtered int `mapValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `Project(Key(Scan))`, `Project(Value(Scan))`, `FilterValue(MapValue(Scan))` |
@@ -116,6 +119,7 @@ writes its column, and count then reads the finished batch lengths.
 `take` uses these same physical shapes for partition-preserving plans; it scans in partition order
 and decodes only the requested prefix. The contract checks an int `Pipeline2(Scan)` and pair
 `FilterValue(Scan)` with `tryTake`. A boolean filter chain uses the same prefix decode.
+How `sortByIntKey` handles `take` is stated once, under bounded `take`.
 
 ### Boolean support
 
@@ -191,18 +195,18 @@ the pair type, such as `(Int, Int) => (Long, Int)`, is excluded: `partitioning`,
 `tryGroupedSum` stay on the row path. The structural peel label is still
 `GroupedSum(MapPair(Scan))`.
 
-These 54 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+These 53 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
-`sortBy`, `sortByIntKey`, `sortByLongKey`, map on join triples, a general tuple filter on join
+`sortBy`, `sortByLongKey`, map on join triples, a general tuple filter on join
 triples, non-Int `mapValues`, string/double pair projection or pair filters, string/double-key
 `groupByKey`, `reduceByKey`, and join, long-pair `keys`, `values`, `mapValues`, an element map,
 `filter`, `filterKeys`, `filterValues`, `groupedSum`, and `sortBy` (`take` of a long-pair scan is
 accepted, and an unhinted or shuffle-hash inner join of long pairs is accepted),
 single-precision `Float` sources/maps, all-null strings, empty generic sources without a type
 descriptor, and element maps that do not preserve the column type.
-That is 53 previous exclusions, minus the unhinted long join. 53 - 1 = 52. `sortByIntKey` and
-`sortByLongKey` are row-path shapes because this PR has no columnar arm for either node.
-52 + 2 = 54. Accepted stays 178. Long broadcast,
+That is 54 previous exclusions. `sortByIntKey` moves to the accepted list. This is a move, not a
+new fixture. 54 - 1 = 53. Accepted moves from 178 to 179, and the total stays 232.
+`sortByLongKey` stays a row-path shape. Long broadcast,
 sort-merge, and outer joins stay on the row path. They are covered by execution tests, not
 contract fixtures, because the contract does not track the int refusals either.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then
@@ -259,6 +263,9 @@ and int `mapValues`; and a long-pair scan. Boolean take is filter and scan only.
 that scan. Take visits the accepted partitions in order and decodes only the remaining requested
 prefix. A reduce, join, or other exchange/aggregate shape stays on the row path because its output
 requires processing the complete upstream input before the first result is known.
+`sortByIntKey` of an int-pair scan is not partition-preserving. Take runs the whole sort, then
+decodes the requested prefix across the sorted output partitions in order. `take(0)` returns empty
+without running.
 
 On the row path, narrow-only plans compile to a one-stage graph and flow through the same path
 as wide plans.

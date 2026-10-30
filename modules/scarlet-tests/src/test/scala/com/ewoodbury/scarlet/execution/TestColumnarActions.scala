@@ -636,18 +636,20 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
     val badKey = Seq(erasedPair(Some(1), Some(2)), erasedCells("nope", Int.box(4)))
     val badValue = Seq(erasedPair(Some(1), Some(2)), erasedCells(Int.box(1), "nope"))
-    val keyMessage = "grouped sum expected an Int key, found java.lang.String"
-    val valueMessage = "grouped sum expected an Int value, found java.lang.String"
+    val columnarKeyMessage = "pair component expected an Int key, found java.lang.String"
+    val columnarValueMessage = "pair component expected an Int value, found java.lang.String"
+    val rowKeyMessage = "grouped sum expected an Int key, found java.lang.String"
+    val rowValueMessage = "grouped sum expected an Int value, found java.lang.String"
 
     val columnarKey = intercept[IllegalArgumentException](columnar(summed(badKey)))
     val rowKey = intercept[IllegalArgumentException](row(summed(badKey)))
-    columnarKey.getMessage shouldBe keyMessage
-    rowKey.getMessage shouldBe keyMessage
+    columnarKey.getMessage shouldBe columnarKeyMessage
+    rowKey.getMessage shouldBe rowKeyMessage
 
     val columnarValue = intercept[IllegalArgumentException](columnar(summed(badValue)))
     val rowValue = intercept[IllegalArgumentException](row(summed(badValue)))
-    columnarValue.getMessage shouldBe valueMessage
-    rowValue.getMessage shouldBe valueMessage
+    columnarValue.getMessage shouldBe columnarValueMessage
+    rowValue.getMessage shouldBe rowValueMessage
   }
 
   "primitive sources" should "sum an int array like a boxed vector" in {

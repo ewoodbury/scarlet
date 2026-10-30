@@ -305,6 +305,11 @@ object BatchCodec:
 
   def decodeIntPairs(batch: ColumnBatch): Seq[(Int, Int)] = decodeIntPairs(batch, batch.length)
 
+  /**
+   * Reads an int-pair batch. A clear bit is an error: the decoded `Int` would otherwise be the
+   * stored zero, or a null that only a sort is allowed to keep. A prefix checks only the rows it
+   * returns.
+   */
   def decodeIntPairs(batch: ColumnBatch, maxRows: Int): Seq[(Int, Int)] =
     val (left, right) = intPair(batch)
     val rows = decodedLength(batch, maxRows)
@@ -313,6 +318,20 @@ object BatchCodec:
       require(left.isValid(row) && right.isValid(row), s"null Int32 pair at row $row")
       (left.values(row), right.values(row))
     }
+
+  /**
+   * Reads an int-pair batch and keeps a clear key or value bit as a null `Int`. A fully present
+   * batch still decodes to the stored ints. This matches [[decodeLongPairs]]. [[decodeIntPairs]]
+   * rejects a clear bit. A sort of int pairs is the caller that keeps those nulls.
+   */
+  private[scarlet] def decodeIntPairsPreservingAbsence(
+      batch: ColumnBatch,
+      maxRows: Int,
+  ): Seq[(Int, Int)] =
+    val (left, right) = intPair(batch)
+    val rows = decodedLength(batch, maxRows)
+    ColumnMetrics.decoded(rows)
+    Seq.tabulate(rows)(row => erasedIntPair(intRef(left, row), intRef(right, row)))
 
   /**
    * Boxed `(Long, Long)` pairs. A null component stays absent. `productElement` does not unbox, so
@@ -605,7 +624,7 @@ object BatchCodec:
         absent
       case other =>
         val found = other.asInstanceOf[AnyRef].getClass.getName
-        throw new IllegalArgumentException(s"grouped sum expected an Int $role, found $found")
+        throw new IllegalArgumentException(s"pair component expected an Int $role, found $found")
 
   /**
    * Fills both long columns in one pass. A null component is absent. Any other non-long cell
@@ -665,6 +684,23 @@ object BatchCodec:
       case other =>
         val found = other.asInstanceOf[AnyRef].getClass.getName
         throw new ClassCastException(s"columnar long pair expected a Long, found $found")
+
+  /**
+   * A present cell is the stored int. A clear bit is a null reference, not `0`.
+   *
+   * The return type stays `java.lang.Integer`. A `scala.Int` return unboxes that null to `0`.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def intRef(column: Int32Column, row: Int): java.lang.Integer =
+    if (column.isValid(row)) java.lang.Integer.valueOf(column.values(row)) else null
+
+  /**
+   * Named erasure boundary. The decoded tuple has to carry a null component so a sorted null key
+   * matches the row path. Building it from `java.lang.Integer` keeps the null from becoming `0`.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
+  private def erasedIntPair(key: java.lang.Integer, value: java.lang.Integer): (Int, Int) =
+    Tuple2(key, value).asInstanceOf[(Int, Int)]
 
   /**
    * A present cell is the stored long. A clear bit is a null reference, not `0`.

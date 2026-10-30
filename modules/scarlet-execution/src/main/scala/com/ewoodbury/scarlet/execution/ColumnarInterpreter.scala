@@ -12,12 +12,12 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * the operator recorded on each physical node. A mismatch throws `IllegalStateException`, which
  * [[ColumnarPlanner.tryRun]] does not turn into a row-path fallback. A broadcast build table above
  * `broadcastBuildBudgetBytes` throws `IllegalStateException` the same way: both inputs are already
- * evaluated, and the budget covers that table only. A partition selector on an aggregate or a join
- * fails a `require` guard with `IllegalArgumentException`, and that is not a fallback either. A
- * `ClassCastException` from a filter, or from a string map that declares `String` and returns
- * another value, is still a fallback, and that function may already have run. A null value on a
- * left, right, or full outer join is the same fallback: the value columns are already encoded, and
- * the kernel is not chosen. A null value on a long inner join is that fallback too.
+ * evaluated, and the budget covers that table only. A partition selector on an aggregate, a join,
+ * or a sort fails a `require` guard with `IllegalArgumentException`, and that is not a fallback
+ * either. A `ClassCastException` from a filter, or from a string map that declares `String` and
+ * returns another value, is still a fallback, and that function may already have run. A null value
+ * on a left, right, or full outer join is the same fallback: the value columns are already
+ * encoded, and the kernel is not chosen. A null value on a long inner join is that fallback too.
  */
 @SuppressWarnings(
   Array(
@@ -78,7 +78,34 @@ private[execution] object ColumnarInterpreter:
     case None => partitions
     case Some(index) => partitions.slice(index, index + 1)
 
+  /**
+   * Decode `columns`. Int pairs use [[BatchCodec.decodeIntPairsPreservingAbsence]] only for
+   * [[PhysicalOp.SortByIntKey]]. Every other op uses [[BatchCodec.decodeIntPairs]], which rejects
+   * a clear bit.
+   */
+  private[execution] def decodeFor(columns: Columns, op: PhysicalOp): Seq[Partition[_]] =
+    decodeWith(columns, intPairDecoder(op))
+
+  /**
+   * Prefix of [[decodeFor]]. The same op chooses the int-pair decoder. `limit <= 0` returns empty
+   * without reading a batch.
+   */
+  private[execution] def decodePrefixFor(columns: Columns, limit: Int, op: PhysicalOp): Seq[Any] =
+    decodePrefixWith(columns, limit, intPairDecoder(op))
+
+  private def intPairDecoder(op: PhysicalOp): (ColumnBatch, Int) => Seq[(Int, Int)] =
+    op match
+      case _: PhysicalOp.SortByIntKey => BatchCodec.decodeIntPairsPreservingAbsence
+      case _ => (batch, rows) => BatchCodec.decodeIntPairs(batch, rows)
+
   private[execution] def decodePrefix(columns: Columns, limit: Int): Seq[Any] =
+    decodePrefixWith(columns, limit, (batch, rows) => BatchCodec.decodeIntPairs(batch, rows))
+
+  private def decodePrefixWith(
+      columns: Columns,
+      limit: Int,
+      decodePairs: (ColumnBatch, Int) => Seq[(Int, Int)],
+  ): Seq[Any] =
     if (limit <= 0) then Seq.empty
     else
       columns match
@@ -89,7 +116,7 @@ private[execution] object ColumnarInterpreter:
         case Columns.Floats(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeFloat64s(batch, rows))
         case Columns.Pairs(parts) =>
-          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeIntPairs(batch, rows))
+          prefixRows(parts, limit, decodePairs)
         case Columns.LongPairs(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeLongPairs(batch, rows))
         case Columns.Triples(parts) =>
@@ -535,6 +562,17 @@ private[execution] object ColumnarInterpreter:
           ColumnarPlanner.batchSize,
         )
       }
+    case (Plan.SortByIntKeyOp(source), PhysicalOp.SortByIntKey(child)) =>
+      // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
+      // preserveAbsence keeps a null key and a null value. A null key still orders as zero.
+      Columns.Pairs(
+        RankSplit.sortAndSplit(
+          pairsOf(interpret(source, child, selectedPartition = None, preserveAbsence = true)),
+          ColumnarPlanner.shuffleWidth,
+          ColumnarPlanner.parallelism,
+        ),
+      )
     case _ =>
       throw new IllegalStateException(
         s"physical tree does not match ${plan.getClass.getSimpleName}",
@@ -981,7 +1019,10 @@ private[execution] object ColumnarInterpreter:
       BatchCodec.strings(rows)
     }.toVector
 
-  private[execution] def decode(columns: Columns): Seq[Partition[_]] = columns match
+  private def decodeWith(
+      columns: Columns,
+      decodePairs: (ColumnBatch, Int) => Seq[(Int, Int)],
+  ): Seq[Partition[_]] = columns match
     case Columns.Ints(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeInts(batch)))
     case Columns.Longs(parts) =>
@@ -989,7 +1030,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.Floats(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeFloat64s(batch)))
     case Columns.Pairs(parts) =>
-      parts.map(batch => Partition(BatchCodec.decodeIntPairs(batch)))
+      parts.map(batch => Partition(decodePairs(batch, batch.length)))
     case Columns.LongPairs(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeLongPairs(batch)))
     case Columns.Triples(parts) =>
