@@ -4,6 +4,8 @@ package com.ewoodbury.scarlet.columnar
  * Long-pair scatter. Boundaries are [[RankBounds]], the same rule [[RankScatter]] uses. The
  * columns are `Int64` instead of `Int32`.
  *
+ * [[RankSplitLong]] and [[RankSplitLongRuns]] both call [[scatter]].
+ *
  * `ready` is polled before each row. `write` appends that row to the sink it is given. A null
  * payload is the caller's concern: the sink stores a key or a value only when the present flag is
  * set.

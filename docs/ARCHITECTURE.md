@@ -79,7 +79,7 @@ ascending by effective key: a null key orders as zero and stays null. Shape stri
 | String source, scalar filter/map, filter-map run, dictionary equality filter and mapped dictionary result | `Utf8Dict` | `Scan`, `Filter(Scan)`, `Project(Scan)`, `Pipeline2(Scan)`, `Filter(Scan)`, `Project(Filter(Scan))` respectively |
 | Int-pair source and row/key/value filters | `Columnar` | `Scan`, `FilterRow(Scan)`, `FilterKey(Scan)`, `FilterValue(Scan)` |
 | `sortByIntKey` of an int-pair scan. Each source partition is sorted by effective key, then rank-merged into `defaultShufflePartitions`. A null key orders as zero and stays null. A null value is retained. Ties keep input order. Output partition sizes differ by at most one, each partition is sorted, and concatenation is globally sorted. Distribution is `Range(defaultShufflePartitions, Seq(0))` and ordering is `Sorted(Seq(0), Seq(true))`, ascending by that effective key. A filter, map, mapValues, projection, or any other non-scan child stays on the row path. A filter above the sort stays on the row path | `Columnar` | `SortByIntKey(Scan)` |
-| `sortByLongKey` of a long-pair scan. Rank boundaries match `sortByIntKey`. A null key orders as zero and stays null. A null value is retained. Ties keep input order. Distribution is `Range(defaultShufflePartitions, Seq(0))` and ordering is `Sorted(Seq(0), Seq(true))`. A filter, map, mapValues, projection, or any other non-scan child stays on the row path. A filter above the sort stays on the row path. There is no spill. An input over the budget uses this in-memory split and can run out of memory | `Columnar` | `SortByLongKey(Scan)` |
+| `sortByLongKey` of a long-pair scan. Rank boundaries match `sortByIntKey`. A null key orders as zero and stays null. A null value is retained. Ties keep input order. Distribution is `Range(defaultShufflePartitions, Seq(0))` and ordering is `Sorted(Seq(0), Seq(true))`. A filter, map, mapValues, projection, or any other non-scan child stays on the row path. A filter above the sort stays on the row path. Over the budget, with spill on, each input partition is one sorted run and the runs are merged `spillFanIn` at a time. The result matches this in-memory split. One input partition is still sorted in memory. At or under the budget, and whenever spill is off, the in-memory split runs and writes nothing | `Columnar` | `SortByLongKey(Scan)` |
 | Empty typed int-pair source | `Columnar` | `Scan` |
 | Long-pair source, including an empty source | `Columnar` | `Scan` |
 | Pair `keys`, `values`, int `mapValues`, mapped key/value columns, filtered int `mapValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `Project(Key(Scan))`, `Project(Value(Scan))`, `FilterValue(MapValue(Scan))` |
@@ -178,7 +178,7 @@ first string, and an empty iterable has no witness and stays on the row path.
 `groupedSum` is columnar for an `(Int, Int)` source. A `(Long, Long)` scan, `reduceByKey` on
 that scan, an inner shuffle-hash join of that scan, and `sortByLongKey` of that scan are columnar.
 `groupedSum` of a long pair stays on the row path. Broadcast, sort-merge, and outer joins on long
-keys stay on the row path. A long sort does not spill.
+keys stay on the row path. A long sort spills over the budget the same way an int sort does.
 String `groupByKey` and string `join` are refused. Also refused, and already listed with the contract
 fixtures: `distinct`, `partitionBy`, `sortBy`, `groupByKey`, and joins on a string or double key.
 `min` and `max` are not in the API. Nullable long and boolean sources have no
@@ -392,10 +392,10 @@ The rules that hold for every kind:
 
 ## Spill
 
-Grouped sum, an inner broadcast join's build, sort-merge joins, and an int-pair `sortByIntKey`
-spill when `spillEnabled` is on. `spillBudgetBytes` is the in-memory trigger. The flag defaults
-off. `spillMaxFiles` and `spillMaxBytes` cap one spill store. Long hash reduce never spills; an
-input that does not fit stays in memory.
+Grouped sum, an inner broadcast join's build, sort-merge joins, an int-pair `sortByIntKey`, and a
+long-pair `sortByLongKey` spill when `spillEnabled` is on. `spillBudgetBytes` is the in-memory
+trigger. The flag defaults off. `spillMaxFiles` and `spillMaxBytes` cap one spill store. Long hash
+reduce never spills; an input that does not fit stays in memory.
 
 At or under `spillBudgetBytes`, and whenever `spillEnabled` is off, a sort-merge partition stays
 in memory. Over the budget, with spill on, each side is written as sorted runs and merged
@@ -407,10 +407,11 @@ then scattered by rank, and the result matches the in-memory rank split. One inp
 still sorted in memory. At or under the budget, and whenever spill is off, that in-memory split
 runs and writes nothing.
 
-A long-pair `sortByLongKey` does not spill. The physical op stays `SortByLongKey`, and the
-in-memory rank split runs even when `spillEnabled` is on and the input is over `spillBudgetBytes`.
-That input can exhaust memory. This is the same limit as the long-key inner join, which has no
-spill and no build budget.
+A long-pair `sortByLongKey` keeps the physical op `SortByLongKey`. It spills the same way: one
+sorted run per input partition, merged `spillFanIn` at a time, then scattered by the same rank
+boundaries. The long-pair codec is the one the store already writes. One input partition is still
+sorted in memory. At or under the budget, and whenever spill is off, the in-memory split runs and
+writes nothing. The long-key inner join still has no spill and no build budget.
 
 ## Known limitations (deferred work)
 
@@ -422,5 +423,4 @@ Roadmap and sequencing are tracked externally; the headline items:
   `Seq`.
 - The sort-merge operator still materialises its inputs and its result.
 - A shuffle-hash join does not spill. The long-key inner join is the same: no spill and no build budget.
-- A long-pair sort does not spill. Over the budget it uses the in-memory path and can run out of memory. The long-key inner join has the same limit.
 - Long hash reduce never spills; an input that does not fit stays in memory.

@@ -24,8 +24,9 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * (union, flatMap, distinct, generic sortBy, a map that is not fed by `Int`, `Long`, `Double`, or
  * `String`, any `Boolean` map, and the rest) makes the whole plan ineligible, so a supported
  * prefix is not executed on its own. `sortByIntKey` of an int-pair scan and `sortByLongKey` of a
- * long-pair scan lower to a rank split. A null key orders as zero and stays null. A long sort does
- * not spill: over the budget it stays in memory.
+ * long-pair scan lower to a rank split. A null key orders as zero and stays null. Over the budget,
+ * with spill on, a long sort writes one run per input partition. At or under the budget, and
+ * whenever spill is off, it stays in memory and writes nothing.
  *
  * [[lower]] and interpretation walk the same logical plan. The physical node records the operator
  * and not the function, so each logical node is matched to the node [[lower]] built for it. A
@@ -179,8 +180,9 @@ object ColumnarPlanner:
    * hint uses the shuffle-hash op. A null value does not change that shape: [[tryRun]] reads the
    * value columns and returns `None`, and the row path runs. [[SortLowering]] accepts a typed key
    * sort only for a scan of the matching pair kind. Any other child, and any parent of that sort,
-   * stays on the row path. A long sort does not spill. [[partitioning]] and [[tryRun]] follow a
-   * refusal. They also drop a lowered tree whose layout is invalid.
+   * stays on the row path. A long sort spills when `spillEnabled` is on and the retained estimate
+   * exceeds `spillBudgetBytes`. The physical op stays `SortByLongKey`. [[partitioning]] and
+   * [[tryRun]] follow a refusal. They also drop a lowered tree whose layout is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     if (!ScarletConf.get.columnarExecution) then None

@@ -246,7 +246,10 @@ final case class DistCollection[A](plan: Plan[A]):
    * key-value plan. Generic [[sortBy]] stays an opaque [[Plan.SortByOp]] and runs on the row path.
    * A scan of long pairs lowers to a columnar rank split. Any other child stays on the row path. A
    * null `Long` key orders as zero and the row is retained. This matches `sortBy(_._1)` and is not
-   * a null-safe ordering. There is no spill. An input over the budget stays in memory.
+   * a null-safe ordering. When `spillEnabled` is on and the retained estimate exceeds
+   * `spillBudgetBytes`, each input partition is one sorted run and the runs are merged
+   * `spillFanIn` at a time. One input partition is still sorted in memory. At or under the budget,
+   * and whenever spill is off, the in-memory split runs and writes nothing.
    */
   def sortByLongKey(using ev: A =:= (Long, Long)): DistCollection[(Long, Long)] =
     DistCollection(Plan.SortByLongKeyOp(kvPlan))

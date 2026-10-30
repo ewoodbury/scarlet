@@ -29,8 +29,8 @@ package com.ewoodbury.scarlet.columnar
  * still hold the input vector. No per-row object is allocated.
  *
  * `rows == 0` returns `partitions` empty long-pair batches and does not sort. `partitions <= 0`,
- * `parallelism <= 0`, and an empty `batches` vector are rejected. This path does not spill. An
- * input over the budget stays in memory.
+ * `parallelism <= 0`, and an empty `batches` vector are rejected. This object does not choose
+ * spill. [[RankSplitLongRuns]] does, and it calls this split when the input fits.
  */
 object RankSplitLong:
 
