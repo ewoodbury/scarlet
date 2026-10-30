@@ -57,10 +57,10 @@ inferred from record order.
   non-shuffle stage is chainable, including union concatenation stages — narrow ops run per
   partition of the stage's output. This is what fuses `map(f).filter(p)` into one pass and lets
   narrow work follow a shuffle without a data movement boundary.
-- **Wide operations** (`groupByKey`, `reduceByKey`, `sortBy`, `partitionBy`, `repartition`,
-  `coalesce`, `join`, `cogroup`): cut a stage boundary via `createShuffleStageUnified`, which
-  attaches the `WideOp` dispatch record, `ShuffleInput` sources (side-tagged for
-  join/cogroup), and output partitioning metadata.
+- **Wide operations** (`groupByKey`, `reduceByKey`, `sortBy`, `sortByIntKey`, `sortByLongKey`,
+  `partitionBy`, `repartition`, `coalesce`, `join`, `cogroup`): cut a stage boundary via
+  `createShuffleStageUnified`, which attaches the `WideOp` dispatch record, `ShuffleInput`
+  sources (side-tagged for join/cogroup), and output partitioning metadata.
 - **Shuffle bypass** (`Operation.canBypassShuffle`): when upstream partitioning already matches
   the operation's requirement, the operation is appended as a local op instead of a shuffle
   stage — e.g. `partitionBy(n)` then `groupByKey` with matching `n` becomes a local group.

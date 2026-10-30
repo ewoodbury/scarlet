@@ -252,6 +252,30 @@ object Plan {
       extends Plan[A]
 
   /**
+   * Sorts `(Int, Int)` pairs ascending by column 0. This node is planned like [[SortByOp]] with
+   * the key taken from column 0 and [[Ordering.Int]]. Generic [[SortByOp]] stays opaque. The
+   * columnar path is not implemented yet. A null `Int` key is unboxed to zero by the row key
+   * function, so it ties with a present zero and the row is retained. This matches `sortBy(_._1)`
+   * today and is not a null-safe ordering.
+   *
+   * @param source
+   *   The preceding plan node.
+   */
+  case class SortByIntKeyOp(source: Plan[(Int, Int)]) extends Plan[(Int, Int)]
+
+  /**
+   * Sorts `(Long, Long)` pairs ascending by column 0. This node is planned like [[SortByOp]] with
+   * the key taken from column 0 and [[Ordering.Long]]. Generic [[SortByOp]] stays opaque. The
+   * columnar path is not implemented yet. A null `Long` key is unboxed to zero by the row key
+   * function, so it ties with a present zero and the row is retained. This matches `sortBy(_._1)`
+   * today and is not a null-safe ordering.
+   *
+   * @param source
+   *   The preceding plan node.
+   */
+  case class SortByLongKeyOp(source: Plan[(Long, Long)]) extends Plan[(Long, Long)]
+
+  /**
    * Join execution strategies for physical planning.
    */
   enum JoinStrategy {

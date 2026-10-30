@@ -232,6 +232,26 @@ final case class DistCollection[A](plan: Plan[A]):
     DistCollection(Plan.SortByOp(this.plan, keyFunc, ordering))
 
   /**
+   * Sorts `(Int, Int)` pairs ascending by column 0. Builds [[Plan.SortByIntKeyOp]] from the
+   * key-value plan. Generic [[sortBy]] stays an opaque [[Plan.SortByOp]] and runs on the row path.
+   * The columnar path is not implemented yet. A null `Int` key is unboxed to zero by the row key
+   * function, so it ties with a present zero and the row is retained. This matches `sortBy(_._1)`
+   * today and is not a null-safe ordering.
+   */
+  def sortByIntKey(using ev: A =:= (Int, Int)): DistCollection[(Int, Int)] =
+    DistCollection(Plan.SortByIntKeyOp(kvPlan))
+
+  /**
+   * Sorts `(Long, Long)` pairs ascending by column 0. Builds [[Plan.SortByLongKeyOp]] from the
+   * key-value plan. Generic [[sortBy]] stays an opaque [[Plan.SortByOp]] and runs on the row path.
+   * The columnar path is not implemented yet. A null `Long` key is unboxed to zero by the row key
+   * function, so it ties with a present zero and the row is retained. This matches `sortBy(_._1)`
+   * today and is not a null-safe ordering.
+   */
+  def sortByLongKey(using ev: A =:= (Long, Long)): DistCollection[(Long, Long)] =
+    DistCollection(Plan.SortByLongKeyOp(kvPlan))
+
+  /**
    * Transformation: Joins this collection with another collection by key, requiring a shuffle
    * operation. A null key is dropped on both sides and does not match, for every strategy. Returns
    * a new DistCollection representing the joined data. Does not trigger computation.
