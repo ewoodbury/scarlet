@@ -43,6 +43,19 @@ object ColumnBatches:
     else cuts(batch.length, batchSize).map { case (start, length) => copy(batch, start, length) }
 
   /**
+   * One copied range of `batch`. Callers that walk [[Morsels]] write one range and drop it before
+   * the next, so the slices of a long batch are not all live together.
+   */
+  private[scarlet] def copyRange(batch: ColumnBatch, start: Int, length: Int): ColumnBatch =
+    require(start >= 0, s"slice start must be >= 0, got $start")
+    require(length >= 0, s"slice length must be >= 0, got $length")
+    require(
+      start.toLong + length.toLong <= batch.length.toLong,
+      s"slice [$start, ${start.toLong + length.toLong}) outside batch length ${batch.length}",
+    )
+    copy(batch, start, length)
+
+  /**
    * Row ranges of `rows` rows cut into pieces of at most `batchSize`. `rows == 0` is one empty
    * range. The last piece is shorter when the length does not divide evenly.
    */

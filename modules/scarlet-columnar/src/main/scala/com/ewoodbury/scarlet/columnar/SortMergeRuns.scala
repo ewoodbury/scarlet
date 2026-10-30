@@ -388,10 +388,11 @@ private[scarlet] object SortMergeRuns:
   ): SpillFile =
     val cursors = openCursors(files)
     try
-      val heap = openHeap(cursors)
+      val keys = new Array[Int](cursors.length)
+      val heap = openHeap(cursors, keys)
       val merged = store.writeStreaming(pairSchema) { sink =>
         failIfPass(pass)
-        writeSorted(heap, sink, batchSize)
+        writeSorted(heap, keys, cursors, sink, batchSize)
       }
       val _ = filesWritten.incrementAndGet()
       merged
@@ -402,13 +403,20 @@ private[scarlet] object SortMergeRuns:
         id += 1
       }
 
-  private def writeSorted(heap: KeyHeap, sink: SpillBatchWriter, batchSize: Int): Unit =
+  private def writeSorted(
+      heap: OrderedRunHeap,
+      keys: Array[Int],
+      cursors: Array[RunCursor],
+      sink: SpillBatchWriter,
+      batchSize: Int,
+  ): Unit =
     val bufKeys = new Array[Int](batchSize)
     val bufValues = new Array[Int](batchSize)
     val bufWords = Validity.allocate(batchSize)
     var filled = 0
     while (!heap.isEmpty) {
-      val cursor = heap.pop()
+      val id = heap.pop()
+      val cursor = cursors(id)
       bufKeys(filled) = cursor.key
       if (cursor.valuePresent) then
         bufValues(filled) = cursor.value
@@ -416,7 +424,9 @@ private[scarlet] object SortMergeRuns:
       else bufValues(filled) = 0
       filled += 1
       cursor.advance()
-      if (cursor.ready) then heap.push(cursor.id)
+      if (cursor.ready) then
+        keys(id) = cursor.key
+        heap.push(id)
       if (filled == batchSize) then
         sink.write(morselBatch(bufKeys, bufValues, bufWords, filled))
         clearWords(bufWords, filled)
@@ -761,72 +771,17 @@ private[scarlet] object SortMergeRuns:
       length = batch.length
       index = 0
 
-  /** Min-heap of live cursors, ordered by key and then by cursor id. */
-  private final class KeyHeap(cursors: Array[RunCursor]):
-
-    private val nodes = new Array[Int](cursors.length)
-    private var size: Int = 0
-
-    def isEmpty: Boolean = size == 0
-
-    def minKey: Int =
-      require(size > 0, "sort-merge heap is empty")
-      cursors(nodes(0)).key
-
-    def pop(): RunCursor =
-      val cursor = cursors(nodes(0))
-      size -= 1
-      if (size > 0) then
-        nodes(0) = nodes(size)
-        siftDown(0)
-      cursor
-
-    def push(id: Int): Unit =
-      nodes(size) = id
-      siftUp(size)
-      size += 1
-
-    private def less(leftId: Int, rightId: Int): Boolean =
-      val order = Integer.compare(cursors(leftId).key, cursors(rightId).key)
-      order < 0 || (order == 0 && leftId < rightId)
-
-    private def siftUp(start: Int): Unit =
-      var at = start
-      var moved = true
-      while (moved && at > 0) {
-        val parent = (at - 1) >>> 1
-        if (less(nodes(at), nodes(parent))) then
-          swap(at, parent)
-          at = parent
-        else moved = false
-      }
-
-    private def siftDown(start: Int): Unit =
-      var at = start
-      var moved = true
-      while (moved) {
-        val left = at * 2 + 1
-        val right = left + 1
-        var best = at
-        if (left < size && less(nodes(left), nodes(best))) then best = left
-        if (right < size && less(nodes(right), nodes(best))) then best = right
-        if (best == at) then moved = false
-        else
-          swap(at, best)
-          at = best
-      }
-
-    private def swap(left: Int, right: Int): Unit =
-      val held = nodes(left)
-      nodes(left) = nodes(right)
-      nodes(right) = held
-
-  /** Pushes each cursor that has a row. Callers open at most `fanIn` cursors. */
-  private def openHeap(cursors: Array[RunCursor]): KeyHeap =
-    val heap = new KeyHeap(cursors)
+  /**
+   * Pushes each cursor that has a row and stores its present key. Callers open at most `fanIn`
+   * cursors. The heap reads `keys(id)`; this is the only place a sort-merge key enters it.
+   */
+  private def openHeap(cursors: Array[RunCursor], keys: Array[Int]): OrderedRunHeap =
+    val heap = new OrderedRunHeap(keys)
     var id = 0
     while (id < cursors.length) {
-      if (cursors(id).ready) then heap.push(id)
+      if (cursors(id).ready) then
+        keys(id) = cursors(id).key
+        heap.push(id)
       id += 1
     }
     heap

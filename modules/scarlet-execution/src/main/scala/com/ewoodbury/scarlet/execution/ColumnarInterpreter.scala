@@ -566,13 +566,17 @@ private[execution] object ColumnarInterpreter:
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
       // preserveAbsence keeps a null key and a null value. A null key still orders as zero.
-      Columns.Pairs(
-        RankSplit.sortAndSplit(
-          pairsOf(interpret(source, child, selectedPartition = None, preserveAbsence = true)),
-          ColumnarPlanner.shuffleWidth,
-          ColumnarPlanner.parallelism,
-        ),
+      // The physical op stays SortByIntKey. Run and take both reach this arm. RankSplitRuns
+      // chooses the in-memory split or spilled runs. Take decodes only the prefix of the result.
+      val batches =
+        pairsOf(interpret(source, child, selectedPartition = None, preserveAbsence = true))
+      val sorted = RankSplitRuns.sortAndSplit(
+        batches,
+        ColumnarPlanner.shuffleWidth,
+        ColumnarPlanner.parallelism,
+        ScarletConf.get,
       )
+      Columns.Pairs(sorted)
     case _ =>
       throw new IllegalStateException(
         s"physical tree does not match ${plan.getClass.getSimpleName}",
