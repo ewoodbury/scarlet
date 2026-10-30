@@ -253,10 +253,10 @@ object Plan {
 
   /**
    * Sorts `(Int, Int)` pairs ascending by column 0. This node is planned like [[SortByOp]] with
-   * the key taken from column 0 and [[Ordering.Int]]. Generic [[SortByOp]] stays opaque. The
-   * columnar path is not implemented yet. A null `Int` key is unboxed to zero by the row key
-   * function, so it ties with a present zero and the row is retained. This matches `sortBy(_._1)`
-   * today and is not a null-safe ordering.
+   * the key taken from column 0 and [[Ordering.Int]]. Generic [[SortByOp]] stays opaque. A scan of
+   * int pairs lowers to a columnar rank split. Any other child stays on the row path. A null `Int`
+   * key orders as zero and the row is retained. This matches `sortBy(_._1)` and is not a null-safe
+   * ordering.
    *
    * @param source
    *   The preceding plan node.

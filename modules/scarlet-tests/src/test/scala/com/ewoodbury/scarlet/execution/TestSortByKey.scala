@@ -8,7 +8,10 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.{Plan, PlanWide, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
-/** Row-path global sort of typed pairs. The columnar planner does not match these nodes. */
+/**
+ * Global sort of typed pairs. An int-pair scan lowers to `SortByIntKey(Scan)`. A long-pair sort
+ * stays on the row path. A null key orders as zero and the row is retained, matching `sortBy`.
+ */
 class TestSortByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   private val originalConf = ScarletConf.get
@@ -37,7 +40,13 @@ class TestSortByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       case other => fail(s"expected SortByIntKeyOp, got $other")
     generic.plan shouldBe a[Plan.SortByOp[_, _]]
     assertWideSort(sorted.plan, Ordering.Int)
-    assertRowPath(sorted.plan)
+    ColumnarPlanner.lower(sorted.plan).map(_.shape) shouldBe Some("SortByIntKey(Scan)")
+    val info = ColumnarPlanner.partitioning(sorted.plan).getOrElse(fail("expected a layout"))
+    info.distribution shouldBe Distribution.Range(
+      ScarletConf.get.defaultShufflePartitions,
+      PartitioningInfo.RowKeyOrdinals,
+    )
+    info.ordering shouldBe OrderingTag.Sorted(PartitioningInfo.RowKeyOrdinals, Seq(true))
 
     val first = collect(sorted)
     val second = collect(sorted) // idempotent
@@ -112,9 +121,9 @@ class TestSortByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   }
 
   it should "sort a null key where zero sorts, matching sortBy" in {
-    // The row key function unboxes column 0. A null int or long unboxes to zero, so it ties with
-    // a present zero and keeps its place in that tie. The null stays in the row. This is the row
-    // path only.
+    // The key function unboxes column 0. A null int or long unboxes to zero, so it ties with a
+    // present zero and keeps its place in that tie. The null stays in the row. The int scan runs
+    // on the columnar rank split. The long scan stays on the row path.
     val ints = Seq(
       intPair(boxedInt(1), boxedInt(10)),
       intPair(noInt, boxedInt(99)),
