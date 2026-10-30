@@ -268,7 +268,10 @@ object Plan {
    * the key taken from column 0 and [[Ordering.Long]]. Generic [[SortByOp]] stays opaque. A scan
    * of long pairs lowers to a columnar rank split. Any other child stays on the row path. A null
    * `Long` key orders as zero and the row is retained. This matches `sortBy(_._1)` and is not a
-   * null-safe ordering. There is no spill. An input over the budget stays in memory.
+   * null-safe ordering. When `spillEnabled` is on and the retained estimate exceeds
+   * `spillBudgetBytes`, each input partition is one sorted run and the runs are merged
+   * `spillFanIn` at a time. One input partition is still sorted in memory. At or under the budget,
+   * and whenever spill is off, the in-memory split runs and writes nothing.
    *
    * @param source
    *   The preceding plan node.

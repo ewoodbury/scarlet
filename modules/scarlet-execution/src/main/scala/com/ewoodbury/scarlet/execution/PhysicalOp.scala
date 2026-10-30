@@ -193,8 +193,9 @@ enum PhysicalOp:
    *
    * The ordering tag is [[OrderingTag.Sorted]] with `Seq(0)` and `Seq(true)`. That is ascending by
    * effective key: a null key orders as zero and stays null in the output. The tag is not a claim
-   * that column 0 is non-null. This path does not spill. An input over the budget stays in memory
-   * and can exhaust it.
+   * that column 0 is non-null. Over the budget, with spill on, each input partition is one sorted
+   * run and the runs are merged. One input partition is still sorted in memory. At or under the
+   * budget, and whenever spill is off, the in-memory split runs and writes nothing.
    */
   case SortByLongKey(child: PhysicalOp)
 

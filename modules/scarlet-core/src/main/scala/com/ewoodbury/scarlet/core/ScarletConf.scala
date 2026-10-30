@@ -44,20 +44,21 @@ final case class ScarletConf(
     /** Rows per morsel on the columnar path. */
     columnarBatchSize: Int = 8192,
     /**
-     * When true, a grouped-sum bucket, an inner broadcast build, a sort-merge partition, or an
-     * int-pair sort whose estimate exceeds `spillBudgetBytes` is spilled. Off by default, so each
-     * stays in memory. Outer hash and broadcast joins do not read this flag; an outer sort-merge
-     * does. A long-pair sort does not read this flag and stays in memory.
+     * When true, a grouped-sum bucket, an inner broadcast build, a sort-merge partition, an
+     * int-pair sort, or a long-pair sort whose estimate exceeds `spillBudgetBytes` is spilled. Off
+     * by default, so each stays in memory. Outer hash and broadcast joins do not read this flag;
+     * an outer sort-merge does.
      */
     spillEnabled: Boolean = false,
     /**
      * Byte budget for one grouped-sum bucket, one inner-join build table, the sorted sides of one
-     * sort-merge partition, and the sorted input of one int-pair sort. The default is 64 MiB. A
-     * broadcast build over this budget is partitioned with the probe. One partition that is still
-     * over it throws. A sort-merge partition over it is written as sorted runs and merged
-     * `spillFanIn` at a time. One equal-key group that is still over it throws. An int-pair sort
-     * over it writes one sorted run per input partition and merges `spillFanIn` runs at a time.
-     * One input partition is still sorted in memory. A long-pair sort does not read this budget.
+     * sort-merge partition, the sorted input of one int-pair sort, and the sorted input of one
+     * long-pair sort. The default is 64 MiB. A broadcast build over this budget is partitioned
+     * with the probe. One partition that is still over it throws. A sort-merge partition over it
+     * is written as sorted runs and merged `spillFanIn` at a time. One equal-key group that is
+     * still over it throws. An int-pair sort over it writes one sorted run per input partition and
+     * merges `spillFanIn` runs at a time. A long-pair sort does the same for long pairs. One input
+     * partition is still sorted in memory.
      */
     spillBudgetBytes: Long = 64L * 1024L * 1024L,
     /**
@@ -77,12 +78,12 @@ final case class ScarletConf(
      */
     spillMaxBytes: Long = 8L * 1024L * 1024L * 1024L,
     /**
-     * Fan-in of a spilled sort-merge and of a spilled int-pair sort. At most this many sorted runs
-     * are merged at once. The default is 8. A side, or a sort, with more runs is merged in passes
-     * until one run remains, so a pass loads at most this many batches. The join then loads one
-     * batch from each side. The sort then reads one batch of the remaining run and scatters it by
-     * rank. A value below 2 is rejected when a partition or a sort spills, because a pass would
-     * not shrink the runs.
+     * Fan-in of a spilled sort-merge, a spilled int-pair sort, and a spilled long-pair sort. At
+     * most this many sorted runs are merged at once. The default is 8. A side, or a sort, with
+     * more runs is merged in passes until one run remains, so a pass loads at most this many
+     * batches. The join then loads one batch from each side. The sort then reads one batch of the
+     * remaining run and scatters it by rank. A value below 2 is rejected when a partition or a
+     * sort spills, because a pass would not shrink the runs.
      */
     spillFanIn: Int = 8,
 ):

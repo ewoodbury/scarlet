@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import java.nio.file.Path
+
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -12,7 +14,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * Columnar rank split of a long-pair scan. A null key orders as zero and stays null. A null value
  * stays null. Ties keep input order. Partition boundaries are [[RankBounds]], shared with the int
- * split. There is no spill: over the budget the in-memory split still runs.
+ * split. Over the budget, with spill on, [[RankSplitLongRuns]] writes one run per input partition.
+ * Spill detail is [[TestRankSplitLongRuns]]. At or under the budget, and whenever spill is off,
+ * the in-memory split runs and writes nothing.
  */
 class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -27,6 +31,7 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ScarletRuntime.get.shuffle.clear()
     ScarletConf.set(originalConf)
     RankSplitRuns.resetForTest()
+    RankSplitLongRuns.resetForTest()
     ()
 
   "sortByLongKey" should "match the row path for distinct, duplicate, and negative keys" in {
@@ -183,15 +188,20 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       Option.empty[PartitioningInfo]
   }
 
-  it should "stay in memory when spill is on and the budget is exhausted" in {
-    ScarletConf.set(ScarletConf.get.copy(spillEnabled = true, spillBudgetBytes = 1L))
-    RankSplitRuns.resetForTest()
-    val source = DistCollection.ofLongPairs(Array(3L, 1L, 2L, 2L), Array(30L, 10L, 20L, 21L), 2)
-    val sorted = source.sortByLongKey
+  it should "spill when the budget is exhausted, match the row path, and write nothing on the int path" in {
+    // Pins spillMaxFiles and spillMaxBytes to the store defaults, so ambient config cannot leak in.
+    new TestRankSplitLongRuns().withConf(0L, batchSize = 2, fanIn = 8) { dir =>
+      val source = DistCollection.ofLongPairs(Array(3L, 1L, 2L, 2L), Array(30L, 10L, 20L, 21L), 2)
+      val sorted = source.sortByLongKey
 
-    collect(sorted) shouldBe rowCollect(sorted)
-    ColumnarPlanner.lower(sorted.plan).map(_.shape) shouldBe Some("SortByLongKey(Scan)")
-    RankSplitRuns.filesWrittenForTest shouldBe 0L
+      collect(sorted) shouldBe rowCollect(sorted)
+      ColumnarPlanner.lower(sorted.plan).map(_.shape) shouldBe Some("SortByLongKey(Scan)")
+      // Two source partitions and one merge. The int counter stays at zero.
+      RankSplitLongRuns.filesWrittenForTest shouldBe 3L
+      RankSplitLongRuns.mergePassesForTest shouldBe 1L
+      RankSplitRuns.filesWrittenForTest shouldBe 0L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
   }
 
   it should "match the int rank split on partition sizes and relative order" in {

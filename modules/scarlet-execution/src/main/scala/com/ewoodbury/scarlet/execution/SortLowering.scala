@@ -9,7 +9,8 @@ import com.ewoodbury.scarlet.core.Plan
  * [[PhysicalOp.SortByIntKey]]. [[Plan.SortByLongKeyOp]] lowers only when its child is a scan of
  * long pairs, to [[PhysicalOp.SortByLongKey]]. Any other child stays on the row path.
  * [[acceptsAsChild]] refuses either sort, so a filter, join, aggregate, or projection above a sort
- * stays on the row path. A long sort does not spill.
+ * stays on the row path. A long sort spills through the same budget as an int sort. The physical
+ * op stays [[PhysicalOp.SortByLongKey]].
  *
  * Both sorts share one ordering tag: range distribution on the row key, ascending by effective
  * key. A null key orders as zero and stays null. The caller supplies the columnar layout. Int

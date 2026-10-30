@@ -209,8 +209,9 @@ outside the timer. The run rejected nothing.
 
 An earlier study reported 6-11x for a prototype of the sort kernel. This table times the
 production path. The timed action includes the plan and the rank split, then the decode and the
-checksum mix. A long-pair sort does not spill. Over the budget it stays on this in-memory path
-and can run out of memory.
+checksum mix. A long-pair sort spills when `spillEnabled` is on and the retained estimate is over
+`spillBudgetBytes`. One input partition is still sorted in memory when spill is on. This run
+leaves spill off, so the timed path is the in-memory rank split.
 
 ## Spill
 

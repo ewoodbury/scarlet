@@ -594,14 +594,16 @@ private[execution] object ColumnarInterpreter:
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
       // Long-pair encode always keeps a null key and a null value. preserveAbsence is passed for
       // symmetry with the int sort. It does not change the long encode. decodeLongPairs keeps
-      // those nulls on the way out. RankSplitRuns is int-only. Over the budget this stays in
-      // memory.
+      // those nulls on the way out. The physical op stays SortByLongKey. Run and take both reach
+      // this arm. RankSplitLongRuns chooses the in-memory split or spilled runs. Take decodes
+      // only the prefix of the result.
       val batches =
         longPairsOf(interpret(source, child, selectedPartition = None, preserveAbsence = true))
-      val sorted = RankSplitLong.sortAndSplit(
+      val sorted = RankSplitLongRuns.sortAndSplit(
         batches,
         ColumnarPlanner.shuffleWidth,
         ColumnarPlanner.parallelism,
+        ScarletConf.get,
       )
       Columns.LongPairs(sorted)
     case _ =>
