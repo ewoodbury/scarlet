@@ -244,9 +244,9 @@ final case class DistCollection[A](plan: Plan[A]):
   /**
    * Sorts `(Long, Long)` pairs ascending by column 0. Builds [[Plan.SortByLongKeyOp]] from the
    * key-value plan. Generic [[sortBy]] stays an opaque [[Plan.SortByOp]] and runs on the row path.
-   * The columnar path is not implemented yet. A null `Long` key is unboxed to zero by the row key
-   * function, so it ties with a present zero and the row is retained. This matches `sortBy(_._1)`
-   * today and is not a null-safe ordering.
+   * A scan of long pairs lowers to a columnar rank split. Any other child stays on the row path. A
+   * null `Long` key orders as zero and the row is retained. This matches `sortBy(_._1)` and is not
+   * a null-safe ordering. There is no spill. An input over the budget stays in memory.
    */
   def sortByLongKey(using ev: A =:= (Long, Long)): DistCollection[(Long, Long)] =
     DistCollection(Plan.SortByLongKeyOp(kvPlan))

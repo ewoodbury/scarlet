@@ -47,7 +47,7 @@ final case class ScarletConf(
      * When true, a grouped-sum bucket, an inner broadcast build, a sort-merge partition, or an
      * int-pair sort whose estimate exceeds `spillBudgetBytes` is spilled. Off by default, so each
      * stays in memory. Outer hash and broadcast joins do not read this flag; an outer sort-merge
-     * does.
+     * does. A long-pair sort does not read this flag and stays in memory.
      */
     spillEnabled: Boolean = false,
     /**
@@ -57,7 +57,7 @@ final case class ScarletConf(
      * over it throws. A sort-merge partition over it is written as sorted runs and merged
      * `spillFanIn` at a time. One equal-key group that is still over it throws. An int-pair sort
      * over it writes one sorted run per input partition and merges `spillFanIn` runs at a time.
-     * One input partition is still sorted in memory.
+     * One input partition is still sorted in memory. A long-pair sort does not read this budget.
      */
     spillBudgetBytes: Long = 64L * 1024L * 1024L,
     /**

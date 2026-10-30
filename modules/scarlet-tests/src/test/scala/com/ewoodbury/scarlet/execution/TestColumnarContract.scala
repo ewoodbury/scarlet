@@ -30,15 +30,15 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 178 previous accepted fixtures. sortByIntKey moves from the excluded list. This is a move,
-    // not a new fixture. 178 + 1 = 179.
-    accepted.size shouldBe 179
-    // 54 previous exclusions. sortByIntKey moves to the accepted list. This is a move, not a new
-    // fixture. 54 - 1 = 53. sortByLongKey stays excluded. The total stays 178 + 54 = 232.
+    // 180 accepted fixtures. sortByLongKey moved from the excluded list. This is a move, not a
+    // new fixture.
+    accepted.size shouldBe 180
+    // 52 exclusions. sortByLongKey moved to the accepted list. This is a move, not a new fixture.
+    // 180 + 52 = 232.
     // Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by
     // execution tests, not contract fixtures, because the contract does not track the int
     // refusals either.
-    excluded.size shouldBe 53
+    excluded.size shouldBe 52
     (accepted.size + excluded.size) shouldBe 232
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
@@ -429,6 +429,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         rangeSortedInfo(layout),
         Some("SortByIntKey(Scan)"),
       ),
+      AcceptedCase(
+        "long sortByLongKey",
+        Plan.SortByLongKeyOp(longPairSource),
+        rangeSortedInfo(layout),
+        Some("SortByLongKey(Scan)"),
+      ),
       AcceptedCase("int pair keys", keys, narrowInfo(2, layout), Some("Key(Scan)")),
       AcceptedCase("int pair values", values, narrowInfo(2, layout), Some("Value(Scan)")),
       AcceptedCase("int mapValues", mapValues, narrowInfo(2, layout), Some("MapValue(Scan)")),
@@ -639,7 +645,6 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ExcludedCase("groupByKey int", Plan.GroupByKeyOp(pairSource)),
       ExcludedCase("cogroup", Plan.CoGroupOp(pairSource, rightPairSource)),
       ExcludedCase("sortBy", Plan.SortByOp(intSource, (value: Int) => value, Ordering.Int)),
-      ExcludedCase("sortByLongKey", Plan.SortByLongKeyOp(longPairSource)),
       ExcludedCase("map on triples", tripleMapped),
       ExcludedCase("generic triple filter", genericTripleFilter),
       ExcludedCase("mapValues to string", stringMapValues),
@@ -748,7 +753,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
    * `lower` and the action gates share one decision. A refused plan, including a non-int
    * sort-merge and a type-changing pair map, makes every gate return `None`. An accepted plan
    * runs `tryRun` and `tryCount`. `tryTake` runs when the physical tree keeps input partitions,
-   * and for an int-key sort, which runs the whole sort and then decodes the prefix.
+   * and for an int-key or long-key sort, which runs the whole sort and then decodes the prefix.
    * `trySumInt`, `trySumLong`, and `trySumDouble` run only for that numeric kind. `tryGroupedSum`
    * equals `groupedSum` for an accepted grouped pair source and for an accepted row, key, or
    * value filter of one, and is `None` for every other accepted plan. The peel label follows
@@ -813,12 +818,13 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.HashLeftOuter(_, _) | PhysicalOp.HashRightOuter(_, _) |
         PhysicalOp.HashFullOuter(_, _) | PhysicalOp.BroadcastJoin(_, _, _) |
         PhysicalOp.BroadcastLeftOuter(_, _) | PhysicalOp.BroadcastRightOuter(_, _) |
-        PhysicalOp.BroadcastFullOuter(_, _) | PhysicalOp.SortByIntKey(_) =>
+        PhysicalOp.BroadcastFullOuter(_, _) | PhysicalOp.SortByIntKey(_) |
+        PhysicalOp.SortByLongKey(_) =>
       false
 
-  /** An int-key sort is not partition-preserving, and `tryTake` still runs it. */
+  /** A key sort is not partition-preserving, and `tryTake` still runs it. */
   private def acceptsTake(op: PhysicalOp): Boolean = op match
-    case _: PhysicalOp.SortByIntKey => true
+    case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey => true
     case other => preservesPartitions(other)
 
   private def assertRowPath[A](plan: Plan[A]): Unit =

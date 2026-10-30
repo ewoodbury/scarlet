@@ -9,8 +9,9 @@ import com.ewoodbury.scarlet.core.{Plan, PlanWide, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
- * Global sort of typed pairs. An int-pair scan lowers to `SortByIntKey(Scan)`. A long-pair sort
- * stays on the row path. A null key orders as zero and the row is retained, matching `sortBy`.
+ * Global sort of typed pairs. An int-pair scan lowers to `SortByIntKey(Scan)`. A long-pair scan
+ * lowers to `SortByLongKey(Scan)`. A null key orders as zero and the row is retained, matching
+ * `sortBy`.
  */
 class TestSortByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -78,7 +79,13 @@ class TestSortByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       case other => fail(s"expected SortByLongKeyOp, got $other")
     generic.plan shouldBe a[Plan.SortByOp[_, _]]
     assertWideSort(sorted.plan, Ordering.Long)
-    assertRowPath(sorted.plan)
+    ColumnarPlanner.lower(sorted.plan).map(_.shape) shouldBe Some("SortByLongKey(Scan)")
+    val info = ColumnarPlanner.partitioning(sorted.plan).getOrElse(fail("expected a layout"))
+    info.distribution shouldBe Distribution.Range(
+      ScarletConf.get.defaultShufflePartitions,
+      PartitioningInfo.RowKeyOrdinals,
+    )
+    info.ordering shouldBe OrderingTag.Sorted(PartitioningInfo.RowKeyOrdinals, Seq(true))
 
     collect(sorted) shouldBe expected
     collect(sorted) shouldBe expected // idempotent
@@ -122,8 +129,8 @@ class TestSortByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   it should "sort a null key where zero sorts, matching sortBy" in {
     // The key function unboxes column 0. A null int or long unboxes to zero, so it ties with a
-    // present zero and keeps its place in that tie. The null stays in the row. The int scan runs
-    // on the columnar rank split. The long scan stays on the row path.
+    // present zero and keeps its place in that tie. The null stays in the row. Both scans run on
+    // the columnar rank split.
     val ints = Seq(
       intPair(boxedInt(1), boxedInt(10)),
       intPair(noInt, boxedInt(99)),
@@ -165,10 +172,6 @@ class TestSortByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     graph.stages(graph.finalStageId).outputPartitioning shouldBe Some(
       PartitioningInfo.rangeSorted(shufflePartitions),
     )
-
-  private def assertRowPath(plan: Plan[_]): Unit =
-    ColumnarPlanner.lower(plan) shouldBe Option.empty[PhysicalOp]
-    ColumnarPlanner.partitioning(plan) shouldBe Option.empty[PartitioningInfo]
 
   private def collect[A](collection: DistCollection[A]): Seq[A] =
     ScarletRuntime.get.shuffle.clear()
