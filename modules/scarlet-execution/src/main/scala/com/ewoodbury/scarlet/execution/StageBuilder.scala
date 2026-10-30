@@ -341,7 +341,8 @@ object StageBuilder:
    *   4. **Wide Transformations (Shuffle Operations)**:
    *      - GroupByKeyOp, ReduceByKeyOp: Supports shuffle bypass optimization when already
    *        partitioned correctly
-   *      - SortByOp, PartitionByOp, RepartitionOp, CoalesceOp: Always creates shuffle boundaries
+   *      - SortByOp, SortByIntKeyOp, SortByLongKeyOp, PartitionByOp, RepartitionOp, CoalesceOp:
+   *        Always creates shuffle boundaries
    *      - JoinOp, LeftOuterJoinOp, RightOuterJoinOp, FullOuterJoinOp, CoGroupOp: Multi-input wide
    *        operations with side tagging for disambiguation
    *      - Uses WideOp metadata structures for shuffle execution planning
@@ -607,22 +608,37 @@ object StageBuilder:
         }
 
       case sortBy: Plan.SortByOp[_, _] =>
-        val (sourceStageId, _) = buildStagesFromPlan(ctx, sortBy.source, builderMap, dependencies)
-        val n = ScarletConf.get.defaultShufflePartitions
-        val shuffleId = createShuffleStageUnified(
+        sortByShuffle(
           ctx,
-          Seq(sourceStageId),
-          SortByWideOp(
-            SortWideOpMeta(
-              numPartitions = n,
-              keyFunc = sortBy.keyFunc,
-              ordering = sortBy.ordering,
-            ),
-          ),
+          sortBy.source,
+          sortBy.keyFunc,
+          sortBy.ordering,
+          sortBy,
           builderMap,
           dependencies,
         )
-        (shuffleId, Some(sortBy))
+
+      case intSort: Plan.SortByIntKeyOp =>
+        sortByShuffle(
+          ctx,
+          intSort.source,
+          (pair: (Int, Int)) => pair._1,
+          Ordering.Int,
+          intSort,
+          builderMap,
+          dependencies,
+        )
+
+      case longSort: Plan.SortByLongKeyOp =>
+        sortByShuffle(
+          ctx,
+          longSort.source,
+          (pair: (Long, Long)) => pair._1,
+          Ordering.Long,
+          longSort,
+          builderMap,
+          dependencies,
+        )
 
       case pby: Plan.PartitionByOp[_, _] =>
         val (sourceStageId, _) = buildStagesFromPlan(ctx, pby.source, builderMap, dependencies)
@@ -887,6 +903,37 @@ object StageBuilder:
           // Recorded for the plan. The row executor does not read it.
           joinStrategy = joinStrategy,
           sides = Seq(Side.Left, Side.Right),
+        ),
+      ),
+      builderMap,
+      dependencies,
+    )
+    (shuffleId, Some(plan))
+  }
+
+  /**
+   * Range-partitions and locally sorts. `SortByOp`, `SortByIntKeyOp`, and `SortByLongKeyOp` share
+   * this shuffle. The caller supplies the key function and the ordering.
+   */
+  private def sortByShuffle[A, B](
+      ctx: BuildContext,
+      source: Plan[A],
+      keyFunc: A => B,
+      ordering: Ordering[B],
+      plan: Plan[_],
+      builderMap: mutable.Map[StageId, StageDraft],
+      dependencies: mutable.Map[StageId, mutable.Set[StageId]],
+  ): (StageId, Option[Plan[_]]) = {
+    val (sourceStageId, _) = buildStagesFromPlan(ctx, source, builderMap, dependencies)
+    val numPartitions = ScarletConf.get.defaultShufflePartitions
+    val shuffleId = createShuffleStageUnified(
+      ctx,
+      Seq(sourceStageId),
+      SortByWideOp(
+        SortWideOpMeta(
+          numPartitions = numPartitions,
+          keyFunc = keyFunc,
+          ordering = ordering,
         ),
       ),
       builderMap,

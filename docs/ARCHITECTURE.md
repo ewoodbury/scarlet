@@ -191,16 +191,18 @@ the pair type, such as `(Int, Int) => (Long, Int)`, is excluded: `partitioning`,
 `tryGroupedSum` stay on the row path. The structural peel label is still
 `GroupedSum(MapPair(Scan))`.
 
-These 52 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+These 54 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
-`sortBy`, map on join triples, a general tuple filter on join triples, non-Int `mapValues`,
-string/double pair projection or pair filters, string/double-key `groupByKey`, `reduceByKey`, and
-join, long-pair `keys`, `values`, `mapValues`, an element map, `filter`, `filterKeys`,
-`filterValues`, `groupedSum`, and `sortBy` (`take` of a long-pair scan is accepted, and an
-unhinted or shuffle-hash inner join of long pairs is accepted),
+`sortBy`, `sortByIntKey`, `sortByLongKey`, map on join triples, a general tuple filter on join
+triples, non-Int `mapValues`, string/double pair projection or pair filters, string/double-key
+`groupByKey`, `reduceByKey`, and join, long-pair `keys`, `values`, `mapValues`, an element map,
+`filter`, `filterKeys`, `filterValues`, `groupedSum`, and `sortBy` (`take` of a long-pair scan is
+accepted, and an unhinted or shuffle-hash inner join of long pairs is accepted),
 single-precision `Float` sources/maps, all-null strings, empty generic sources without a type
 descriptor, and element maps that do not preserve the column type.
-That is 53 previous exclusions, minus the unhinted long join. 53 - 1 = 52. Long broadcast,
+That is 53 previous exclusions, minus the unhinted long join. 53 - 1 = 52. `sortByIntKey` and
+`sortByLongKey` are row-path shapes because this PR has no columnar arm for either node.
+52 + 2 = 54. Accepted stays 178. Long broadcast,
 sort-merge, and outer joins stay on the row path. They are covered by execution tests, not
 contract fixtures, because the contract does not track the int refusals either.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then

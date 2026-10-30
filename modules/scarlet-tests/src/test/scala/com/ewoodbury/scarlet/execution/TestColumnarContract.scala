@@ -34,11 +34,13 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     // and an explicit shuffle-hash long-pair join is added. 176 + 1 + 1 = 178.
     accepted.size shouldBe 178
     // Broadcast, shuffle-hash, unhinted, and explicit sort-merge joins of int pairs are accepted,
-    // including left, right, and full outer. 53 previous exclusions, minus the unhinted long-pair
-    // join that is now accepted. 53 - 1 = 52. Long broadcast, sort-merge, and outer joins stay on
-    // the row path. They are covered by execution tests, not contract fixtures, because the
-    // contract does not track the int refusals either.
-    excluded.size shouldBe 52
+    // including left, right, and full outer. 52 previous exclusions. sortByIntKey and
+    // sortByLongKey are both new exclusions: the columnar planner does not match either node.
+    // 52 + 2 = 54.
+    // Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by
+    // execution tests, not contract fixtures, because the contract does not track the int
+    // refusals either.
+    excluded.size shouldBe 54
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -632,6 +634,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ExcludedCase("groupByKey int", Plan.GroupByKeyOp(pairSource)),
       ExcludedCase("cogroup", Plan.CoGroupOp(pairSource, rightPairSource)),
       ExcludedCase("sortBy", Plan.SortByOp(intSource, (value: Int) => value, Ordering.Int)),
+      ExcludedCase("sortByIntKey", Plan.SortByIntKeyOp(pairSource)),
+      ExcludedCase("sortByLongKey", Plan.SortByLongKeyOp(longPairSource)),
       ExcludedCase("map on triples", tripleMapped),
       ExcludedCase("generic triple filter", genericTripleFilter),
       ExcludedCase("mapValues to string", stringMapValues),
@@ -936,6 +940,9 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case Plan.GroupByKeyOp(_) => PlanNode.GroupByKey
     case Plan.ReduceByKeyOp(_, _) => PlanNode.ReduceByKey
     case Plan.SortByOp(_, _, _) => PlanNode.SortBy
+    // Typed key nodes deliberately share the generic PlanNode.SortBy label.
+    case Plan.SortByIntKeyOp(_) => PlanNode.SortBy
+    case Plan.SortByLongKeyOp(_) => PlanNode.SortBy
     case Plan.JoinOp(_, _, _) => PlanNode.Join
     case Plan.LeftOuterJoinOp(_, _, _) => PlanNode.Join
     case Plan.RightOuterJoinOp(_, _, _) => PlanNode.Join
