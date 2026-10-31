@@ -56,8 +56,15 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * Nearest-rank percentiles use 1-based rank `ceil(p / 100 * n)` with no interpolation. p95 has
  * samples above it; it is not a stable tail. `max` is the largest sample.
  *
+ * An optional `large` argument runs [[SortScaleBench]] instead of this suite. That mode times
+ * only the int-key and long-key sorts, at 5e6 rows, columnar only, at widths 1 and 4, then a 1e6
+ * spill stress at width 1. It discards two warmup rounds and measures ten. The row path is not
+ * run there. With no arguments, the suite described above runs. Those are the only accepted
+ * invocations. Any other argument prints usage to stderr and exits nonzero.
+ *
  * {{{
  * sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.QueryBench"
+ * sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.QueryBench large"
  * }}}
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
@@ -107,6 +114,16 @@ object QueryBench:
     }
 
   def main(args: Array[String]): Unit =
+    args.toList match
+      case Nil => runDefault()
+      case "large" :: Nil => SortScaleBench.run()
+      case other =>
+        System.err.println(s"usage: QueryBench [large], got ${other.mkString(" ")}")
+        System.err.println("accepted: no arguments, or large")
+        sys.exit(1)
+
+  /** The suite timed by `QueryBench` with no arguments. */
+  private def runDefault(): Unit =
     checkHarness()
     val savedConf = ScarletConf.get
     val savedRuntime = ScarletRuntime.get
