@@ -213,6 +213,74 @@ checksum mix. A long-pair sort spills when `spillEnabled` is on and the retained
 `spillBudgetBytes`. One input partition is still sorted in memory when spill is on. This run
 leaves spill off, so the timed path is the in-memory rank split.
 
+### Sort at scale
+
+`QueryBench large` times only the sort cases. The default suite, including the 1e6 table above,
+is unchanged. `make test` does not run this mode, and it does not assert on timing.
+
+```shell
+sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.QueryBench large"
+```
+
+`QueryBench` accepts no arguments, or a single `large` argument. Any other argument prints usage
+to stderr and exits nonzero.
+
+Two warmup rounds are discarded. Ten rounds are measured, fewer than the default forty.
+Percentiles are nearest-rank: the 1-based rank is `ceil(p / 100 * n)`, with no interpolation.
+For 10 samples, p50 is rank 5 and p95 is rank 10, the same sample as max. p95 is not a stable
+tail. Widths 1 and 4 share one JVM. Width order flips each round, and each width leads half of
+the measured rounds. `runMain` executes in the sbt JVM with `Test / fork` left false, so absolute
+times carry sbt and JIT noise. Comparisons within one run are the signal.
+
+`int-sort-key-large` and `long-sort-key-large` use the same construction as the 1e6 sort queries,
+with the row count set to 5e6: two source partitions, batch size 8192, a Fisher-Yates permutation
+of the keys, and values from the shared generator. Long pairs widen those ints. The path is
+columnar only. The checksum is a local stable sort of the same pairs, compared before warmup and
+after the measured rounds, outside the timer. A columnar sample must publish at least one batch.
+`alloc_mb` uses the same method as the default run. The same method at widths 1 and 4 does not
+mean the two numbers are identical.
+
+The row path was not run at 5e6. That is a scope decision. The 1e6 figures in the table above are
+the existing row results: int-key p50 866.004 ms at one thread and 676.104 ms at four, long-key
+p50 977.116 ms and 652.861 ms. Scaling those per-type allocation numbers by five (int about
+456 MB, long about 504 MB) gives an extrapolated cumulative allocation of about 2.3–2.5 GB. That
+figure is not peak heap. The sbt JVM heap max on this run was 3221225472 bytes (3 GiB). The heap
+is left unchanged.
+
+Two stress cases run in the same mode, at 1e6 rows, columnar, width 1. `int-sort-key-spill` and
+`long-sort-key-spill` set `spillEnabled` and `spillBudgetBytes` to 64 KiB. Expected file and pass
+counts are derived from the two source partitions and `spillFanIn` (default 8): each partition is
+one run, and runs merge until one file remains, which is 3 files and 1 pass. A case that does not
+match fails the run, including one with `merge_passes == 0` after a file was written, and no
+table is printed. Scale rows leave spill off, so `files_written` and `merge_passes` are 0.
+`files_written` is a publish count, not a live-file count. The rank-split store deletes every run
+at close. `RankSplitRuns` and `RankSplitLongRuns` are reset before each attempt, and again after
+`ScarletConf` and `ScarletRuntime` are restored. Stdout is JSON lines with schema `sort-scale-1`.
+The line below is the recorded `int-sort-key-large` row at one thread:
+
+```text
+{"schema":"sort-scale-1","query":"int-sort-key-large","layout":"columnar","threads":1,"rows":5000000,"batch":8192,"rounds":10,"p50_ms":1775.479,"p95_ms":1898.118,"max_ms":1898.118,"alloc_mb":667.044,"files_written":0,"merge_passes":0,"checksum":-9016398097113063634}
+```
+
+Recorded on the same Apple M1 Pro (8 cores), OpenJDK 64-Bit Server VM 17.0.16, through `sbt` with
+`Test / fork` left false, on 2026-10-31. The preamble printed
+`java=OpenJDK 64-Bit Server VM 17.0.16+0`. The whole run took 139.586 s. That recording stopped
+before spill-directory cleanup. Later runs include cleanup in `wall_s`.
+
+| query | layout | threads | rows | p50 ms | p95 ms | max ms | alloc mb | files_written | merge_passes |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| int-sort-key-large | columnar | 1 | 5000000 | 1775.479 | 1898.118 | 1898.118 | 667.044 | 0 | 0 |
+| int-sort-key-large | columnar | 4 | 5000000 | 1156.652 | 1517.551 | 1517.551 | 667.047 | 0 | 0 |
+| long-sort-key-large | columnar | 1 | 5000000 | 1923.738 | 2290.469 | 2290.469 | 867.049 | 0 | 0 |
+| long-sort-key-large | columnar | 4 | 5000000 | 1475.988 | 1806.404 | 1806.404 | 867.064 | 0 | 0 |
+| int-sort-key-spill | columnar | 1 | 1000000 | 277.883 | 405.259 | 405.259 | 208.805 | 3 | 1 |
+| long-sort-key-spill | columnar | 1 | 1000000 | 314.701 | 398.685 | 398.685 | 320.885 | 3 | 1 |
+
+The scale checksum is `-9016398097113063634`. The spill checksum is `-2192214190940607341`, the
+same value as the 1e6 sort queries above, because those inputs match. Each stress row wrote 3
+files and took 1 merge pass. Within this run, int-key p50 is 1775.479 ms at one thread and
+1156.652 ms at four. Long-key p50 is 1923.738 ms at one thread and 1475.988 ms at four.
+
 ## Spill
 
 `SpillBench` times grouped sum and sort-merge with spill off, with spill on at the default
