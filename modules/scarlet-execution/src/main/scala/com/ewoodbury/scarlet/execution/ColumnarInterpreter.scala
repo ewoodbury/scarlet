@@ -32,14 +32,20 @@ private[execution] object ColumnarInterpreter:
       source: Plan[_],
       child: PhysicalOp,
       ordinal: Int,
-      selectedPartition: Option[Int] = None,
-      preserveAbsence: Boolean = false,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
   ): Columns =
-    val columns = pairsOf(interpret(source, child, selectedPartition, preserveAbsence)).map {
-      batch =>
-        ColumnBatches.takeColumn(batch, ordinal)
-    }
+    val columns = pairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals))
+      .map { batch =>
+        // A singleton encode stores the demanded ordinal at index 0.
+        ColumnBatches.takeColumn(batch, encodedIndex(batch, ordinal))
+      }
     Columns.Ints(columns)
+
+  /** Index of `ordinal` after a one-column encode. Both columns keep their indexes. */
+  private def encodedIndex(batch: ColumnBatch, ordinal: Int): Int =
+    if (batch.columns.length == 1) then 0 else ordinal
 
   private[execution] def batchesOf(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.Ints(parts) => parts
@@ -161,6 +167,25 @@ private[execution] object ColumnarInterpreter:
       op: PhysicalOp,
       selectedPartition: Option[Int] = None,
       preserveAbsence: Boolean = false,
+  ): Columns =
+    interpretAt(
+      plan,
+      op,
+      selectedPartition,
+      preserveAbsence,
+      ColumnUse.ordinals(plan, op),
+    )
+
+  /**
+   * `ordinals` is the scan demand of the root plan. Recursive calls pass that same set.
+   * Recomputing it on a peeled child would forget a projection or a filter above the peel.
+   */
+  private[execution] def interpretAt(
+      plan: Plan[_],
+      op: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
   ): Columns = (plan, op) match
     case (Plan.Source(partitions, _), PhysicalOp.Scan(kind, _)) =>
       val selected = selectPartition(partitions, selectedPartition)
@@ -172,7 +197,8 @@ private[execution] object ColumnarInterpreter:
           // preserveAbsence keeps a null key or a null value in the pair columns. It is not the
           // probe side. Other pair plans still unbox.
           val encoded =
-            if (preserveAbsence) then encodeGroupedPairs(selected) else encodePairs(selected)
+            if (preserveAbsence) then encodeGroupedPairs(selected)
+            else encodePairs(selected, ordinals)
           Columns.Pairs(encoded)
         case PhysicalOp.Kind.LongPairs => Columns.LongPairs(encodeLongPairs(selected))
         case PhysicalOp.Kind.Strings => Columns.Strings(encodeStrings(selected))
@@ -185,11 +211,11 @@ private[execution] object ColumnarInterpreter:
     // `accepts` walks the logical plan, so it runs only for a filter node.
     case (logical, physical)
         if physical.isInstanceOf[PhysicalOp.Filter] && FilterChain.accepts(logical, physical) =>
-      FilterChain.run(logical, physical, selectedPartition, preserveAbsence)
+      FilterChain.run(logical, physical, selectedPartition, preserveAbsence, ordinals)
     case (Plan.MapOp(source, mapper), PhysicalOp.Project(child)) =>
-      project(interpret(source, child, selectedPartition, preserveAbsence), mapper)
+      project(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals), mapper)
     case (logical, PhysicalOp.Pipeline(child, length)) =>
-      interpretPipeline(logical, child, length, selectedPartition, preserveAbsence)
+      interpretPipeline(logical, child, length, selectedPartition, preserveAbsence, ordinals)
     case (Plan.KeysOp(source), PhysicalOp.Column(child, 0)) =>
       pairProjection(
         source,
@@ -197,6 +223,7 @@ private[execution] object ColumnarInterpreter:
         ordinal = 0,
         selectedPartition = selectedPartition,
         preserveAbsence = preserveAbsence,
+        ordinals = ordinals,
       )
     case (Plan.ValuesOp(source), PhysicalOp.Column(child, 1)) =>
       pairProjection(
@@ -205,6 +232,7 @@ private[execution] object ColumnarInterpreter:
         ordinal = 1,
         selectedPartition = selectedPartition,
         preserveAbsence = preserveAbsence,
+        ordinals = ordinals,
       )
     case (Plan.MapValuesOp(source, mapper), PhysicalOp.MapValue(child)) =>
       // Named erasure boundary. The descriptor check verified the declared `Int => Int` shape
@@ -212,15 +240,16 @@ private[execution] object ColumnarInterpreter:
       @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val fn = mapper.asInstanceOf[Int => Int]
       Columns.Pairs(
-        onEachMorsel(pairsOf(interpret(source, child, selectedPartition, preserveAbsence))) {
-          morsel =>
-            ColumnKernel.projectInt32(
-              morsel.batch,
-              1,
-              morsel.start,
-              morsel.length,
-              value => fn(value),
-            )
+        onEachMorsel(
+          pairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)),
+        ) { morsel =>
+          ColumnKernel.projectInt32(
+            morsel.batch,
+            1,
+            morsel.start,
+            morsel.length,
+            value => fn(value),
+          )
         },
       )
     case (
@@ -234,7 +263,7 @@ private[execution] object ColumnarInterpreter:
       val op = reduceFunc.asInstanceOf[(Int, Int) => Int]
       Columns.Pairs(
         HashReduce.byKey(
-          pairsOf(interpret(source, child, selectedPartition, preserveAbsence)),
+          pairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)),
           ColumnarPlanner.shuffleWidth,
           ColumnarPlanner.parallelism,
           ColumnarPlanner.batchSize,
@@ -252,7 +281,7 @@ private[execution] object ColumnarInterpreter:
       val op = reduceFunc.asInstanceOf[(Long, Long) => Long]
       Columns.LongPairs(
         LongHashReduce.byKey(
-          longPairsOf(interpret(source, child, selectedPartition, preserveAbsence)),
+          longPairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)),
           ColumnarPlanner.shuffleWidth,
           ColumnarPlanner.parallelism,
           ColumnarPlanner.batchSize,
@@ -267,8 +296,8 @@ private[execution] object ColumnarInterpreter:
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       Columns.Triples(
         ColumnPipeline.innerJoin(
-          pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence)),
-          pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence)),
+          pairsOf(interpretAt(left, leftOp, selectedPartition, preserveAbsence, ordinals)),
+          pairsOf(interpretAt(right, rightOp, selectedPartition, preserveAbsence, ordinals)),
           ColumnarPlanner.shuffleWidth,
           ColumnarPlanner.parallelism,
           ColumnarPlanner.batchSize,
@@ -280,8 +309,12 @@ private[execution] object ColumnarInterpreter:
         ) if ColumnarPlanner.acceptsShuffleHash(strategy) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      val leftBatches = longPairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence))
-      val rightBatches = longPairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence))
+      val leftBatches = longPairsOf(
+        interpretAt(left, leftOp, selectedPartition, preserveAbsence, ordinals),
+      )
+      val rightBatches = longPairsOf(
+        interpretAt(right, rightOp, selectedPartition, preserveAbsence, ordinals),
+      )
       // Validity words are already on the columns. A null value is not a decoded long, so the
       // kernel is not chosen.
       val valuesPresent =
@@ -311,8 +344,8 @@ private[execution] object ColumnarInterpreter:
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       Columns.Triples(
         ColumnPipeline.sortMergeJoin(
-          pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence)),
-          pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence)),
+          pairsOf(interpretAt(left, leftOp, selectedPartition, preserveAbsence, ordinals)),
+          pairsOf(interpretAt(right, rightOp, selectedPartition, preserveAbsence, ordinals)),
           ColumnarPlanner.shuffleWidth,
           ColumnarPlanner.parallelism,
           ColumnarPlanner.batchSize,
@@ -324,8 +357,12 @@ private[execution] object ColumnarInterpreter:
         ) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      val leftBatches = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence))
-      val rightBatches = pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence))
+      val leftBatches = pairsOf(
+        interpretAt(left, leftOp, selectedPartition, preserveAbsence, ordinals),
+      )
+      val rightBatches = pairsOf(
+        interpretAt(right, rightOp, selectedPartition, preserveAbsence, ordinals),
+      )
       val (probe, build) = buildSide match
         case PhysicalOp.BuildSide.Right => (leftBatches, rightBatches)
         case PhysicalOp.BuildSide.Left => (rightBatches, leftBatches)
@@ -348,8 +385,12 @@ private[execution] object ColumnarInterpreter:
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       // preserveAbsence keeps null keys. It is not the probe side. The right input is the build.
-      val probe = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
-      val build = pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+      val probe = pairsOf(
+        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
+      )
+      val build = pairsOf(
+        interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
+      )
       // Validity words are already on the columns. A null value is not a probe-side row with no
       // partner, and this path cannot represent one, so the kernel is not chosen.
       val valuesPresent =
@@ -378,8 +419,12 @@ private[execution] object ColumnarInterpreter:
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       // preserveAbsence keeps null keys. The left input is the probe side. Its exchange carries a
       // null key. The right input is the build side. Its exchange drops a null key.
-      val probe = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
-      val build = pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+      val probe = pairsOf(
+        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
+      )
+      val build = pairsOf(
+        interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
+      )
       // Validity words are already on the columns. A null value is not a probe-side row with no
       // partner, and this path cannot represent one, so the kernel is not chosen.
       val valuesPresent =
@@ -407,8 +452,12 @@ private[execution] object ColumnarInterpreter:
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       // preserveAbsence keeps null keys. The left input is the build. The right input is the
       // probe, so unmatched right rows are kept.
-      val build = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
-      val probe = pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+      val build = pairsOf(
+        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
+      )
+      val probe = pairsOf(
+        interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
+      )
       rightOuter(probe, build) { (probeBatches, buildBatches) =>
         ColumnPipeline.broadcastLeftOuterJoin(
           probeBatches,
@@ -428,8 +477,12 @@ private[execution] object ColumnarInterpreter:
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       // preserveAbsence keeps null keys. The right input is the probe side. Its exchange carries
       // a null key. The left input is the build side. Its exchange drops a null key.
-      val build = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
-      val probe = pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+      val build = pairsOf(
+        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
+      )
+      val probe = pairsOf(
+        interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
+      )
       rightOuter(probe, build) { (probeBatches, buildBatches) =>
         ColumnPipeline.hashLeftOuterJoin(
           probeBatches,
@@ -448,8 +501,12 @@ private[execution] object ColumnarInterpreter:
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       /* preserveAbsence keeps null keys. The left input is the probe. The right input is the
        * build. */
-      val probe = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
-      val build = pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+      val probe = pairsOf(
+        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
+      )
+      val build = pairsOf(
+        interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
+      )
       fullOuter(probe, build) { (probeBatches, buildBatches) =>
         ColumnPipeline.broadcastFullOuterJoin(
           probeBatches,
@@ -469,8 +526,12 @@ private[execution] object ColumnarInterpreter:
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       // preserveAbsence keeps null keys. Both exchanges carry a null key. The right input is the
       // build side. A null build key is carried outside the table.
-      val probe = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
-      val build = pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+      val probe = pairsOf(
+        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
+      )
+      val build = pairsOf(
+        interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
+      )
       fullOuter(probe, build) { (probeBatches, buildBatches) =>
         ColumnPipeline.hashFullOuterJoin(
           probeBatches,
@@ -492,8 +553,12 @@ private[execution] object ColumnarInterpreter:
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       // preserveAbsence keeps null keys. The left exchange carries a null key. The right exchange
       // drops one. The kernel publishes (key, left, right).
-      val probe = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
-      val build = pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+      val probe = pairsOf(
+        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
+      )
+      val build = pairsOf(
+        interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
+      )
       val valuesPresent =
         ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
       if (!valuesPresent) then
@@ -521,9 +586,11 @@ private[execution] object ColumnarInterpreter:
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       // preserveAbsence keeps null keys. The kernel swaps the value columns back. Do not swap
       // again here.
-      val leftBatches = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
+      val leftBatches = pairsOf(
+        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
+      )
       val rightBatches =
-        pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+        pairsOf(interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals))
       val valuesPresent =
         ColumnPipeline.valuesFullyPresent(leftBatches) &&
           ColumnPipeline.valuesFullyPresent(rightBatches)
@@ -551,8 +618,12 @@ private[execution] object ColumnarInterpreter:
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       // preserveAbsence keeps null keys. Both exchanges carry a null key.
-      val probe = pairsOf(interpret(left, leftOp, selectedPartition, preserveAbsence = true))
-      val build = pairsOf(interpret(right, rightOp, selectedPartition, preserveAbsence = true))
+      val probe = pairsOf(
+        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
+      )
+      val build = pairsOf(
+        interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
+      )
       fullOuter(probe, build) { (probeBatches, buildBatches) =>
         ColumnPipeline.sortMergeFullOuterJoin(
           probeBatches,
@@ -569,7 +640,9 @@ private[execution] object ColumnarInterpreter:
       // The physical op stays SortByIntKey. Run and take both reach this arm. RankSplitRuns
       // chooses the in-memory split or spilled runs. Take decodes only the prefix of the result.
       val batches =
-        pairsOf(interpret(source, child, selectedPartition = None, preserveAbsence = true))
+        pairsOf(
+          interpretAt(source, child, selectedPartition = None, preserveAbsence = true, ordinals),
+        )
       val sorted = RankSplitRuns.sortAndSplit(
         batches,
         ColumnarPlanner.shuffleWidth,
@@ -586,7 +659,9 @@ private[execution] object ColumnarInterpreter:
       // this arm. RankSplitLongRuns chooses the in-memory split or spilled runs. Take decodes
       // only the prefix of the result.
       val batches =
-        longPairsOf(interpret(source, child, selectedPartition = None, preserveAbsence = true))
+        longPairsOf(
+          interpretAt(source, child, selectedPartition = None, preserveAbsence = true, ordinals),
+        )
       val sorted = RankSplitLongRuns.sortAndSplit(
         batches,
         ColumnarPlanner.shuffleWidth,
@@ -640,12 +715,13 @@ private[execution] object ColumnarInterpreter:
       length: Int,
       selectedPartition: Option[Int],
       preserveAbsence: Boolean,
+      ordinals: Set[Int],
   ): Columns =
     val (source, steps) = ColumnarPlanner.elementSteps(plan, length)
     if (steps.length < length) then
       // Lowering uses this same collector, so this only guards a malformed physical tree.
       throw new IllegalStateException("pipeline does not match logical element steps")
-    pipeline(interpret(source, child, selectedPartition, preserveAbsence), steps)
+    pipeline(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals), steps)
 
   private def pipeline(
       columns: Columns,
@@ -767,7 +843,7 @@ private[execution] object ColumnarInterpreter:
         Columns.Pairs(onEachMorsel(pairsOf(columns)) { morsel =>
           ColumnKernel.filterInt32(
             morsel.batch,
-            0,
+            encodedIndex(morsel.batch, 0),
             morsel.start,
             morsel.length,
             value => keep(value),
@@ -778,7 +854,7 @@ private[execution] object ColumnarInterpreter:
         Columns.Pairs(onEachMorsel(pairsOf(columns)) { morsel =>
           ColumnKernel.filterInt32(
             morsel.batch,
-            1,
+            encodedIndex(morsel.batch, 1),
             morsel.start,
             morsel.length,
             value => keep(value),
@@ -987,8 +1063,37 @@ private[execution] object ColumnarInterpreter:
           BatchCodec.ints(rows)
     }.toVector
 
-  private def encodePairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
-    encodePairPartitions(partitions, rows => BatchCodec.intPairs(rows))
+  /**
+   * Encode the ordinals [[ColumnUse]] demanded. `{0}` copies keys and `{1}` copies values, each as
+   * one `Int32` column at index 0. Any other set, including `{0, 1}`, keeps both columns.
+   * [[encodePairPartitions]] is unchanged, so grouped sum and the absence-preserving copy still
+   * take both arrays. `primitiveEncode` stays one note per partition.
+   */
+  private def encodePairs(
+      partitions: Seq[Partition[_]],
+      ordinals: Set[Int],
+  ): Vector[ColumnBatch] =
+    if (ordinals.size == 1 && ordinals.contains(0)) then encodeOneSide(partitions, key = true)
+    else if (ordinals.size == 1 && ordinals.contains(1)) then
+      encodeOneSide(partitions, key = false)
+    else encodePairPartitions(partitions, rows => BatchCodec.intPairs(rows))
+
+  private def encodeOneSide(partitions: Seq[Partition[_]], key: Boolean): Vector[ColumnBatch] =
+    import com.ewoodbury.scarlet.core.IntPairArrays
+
+    partitions.map { partition =>
+      partition.data match
+        case pairs: IntPairArrays =>
+          val column = if (key) then pairs.keys else pairs.values
+          BatchCodec.copiedInts(column)
+        case other =>
+          // Named erasure boundary. Classification already selected `(Int, Int)` elements.
+          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+          val rows = other.asInstanceOf[Iterable[(Int, Int)]]
+          val side: Iterable[Int] =
+            if (key) then rows.map(pair => pair._1) else rows.map(pair => pair._2)
+          BatchCodec.ints(side)
+    }.toVector
 
   private def encodeLongPairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
     import com.ewoodbury.scarlet.core.LongPairArrays
@@ -1014,8 +1119,8 @@ private[execution] object ColumnarInterpreter:
 
   /**
    * Pair encode for grouped sum. [[BatchCodec.intPairsPreservingAbsence]] keeps a null component
-   * absent and rejects any other non-int cell. An owned pair array has no nulls and is copied like
-   * [[encodePairs]].
+   * absent and rejects any other non-int cell. An owned pair array has no nulls and is copied
+   * through [[encodePairPartitions]], both columns. A singleton demand does not reach this path.
    */
   private[execution] def encodeGroupedPairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
     encodePairPartitions(partitions, rows => BatchCodec.intPairsPreservingAbsence(rows))
