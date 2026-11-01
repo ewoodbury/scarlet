@@ -42,13 +42,15 @@ private[execution] object FilterChain:
       op: PhysicalOp,
       selectedPartition: Option[Int],
       preserveAbsence: Boolean,
+      ordinals: Set[Int],
   ): Columns =
     val peeled = peel(plan, op)
-    val columns = ColumnarInterpreter.interpret(
+    val columns = ColumnarInterpreter.interpretAt(
       peeled.plan,
       peeled.op,
       selectedPartition,
       preserveAbsence,
+      ordinals,
     )
     peeled.layers match
       case Nil =>
@@ -56,7 +58,7 @@ private[execution] object FilterChain:
       case layer :: Nil =>
         ColumnarInterpreter.applyFilter(columns, layer.predicate, layer.slot)
       case stacked =>
-        select(columns, stacked)
+        select(columns, stacked, ordinals)
 
   @tailrec
   private def walk(plan: Plan[_], op: PhysicalOp, acc: List[Layer]): Peeled =
@@ -79,25 +81,26 @@ private[execution] object FilterChain:
         Some((source, child, Layer(predicate, PhysicalOp.Slot.Value)))
       case _ => None
 
-  private def select(columns: Columns, layers: List[Layer]): Columns = columns match
-    case Columns.Ints(parts) =>
-      Columns.Ints(finish(parts, layers.map(stepOnInts)))
-    case Columns.Longs(parts) =>
-      Columns.Longs(finish(parts, layers.map(stepOnLongs)))
-    case Columns.Floats(parts) =>
-      Columns.Floats(finish(parts, layers.map(stepOnFloats)))
-    case Columns.Strings(parts) =>
-      Columns.Strings(finish(parts, layers.map(stepOnStrings)))
-    case Columns.Bools(parts) =>
-      Columns.Bools(finish(parts, layers.map(stepOnBools)))
-    case Columns.Pairs(_) =>
-      val steps = layers.map(stepOnPairs)
-      Columns.Pairs(finish(ColumnarInterpreter.pairsOf(columns), steps))
-    case Columns.Triples(_) =>
-      val steps = layers.map(stepOnTriples)
-      Columns.Triples(finish(ColumnarInterpreter.triplesOf(columns), steps))
-    case Columns.LongPairs(_) | Columns.LongTriples(_) | Columns.Outer(_, _) =>
-      refuse(layers)
+  private def select(columns: Columns, layers: List[Layer], ordinals: Set[Int]): Columns =
+    columns match
+      case Columns.Ints(parts) =>
+        Columns.Ints(finish(parts, layers.map(stepOnInts)))
+      case Columns.Longs(parts) =>
+        Columns.Longs(finish(parts, layers.map(stepOnLongs)))
+      case Columns.Floats(parts) =>
+        Columns.Floats(finish(parts, layers.map(stepOnFloats)))
+      case Columns.Strings(parts) =>
+        Columns.Strings(finish(parts, layers.map(stepOnStrings)))
+      case Columns.Bools(parts) =>
+        Columns.Bools(finish(parts, layers.map(stepOnBools)))
+      case Columns.Pairs(_) =>
+        val steps = layers.map(layer => stepOnPairs(layer, ordinals))
+        Columns.Pairs(finish(ColumnarInterpreter.pairsOf(columns), steps))
+      case Columns.Triples(_) =>
+        val steps = layers.map(stepOnTriples)
+        Columns.Triples(finish(ColumnarInterpreter.triplesOf(columns), steps))
+      case Columns.LongPairs(_) | Columns.LongTriples(_) | Columns.Outer(_, _) =>
+        refuse(layers)
 
   private def finish(parts: Vector[ColumnBatch], steps: Seq[Selection.Step]): Vector[ColumnBatch] =
     val prepared = parts.map(part => part -> Selection.prepare(part, steps)).toMap
@@ -174,9 +177,12 @@ private[execution] object FilterChain:
           PhysicalOp.Slot.TripleRightValue =>
         throw new IllegalStateException("columnar op expected int triples")
 
-  private def stepOnPairs(layer: Layer): Selection.Step = layer.slot match
+  private def stepOnPairs(layer: Layer, ordinals: Set[Int]): Selection.Step = layer.slot match
     case PhysicalOp.Slot.Key => intOrdinal(layer.predicate, 0)
-    case PhysicalOp.Slot.Value => intOrdinal(layer.predicate, 1)
+    case PhysicalOp.Slot.Value =>
+      // A one-column encode stores that column at index 0. Both columns keep the value at 1.
+      val index = if (ordinals.size == 1) then 0 else 1
+      intOrdinal(layer.predicate, index)
     case PhysicalOp.Slot.Row =>
       val keep = layer.predicate.asInstanceOf[((Int, Int)) => Boolean]
       val adapted: PairKernel.IntPairPredicate = (key, value) => keep((key, value))
