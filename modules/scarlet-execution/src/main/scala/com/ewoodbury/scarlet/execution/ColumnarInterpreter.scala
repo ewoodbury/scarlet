@@ -181,27 +181,15 @@ private[execution] object ColumnarInterpreter:
           throw new IllegalStateException(
             s"physical tree does not match ${plan.getClass.getSimpleName}",
           )
-    case (Plan.FilterOp(source, predicate), PhysicalOp.Filter(child, slot)) =>
-      applyFilter(interpret(source, child, selectedPartition, preserveAbsence), predicate, slot)
+    // Two or more filters compact once. A lone filter stays on the existing kernels.
+    // `accepts` walks the logical plan, so it runs only for a filter node.
+    case (logical, physical)
+        if physical.isInstanceOf[PhysicalOp.Filter] && FilterChain.accepts(logical, physical) =>
+      FilterChain.run(logical, physical, selectedPartition, preserveAbsence)
     case (Plan.MapOp(source, mapper), PhysicalOp.Project(child)) =>
       project(interpret(source, child, selectedPartition, preserveAbsence), mapper)
     case (logical, PhysicalOp.Pipeline(child, length)) =>
       interpretPipeline(logical, child, length, selectedPartition, preserveAbsence)
-    case (Plan.FilterKeysOp(source, predicate), PhysicalOp.Filter(child, PhysicalOp.Slot.Key)) =>
-      applyFilter(
-        interpret(source, child, selectedPartition, preserveAbsence),
-        predicate,
-        PhysicalOp.Slot.Key,
-      )
-    case (
-          Plan.FilterValuesOp(source, predicate),
-          PhysicalOp.Filter(child, PhysicalOp.Slot.Value),
-        ) =>
-      applyFilter(
-        interpret(source, child, selectedPartition, preserveAbsence),
-        predicate,
-        PhysicalOp.Slot.Value,
-      )
     case (Plan.KeysOp(source), PhysicalOp.Column(child, 0)) =>
       pairProjection(
         source,
@@ -690,7 +678,11 @@ private[execution] object ColumnarInterpreter:
         PhysicalOp.Slot.Value =>
       throw new IllegalStateException("triple filter has a non-triple slot")
 
-  private def applyFilter(columns: Columns, predicate: Any, slot: PhysicalOp.Slot): Columns =
+  private[execution] def applyFilter(
+      columns: Columns,
+      predicate: Any,
+      slot: PhysicalOp.Slot,
+  ): Columns =
     slot match
       case PhysicalOp.Slot.Element =>
         columns match
@@ -890,7 +882,7 @@ private[execution] object ColumnarInterpreter:
         Columns.Outer(_, _) =>
       throw new IllegalStateException("columnar op expected int pairs")
 
-  private def triplesOf(columns: Columns): Vector[ColumnBatch] = columns match
+  private[execution] def triplesOf(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.Triples(parts) if parts.nonEmpty => parts
     case Columns.Triples(_) =>
       throw new IllegalStateException("columnar triples have no partitions")
@@ -926,7 +918,7 @@ private[execution] object ColumnarInterpreter:
    * One visit per morsel of the shared batch. The function owns its output. Regroup uses the same
    * per-part visit counts as the fan-out above.
    */
-  private def onEachMorsel(
+  private[execution] def onEachMorsel(
       parts: Vector[ColumnBatch],
   )(fn: Morsel => ColumnBatch): Vector[ColumnBatch] =
     fanOut(parts)(part => Morsels.of(part, ColumnarPlanner.batchSize))(fn)
