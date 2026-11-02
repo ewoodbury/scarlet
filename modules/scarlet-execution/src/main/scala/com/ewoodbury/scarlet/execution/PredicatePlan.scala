@@ -3,7 +3,7 @@ package com.ewoodbury.scarlet.execution
 import scala.annotation.tailrec
 
 import com.ewoodbury.scarlet.api.IntJoinTriplePredicate
-import com.ewoodbury.scarlet.columnar.{ColumnBatch, ColumnKernel, PairKernel, Selection}
+import com.ewoodbury.scarlet.columnar.{ColumnBatch, ColumnKernel, PairKernel, PairStep, Selection}
 import com.ewoodbury.scarlet.core.Plan
 
 /**
@@ -13,7 +13,8 @@ import com.ewoodbury.scarlet.core.Plan
  * cast reads the erased function once and does not call it. [[applyAtom]] runs one existing kernel
  * on the given range. It does not take a [[Compiled]], so an encoder cannot apply the predicate a
  * second time. [[selectionSteps]] returns steps only for a pair or triple stack. An element stack
- * is `None`, and the caller chains [[applyAtom]], one morsel visit per atom.
+ * is `None`, and the caller chains [[applyAtom]], one morsel visit per atom. [[pairSteps]] is the
+ * keep vector for a pair stack. It is not a second compile, and it is not [[selectionSteps]].
  *
  * Named erasure boundary. The physical slot chose the function. A wrong erased type throws
  * `ClassCastException`, and [[ColumnarPlanner.tryRun]] returns `None`.
@@ -111,6 +112,63 @@ private[execution] object PredicatePlan:
     else if (compiled.atoms.forall(isTripleAtom)) then Some(compiled.atoms.map(tripleSelection))
     else None
 
+  /**
+   * Pair keep steps in source order. `None` unless every atom is a pair keep, so the vector is
+   * only [[PairStep.KeepKey]], [[PairStep.KeepValue]], and [[PairStep.KeepRow]]. The predicate was
+   * cast when the atom was built. This does not cast it again and does not run it. Interpreting
+   * the filtered plan and also passing the vector to `sumByKey` applies it twice.
+   */
+  def pairSteps(compiled: Compiled): Option[Vector[PairStep]] =
+    val seed: Option[Vector[PairStep]] = Some(Vector.empty[PairStep])
+    val gathered = compiled.atoms.foldLeft(seed) { (acc, atom) =>
+      (acc, atom) match
+        case (Some(steps), Atom.PairKey(keep)) =>
+          Some(steps :+ PairStep.KeepKey(value => keep(value)))
+        case (Some(steps), Atom.PairValue(_, keep)) =>
+          Some(steps :+ PairStep.KeepValue(value => keep(value)))
+        case (Some(steps), Atom.PairRow(keep)) =>
+          Some(steps :+ PairStep.KeepRow((key, value) => keep(key, value)))
+        case _ => None
+    }
+    gathered.filter(_.nonEmpty)
+
+  /**
+   * Keep steps for a contiguous pair-filter prefix, and the plan under that prefix.
+   *
+   * The physical child only carries [[PhysicalOp.Kind.Pairs]] so [[compile]] can read the slots.
+   * It is not interpreted. The returned plan is [[childOf]]'s source.
+   */
+  private[execution] def pairKeeps(plan: Plan[_]): (Plan[_], Vector[PairStep]) =
+    val op = pairStack(plan)
+    val compiled = compile(plan, op).getOrElse(missingStack)
+    val steps = pairSteps(compiled).getOrElse(missingStack)
+    val (child, _) = childOf(plan, op)
+    (child, steps)
+
+  /**
+   * The atom of the filter this arm matched, which is the outermost one. A stack below it is
+   * interpreted by the fold's own `interpret(source, child)` call, so it is not applied here.
+   */
+  private[execution] def int32Filter(plan: Plan[_], op: PhysicalOp): ColumnKernel.Int32Predicate =
+    outerAtom(plan, op) match
+      case Atom.Int32(_, keep) => keep
+      case _ => missingFilter
+
+  /** The outermost atom. A mistyped predicate throws `ClassCastException` from [[compile]]. */
+  private[execution] def int64Filter(plan: Plan[_], op: PhysicalOp): ColumnKernel.Int64Predicate =
+    outerAtom(plan, op) match
+      case Atom.Int64(_, keep) => keep
+      case _ => missingFilter
+
+  /** The outermost atom. A mistyped predicate throws `ClassCastException` from [[compile]]. */
+  private[execution] def float64Filter(
+      plan: Plan[_],
+      op: PhysicalOp,
+  ): ColumnKernel.Float64Predicate =
+    outerAtom(plan, op) match
+      case Atom.Float64(_, keep) => keep
+      case _ => missingFilter
+
   /** Dictionary groups in source order. `None` unless every atom is a literal group. */
   def literalGroups(compiled: Compiled): Option[Vector[Vector[String]]] =
     val seed: Option[Vector[Vector[String]]] = Some(Vector.empty[Vector[String]])
@@ -142,6 +200,32 @@ private[execution] object PredicatePlan:
   /** `ClassCastException` for a batch this stack does not compact. The slot picks the message. */
   def unsupported(slot: PhysicalOp.Slot): Nothing =
     throw new ClassCastException(slotMessage(slot))
+
+  private def outerAtom(plan: Plan[_], op: PhysicalOp): Atom = compile(plan, op) match
+    case Some(Compiled(atoms)) if atoms.nonEmpty => atoms.last
+    case _ => missingFilter
+
+  private def pairStack(plan: Plan[_]): PhysicalOp = plan match
+    case Plan.FilterOp(source, _) =>
+      PhysicalOp.Filter(pairStackChild(source), PhysicalOp.Slot.Row)
+    case Plan.FilterKeysOp(source, _) =>
+      PhysicalOp.Filter(pairStackChild(source), PhysicalOp.Slot.Key)
+    case Plan.FilterValuesOp(source, _) =>
+      PhysicalOp.Filter(pairStackChild(source), PhysicalOp.Slot.Value)
+    case _ => missingStack
+
+  private def pairStackChild(plan: Plan[_]): PhysicalOp = plan match
+    case Plan.FilterOp(_, _) | Plan.FilterKeysOp(_, _) | Plan.FilterValuesOp(_, _) =>
+      pairStack(plan)
+    case _ => PhysicalOp.Scan(PhysicalOp.Kind.Pairs, Seq.empty)
+
+  // Both are fallback signals: the planner catches ClassCastException and returns None, which
+  // sends the plan to the row path. A shape this code cannot name is not a crash.
+  private def missingFilter: Nothing =
+    throw new ClassCastException("element filter did not compile")
+
+  private def missingStack: Nothing =
+    throw new ClassCastException("pair filter stack has no predicate")
 
   private final class JoinColumn(recognized: IntJoinTriplePredicate[?], ordinal: Int)
       extends ColumnKernel.Int32Predicate:
