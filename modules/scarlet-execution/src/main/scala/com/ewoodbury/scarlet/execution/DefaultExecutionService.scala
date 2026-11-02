@@ -77,7 +77,7 @@ class DefaultExecutionService extends ExecutionService {
    *
    * Named erasure boundary. `(Int, Int)` erases its fields. `productElement` keeps a null
    * component visible without unboxing, and the two cells are matched in place so the row does not
-   * allocate a pair. A non-null cell is a reference, so the class-name cast is safe.
+   * allocate. A non-null cell is a reference, so the class-name cast is safe.
    */
   @SuppressWarnings(
     Array(

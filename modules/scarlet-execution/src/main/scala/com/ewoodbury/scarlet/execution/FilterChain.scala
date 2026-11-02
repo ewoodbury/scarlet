@@ -45,8 +45,8 @@ private[execution] object FilterChain:
       case Columns.LongPairs(_) | Columns.LongTriples(_) =>
         PredicatePlan.unsupported(opening(plan, op))
       // An outer batch is a triple with an absent side. This must stay an IllegalStateException:
-      // the planner catches ClassCastException and falls back to rows, where the predicate would
-      // unbox the absent side and throw a null pointer instead of naming the unsupported shape.
+      // the planner catches ClassCastException, including ColumnarFallback, and falls back to
+      // rows, where the predicate would unbox the absent side and throw a null pointer.
       case Columns.Outer(_, _) =>
         throw new IllegalStateException(PredicatePlan.outerMessage)
       case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Strings(_) |

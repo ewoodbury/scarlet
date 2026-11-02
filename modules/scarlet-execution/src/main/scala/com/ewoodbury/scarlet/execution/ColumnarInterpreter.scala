@@ -14,9 +14,10 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * evaluated, and the budget covers that table only. A partition selector on an aggregate, a join,
  * or a sort fails a `require` guard with `IllegalArgumentException`, and that is not a fallback
  * either. A `ClassCastException` from a filter, or from a string map that declares `String` and
- * returns another value, is still a fallback, and that function may already have run. A null value
- * on a left, right, or full outer join is the same fallback: the value columns are already
- * encoded, and the kernel is not chosen. A null value on a long inner join is that fallback too.
+ * returns another value, is still a fallback, and that function may already have run.
+ * [[ColumnarFallback]] is the named form of a deliberate decline, including a null value on a
+ * left, right, or full outer join: the value columns are already encoded, and the kernel is not
+ * chosen. A null value on a long inner join is that fallback too.
  */
 @SuppressWarnings(
   Array(
@@ -321,7 +322,7 @@ private[execution] object ColumnarInterpreter:
         ColumnPipeline.longValuesFullyPresent(leftBatches) &&
           ColumnPipeline.longValuesFullyPresent(rightBatches)
       if (!valuesPresent) then
-        throw new ClassCastException(
+        throw new ColumnarFallback(
           "a null value on a long inner join stays on the row path",
         )
       Columns.LongTriples(
@@ -396,7 +397,7 @@ private[execution] object ColumnarInterpreter:
       val valuesPresent =
         ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
       if (!valuesPresent) then
-        throw new ClassCastException(
+        throw new ColumnarFallback(
           "a null value on a left outer join stays on the row path",
         )
       // The kernel writes (key, probe value, build value). The probe side is the left input, so
@@ -430,7 +431,7 @@ private[execution] object ColumnarInterpreter:
       val valuesPresent =
         ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
       if (!valuesPresent) then
-        throw new ClassCastException(
+        throw new ColumnarFallback(
           "a null value on a left outer join stays on the row path",
         )
       // The kernel writes (key, probe value, build value). The probe side is the left input, so
@@ -562,7 +563,7 @@ private[execution] object ColumnarInterpreter:
       val valuesPresent =
         ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
       if (!valuesPresent) then
-        throw new ClassCastException(
+        throw new ColumnarFallback(
           "a null value on a left outer join stays on the row path",
         )
       Columns.Outer(
@@ -595,7 +596,7 @@ private[execution] object ColumnarInterpreter:
         ColumnPipeline.valuesFullyPresent(leftBatches) &&
           ColumnPipeline.valuesFullyPresent(rightBatches)
       if (!valuesPresent) then
-        throw new ClassCastException(
+        throw new ColumnarFallback(
           "a null value on a right outer join stays on the row path",
         )
       Columns.Outer(
@@ -687,7 +688,7 @@ private[execution] object ColumnarInterpreter:
     val valuesPresent =
       ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
     if (!valuesPresent) then
-      throw new ClassCastException(
+      throw new ColumnarFallback(
         "a null value on a right outer join stays on the row path",
       )
     Columns.Outer(swapValueColumns(join(probe, build)), AbsentSide.Left)
@@ -704,7 +705,7 @@ private[execution] object ColumnarInterpreter:
     val valuesPresent =
       ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
     if (!valuesPresent) then
-      throw new ClassCastException(
+      throw new ColumnarFallback(
         "a null value on a full outer join stays on the row path",
       )
     Columns.Outer(join(probe, build), AbsentSide.Both)
@@ -785,7 +786,7 @@ private[execution] object ColumnarInterpreter:
       })
     case Columns.Strings(parts) =>
       // Named erasure boundary. A declared string map may return another value; `stringResult`
-      // turns that into `ClassCastException`, which is the row-path fallback.
+      // turns that into `ColumnarFallback`, which is the named row-path fallback.
       @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Any"))
       val fn = mapper.asInstanceOf[String => Any]
       Columns.Strings(onEachMorsel(parts) { morsel =>

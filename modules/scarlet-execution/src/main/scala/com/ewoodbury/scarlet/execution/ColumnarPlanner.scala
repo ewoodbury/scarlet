@@ -199,8 +199,9 @@ object ColumnarPlanner:
       case Some(op) => runLowered(plan, op)
 
   /**
-   * Decode a tree [[lower]] would hand to [[tryRun]]. `ClassCastException` is the row-path
-   * fallback. Any other failure, including a boolean column in the element pipeline, propagates.
+   * Decode a tree [[lower]] would hand to [[tryRun]]. The catch is the row-path fallback.
+   * [[ColumnarFallback]] is its named form. Any other failure, including a boolean column in the
+   * element pipeline, propagates.
    */
   private[execution] def runLowered[A](plan: Plan[A], op: PhysicalOp): Option[Seq[Partition[A]]] =
     try
@@ -209,6 +210,7 @@ object ColumnarPlanner:
           .decodeFor(ColumnarInterpreter.interpret(plan, op), op)
           .asInstanceOf[Seq[Partition[A]]],
       )
+    // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
     catch case _: ClassCastException => None
 
   /**
@@ -216,7 +218,8 @@ object ColumnarPlanner:
    * interpret one source partition at a time. An int-key or long-key sort is not
    * partition-preserving: the whole sort runs, then only the requested prefix is decoded across
    * the output partitions in order. An exchange, aggregate, or join is refused. `n <= 0` returns
-   * empty without running. `ClassCastException` falls back to `None`.
+   * empty without running. The catch is the row-path fallback. [[ColumnarFallback]] is its named
+   * form.
    */
   def tryTake[A](plan: Plan[A], n: Int): Option[Seq[A]] =
     if (n <= 0) then Some(Seq.empty[A])
@@ -225,6 +228,7 @@ object ColumnarPlanner:
         case None => None
         case Some(op) =>
           try takeAccepted(plan, op, n).map(_.asInstanceOf[Seq[A]])
+          // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
           catch case _: ClassCastException => None
 
   private def takeAccepted(plan: Plan[_], op: PhysicalOp, n: Int): Option[Seq[Any]] =
@@ -270,13 +274,15 @@ object ColumnarPlanner:
    * Row count of a columnar plan. `None` means the row path. This does not decode.
    * [[TrailingProject.count]] folds an int, long, or dictionary-literal string chain without
    * writing it. Any other accepted plan reads finished batch lengths. A string shape that is not
-   * the literal chain is that second strategy.
+   * the literal chain is that second strategy. The catch is the row-path fallback.
+   * [[ColumnarFallback]] is its named form.
    */
   def tryCount(plan: Plan[_]): Option[Long] =
     accepted(plan) match
       case None => None
       case Some(op) =>
         try TrailingProject.count(plan, op).orElse(finishedCount(plan, op))
+        // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
         catch case _: ClassCastException => None
 
   private def finishedCount(plan: Plan[_], op: PhysicalOp): Option[Long] =
@@ -286,36 +292,42 @@ object ColumnarPlanner:
 
   /**
    * Wide sum of a finished int column. `None` means the row path, including a plan whose result is
-   * not an int column. Null slots are skipped. This does not decode.
+   * not an int column. Null slots are skipped. This does not decode. The catch is the row-path
+   * fallback. [[ColumnarFallback]] is its named form.
    */
   def trySumInt(plan: Plan[_]): Option[Long] =
     accepted(plan) match
       case Some(op) if isInt(op) =>
         try Some(sumInt(plan, op))
+        // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
         catch case _: ClassCastException => None
       case _ => None
 
   /**
    * Sum of a double plan. `None` means the row path, including a plan whose result is not a double
    * column. A filter/project chain adds in the fused loop and does not write that chain's output
-   * column. Null slots are skipped.
+   * column. Null slots are skipped. The catch is the row-path fallback. [[ColumnarFallback]] is
+   * its named form.
    */
   def trySumDouble(plan: Plan[_]): Option[Double] =
     accepted(plan) match
       case Some(op) if isFloat(op) =>
         try Some(sumDouble(plan, op))
+        // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
         catch case _: ClassCastException => None
       case _ => None
 
   /**
    * Wide sum of a finished long column. `None` means the row path, including a plan whose result
    * is not a long column. The sum wraps. Null slots are skipped. A filter/project chain adds in
-   * the fused walk and does not write that chain's output column.
+   * the fused walk and does not write that chain's output column. The catch is the row-path
+   * fallback. [[ColumnarFallback]] is its named form.
    */
   def trySumLong(plan: Plan[_]): Option[Long] =
     accepted(plan) match
       case Some(op) if isLong(op) =>
         try Some(sumLong(plan, op))
+        // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
         catch case _: ClassCastException => None
       case _ => None
 
@@ -332,7 +344,7 @@ object ColumnarPlanner:
    * refused. A pair map that stays `(Int, Int)` is the case [[lower]] refuses while this still
    * succeeds. There is no layout for that map. [[groupedSumPeel]] labels the walked steps and is
    * not this action. A map to another pair type, such as `(Long, Int)`, throws
-   * `ClassCastException` and returns `None`.
+   * [[ColumnarFallback]] from the pair unbox and this catch returns `None`.
    */
   def tryGroupedSum(plan: Plan[_]): Option[Long] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -341,6 +353,7 @@ object ColumnarPlanner:
       base match
         case source: Plan.Source[_] =>
           try runGroupedSum(source, steps)
+          // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
           catch case _: ClassCastException => None
         case _ => None
 
@@ -453,7 +466,7 @@ object ColumnarPlanner:
    * Pair filters and pair maps above `base`, in source order. A filter prefix is
    * [[PredicatePlan.pairKeeps]]: one [[PredicatePlan.compile]], then [[PredicatePlan.pairSteps]].
    * The map arm is cast here and called later, during the aggregate scan. [[lower]] refuses that
-   * map. A function that is not `(Int, Int)` throws `ClassCastException` when the scan calls it.
+   * map. A function that is not `(Int, Int)` throws [[ColumnarFallback]] when the scan unboxes it.
    */
   private[execution] def peelPairOps(plan: Plan[_]): (Plan[_], List[PairStep]) =
     @tailrec
@@ -511,32 +524,16 @@ object ColumnarPlanner:
     val values = source.partitions.iterator.flatMap(_.data.iterator)
     source.descriptor match
       case Plan.SourceDescriptor.Unknown =>
-        values.nextOption().exists(isNullableIntPair)
+        values.nextOption().exists(IntPairCells.isNullablePair)
       case Plan.SourceDescriptor.Pairs =>
         values.nextOption() match
           case None => false
-          case Some(first) => isNullableIntPair(first) && values.forall(isNullableIntPair)
+          case Some(first) =>
+            IntPairCells.isNullablePair(first) && values.forall(IntPairCells.isNullablePair)
       case Plan.SourceDescriptor.Ints | Plan.SourceDescriptor.Longs |
           Plan.SourceDescriptor.Doubles | Plan.SourceDescriptor.Bools |
           Plan.SourceDescriptor.Strings | Plan.SourceDescriptor.LongPairs =>
         false
-
-  /**
-   * Named erasure boundary. A grouped-sum pair is a 2-tuple. `productElement` does not unbox, so a
-   * null component still witnesses a pair. A non-null cell is a reference, so the class test is
-   * safe.
-   */
-  @SuppressWarnings(Array("org.wartremover.warts.Null"))
-  private def isNullableIntPair(value: Any): Boolean =
-    def isIntOrNull(cell: Any): Boolean = cell match
-      case null => true
-      case _: Int => true
-      case _ => false
-
-    value match
-      case pair: Tuple2[?, ?] =>
-        isIntOrNull(pair.productElement(0)) && isIntOrNull(pair.productElement(1))
-      case _ => false
 
   private[execution] def isInt(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Ints => true
@@ -1137,7 +1134,7 @@ object ColumnarPlanner:
     case null => null
     case text: String => text
     case other =>
-      throw new ClassCastException(
+      throw new ColumnarFallback(
         s"columnar string map expected a String, found ${other.getClass.getName}",
       )
 

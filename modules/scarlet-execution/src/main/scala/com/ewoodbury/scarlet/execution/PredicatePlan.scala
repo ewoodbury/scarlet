@@ -3,7 +3,7 @@ package com.ewoodbury.scarlet.execution
 import scala.annotation.tailrec
 
 import com.ewoodbury.scarlet.api.IntJoinTriplePredicate
-import com.ewoodbury.scarlet.columnar.{ColumnBatch, ColumnKernel, PairKernel, PairStep, Selection}
+import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.Plan
 
 /**
@@ -17,7 +17,9 @@ import com.ewoodbury.scarlet.core.Plan
  * keep vector for a pair stack. It is not a second compile, and it is not [[selectionSteps]].
  *
  * Named erasure boundary. The physical slot chose the function. A wrong erased type throws
- * `ClassCastException`, and [[ColumnarPlanner.tryRun]] returns `None`.
+ * [[ColumnarFallback]], and [[ColumnarPlanner.tryRun]] returns `None`. A cast that fails while a
+ * predicate runs is still a plain `ClassCastException`, and that catch treats it as the same
+ * fallback.
  */
 @SuppressWarnings(
   Array(
@@ -154,13 +156,13 @@ private[execution] object PredicatePlan:
       case Atom.Int32(_, keep) => keep
       case _ => missingFilter
 
-  /** The outermost atom. A mistyped predicate throws `ClassCastException` from [[compile]]. */
+  /** The outermost atom. A mistyped predicate throws [[ColumnarFallback]] from [[compile]]. */
   private[execution] def int64Filter(plan: Plan[_], op: PhysicalOp): ColumnKernel.Int64Predicate =
     outerAtom(plan, op) match
       case Atom.Int64(_, keep) => keep
       case _ => missingFilter
 
-  /** The outermost atom. A mistyped predicate throws `ClassCastException` from [[compile]]. */
+  /** The outermost atom. A mistyped predicate throws [[ColumnarFallback]] from [[compile]]. */
   private[execution] def float64Filter(
       plan: Plan[_],
       op: PhysicalOp,
@@ -197,9 +199,9 @@ private[execution] object PredicatePlan:
   def openingSlot(plan: Plan[_], op: PhysicalOp): Option[PhysicalOp.Slot] =
     layers(plan, op).headOption.map(_.slot)
 
-  /** `ClassCastException` for a batch this stack does not compact. The slot picks the message. */
+  /** [[ColumnarFallback]] for a batch this stack does not compact. The slot picks the message. */
   def unsupported(slot: PhysicalOp.Slot): Nothing =
-    throw new ClassCastException(slotMessage(slot))
+    throw new ColumnarFallback(slotMessage(slot))
 
   private def outerAtom(plan: Plan[_], op: PhysicalOp): Atom = compile(plan, op) match
     case Some(Compiled(atoms)) if atoms.nonEmpty => atoms.last
@@ -219,13 +221,13 @@ private[execution] object PredicatePlan:
       pairStack(plan)
     case _ => PhysicalOp.Scan(PhysicalOp.Kind.Pairs, Seq.empty)
 
-  // Both are fallback signals: the planner catches ClassCastException and returns None, which
-  // sends the plan to the row path. A shape this code cannot name is not a crash.
+  // Both are fallback signals: the planner catches ClassCastException, whose named form is
+  // ColumnarFallback, and returns None, which sends the plan to the row path.
   private def missingFilter: Nothing =
-    throw new ClassCastException("element filter did not compile")
+    throw new ColumnarFallback("element filter did not compile")
 
   private def missingStack: Nothing =
-    throw new ClassCastException("pair filter stack has no predicate")
+    throw new ColumnarFallback("pair filter stack has no predicate")
 
   private final class JoinColumn(recognized: IntJoinTriplePredicate[?], ordinal: Int)
       extends ColumnKernel.Int32Predicate:
@@ -464,4 +466,4 @@ private[execution] object PredicatePlan:
       method.getReturnType.eq(classOf[java.lang.Boolean])
 
   private def rejectPredicate(predicate: Any): Nothing =
-    throw new ClassCastException(s"columnar filter predicate is ${predicate.getClass.getName}")
+    throw new ColumnarFallback(s"columnar filter predicate is ${predicate.getClass.getName}")

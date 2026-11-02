@@ -6,7 +6,7 @@ import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import com.ewoodbury.scarlet.api.DistCollection
+import com.ewoodbury.scarlet.api.{DistCollection, IntJoinTriplePredicate}
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
@@ -464,7 +464,7 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
       PhysicalOp.Slot.Row,
     )
 
-    val thrown = intercept[ClassCastException] {
+    val thrown = intercept[ColumnarFallback] {
       ColumnarInterpreter.interpret(stacked.plan, op)
     }
     thrown.getMessage shouldBe "columnar op expected int pairs"
@@ -472,6 +472,43 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
     calls.get() shouldBe 0
     ColumnarPlanner.lower(stacked.plan) shouldBe Option.empty[PhysicalOp]
     stacked.collect().toList shouldBe row(stacked.collect().toList)
+  }
+
+  it should "name a type-changing pair map and keep a same-type map fused" in {
+    arm()
+    val source = DistCollection(Seq(1 -> 4, 2 -> 5), 1)
+    val stayed = source.map { case (key, value) => (key + 1, value) }
+    ColumnarPlanner.lower(stayed.plan) shouldBe Option.empty[PhysicalOp]
+    ColumnarPlanner.tryGroupedSum(stayed.plan) shouldBe Some(9L)
+
+    val widened = source.map { case (key, value) => (key.toLong, value) }
+    ColumnarPlanner.tryGroupedSum(widened.plan) shouldBe None
+    val batch = BatchCodec.intPairs(Seq((1, 4), (2, 5)))
+    val (_, steps) = ColumnarPlanner.peelPairOps(widened.plan)
+    val thrown = intercept[ColumnarFallback] {
+      HashAggregate.sumInt32(batch, 0, 1, steps.toVector)
+    }
+    thrown.getClass shouldBe classOf[ColumnarFallback]
+  }
+
+  it should "fail an outer-batch filter without falling back" in {
+    arm()
+    val joined = DistCollection(Seq(1 -> 10, 2 -> 20), 1).leftOuterJoin(
+      DistCollection(Seq(1 -> 100), 1),
+    )
+    val predicate = new IntJoinTriplePredicate[(Int, (Int, Option[Int]))]:
+      val selectedSlot: IntJoinTriplePredicate.Slot = IntJoinTriplePredicate.Slot.Key
+      def keep(value: Int): Boolean = value > 0
+      def apply(row: (Int, (Int, Option[Int]))): Boolean = keep(row._1)
+    val filtered = DistCollection(Plan.FilterOp(joined.plan, predicate))
+    val lowered = ColumnarPlanner.lower(filtered.plan).getOrElse(fail("expected a lowered filter"))
+    val thrown = intercept[IllegalStateException] {
+      ColumnarPlanner.runLowered(filtered.plan, lowered)
+    }
+    thrown.getClass shouldBe classOf[IllegalStateException]
+    intercept[IllegalStateException] {
+      filtered.collect()
+    }
   }
 
   it should "publish a second kernel pass for a string stack across morsels" in {
