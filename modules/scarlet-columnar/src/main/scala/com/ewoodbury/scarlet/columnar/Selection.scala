@@ -1,9 +1,12 @@
 package com.ewoodbury.scarlet.columnar
 
-import java.util.concurrent.atomic.AtomicInteger
-
 /**
- * One pass over a stack of filters.
+ * One pass over a stack of filters on a multi-column batch.
+ *
+ * [[com.ewoodbury.scarlet.execution.FilterChain]] uses this for pair and triple batches. A
+ * single-column batch stays on chained kernels. The survivor index is four bytes per row, which
+ * costs more than the intermediate column a chained kernel writes for the next filter to read. A
+ * boolean column is one bit per row.
  *
  * The survivor index is an `Array[Int]` of absolute row ids in the source batch, plus a count. The
  * array is allocated once for the morsel invocation and reused for every step. It is not a field:
@@ -12,15 +15,12 @@ import java.util.concurrent.atomic.AtomicInteger
  * array, so the count shrinks. A later predicate is a per-row call on the survivors. It is not a
  * word-level AND.
  *
- * A primitive, boolean, dictionary-code, or pair slot skips a null and does not call the
- * predicate. A present zero is still a candidate. A key or value slot looks at that ordinal only,
- * so a null on the other ordinal can survive. A pair row needs both ordinals. A triple needs all
- * three present and names the absolute row when one is null, before any predicate call. A general
- * string predicate is called on every candidate, including an empty cell. An empty cell that
- * passes stays absent in the output. [[prepare]] resolves each dictionary-code step against the
- * partition dictionary once. Every morsel of that partition reuses the mask. A null code, or a
- * code outside the dictionary, is not selected. [[ColumnKernel.countByGroups]] counts with its own
- * masks and does not use this one.
+ * A primitive, boolean, or pair slot skips a null and does not call the predicate. A present zero
+ * is still a candidate. A key or value slot looks at that ordinal only, so a null on the other
+ * ordinal can survive. A pair row needs both ordinals. A triple needs all three present and names
+ * the absolute row when one is null, before any predicate call. A general string predicate is
+ * called on every candidate, including an empty cell. An empty cell that passes stays absent in
+ * the output.
  *
  * Compact gathers every column by absolute row and copies the source validity bit. A clear bit
  * stores zero and leaves the output bit clear. [[Validity.prefixValid]] is not used: a survivor
@@ -36,36 +36,12 @@ private[scarlet] object Selection:
     case Float64(column: Int, predicate: ColumnKernel.Float64Predicate)
     case Bool(column: Int, predicate: ColumnKernel.BoolPredicate)
     case Utf8(column: Int, predicate: ColumnKernel.Utf8Predicate)
-    case Utf8Codes(column: Int, literals: IndexedSeq[String])
-
-    /** Mask from [[prepare]]. The literals have already been resolved against one dictionary. */
-    case Utf8Mask(column: Int, mask: Array[Boolean])
     case IntPair(predicate: PairKernel.IntPairPredicate)
     case IntTriple(column: Int, predicate: ColumnKernel.Int32Predicate)
 
   /**
-   * Resolves dictionary-code steps against `batch`. The dictionary belongs to the partition and is
-   * shared by its morsels, so the caller does this once per partition. Other steps are copied
-   * unchanged.
-   */
-  private[scarlet] def prepare(batch: ColumnBatch, steps: Seq[Step]): Vector[Step] =
-    steps.iterator.map {
-      case Step.Utf8Codes(ordinal, literals) =>
-        Step.Utf8Mask(ordinal, codeMask(utf8At(batch, ordinal), literals))
-      case other => other
-    }.toVector
-
-  /**
-   * How many dictionary-code masks have been built since [[resetCodeMaskBuilds]]. Not a metric.
-   */
-  private[scarlet] def codeMaskBuilds: Int = maskBuilds.get()
-
-  private[scarlet] def resetCodeMaskBuilds(): Unit = maskBuilds.set(0)
-
-  /**
    * Applies `steps` to `[start, start + length)`. `steps` is read in order and is not copied. An
-   * empty range publishes an empty batch and does not call a predicate. A [[Step.Utf8Mask]] built
-   * by [[prepare]] is reused as given.
+   * empty range publishes an empty batch and does not call a predicate.
    */
   def apply(batch: ColumnBatch, start: Int, length: Int, steps: Seq[Step]): ColumnBatch =
     // The range message names the window. `require` is the check for an empty stack.
@@ -96,10 +72,6 @@ private[scarlet] object Selection:
       seedBool(batch, ordinal, start, length, predicate, index)
     case Step.Utf8(ordinal, predicate) =>
       seedUtf8(batch, ordinal, start, length, predicate, index)
-    case Step.Utf8Codes(ordinal, literals) =>
-      seedCodes(batch, ordinal, start, length, literals, index)
-    case Step.Utf8Mask(ordinal, mask) =>
-      seedMasked(batch, ordinal, start, length, mask, index)
     case Step.IntPair(predicate) =>
       seedPair(batch, start, length, predicate, index)
     case Step.IntTriple(ordinal, predicate) =>
@@ -117,10 +89,6 @@ private[scarlet] object Selection:
         restrictBool(batch, ordinal, predicate, index, count)
       case Step.Utf8(ordinal, predicate) =>
         restrictUtf8(batch, ordinal, predicate, index, count)
-      case Step.Utf8Codes(ordinal, literals) =>
-        restrictCodes(batch, ordinal, literals, index, count)
-      case Step.Utf8Mask(ordinal, mask) =>
-        restrictMasked(batch, ordinal, mask, index, count)
       case Step.IntPair(predicate) =>
         restrictPair(batch, predicate, index, count)
       case Step.IntTriple(ordinal, predicate) =>
@@ -342,88 +310,6 @@ private[scarlet] object Selection:
     }
     written
 
-  private def seedCodes(
-      batch: ColumnBatch,
-      ordinal: Int,
-      start: Int,
-      length: Int,
-      literals: IndexedSeq[String],
-      index: Array[Int],
-  ): Int =
-    val column = utf8At(batch, ordinal)
-    Ranges.check(start, length, column.length)
-    scanCodes(column, codeMask(column, literals), start, length, index)
-
-  private def seedMasked(
-      batch: ColumnBatch,
-      ordinal: Int,
-      start: Int,
-      length: Int,
-      mask: Array[Boolean],
-      index: Array[Int],
-  ): Int =
-    val column = utf8At(batch, ordinal)
-    Ranges.check(start, length, column.length)
-    scanCodes(column, mask, start, length, index)
-
-  private def scanCodes(
-      column: DictUtf8Column,
-      mask: Array[Boolean],
-      start: Int,
-      length: Int,
-      index: Array[Int],
-  ): Int =
-    val codes = column.codes
-    val words = column.validity.words
-    val end = start + length
-    var row = start
-    var written = 0
-    while (row < end) {
-      if (Validity.isSet(words, row) && codeSelected(mask, codes(row))) then
-        index(written) = row
-        written += 1
-      row += 1
-    }
-    written
-
-  private def restrictCodes(
-      batch: ColumnBatch,
-      ordinal: Int,
-      literals: IndexedSeq[String],
-      index: Array[Int],
-      count: Int,
-  ): Int =
-    val column = utf8At(batch, ordinal)
-    restrictMasked(column, codeMask(column, literals), index, count)
-
-  private def restrictMasked(
-      batch: ColumnBatch,
-      ordinal: Int,
-      mask: Array[Boolean],
-      index: Array[Int],
-      count: Int,
-  ): Int =
-    restrictMasked(utf8At(batch, ordinal), mask, index, count)
-
-  private def restrictMasked(
-      column: DictUtf8Column,
-      mask: Array[Boolean],
-      index: Array[Int],
-      count: Int,
-  ): Int =
-    val codes = column.codes
-    val words = column.validity.words
-    var read = 0
-    var written = 0
-    while (read < count) {
-      val row = index(read)
-      if (Validity.isSet(words, row) && codeSelected(mask, codes(row))) then
-        index(written) = row
-        written += 1
-      read += 1
-    }
-    written
-
   private def seedPair(
       batch: ColumnBatch,
       start: Int,
@@ -540,29 +426,6 @@ private[scarlet] object Selection:
       row: Int,
   ): Boolean =
     Validity.isSet(keyWords, row) && Validity.isSet(valueWords, row)
-
-  /** A code of `-1`, or any code outside the dictionary, is not selected. A null slot is not. */
-  private inline def codeSelected(mask: Array[Boolean], code: Int): Boolean =
-    code >= 0 && code < mask.length && mask(code)
-
-  private val maskBuilds = new AtomicInteger
-
-  /**
-   * One bit per dictionary entry. A literal that is not in the dictionary, including a code of
-   * `-1`, sets nothing. The scan still skips a null slot.
-   */
-  private def codeMask(column: DictUtf8Column, literals: IndexedSeq[String]): Array[Boolean] =
-    maskBuilds.incrementAndGet()
-    val mask = new Array[Boolean](column.dictionary.length)
-    val iterator = literals.iterator
-    while (iterator.hasNext) {
-      val code = column.codeOf(iterator.next())
-      if (code >= 0) then mask(code) = true
-    }
-    mask
-
-  private def utf8At(batch: ColumnBatch, ordinal: Int): DictUtf8Column =
-    ColumnKernel.asUtf8(ColumnKernel.columnAt(batch, ordinal), ordinal)
 
   private def pairColumns(batch: ColumnBatch): (Int32Column, Int32Column) =
     require(

@@ -207,7 +207,8 @@ private[execution] object ColumnarInterpreter:
           throw new IllegalStateException(
             s"physical tree does not match ${plan.getClass.getSimpleName}",
           )
-    // Two or more filters compact once. A lone filter stays on the existing kernels.
+    // Two or more pair or triple filters compact once. A single-column stack chains kernels.
+    // A lone filter stays on the existing kernels.
     // `accepts` walks the logical plan, so it runs only for a filter node.
     case (logical, physical)
         if physical.isInstanceOf[PhysicalOp.Filter] && FilterChain.accepts(logical, physical) =>

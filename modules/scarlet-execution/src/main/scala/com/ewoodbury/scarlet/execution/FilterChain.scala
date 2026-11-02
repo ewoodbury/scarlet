@@ -9,18 +9,23 @@ import com.ewoodbury.scarlet.core.Plan
 import ColumnarInterpreter.Columns
 
 /**
- * Peels a stack of consecutive unfused filters and compacts it once per morsel.
+ * Peels a stack of consecutive unfused filters.
  *
  * Named erasure boundary, same as [[ColumnarInterpreter]]. The planner chose the slot and did not
  * call the function. The cast checks the erased type. A wrong type throws `ClassCastException`,
  * and [[ColumnarPlanner.tryRun]] returns `None`. A column kind this stack cannot compact throws
- * that same exception, so the query degrades to the row path. The casts run after the child is
- * interpreted and before any morsel, so a bad later predicate does not run the earlier ones.
+ * that same exception, so the query degrades to the row path. Pair and triple steps are cast after
+ * the child is interpreted and before any morsel. A single-column chain resolves every step's
+ * typed function, including a dictionary literal set, before any morsel. A bad later predicate
+ * does not run the earlier ones.
  *
  * A lone filter is handed to [[ColumnarInterpreter.applyFilter]], which keeps [[ColumnKernel]],
  * [[PairKernel]], and [[BoolPipeline.filter]]. Two or more filters interpret the non-filter child
- * once, then [[Selection]] applies every predicate to that batch. A map or a pipeline is not a
- * filter and stops the peel.
+ * once. [[Selection]] then compacts a pair or triple batch in one pass. An int, long, float,
+ * string, or boolean batch chains [[ColumnarInterpreter.applyFilter]], one kernel per filter. The
+ * survivor index is four bytes per row, which costs more than the intermediate column a chained
+ * kernel writes for the next filter to read. A boolean column is one bit per row. Long pairs, long
+ * triples, and outer batches still refuse. A map or a pipeline is not a filter and stops the peel.
  */
 @SuppressWarnings(
   Array(
@@ -83,16 +88,9 @@ private[execution] object FilterChain:
 
   private def select(columns: Columns, layers: List[Layer], ordinals: Set[Int]): Columns =
     columns match
-      case Columns.Ints(parts) =>
-        Columns.Ints(finish(parts, layers.map(stepOnInts)))
-      case Columns.Longs(parts) =>
-        Columns.Longs(finish(parts, layers.map(stepOnLongs)))
-      case Columns.Floats(parts) =>
-        Columns.Floats(finish(parts, layers.map(stepOnFloats)))
-      case Columns.Strings(parts) =>
-        Columns.Strings(finish(parts, layers.map(stepOnStrings)))
-      case Columns.Bools(parts) =>
-        Columns.Bools(finish(parts, layers.map(stepOnBools)))
+      case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Strings(_) |
+          Columns.Bools(_) =>
+        chain(columns, layers)
       case Columns.Pairs(_) =>
         val steps = layers.map(layer => stepOnPairs(layer, ordinals))
         Columns.Pairs(finish(ColumnarInterpreter.pairsOf(columns), steps))
@@ -102,14 +100,104 @@ private[execution] object FilterChain:
       case Columns.LongPairs(_) | Columns.LongTriples(_) | Columns.Outer(_, _) =>
         refuse(layers)
 
-  private def finish(parts: Vector[ColumnBatch], steps: Seq[Selection.Step]): Vector[ColumnBatch] =
-    val prepared = parts.map(part => part -> Selection.prepare(part, steps)).toMap
-    ColumnarInterpreter.onEachMorsel(parts) { morsel =>
-      val resolved = prepared.getOrElse(
-        morsel.batch,
-        throw new IllegalStateException("morsel batch has no resolved filter steps"),
+  /** One kernel per filter. The intermediate column is the survivor set the next kernel reads. */
+  private def chain(columns: Columns, layers: List[Layer]): Columns =
+    val resolved = layers.map(layer => resolve(columns, layer))
+    resolved.foldLeft(columns) { (current, predicate) =>
+      ColumnarInterpreter.applyFilter(current, predicate, PhysicalOp.Slot.Element)
+    }
+
+  /**
+   * Casts one element predicate, or reads its dictionary literals, and does not call it. Every
+   * layer is resolved before [[chain]] runs a kernel.
+   */
+  private def resolve(columns: Columns, layer: Layer): Any =
+    layer.slot match
+      case PhysicalOp.Slot.Element =>
+        resolveElement(columns, layer.predicate)
+        layer.predicate
+      case PhysicalOp.Slot.Row | PhysicalOp.Slot.Key | PhysicalOp.Slot.Value =>
+        throw new IllegalStateException("columnar op expected int pairs")
+      case PhysicalOp.Slot.TripleKey | PhysicalOp.Slot.TripleLeftValue |
+          PhysicalOp.Slot.TripleRightValue =>
+        throw new IllegalStateException("columnar op expected int triples")
+
+  private def resolveElement(columns: Columns, predicate: Any): Unit = columns match
+    case Columns.Ints(_) =>
+      requireSpecialized(predicate, "apply$mcZI$sp", classOf[Int], classOf[Boolean])
+    case Columns.Longs(_) =>
+      requireSpecialized(predicate, "apply$mcZJ$sp", classOf[Long], classOf[Boolean])
+    case Columns.Floats(_) =>
+      requireSpecialized(predicate, "apply$mcZD$sp", classOf[Double], classOf[Boolean])
+    case Columns.Bools(_) =>
+      if (!acceptsBoolean(predicate)) then rejectPredicate(predicate)
+      val _ = predicate.asInstanceOf[Boolean => Boolean]
+    case Columns.Strings(_) =>
+      ColumnarPlanner.dictionaryStringLiterals(predicate) match
+        case Some(_) => ()
+        case None =>
+          if (specializedApply(predicate)) then rejectPredicate(predicate)
+          val _ = predicate.asInstanceOf[String => Boolean]
+    case Columns.Pairs(_) | Columns.LongPairs(_) | Columns.Triples(_) | Columns.LongTriples(_) |
+        Columns.Outer(_, _) =>
+      throw new IllegalStateException(
+        "columnar element filter expects ints, longs, floats, booleans, or strings",
       )
-      Selection(morsel.batch, morsel.start, morsel.length, resolved)
+
+  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+  private def requireSpecialized(
+      predicate: Any,
+      specialized: String,
+      argument: Class[_],
+      result: Class[_],
+  ): Unit =
+    val found = predicate.getClass.getDeclaredMethods.exists { method =>
+      !method.isBridge &&
+      method.getName == specialized &&
+      method.getParameterCount == 1 &&
+      method.getParameterTypes()(0).eq(argument) &&
+      method.getReturnType.eq(result)
+    }
+    if (!found) then rejectPredicate(predicate)
+
+  /** A primitive specialized `apply` is the implementation. A bridge does not count. */
+  private def specializedApply(predicate: Any): Boolean =
+    predicate.getClass.getDeclaredMethods.exists { method =>
+      method.getName.startsWith("apply$mc") && !method.isBridge
+    }
+
+  private def acceptsBoolean(predicate: Any): Boolean =
+    !specializedApply(predicate) && predicate.getClass.getDeclaredMethods.exists(booleanApply)
+
+  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+  private def booleanApply(method: java.lang.reflect.Method): Boolean =
+    !method.isBridge &&
+      method.getName == "apply" &&
+      method.getParameterCount == 1 &&
+      (primitiveBoolean(method) || erasedBoolean(method) || boxedBoolean(method))
+
+  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+  private def primitiveBoolean(method: java.lang.reflect.Method): Boolean =
+    method.getParameterTypes()(0).eq(classOf[Boolean]) &&
+      method.getReturnType.eq(classOf[Boolean])
+
+  /** A lambda declares `apply(Object)` and returns a primitive boolean. */
+  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+  private def erasedBoolean(method: java.lang.reflect.Method): Boolean =
+    method.getParameterTypes()(0).eq(classOf[Object]) &&
+      method.getReturnType.eq(classOf[Boolean])
+
+  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+  private def boxedBoolean(method: java.lang.reflect.Method): Boolean =
+    method.getParameterTypes()(0).eq(classOf[Object]) &&
+      method.getReturnType.eq(classOf[java.lang.Boolean])
+
+  private def rejectPredicate(predicate: Any): Nothing =
+    throw new ClassCastException(s"columnar filter predicate is ${predicate.getClass.getName}")
+
+  private def finish(parts: Vector[ColumnBatch], steps: Seq[Selection.Step]): Vector[ColumnBatch] =
+    ColumnarInterpreter.onEachMorsel(parts) { morsel =>
+      Selection(morsel.batch, morsel.start, morsel.length, steps)
     }
 
   /**
@@ -129,53 +217,6 @@ private[execution] object FilterChain:
           PhysicalOp.Slot.TripleRightValue =>
         "columnar op expected int triples"
     throw new ClassCastException(message)
-
-  private def stepOnInts(layer: Layer): Selection.Step =
-    elementStep(layer) { predicate =>
-      val keep = predicate.asInstanceOf[Int => Boolean]
-      val adapted: ColumnKernel.Int32Predicate = value => keep(value)
-      Selection.Step.Int32(0, adapted)
-    }
-
-  private def stepOnLongs(layer: Layer): Selection.Step =
-    elementStep(layer) { predicate =>
-      val keep = predicate.asInstanceOf[Long => Boolean]
-      val adapted: ColumnKernel.Int64Predicate = value => keep(value)
-      Selection.Step.Int64(0, adapted)
-    }
-
-  private def stepOnFloats(layer: Layer): Selection.Step =
-    elementStep(layer) { predicate =>
-      val keep = predicate.asInstanceOf[Double => Boolean]
-      val adapted: ColumnKernel.Float64Predicate = value => keep(value)
-      Selection.Step.Float64(0, adapted)
-    }
-
-  private def stepOnBools(layer: Layer): Selection.Step =
-    elementStep(layer) { predicate =>
-      val keep = predicate.asInstanceOf[Boolean => Boolean]
-      val adapted: ColumnKernel.BoolPredicate = value => keep(value)
-      Selection.Step.Bool(0, adapted)
-    }
-
-  private def stepOnStrings(layer: Layer): Selection.Step =
-    elementStep(layer) { predicate =>
-      ColumnarPlanner.dictionaryStringLiterals(predicate) match
-        case Some(literals) => Selection.Step.Utf8Codes(0, literals)
-        case None =>
-          val keep = predicate.asInstanceOf[String => Boolean]
-          val adapted: ColumnKernel.Utf8Predicate = value => keep(value)
-          Selection.Step.Utf8(0, adapted)
-    }
-
-  private def elementStep(layer: Layer)(build: Any => Selection.Step): Selection.Step =
-    layer.slot match
-      case PhysicalOp.Slot.Element => build(layer.predicate)
-      case PhysicalOp.Slot.Row | PhysicalOp.Slot.Key | PhysicalOp.Slot.Value =>
-        throw new IllegalStateException("columnar op expected int pairs")
-      case PhysicalOp.Slot.TripleKey | PhysicalOp.Slot.TripleLeftValue |
-          PhysicalOp.Slot.TripleRightValue =>
-        throw new IllegalStateException("columnar op expected int triples")
 
   private def stepOnPairs(layer: Layer, ordinals: Set[Int]): Selection.Step = layer.slot match
     case PhysicalOp.Slot.Key => intOrdinal(layer.predicate, 0)

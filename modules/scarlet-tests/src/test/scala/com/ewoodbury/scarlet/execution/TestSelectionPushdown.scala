@@ -185,7 +185,7 @@ class TestSelectionPushdown extends AnyFlatSpec with Matchers with BeforeAndAfte
     collected shouldBe row(queried.collect().toList)
   }
 
-  "a string filter stack" should "stay encode plus one publish" in {
+  "a string filter stack" should "publish one batch per filter and skip Selection" in {
     val stacked = DistCollection(Seq("US", "CA", "US"), 1)
       .filterStringEquals("US")
       .filterStringEquals("US")
@@ -195,8 +195,9 @@ class TestSelectionPushdown extends AnyFlatSpec with Matchers with BeforeAndAfte
     val (collected, batches, visits) = stringFootprint(stacked.collect().toList)
     collected shouldBe expected
     collected shouldBe List("US", "US")
-    batches shouldBe 2L
-    visits shouldBe 1L
+    // Encode, then one kernel publish per filter.
+    batches shouldBe 3L
+    visits shouldBe 2L
   }
 
   private def pairs(): DistCollection[(Int, Int)] =
