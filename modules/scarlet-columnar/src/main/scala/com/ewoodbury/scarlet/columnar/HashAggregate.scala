@@ -632,13 +632,27 @@ object HashAggregate:
         case PairStep.KeepRow(predicate) => kept = predicate(key, value)
         case PairStep.MapPair(mapper) =>
           val projected = mapper(key, value)
-          key = projected._1
-          value = projected._2
+          // `productElement` does not unbox. A non-int cell is the deliberate decline.
+          // A cast inside `mapper` is not caught here.
+          key = unboxedComponent(projected, 0)
+          value = unboxedComponent(projected, 1)
       index += 1
     }
     slot.key = key
     slot.value = value
     slot.kept = kept
+
+  /**
+   * One cell of a pair map. `productElement` keeps a null visible. A null or any non-int cell is
+   * [[ColumnarFallback]]: it is not silently unboxed to zero, and the plan falls back to rows
+   * where a null component is handled by the row rule.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def unboxedComponent(projected: (Int, Int), ordinal: Int): Int =
+    projected.productElement(ordinal) match
+      case present: Int => present
+      case _ =>
+        throw new ColumnarFallback("pair map did not stay (Int, Int)")
 
   private def scanSumLongDense(
       table: GroupTable,

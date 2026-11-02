@@ -683,7 +683,7 @@ object BatchCodec:
         absent
       case other =>
         val found = other.asInstanceOf[AnyRef].getClass.getName
-        throw new ClassCastException(s"columnar long pair expected a Long, found $found")
+        throw new ColumnarFallback(s"columnar long pair expected a Long, found $found")
 
   /**
    * A present cell is the stored int. A clear bit is a null reference, not `0`.
