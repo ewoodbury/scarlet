@@ -321,16 +321,18 @@ object ColumnarPlanner:
 
   /**
    * Folded wide sum of int pairs. `None` means the row path. A typed pair source runs
-   * [[ColumnPipeline.sumByKey]]. A preceding row, key, or value filter, or a map that stays a
-   * pair, is compiled into `keep`/`map` or [[com.ewoodbury.scarlet.columnar.PairStep]]s and
-   * applied inside the partial `sumInt32`. A source descriptor supplies the type for empty
-   * partitions. A null component drops the row before those steps. A 2-tuple of `Int` or null
-   * still witnesses a pair, so a leading null does not refuse the encode. Any other cell type
-   * fails. This does not decode. A mistyped function throws `ClassCastException` and is refused
-   * after any rows it already touched. Any other shape is refused. A pair map that stays
-   * `(Int, Int)` is the case [[lower]] refuses while this still succeeds. There is no layout for
-   * that map. [[groupedSumPeel]] labels the walked steps and is not this action. A map to another
-   * pair type, such as `(Long, Int)`, throws `ClassCastException` and returns `None`.
+   * [[ColumnPipeline.sumByKey]]. A preceding row, key, or value filter is
+   * [[PredicatePlan.pairSteps]] from one [[PredicatePlan.compile]]. A map that stays a pair is
+   * still a [[com.ewoodbury.scarlet.columnar.PairStep.MapPair]]. Both run inside the partial
+   * `sumInt32`. The child source is encoded with no predicate, so those steps run once. A source
+   * descriptor supplies the type for empty partitions. A null component drops the row before those
+   * steps. A 2-tuple of `Int` or null still witnesses a pair, so a leading null does not refuse
+   * the encode. Any other cell type fails. This does not decode. A mistyped function throws
+   * `ClassCastException` and is refused after any rows it already touched. Any other shape is
+   * refused. A pair map that stays `(Int, Int)` is the case [[lower]] refuses while this still
+   * succeeds. There is no layout for that map. [[groupedSumPeel]] labels the walked steps and is
+   * not this action. A map to another pair type, such as `(Long, Int)`, throws
+   * `ClassCastException` and returns `None`.
    */
   def tryGroupedSum(plan: Plan[_]): Option[Long] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -348,13 +350,13 @@ object ColumnarPlanner:
   private def matchedSumInt(plan: Plan[_], op: PhysicalOp): Long = (plan, op) match
     case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) =>
       ColumnReduce.sumInt32(ColumnarInterpreter.encodeInts(partitions))
-    case (Plan.FilterOp(source, predicate), PhysicalOp.Filter(child, PhysicalOp.Slot.Element))
+    case (Plan.FilterOp(source, _), PhysicalOp.Filter(child, PhysicalOp.Slot.Element))
         if isInt(child) =>
-      val keep = predicate.asInstanceOf[Int => Boolean]
+      val keep = PredicatePlan.int32Filter(plan, op)
       foldMorsels(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
         morsel =>
           val column = Int32Pipeline.singleInt(morsel.batch)
-          Int32Pipeline.sumFiltered(column, morsel.start, morsel.length, value => keep(value))
+          Int32Pipeline.sumFiltered(column, morsel.start, morsel.length, keep)
       }
     case (logical, PhysicalOp.Pipeline(child, length)) if isInt(child) =>
       val (source, steps) = elementSteps(logical, length)
@@ -389,11 +391,18 @@ object ColumnarPlanner:
   private def matchedSumLong(plan: Plan[_], op: PhysicalOp): Long = (plan, op) match
     case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Longs, _)) =>
       ColumnReduce.sumInt64(ColumnarInterpreter.encodeLongs(partitions), 0)
-    case (Plan.FilterOp(source, predicate), PhysicalOp.Filter(child, PhysicalOp.Slot.Element))
+    case (Plan.FilterOp(source, _), PhysicalOp.Filter(child, PhysicalOp.Slot.Element))
         if isLong(child) =>
+      val keep = PredicatePlan.int64Filter(plan, op)
       foldMorsels(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
         morsel =>
-          ElementSum.sumLongs(morsel, List(ElementStep.Filter(predicate)))
+          val column = Int64Pipeline.single(morsel.batch)
+          Int64Pipeline.sum(
+            column,
+            morsel.start,
+            morsel.length,
+            List(Int64Pipeline.Step.Filter(keep)),
+          )
       }
     case (logical, PhysicalOp.Pipeline(child, length)) if isLong(child) =>
       val (source, steps) = elementSteps(logical, length)
@@ -413,13 +422,13 @@ object ColumnarPlanner:
     case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Floats, _)) =>
       ColumnReduce.sumFloat64(ColumnarInterpreter.encodeFloats(partitions))
     case (
-          Plan.FilterOp(source, predicate),
+          Plan.FilterOp(source, _),
           PhysicalOp.Filter(child, PhysicalOp.Slot.Element),
         ) if isFloat(child) =>
-      val keep = predicate.asInstanceOf[Double => Boolean]
+      val keep = PredicatePlan.float64Filter(plan, op)
       foldDouble(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
         batch =>
-          Float64Pipeline.sumFiltered(batch, value => keep(value))
+          Float64Pipeline.sumFiltered(batch, keep)
       }
     case (Plan.MapOp(source, mapper), PhysicalOp.Project(child)) if isFloat(child) =>
       val fn = mapper.asInstanceOf[Double => Double]
@@ -441,24 +450,18 @@ object ColumnarPlanner:
       )
 
   /**
-   * Pair filters and pair maps above `base`, in source order. The functions are cast here and
-   * called later, during the aggregate scan. A function that is not the pair type throws
-   * `ClassCastException` then.
+   * Pair filters and pair maps above `base`, in source order. A filter prefix is
+   * [[PredicatePlan.pairKeeps]]: one [[PredicatePlan.compile]], then [[PredicatePlan.pairSteps]].
+   * The map arm is cast here and called later, during the aggregate scan. [[lower]] refuses that
+   * map. A function that is not `(Int, Int)` throws `ClassCastException` when the scan calls it.
    */
   private[execution] def peelPairOps(plan: Plan[_]): (Plan[_], List[PairStep]) =
     @tailrec
     def collect(current: Plan[_], steps: List[PairStep]): (Plan[_], List[PairStep]) =
       current match
-        case Plan.FilterOp(source, predicate) =>
-          val keep = predicate.asInstanceOf[((Int, Int)) => Boolean]
-          val step = PairStep.KeepRow((key, value) => keep((key, value)))
-          collect(source, step :: steps)
-        case Plan.FilterKeysOp(source, predicate) =>
-          val keep = predicate.asInstanceOf[Int => Boolean]
-          collect(source, PairStep.KeepKey(keep) :: steps)
-        case Plan.FilterValuesOp(source, predicate) =>
-          val keep = predicate.asInstanceOf[Int => Boolean]
-          collect(source, PairStep.KeepValue(keep) :: steps)
+        case Plan.FilterOp(_, _) | Plan.FilterKeysOp(_, _) | Plan.FilterValuesOp(_, _) =>
+          val (child, kept) = PredicatePlan.pairKeeps(current)
+          collect(child, kept.toList ++ steps)
         case Plan.MapOp(source, mapper) =>
           val project = mapper.asInstanceOf[((Int, Int)) => (Int, Int)]
           val step = PairStep.MapPair((key, value) => project((key, value)))
@@ -470,6 +473,7 @@ object ColumnarPlanner:
   private def runGroupedSum(source: Plan.Source[_], steps: List[PairStep]): Option[Long] =
     if (!groupedPairSource(source)) then None
     else
+      // `steps` already names every filter. This copy runs none of them.
       val parts = ColumnarInterpreter.encodeGroupedPairs(source.partitions)
       val grouped = ColumnPipeline.sumByKey(
         parts,

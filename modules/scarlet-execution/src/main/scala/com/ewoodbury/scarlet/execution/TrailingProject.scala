@@ -76,7 +76,8 @@ private[execution] object TrailingProject:
   /**
    * String scan under only dictionary literal filters, when the physical wrappers name the same
    * number of steps. `None` means count should read the finished batches. The base op is the scan
-   * [[lower]] built, and the groups are the literals those steps named.
+   * [[lower]] built. The groups are [[PredicatePlan.literalGroups]] for that same step count. A
+   * project stops [[PredicatePlan.compile]], so the lengths disagree and this chain is `None`.
    */
   private def literalChain(
       plan: Plan[_],
@@ -86,8 +87,17 @@ private[execution] object TrailingProject:
       val (basePlan, steps) = ColumnarPlanner.elementSteps(plan, Int.MaxValue)
       val sameShape = elementDepth(op) == steps.length
       if (sameShape && stringAligned(basePlan, baseOp)) then
-        literalStringGroups(steps).map(groups => (basePlan, baseOp, groups))
+        literalGroupsFor(plan, op, steps.length).map(groups => (basePlan, baseOp, groups))
       else None
+    }
+
+  private def literalGroupsFor(
+      plan: Plan[_],
+      op: PhysicalOp,
+      steps: Int,
+  ): Option[Vector[Vector[String]]] =
+    PredicatePlan.compile(plan, op).flatMap { compiled =>
+      if (compiled.atoms.length == steps) then PredicatePlan.literalGroups(compiled) else None
     }
 
   private def countLiteralStrings(plan: Plan[_], op: PhysicalOp): Option[Long] =
@@ -96,28 +106,6 @@ private[execution] object TrailingProject:
         ColumnKernel.countByGroups(batch, 0, groups)
       }
     }
-
-  /**
-   * Literal groups in source order. `None` means a step is a project or a filter that is not a
-   * dictionary literal list. An empty step list is not a chain.
-   */
-  private def literalStringGroups(
-      steps: List[ColumnarPlanner.ElementStep],
-  ): Option[Vector[Vector[String]]] =
-    def gather(
-        remaining: List[ColumnarPlanner.ElementStep],
-        acc: List[Vector[String]],
-    ): Option[List[Vector[String]]] =
-      remaining match
-        case Nil => Some(acc.reverse)
-        case ColumnarPlanner.ElementStep.Filter(predicate) :: tail =>
-          ColumnarPlanner.dictionaryStringLiterals(predicate) match
-            case Some(literals) => gather(tail, literals :: acc)
-            case None => None
-        case ColumnarPlanner.ElementStep.Project(_) :: _ => None
-
-    if (steps.isEmpty) then None
-    else gather(steps, Nil).map(_.toVector)
 
   private def sumProject(plan: Plan[_], op: PhysicalOp): Option[Long] =
     foldProject(plan, op, ProjectFold.Sum)
