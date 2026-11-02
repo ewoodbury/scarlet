@@ -12,9 +12,10 @@ import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
- * Plan-level proof that a stack of unfused filters compacts once. Counts are
- * [[ColumnMetrics.batchCount]], not wall time. A lone filter is left to the existing kernels,
- * whose formulas live in the morsel and pair suites.
+ * Plan-level proof of where a stack of unfused filters compacts. Counts are
+ * [[ColumnMetrics.batchCount]], not wall time. Pair and triple batches compact once. A
+ * single-column chain publishes one batch per filter. A lone filter is left to the existing
+ * kernels, whose formulas live in the morsel and pair suites.
  */
 class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -26,7 +27,7 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
     ScarletConf.set(original)
     ()
 
-  "a boolean stack" should "compact once and call the second predicate on every survivor" in {
+  "a boolean stack" should "publish one batch per filter and call the second predicate on every survivor" in {
     val rows = Seq(true, false, true)
     val firstCalls = new AtomicInteger
     val secondCalls = new AtomicInteger
@@ -41,28 +42,36 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
       }
 
     shape(stacked.plan) shouldBe "Filter(Filter(Scan))"
+    val expected = row(stacked.collect())
+    // `row` runs both predicates. The counters start again for the columnar pass.
+    firstCalls.set(0)
+    secondCalls.set(0)
     val (collected, batches, visits, _) = footprint(stacked.collect())
+    collected shouldBe expected
     collected shouldBe Seq(true, true)
-    batches shouldBe 2L
-    visits shouldBe 1L
+    // Encode, then one kernel publish per filter.
+    batches shouldBe 3L
+    visits shouldBe 2L
     firstCalls.get() shouldBe 3
     secondCalls.get() shouldBe 3
   }
 
-  it should "compact a stack of three filters once" in {
+  it should "publish one batch for each of three filters" in {
     val stacked = DistCollection(Seq(true, false, true, false), 1)
       .filter((value: Boolean) => value || !value)
       .filter((value: Boolean) => value || !value)
       .filter((value: Boolean) => value)
 
     shape(stacked.plan) shouldBe "Filter(Filter(Filter(Scan)))"
+    val expected = row(stacked.collect())
     val (collected, batches, visits, _) = footprint(stacked.collect())
+    collected shouldBe expected
     collected shouldBe Seq(true, true)
-    batches shouldBe 2L
-    visits shouldBe 1L
+    batches shouldBe 4L
+    visits shouldBe 3L
   }
 
-  "dictionary literals" should "compact two equals filters once and count without that stack" in {
+  "dictionary literals" should "publish one batch per equals filter and count without that chain" in {
     val source = DistCollection(Seq("US", "CA", "US", "GB"), 1)
     val stacked = source.filterStringEquals("US").filterStringEquals("US")
 
@@ -70,8 +79,9 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
     val expected = row(stacked.collect())
     val (collected, batches, visits, _) = footprint(stacked.collect())
     collected shouldBe expected
-    batches shouldBe 2L
-    visits shouldBe 1L
+    // Encode, then one kernel publish per filter.
+    batches shouldBe 3L
+    visits shouldBe 2L
 
     val (counted, countBatches, _, _) = footprint(stacked.count())
     counted shouldBe 2L
@@ -92,13 +102,14 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
 
     shape(stacked.plan) shouldBe "Filter(Filter(Scan))"
     val expected = row(stacked.collect())
+    // `row` runs the general predicate. The counters start again for the columnar pass.
     calls.set(0)
     sawAbsent.set(0)
     val (collected, batches, visits, _) = footprint(stacked.collect())
     collected shouldBe expected
     collected shouldBe Seq("US", "US")
-    batches shouldBe 2L
-    visits shouldBe 1L
+    batches shouldBe 3L
+    visits shouldBe 2L
     calls.get() shouldBe stringsWithNull().length
     sawAbsent.get() shouldBe 1
   }
@@ -115,15 +126,20 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
       }
 
     shape(stacked.plan) shouldBe "Filter(Filter(Scan))"
+    val expected = row(stacked.collect())
+    // `row` runs the general predicate. The counters start again for the columnar pass.
+    calls.set(0)
+    sawAbsent.set(0)
     val (collected, batches, visits, _) = footprint(stacked.collect())
+    collected shouldBe expected
     collected shouldBe Seq("US", "US")
-    batches shouldBe 2L
-    visits shouldBe 1L
+    batches shouldBe 3L
+    visits shouldBe 2L
     calls.get() shouldBe 2
     sawAbsent.get() shouldBe 0
   }
 
-  it should "keep two general filters on the pipeline and still stack a hand-built pair" in {
+  it should "keep two general filters on the pipeline and publish a hand-built chain twice" in {
     val source = DistCollection(stringsWithNull(), 1)
     val logical = Plan.FilterOp(
       Plan.FilterOp(source.plan, keepsAbsentOrUs),
@@ -142,8 +158,9 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
       BatchCodec.decodeNullableStrings(onlyBatch(columns))
     }
     decoded shouldBe Seq(Some("US"), None, Some("US"))
-    batches shouldBe 2L
-    visits shouldBe 1L
+    // Encode, then one kernel publish per hand-built filter.
+    batches shouldBe 3L
+    visits shouldBe 2L
 
     val utf8 = footprint {
       val columns = ColumnarInterpreter.interpret(logical, op)
@@ -173,6 +190,7 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
 
     shape(stacked.plan) shouldBe "FilterValue(FilterKey(Scan))"
     val expected = row(stacked.collect())
+    // `row` runs both predicates. The counters start again for the columnar pass.
     firstCalls.set(0)
     secondCalls.set(0)
     val (collected, batches, visits, _) = footprint(stacked.collect())
@@ -273,28 +291,112 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
     rowCalls.get() shouldBe 2
   }
 
+  "triple filters" should "compact two column filters once" in {
+    val build = DistCollection.ofIntPairs(Array(1, 2, 3, 4), Array(10, 20, 30, 40), 1)
+    val probe = DistCollection.ofIntPairs(Array(1, 2, 4), Array(7, 8, 9), 1)
+    val stacked = build.join(probe).filterJoinKey(_ % 2 == 0).filterJoinLeft(_ >= 20)
+    val joined = build.join(probe)
+
+    shape(stacked.plan) shouldBe
+      "FilterTripleLeftValue(FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan))))"
+    onePartition()
+    val expected = rowUnder(stacked.collect().toList)
+    onePartition()
+    val (joinedBatches, joinedVisits) = ColumnMetrics.withSink(new CountingSink) {
+      val _ = joined.collect()
+      (ColumnMetrics.batchCount, ColumnMetrics.visitCount)
+    }
+    onePartition()
+    val (collected, batches, visits) = ColumnMetrics.withSink(new CountingSink) {
+      val value = stacked.collect().toList
+      (value, ColumnMetrics.batchCount, ColumnMetrics.visitCount)
+    }
+    collected shouldBe expected
+    // One shuffle partition. The join is not a single encode: both sides and the output
+    // publish before the filter. Two column filters then compact in that one morsel.
+    joinedBatches shouldBe 3L
+    joinedVisits shouldBe 3L
+    batches shouldBe joinedBatches + 1L
+    visits shouldBe joinedVisits + 1L
+  }
+
   "take" should "decode only the requested prefix of a filter stack" in {
     val stacked = DistCollection(stringsWithNull(), 1)
       .filter((value: String) => BatchCodec.isAbsent(value) || value.nonEmpty)
       .filterStringEquals("US")
 
     shape(stacked.plan) shouldBe "Filter(Filter(Scan))"
+    val expectedPrefix = row(stacked.take(1))
+    val expectedRest = row(stacked.take(10))
     val (prefix, batches, _, decoded) = footprint(stacked.take(1))
+    prefix shouldBe expectedPrefix
     prefix shouldBe Seq("US")
     decoded shouldBe 1L
-    batches shouldBe 2L
+    batches shouldBe 3L
 
     val (rest, restBatches, _, restDecoded) = footprint(stacked.take(10))
+    rest shouldBe expectedRest
     rest shouldBe Seq("US", "US")
     restDecoded shouldBe 2L
-    restBatches shouldBe 2L
+    restBatches shouldBe 3L
   }
 
-  "long filters" should "stay one publish per pipeline step and compact a hand-built stack once" in {
+  "an int stack" should "publish one batch per hand-built filter" in {
+    val source = DistCollection(Seq(1, 0, -1, 2), 1)
+    val logical = Plan.FilterOp(
+      Plan.FilterOp(source.plan, (value: Int) => value >= 0),
+      (value: Int) => value != 0,
+    )
+    arm()
+    val scan = ColumnarPlanner.lower(source.plan).getOrElse(fail("expected an int scan"))
+    val op = PhysicalOp.Filter(
+      PhysicalOp.Filter(scan, PhysicalOp.Slot.Element),
+      PhysicalOp.Slot.Element,
+    )
+    val (collected, batches, visits, _) = footprint {
+      ColumnarPlanner
+        .runLowered(logical, op)
+        .getOrElse(fail("hand-built stack did not run"))
+        .flatMap(_.data)
+    }
+    collected shouldBe Seq(1, 2)
+    collected shouldBe row(source.filter((value: Int) => value >= 0).filter(_ != 0).collect())
+    // Encode, then one kernel publish per filter. An int column is four bytes plus a validity
+    // bit, the width next to the survivor index, and the chain still publishes once per filter.
+    batches shouldBe 3L
+    visits shouldBe 2L
+  }
+
+  it should "call the first predicate zero times when the second predicate is ill-typed" in {
+    val calls = new AtomicInteger
+    val source = DistCollection(Seq(1, 2, 3), 1)
+    val logical = Plan.FilterOp(
+      Plan.FilterOp(
+        source.plan,
+        (value: Int) => {
+          calls.incrementAndGet()
+          value > 0
+        },
+      ),
+      illTypedInt((value: Long) => value > 0L),
+    )
+    arm()
+    val scan = ColumnarPlanner.lower(source.plan).getOrElse(fail("expected an int scan"))
+    val op = PhysicalOp.Filter(
+      PhysicalOp.Filter(scan, PhysicalOp.Slot.Element),
+      PhysicalOp.Slot.Element,
+    )
+    ColumnarPlanner.runLowered(logical, op) shouldBe None
+    calls.get() shouldBe 0
+  }
+
+  "long filters" should "stay one publish per step, including a hand-built chain" in {
     val source = DistCollection.ofLongs(Array(0L, 1L, -1L, 0L), 1)
     val piped = source.filter((value: Long) => value >= 0L).filter((value: Long) => value == 0L)
     shape(piped.plan) shouldBe "Pipeline2(Scan)"
-    val (_, pipelineBatches, pipelineVisits, _) = footprint(piped.collect())
+    val expected = row(piped.collect())
+    val (pipedRows, pipelineBatches, pipelineVisits, _) = footprint(piped.collect())
+    pipedRows shouldBe expected
     pipelineBatches shouldBe 3L
     pipelineVisits shouldBe 1L
 
@@ -326,8 +428,10 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
         .flatMap(_.data)
     }
     collected shouldBe Seq(0L, 0L)
-    batches shouldBe 2L
-    visits shouldBe 1L
+    collected shouldBe row(source.filter((value: Long) => value >= 0L).filter(_ == 0L).collect())
+    // Encode, then one kernel publish per hand-built filter. Same count as the pipeline.
+    batches shouldBe 3L
+    visits shouldBe 2L
     firstCalls.get() shouldBe 4
     secondCalls.get() shouldBe 3
   }
@@ -370,23 +474,32 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
     stacked.collect().toList shouldBe row(stacked.collect().toList)
   }
 
-  it should "resolve a dictionary mask once per partition across morsels" in {
+  it should "publish a second kernel pass for a string stack across morsels" in {
     val rows = dictionaryRows()
-    val stacked = DistCollection(rows, 2).filterStringEquals("US").filterStringIn("US", "FR")
+    val partitions = 2
+    val once = DistCollection(rows, partitions).filterStringEquals("US")
+    val stacked = once.filterStringIn("US", "FR")
     val expected = row(stacked.collect().toList)
-    val perPartition = ColumnBatches.cuts(rows.length / 2, wideBatch).length
+    val onceExpected = row(once.collect().toList)
+    val perPartition = ColumnBatches.cuts(rows.length / partitions, wideBatch).length
     perPartition should be > 1
 
-    Selection.resetCodeMaskBuilds()
     wide()
-    val (collected, visits) = counted(stacked.collect().toList)
+    val (onceCollected, onceBatches, onceVisits) = scanned(once.collect().toList)
+    onceCollected shouldBe onceExpected
+    onceVisits shouldBe (partitions * perPartition).toLong
+    // Encode one batch per partition. The filter publishes one batch per morsel, then one
+    // regroup because the partition is split.
+    onceBatches shouldBe (partitions + partitions * perPartition + partitions).toLong
+
+    val (collected, batches, visits) = scanned(stacked.collect().toList)
     collected shouldBe expected
     collected.exists(BatchCodec.isAbsent) shouldBe false
     collected should contain("US")
     visits should be > 1L
-    // Two literal steps, two partitions. A rebuild per morsel would be steps times morsels.
-    Selection.codeMaskBuilds shouldBe 2 * 2
-    Selection.codeMaskBuilds should be < (2 * 2 * perPartition)
+    // Survivors fit in one morsel, and regroup of that single batch is the batch itself.
+    // The second filter adds one publish per partition.
+    batches shouldBe onceBatches + partitions.toLong
     assertSurvivorsValid(stacked.plan)
   }
 
@@ -462,6 +575,17 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
 
   private val wideBatch = 4
 
+  private def onePartition(): Unit =
+    ScarletRuntime.get.shuffle.clear()
+    ScarletConf.set(
+      original.copy(
+        columnarExecution = true,
+        columnarBatchSize = 1024,
+        threadPoolSize = 1,
+        defaultShufflePartitions = 1,
+      ),
+    )
+
   private def wide(): Unit =
     ScarletRuntime.get.shuffle.clear()
     ScarletConf.set(
@@ -474,9 +598,13 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
     )
 
   private def counted[A](body: => A): (A, Long) =
+    val (value, _, visits) = scanned(body)
+    (value, visits)
+
+  private def scanned[A](body: => A): (A, Long, Long) =
     ColumnMetrics.withSink(new CountingSink) {
       val value = body
-      (value, ColumnMetrics.visitCount)
+      (value, ColumnMetrics.batchCount, ColumnMetrics.visitCount)
     }
 
   private def rowUnder[A](body: => A): A =
@@ -565,6 +693,10 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
       erased(None, Some(9)),
       (0, 3),
     )
+
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+  private def illTypedInt(predicate: Any): Int => Boolean =
+    predicate.asInstanceOf[Int => Boolean]
 
   @SuppressWarnings(
     Array(
