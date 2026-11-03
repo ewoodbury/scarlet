@@ -140,8 +140,12 @@ private[execution] object TrailingProject:
 
   private def aligned(plan: Plan[_], op: PhysicalOp): Boolean = (plan, op) match
     case (_: Plan.Source[_], PhysicalOp.Scan(PhysicalOp.Kind.Ints, _)) => true
-    case (Plan.KeysOp(_), PhysicalOp.Column(_, 0)) => true
-    case (Plan.ValuesOp(_), PhysicalOp.Column(_, 1)) => true
+    case (Plan.KeysOp(_), PhysicalOp.Column(child, 0)) => intPairChild(child)
+    case (Plan.ValuesOp(_), PhysicalOp.Column(child, 1)) => intPairChild(child)
+    case _ => false
+
+  private def intPairChild(child: PhysicalOp): Boolean = child.kind match
+    case PhysicalOp.Kind.Pairs => true
     case _ => false
 
   private def longChain(
@@ -202,7 +206,10 @@ private[execution] object TrailingProject:
   @tailrec
   private def intColumnBase(op: PhysicalOp): Option[PhysicalOp] = op match
     case scan @ PhysicalOp.Scan(PhysicalOp.Kind.Ints, _) => Some(scan)
-    case column @ PhysicalOp.Column(_, _) => Some(column)
+    case column @ PhysicalOp.Column(_, _) =>
+      column.kind match
+        case PhysicalOp.Kind.Ints => Some(column)
+        case _ => None
     case PhysicalOp.Project(child) => intColumnBase(child)
     case PhysicalOp.Pipeline(child, _) => intColumnBase(child)
     case PhysicalOp.Filter(child, PhysicalOp.Slot.Element) => intColumnBase(child)

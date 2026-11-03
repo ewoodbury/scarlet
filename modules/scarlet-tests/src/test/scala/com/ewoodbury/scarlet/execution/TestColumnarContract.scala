@@ -30,15 +30,15 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 180 accepted fixtures. sortByLongKey moved from the excluded list. This is a move, not a
-    // new fixture.
-    accepted.size shouldBe 180
-    // 52 exclusions. sortByLongKey moved to the accepted list. This is a move, not a new fixture.
-    // 180 + 52 = 232.
+    // 184 accepted fixtures. keys, values, mapValues, and filter of long pairs moved from the
+    // excluded list. This is a move, not a new fixture. 180 + 4 = 184.
+    accepted.size shouldBe 184
+    // 48 exclusions. Those four moved to the accepted list. This is a move, not a new fixture.
+    // 52 - 4 = 48. 184 + 48 = 232.
     // Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by
     // execution tests, not contract fixtures, because the contract does not track the int
     // refusals either.
-    excluded.size shouldBe 52
+    excluded.size shouldBe 48
     (accepted.size + excluded.size) shouldBe 232
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
@@ -360,6 +360,11 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val mappedKeys = Plan.MapOp(keys, (key: Int) => key + 1)
     val mappedValues = Plan.MapOp(values, (value: Int) => value + 1)
     val filteredMapValues = Plan.FilterValuesOp(mapValues, (value: Int) => value > 0)
+    val longKeys = Plan.KeysOp(longPairSource)
+    val longValues = Plan.ValuesOp(longPairSource)
+    val longMapValues = Plan.MapValuesOp(longPairSource, (value: Long) => value + 1L)
+    val longPairFilter =
+      Plan.FilterOp(longPairSource, (pair: (Long, Long)) => pair._1 > 0L)
     val reduced = Plan.ReduceByKeyOp(pairSource, (left: Int, right: Int) => left + right)
     val reducedAfterFilter = Plan.ReduceByKeyOp(
       pairValueFilter,
@@ -441,6 +446,20 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       AcceptedCase("mapped int keys", mappedKeys, narrowInfo(2, layout), Some("Project(Key(Scan))")),
       AcceptedCase("mapped int values", mappedValues, narrowInfo(2, layout), Some("Project(Value(Scan))")),
       AcceptedCase("filtered int mapValues", filteredMapValues, narrowInfo(2, layout), Some("FilterValue(MapValue(Scan))")),
+      acceptedLong("keys of long pairs", longKeys, narrowInfo(2, layout), Some("Key(Scan)")),
+      acceptedLong("values of long pairs", longValues, narrowInfo(2, layout), Some("Value(Scan)")),
+      AcceptedCase(
+        "mapValues on long pairs",
+        longMapValues,
+        narrowInfo(2, layout),
+        Some("MapValue(Scan)"),
+      ),
+      AcceptedCase(
+        "filter of long pairs",
+        longPairFilter,
+        narrowInfo(2, layout),
+        Some("FilterRow(Scan)"),
+      ),
       AcceptedCase("int reduceByKey", reduced, hashedInfo(layout), Some("HashAggregate(Exchange(Scan))")),
       AcceptedCase(
         "long reduceByKey",
@@ -665,16 +684,6 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ExcludedCase("groupByKey with double keys", groupDoubleKeys),
       ExcludedCase("join with string keys", stringKeyJoin),
       ExcludedCase("join with double keys", doubleKeyJoin),
-      ExcludedCase("keys of long pairs", Plan.KeysOp(longPairSource)),
-      ExcludedCase("values of long pairs", Plan.ValuesOp(longPairSource)),
-      ExcludedCase(
-        "mapValues on long pairs",
-        Plan.MapValuesOp(longPairSource, (value: Long) => value + 1L),
-      ),
-      ExcludedCase(
-        "filter of long pairs",
-        Plan.FilterOp(longPairSource, (pair: (Long, Long)) => pair._1 > 0L),
-      ),
       ExcludedCase("single-precision Float source", floatSource),
       ExcludedCase("single-precision Float map", floatMap),
       ExcludedCase("all-null string source", allNullStringSource),

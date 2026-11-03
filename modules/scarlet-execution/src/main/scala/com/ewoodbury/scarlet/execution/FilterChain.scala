@@ -15,8 +15,9 @@ import PredicatePlan.{Atom, Compiled}
  * triple filters compact through [[PredicatePlan.selectionSteps]] in one pass. An int, long,
  * float, string, or boolean stack chains [[PredicatePlan.applyAtom]], one kernel per filter. The
  * survivor index is four bytes per row, which costs more than the intermediate column a chained
- * kernel writes for the next filter to read. A boolean column is one bit per row. Long pairs, long
- * triples, and outer batches still refuse. A map or a pipeline is not a filter and stops the peel.
+ * kernel writes for the next filter to read. A boolean column is one bit per row. A long-pair row
+ * filter chains the same way, one [[LongPairKernel]] per filter. Long triples and outer batches
+ * still refuse. A map or a pipeline is not a filter and stops the peel.
  *
  * [[PredicatePlan.applyAtom]] does not take the compiled stack. Encoders, including the
  * absence-preserving copy under an outer join, do not run the predicate.
@@ -42,7 +43,7 @@ private[execution] object FilterChain:
       ordinals,
     )
     columns match
-      case Columns.LongPairs(_) | Columns.LongTriples(_) =>
+      case Columns.LongTriples(_) =>
         PredicatePlan.unsupported(opening(plan, op))
       // An outer batch is a triple with an absent side. This must stay an IllegalStateException:
       // the planner catches ClassCastException, including ColumnarFallback, and falls back to
@@ -50,7 +51,7 @@ private[execution] object FilterChain:
       case Columns.Outer(_, _) =>
         throw new IllegalStateException(PredicatePlan.outerMessage)
       case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Strings(_) |
-          Columns.Bools(_) | Columns.Pairs(_) | Columns.Triples(_) =>
+          Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.Triples(_) =>
         val compiled = PredicatePlan.compile(plan, op).getOrElse(missing)
         applyCompiled(columns, compiled, ordinals)
 
@@ -96,11 +97,12 @@ private[execution] object FilterChain:
 
   private def inputs(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.Pairs(_) => ColumnarInterpreter.pairsOf(columns)
+    case Columns.LongPairs(_) => ColumnarInterpreter.longPairsOf(columns)
     case Columns.Triples(_) => ColumnarInterpreter.triplesOf(columns)
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Strings(_) |
         Columns.Bools(_) =>
       ColumnarInterpreter.batchesOf(columns)
-    case Columns.LongPairs(_) | Columns.LongTriples(_) | Columns.Outer(_, _) =>
+    case Columns.LongTriples(_) | Columns.Outer(_, _) =>
       missing
 
   private def copy(columns: Columns, parts: Vector[ColumnBatch]): Columns = columns match
@@ -110,8 +112,9 @@ private[execution] object FilterChain:
     case Columns.Strings(_) => Columns.Strings(parts)
     case Columns.Bools(_) => Columns.Bools(parts)
     case Columns.Pairs(_) => Columns.Pairs(parts)
+    case Columns.LongPairs(_) => Columns.LongPairs(parts)
     case Columns.Triples(_) => Columns.Triples(parts)
-    case Columns.LongPairs(_) | Columns.LongTriples(_) | Columns.Outer(_, _) =>
+    case Columns.LongTriples(_) | Columns.Outer(_, _) =>
       missing
 
   private def opening(plan: Plan[_], op: PhysicalOp): PhysicalOp.Slot =

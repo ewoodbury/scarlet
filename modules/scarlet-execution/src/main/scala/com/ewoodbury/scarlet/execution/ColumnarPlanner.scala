@@ -50,31 +50,32 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * operator. Narrow map and filter keep input order and the input partition count. `Double` and
  * `String` select filter and map only. A filter over an int join result is columnar only for
  * explicit key, left-value, and right-value filters; general tuple predicates stay on the row
- * path. `keys` and `values` of an int pair are that column. The arrays are shared: a published
- * column is not mutated, so a view is cheaper than a copy and still correct. `mapValues` lowers
- * only when the function declares an unboxed `Int` result and every other `apply` is an erasure
- * bridge. A wider primitive, a reference result, or an overloaded `apply` stays on the row path.
- * That check reads the method descriptor and does not call the function. `getDeclaredMethods` does
- * not see an inherited `apply`, so that function stays on the row path too. `reduceByKey` on
- * `(Int, Int)` applies the user's function and wraps at `Int`. A `(Long, Long)` source lowers to
- * [[PhysicalOp.LongHashAggregate]] and wraps at `Long`. Any other pair type stays on the row path.
- * A `(Long, Long)` inner join with no hint, or with an explicit shuffle-hash hint, lowers to
- * [[PhysicalOp.LongHashJoin]]. Both sides are exchanged on `Long.hashCode`. There is no spill and
- * no build budget. A null value is not a decoded long: interpretation reads the value columns and
- * leaves the plan on the row path. A broadcast hint, a sort-merge hint, and every outer join on
- * long keys stay on the row path. An int `join` with no hint, or with an explicit shuffle-hash
- * hint, hash-partitions both sides and probes one bucket at a time. A broadcast hint records both
- * children and builds the right input. A later cost-based pass may build the left input instead.
- * The other child is probed in place, with no exchange on either side. Output columns stay
- * `(key, left, right)`. Multiplicity, values, and null semantics match the shuffle-hash join.
- * Order is unspecified. The build table is estimated before it is allocated. That estimate covers
- * the table only, not the rest of the query. An estimate above `broadcastBuildBudgetBytes` throws
- * `IllegalStateException`. Both inputs are already evaluated, so [[tryRun]] does not turn that
- * failure into a row-path fallback. An inner sort-merge on int pairs lowers to
- * [[PhysicalOp.SortMergeJoin]]. A left, right, or full outer sort-merge on int pairs lowers to the
- * matching sort-merge node. Sort-merge on a non-int key, including a long key, makes `lower`
- * return `None`. A `(Long, Long)` inner shuffle-hash join still lowers. Output width for a
- * shuffle-hash join or an aggregate is `defaultShufflePartitions`. A broadcast join's output
+ * path. `keys` and `values` of an int pair or a long pair are that column. The arrays are shared:
+ * a published column is not mutated, so a view is cheaper than a copy and still correct.
+ * `mapValues` lowers when the function declares an unboxed `Int` or `Long` result and every other
+ * `apply` is an erasure bridge. A wider primitive, a reference result, or an overloaded `apply`
+ * stays on the row path. A long-pair row filter lowers too. `filterKeys` and `filterValues` of a
+ * long pair stay on the row path. That check reads the method descriptor and does not call the
+ * function. `getDeclaredMethods` does not see an inherited `apply`, so that function stays on the
+ * row path too. `reduceByKey` on `(Int, Int)` applies the user's function and wraps at `Int`. A
+ * `(Long, Long)` source lowers to [[PhysicalOp.LongHashAggregate]] and wraps at `Long`. Any other
+ * pair type stays on the row path. A `(Long, Long)` inner join with no hint, or with an explicit
+ * shuffle-hash hint, lowers to [[PhysicalOp.LongHashJoin]]. Both sides are exchanged on
+ * `Long.hashCode`. There is no spill and no build budget. A null value is not a decoded long:
+ * interpretation reads the value columns and leaves the plan on the row path. A broadcast hint, a
+ * sort-merge hint, and every outer join on long keys stay on the row path. An int `join` with no
+ * hint, or with an explicit shuffle-hash hint, hash-partitions both sides and probes one bucket at
+ * a time. A broadcast hint records both children and builds the right input. A later cost-based
+ * pass may build the left input instead. The other child is probed in place, with no exchange on
+ * either side. Output columns stay `(key, left, right)`. Multiplicity, values, and null semantics
+ * match the shuffle-hash join. Order is unspecified. The build table is estimated before it is
+ * allocated. That estimate covers the table only, not the rest of the query. An estimate above
+ * `broadcastBuildBudgetBytes` throws `IllegalStateException`. Both inputs are already evaluated,
+ * so [[tryRun]] does not turn that failure into a row-path fallback. An inner sort-merge on int
+ * pairs lowers to [[PhysicalOp.SortMergeJoin]]. A left, right, or full outer sort-merge on int
+ * pairs lowers to the matching sort-merge node. Sort-merge on a non-int key, including a long key,
+ * makes `lower` return `None`. A `(Long, Long)` inner shuffle-hash join still lowers. Output width
+ * for a shuffle-hash join or an aggregate is `defaultShufflePartitions`. A broadcast join's output
  * follows the probe side, whichever child that is; `take` still refuses a join, so the prefix path
  * does not use that count. A left outer join on int pairs lowers for a broadcast hint, a
  * shuffle-hash hint, or an absent hint. Broadcast is [[PhysicalOp.BroadcastLeftOuter]]: the right
@@ -682,7 +683,9 @@ object ColumnarPlanner:
     case Plan.ValuesOp(source) =>
       pairColumn(source, ordinal = 1)
     case Plan.MapValuesOp(source, mapper) =>
-      if (returnsUnboxedInt(mapper)) then mapValue(source) else None
+      if (returnsUnboxedInt(mapper)) then mapValue(source, PhysicalOp.Kind.Pairs)
+      else if (returnsUnboxedLong(mapper)) then mapValue(source, PhysicalOp.Kind.LongPairs)
+      else None
     case Plan.ReduceByKeyOp(source, _) =>
       lowerChild(source).flatMap(ReduceByKeyLowering.apply)
     case Plan.JoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)) =>
@@ -858,17 +861,18 @@ object ColumnarPlanner:
         PhysicalOp.Kind.Strings =>
       if (elementProjectsMatch(child.kind, steps)) then Some(lowerElementPipeline(child, steps))
       else None
-    case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples =>
+    case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongPairs =>
       steps.foldLeft(Option(child)) { (current, step) =>
         current.flatMap(op => lowerElementStep(op, step))
       }
-    case PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples => None
+    case PhysicalOp.Kind.LongTriples => None
 
   private def lowerElementStep(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
     step match
       case ElementStep.Filter(predicate) =>
         child.kind match
-          case PhysicalOp.Kind.Pairs => Some(PhysicalOp.Filter(child, PhysicalOp.Slot.Row))
+          case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs =>
+            Some(PhysicalOp.Filter(child, PhysicalOp.Slot.Row))
           case PhysicalOp.Kind.Triples =>
             tripleFilterSlot(predicate).map { slot =>
               PhysicalOp.Filter(child, slot)
@@ -929,21 +933,28 @@ object ColumnarPlanner:
   private def pairColumn(source: Plan[_], ordinal: Int): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
       child.kind match
-        case PhysicalOp.Kind.Pairs =>
+        case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs =>
           Some(PhysicalOp.Column(child, ordinal))
         case _ => None
     }
 
-  private def mapValue(source: Plan[_]): Option[PhysicalOp] =
+  private def mapValue(source: Plan[_], kind: PhysicalOp.Kind): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
-      child.kind match
-        case PhysicalOp.Kind.Pairs => Some(PhysicalOp.MapValue(child))
+      (child.kind, kind) match
+        case (PhysicalOp.Kind.Pairs, PhysicalOp.Kind.Pairs) =>
+          Some(PhysicalOp.MapValue(child))
+        case (PhysicalOp.Kind.LongPairs, PhysicalOp.Kind.LongPairs) =>
+          Some(PhysicalOp.MapValue(child))
         case _ => None
     }
 
   /** Unboxed `Int => Int` via [[FunctionWitness]], same as an int element project. */
   private def returnsUnboxedInt(function: Any): Boolean =
     FunctionWitness.declaredElement(PhysicalOp.Kind.Ints, function)
+
+  /** Unboxed `Long => Long` via [[FunctionWitness]], same as a long element project. */
+  private def returnsUnboxedLong(function: Any): Boolean =
+    FunctionWitness.declaredElement(PhysicalOp.Kind.Longs, function)
 
   /**
    * True when every project in `steps` declares the signature of `kind`. A filter does not change

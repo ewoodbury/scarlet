@@ -36,12 +36,62 @@ private[execution] object ColumnarInterpreter:
       preserveAbsence: Boolean,
       ordinals: Set[Int],
   ): Columns =
-    val columns = pairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals))
-      .map { batch =>
-        // A singleton encode stores the demanded ordinal at index 0.
-        ColumnBatches.takeColumn(batch, encodedIndex(batch, ordinal))
-      }
-    Columns.Ints(columns)
+    val projected = interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)
+    val columns = projectColumn(pairBatches(child, projected), ordinal)
+    child.kind match
+      case PhysicalOp.Kind.LongPairs => Columns.Longs(columns)
+      case PhysicalOp.Kind.Pairs => Columns.Ints(columns)
+      case _ =>
+        throw new IllegalStateException("columnar projection expected a pair")
+
+  /** The pair batches `child` produced. A wrong column type is a planner bug, not a fallback. */
+  private def pairBatches(child: PhysicalOp, columns: Columns): Vector[ColumnBatch] =
+    child.kind match
+      case PhysicalOp.Kind.LongPairs => longPairsOf(columns)
+      case PhysicalOp.Kind.Pairs => pairsOf(columns)
+      case _ =>
+        throw new IllegalStateException("columnar projection expected a pair")
+
+  private def projectColumn(parts: Vector[ColumnBatch], ordinal: Int): Vector[ColumnBatch] =
+    parts.map { batch =>
+      // A singleton encode stores the demanded ordinal at index 0.
+      ColumnBatches.takeColumn(batch, encodedIndex(batch, ordinal))
+    }
+
+  private def mapIntValues(columns: Columns, mapper: Any): Columns =
+    // Named erasure boundary. Lowering checked the declared `Int => Int` shape, so this cast
+    // is safe.
+    @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+    val fn = mapper.asInstanceOf[Int => Int]
+    Columns.Pairs(
+      onEachMorsel(pairsOf(columns)) { morsel =>
+        ColumnKernel.projectInt32(
+          morsel.batch,
+          1,
+          morsel.start,
+          morsel.length,
+          value => fn(value),
+        )
+      },
+    )
+
+  private def mapLongValues(columns: Columns, mapper: Any): Columns =
+    // Named erasure boundary. Lowering checked `Long => Long` via FunctionWitness, so this cast
+    // is safe. A null value stays null and is not passed to the mapper. A null key is left as it
+    // is.
+    @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+    val fn = mapper.asInstanceOf[Long => Long]
+    Columns.LongPairs(
+      onEachMorsel(longPairsOf(columns)) { morsel =>
+        ColumnKernel.projectInt64(
+          morsel.batch,
+          1,
+          morsel.start,
+          morsel.length,
+          value => fn(value),
+        )
+      },
+    )
 
   /** Index of `ordinal` after a one-column encode. Both columns keep their indexes. */
   private def encodedIndex(batch: ColumnBatch, ordinal: Int): Int =
@@ -89,17 +139,34 @@ private[execution] object ColumnarInterpreter:
    * [[PhysicalOp.SortByIntKey]]. Every other int-pair op uses [[BatchCodec.decodeIntPairs]], which
    * rejects a clear bit. Long pairs use [[BatchCodec.decodeLongPairs]], which already keeps a
    * clear bit. [[PhysicalOp.SortByLongKey]] returns long pairs, so collect and take use that
-   * decoder and do not call the int-pair function.
+   * decoder and do not call the int-pair function. A long column projected from a long pair keeps
+   * a clear bit via [[BatchCodec.decodeLongsPreservingAbsence]]. An element long scan still uses
+   * [[BatchCodec.decodeLongs]], which rejects a clear bit.
    */
   private[execution] def decodeFor(columns: Columns, op: PhysicalOp): Seq[Partition[_]] =
-    decodeWith(columns, intPairDecoder(op))
+    decodeWith(columns, intPairDecoder(op), longDecoder(op))
 
   /**
-   * Prefix of [[decodeFor]]. The same op chooses the int-pair decoder. `limit <= 0` returns empty
-   * without reading a batch.
+   * Prefix of [[decodeFor]]. The same op chooses the int-pair decoder and the long decoder.
+   * `limit <= 0` returns empty without reading a batch.
    */
   private[execution] def decodePrefixFor(columns: Columns, limit: Int, op: PhysicalOp): Seq[Any] =
-    decodePrefixWith(columns, limit, intPairDecoder(op))
+    decodePrefixWith(columns, limit, intPairDecoder(op), longDecoder(op))
+
+  /**
+   * Long decoder for `op`. A key or value column of a long pair keeps a null. Every other long
+   * column rejects one.
+   */
+  private def longDecoder(op: PhysicalOp): (ColumnBatch, Int) => Seq[Long] =
+    if (absentLongColumn(op)) then BatchCodec.decodeLongsPreservingAbsence
+    else (batch, rows) => BatchCodec.decodeLongs(batch, rows)
+
+  private def absentLongColumn(op: PhysicalOp): Boolean = op match
+    case PhysicalOp.Column(child, _) =>
+      child.kind match
+        case PhysicalOp.Kind.LongPairs => true
+        case _ => false
+    case _ => false
 
   /**
    * Int-pair decoder for `op`. [[PhysicalOp.SortByLongKey]] is its own arm. Long-pair decode does
@@ -117,12 +184,18 @@ private[execution] object ColumnarInterpreter:
       case _ => (batch, rows) => BatchCodec.decodeIntPairs(batch, rows)
 
   private[execution] def decodePrefix(columns: Columns, limit: Int): Seq[Any] =
-    decodePrefixWith(columns, limit, (batch, rows) => BatchCodec.decodeIntPairs(batch, rows))
+    decodePrefixWith(
+      columns,
+      limit,
+      (batch, rows) => BatchCodec.decodeIntPairs(batch, rows),
+      (batch, rows) => BatchCodec.decodeLongs(batch, rows),
+    )
 
   private def decodePrefixWith(
       columns: Columns,
       limit: Int,
       decodePairs: (ColumnBatch, Int) => Seq[(Int, Int)],
+      decodeLongs: (ColumnBatch, Int) => Seq[Long],
   ): Seq[Any] =
     if (limit <= 0) then Seq.empty
     else
@@ -130,7 +203,7 @@ private[execution] object ColumnarInterpreter:
         case Columns.Ints(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeInts(batch, rows))
         case Columns.Longs(parts) =>
-          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeLongs(batch, rows))
+          prefixRows(parts, limit, decodeLongs)
         case Columns.Floats(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeFloat64s(batch, rows))
         case Columns.Pairs(parts) =>
@@ -200,15 +273,17 @@ private[execution] object ColumnarInterpreter:
             if (preserveAbsence) then encodeGroupedPairs(selected)
             else encodePairs(selected, ordinals)
           Columns.Pairs(encoded)
-        case PhysicalOp.Kind.LongPairs => Columns.LongPairs(encodeLongPairs(selected))
+        case PhysicalOp.Kind.LongPairs =>
+          Columns.LongPairs(encodeLongPairs(selected, ordinals))
         case PhysicalOp.Kind.Strings => Columns.Strings(encodeStrings(selected))
         case PhysicalOp.Kind.Bools => Columns.Bools(encodeBools(selected))
         case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples =>
           throw new IllegalStateException(
             s"physical tree does not match ${plan.getClass.getSimpleName}",
           )
-    // Two or more pair or triple filters compact once. A single-column stack chains kernels.
-    // A lone filter stays on the existing kernels.
+    // Two or more int pair or triple filters compact once. A long-pair row filter chains one
+    // kernel per filter. A single-column stack chains kernels. A lone filter stays on the
+    // existing kernels.
     // `accepts` walks the logical plan, so it runs only for a filter node.
     case (logical, physical)
         if physical.isInstanceOf[PhysicalOp.Filter] && FilterChain.accepts(logical, physical) =>
@@ -236,23 +311,10 @@ private[execution] object ColumnarInterpreter:
         ordinals = ordinals,
       )
     case (Plan.MapValuesOp(source, mapper), PhysicalOp.MapValue(child)) =>
-      // Named erasure boundary. The descriptor check verified the declared `Int => Int` shape
-      // before lowering, so this cast is safe.
-      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
-      val fn = mapper.asInstanceOf[Int => Int]
-      Columns.Pairs(
-        onEachMorsel(
-          pairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)),
-        ) { morsel =>
-          ColumnKernel.projectInt32(
-            morsel.batch,
-            1,
-            morsel.start,
-            morsel.length,
-            value => fn(value),
-          )
-        },
-      )
+      val input = interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)
+      child.kind match
+        case PhysicalOp.Kind.LongPairs => mapLongValues(input, mapper)
+        case _ => mapIntValues(input, mapper)
     case (
           Plan.ReduceByKeyOp(source, reduceFunc),
           PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)),
@@ -969,7 +1031,39 @@ private[execution] object ColumnarInterpreter:
           BatchCodec.ints(side)
     }.toVector
 
-  private def encodeLongPairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+  /**
+   * Encode the ordinals [[ColumnUse]] demanded. `{0}` copies keys and `{1}` copies values, each as
+   * one `Int64` column at index 0. Any other set, including `{0, 1}`, keeps both columns. A boxed
+   * one-side encode keeps a null and does not read the other component. Sort, reduce, and join
+   * demand both columns, so they still encode both.
+   */
+  private def encodeLongPairs(
+      partitions: Seq[Partition[_]],
+      ordinals: Set[Int],
+  ): Vector[ColumnBatch] =
+    if (ordinals.size == 1 && ordinals.contains(0)) then encodeLongSide(partitions, key = true)
+    else if (ordinals.size == 1 && ordinals.contains(1)) then
+      encodeLongSide(partitions, key = false)
+    else encodeLongPairPartitions(partitions)
+
+  private def encodeLongSide(partitions: Seq[Partition[_]], key: Boolean): Vector[ColumnBatch] =
+    import com.ewoodbury.scarlet.core.LongPairArrays
+
+    partitions.map { partition =>
+      partition.data match
+        case pairs: LongPairArrays =>
+          val column = if (key) then pairs.keys else pairs.values
+          BatchCodec.copiedLongs(column)
+        case other =>
+          // Named erasure boundary. Classification already selected long-pair elements.
+          // `Product` keeps the read on `productElement`, so the other component is not cast.
+          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+          val rows = other.asInstanceOf[Iterable[Product]]
+          val ordinal = if (key) then 0 else 1
+          BatchCodec.longPairSide(rows, ordinal)
+    }.toVector
+
+  private def encodeLongPairPartitions(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
     import com.ewoodbury.scarlet.core.LongPairArrays
 
     partitions.map { partition =>
@@ -982,7 +1076,7 @@ private[execution] object ColumnarInterpreter:
           BatchCodec.longPairs(rows)
     }.toVector
 
-  private def longPairsOf(columns: Columns): Vector[ColumnBatch] = columns match
+  private[execution] def longPairsOf(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.LongPairs(parts) if parts.nonEmpty => parts
     case Columns.LongPairs(_) =>
       throw new IllegalStateException("columnar long pairs have no partitions")
@@ -1026,11 +1120,12 @@ private[execution] object ColumnarInterpreter:
   private def decodeWith(
       columns: Columns,
       decodePairs: (ColumnBatch, Int) => Seq[(Int, Int)],
+      decodeLongs: (ColumnBatch, Int) => Seq[Long],
   ): Seq[Partition[_]] = columns match
     case Columns.Ints(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeInts(batch)))
     case Columns.Longs(parts) =>
-      parts.map(batch => Partition(BatchCodec.decodeLongs(batch)))
+      parts.map(batch => Partition(decodeLongs(batch, batch.length)))
     case Columns.Floats(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeFloat64s(batch)))
     case Columns.Pairs(parts) =>
