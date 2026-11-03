@@ -141,17 +141,20 @@ private[execution] object ColumnarInterpreter:
    * clear bit. [[PhysicalOp.SortByLongKey]] returns long pairs, so collect and take use that
    * decoder and do not call the int-pair function. A long column projected from a long pair keeps
    * a clear bit via [[BatchCodec.decodeLongsPreservingAbsence]]. An element long scan still uses
-   * [[BatchCodec.decodeLongs]], which rejects a clear bit.
+   * [[BatchCodec.decodeLongs]], which rejects a clear bit. Int triples use
+   * [[BatchCodec.decodeIntTriplesPreservingAbsence]] only for a [[PhysicalOp.Project]]. A map may
+   * keep a null component. Every other triple op uses [[BatchCodec.decodeIntTriples]], which
+   * rejects a clear bit. A whole-row filter drops those rows before decode.
    */
   private[execution] def decodeFor(columns: Columns, op: PhysicalOp): Seq[Partition[_]] =
-    decodeWith(columns, intPairDecoder(op), longDecoder(op))
+    decodeWith(columns, intPairDecoder(op), longDecoder(op), tripleDecoder(op))
 
   /**
    * Prefix of [[decodeFor]]. The same op chooses the int-pair decoder and the long decoder.
    * `limit <= 0` returns empty without reading a batch.
    */
   private[execution] def decodePrefixFor(columns: Columns, limit: Int, op: PhysicalOp): Seq[Any] =
-    decodePrefixWith(columns, limit, intPairDecoder(op), longDecoder(op))
+    decodePrefixWith(columns, limit, intPairDecoder(op), longDecoder(op), tripleDecoder(op))
 
   /**
    * Long decoder for `op`. A key or value column of a long pair keeps a null. Every other long
@@ -183,12 +186,19 @@ private[execution] object ColumnarInterpreter:
           )
       case _ => (batch, rows) => BatchCodec.decodeIntPairs(batch, rows)
 
+  /** A triple map may keep a null component. Every other triple op rejects a clear bit. */
+  private def tripleDecoder(op: PhysicalOp): (ColumnBatch, Int) => Seq[(Int, (Int, Int))] =
+    op match
+      case _: PhysicalOp.Project => BatchCodec.decodeIntTriplesPreservingAbsence
+      case _ => (batch, rows) => BatchCodec.decodeIntTriples(batch, rows)
+
   private[execution] def decodePrefix(columns: Columns, limit: Int): Seq[Any] =
     decodePrefixWith(
       columns,
       limit,
       (batch, rows) => BatchCodec.decodeIntPairs(batch, rows),
       (batch, rows) => BatchCodec.decodeLongs(batch, rows),
+      (batch, rows) => BatchCodec.decodeIntTriples(batch, rows),
     )
 
   private def decodePrefixWith(
@@ -196,6 +206,7 @@ private[execution] object ColumnarInterpreter:
       limit: Int,
       decodePairs: (ColumnBatch, Int) => Seq[(Int, Int)],
       decodeLongs: (ColumnBatch, Int) => Seq[Long],
+      decodeTriples: (ColumnBatch, Int) => Seq[(Int, (Int, Int))],
   ): Seq[Any] =
     if (limit <= 0) then Seq.empty
     else
@@ -212,7 +223,7 @@ private[execution] object ColumnarInterpreter:
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeLongPairs(batch, rows))
         case Columns.Triples(parts) =>
           // Joins are not partition-preserving, so `take` does not reach this arm.
-          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeIntTriples(batch, rows))
+          prefixRows(parts, limit, decodeTriples)
         case Columns.LongTriples(parts) =>
           // Joins are not partition-preserving, so `take` does not reach this arm.
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeLongTriples(batch, rows))
@@ -241,11 +252,14 @@ private[execution] object ColumnarInterpreter:
       selectedPartition: Option[Int] = None,
       preserveAbsence: Boolean = false,
   ): Columns =
+    // A whole-row filter or a triple map asks the join to keep null values. A bare join does not,
+    // and a slot filter does not: its kernel rejects a clear bit.
+    val absence = preserveAbsence || op.requestsTripleAbsence
     interpretAt(
       plan,
       op,
       selectedPartition,
-      preserveAbsence,
+      absence,
       ColumnUse.ordinals(plan, op),
     )
 
@@ -860,8 +874,18 @@ private[execution] object ColumnarInterpreter:
           value => ColumnarPlanner.stringResult(fn(value)),
         )
       })
-    case Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.Triples(_) |
-        Columns.LongTriples(_) | Columns.Outer(_, _) =>
+    case Columns.Triples(parts) =>
+      // Named erasure boundary. The adapter returns Any. A type-changing triple throws
+      // ColumnarFallback inside the kernel, before the output batch is published, instead of a
+      // raw ClassCastException from this cast. The cast itself succeeds for any Function1.
+      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Any"))
+      val fn = mapper.asInstanceOf[((Int, (Int, Int))) => Any]
+      val adapted: PairKernel.IntTripleMap = (key, left, right) => fn((key, (left, right)))
+      Columns.Triples(onEachMorsel(parts) { morsel =>
+        PairKernel.mapTriple(morsel.batch, morsel.start, morsel.length, adapted)
+      })
+    case Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.LongTriples(_) |
+        Columns.Outer(_, _) =>
       throw new IllegalStateException(
         s"columnar map expects ${elementColumnList(includeBooleans = false)}",
       )
@@ -1121,6 +1145,7 @@ private[execution] object ColumnarInterpreter:
       columns: Columns,
       decodePairs: (ColumnBatch, Int) => Seq[(Int, Int)],
       decodeLongs: (ColumnBatch, Int) => Seq[Long],
+      decodeTriples: (ColumnBatch, Int) => Seq[(Int, (Int, Int))],
   ): Seq[Partition[_]] = columns match
     case Columns.Ints(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeInts(batch)))
@@ -1133,7 +1158,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.LongPairs(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeLongPairs(batch)))
     case Columns.Triples(parts) =>
-      parts.map(batch => Partition(BatchCodec.decodeIntTriples(batch)))
+      parts.map(batch => Partition(decodeTriples(batch, batch.length)))
     case Columns.LongTriples(parts) =>
       // Named erasure boundary for the long join. The decoded rows are `(Long, (Long, Long))`.
       // [[ColumnarPlanner.runLowered]] casts the partition sequence to the plan's element type.

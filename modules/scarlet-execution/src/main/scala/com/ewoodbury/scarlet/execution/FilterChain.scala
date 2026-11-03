@@ -16,8 +16,9 @@ import PredicatePlan.{Atom, Compiled}
  * float, string, or boolean stack chains [[PredicatePlan.applyAtom]], one kernel per filter. The
  * survivor index is four bytes per row, which costs more than the intermediate column a chained
  * kernel writes for the next filter to read. A boolean column is one bit per row. A long-pair row
- * filter chains the same way, one [[LongPairKernel]] per filter. Long triples and outer batches
- * still refuse. A map or a pipeline is not a filter and stops the peel.
+ * filter chains the same way, one [[LongPairKernel]] per filter. A whole-row triple filter chains
+ * too: it is not a slot atom, so it does not compact through [[Selection]]. Long triples and outer
+ * batches still refuse. A map or a pipeline is not a filter and stops the peel.
  *
  * [[PredicatePlan.applyAtom]] does not take the compiled stack. Encoders, including the
  * absence-preserving copy under an outer join, do not run the predicate.
@@ -61,7 +62,12 @@ private[execution] object FilterChain:
       case Columns.Pairs(_) if compiled.atoms.length > 1 =>
         Columns.Pairs(compact(ColumnarInterpreter.pairsOf(columns), compiled, ordinals))
       case Columns.Triples(_) if compiled.atoms.length > 1 =>
-        Columns.Triples(compact(ColumnarInterpreter.triplesOf(columns), compiled, ordinals))
+        // A whole-row atom is not a slot atom. Two of them chain. Slot atoms still compact once.
+        PredicatePlan.selectionSteps(compiled) match
+          case Some(_) =>
+            Columns.Triples(compact(ColumnarInterpreter.triplesOf(columns), compiled, ordinals))
+          case None =>
+            chain(columns, compiled.atoms)
       case _ =>
         chain(columns, compiled.atoms)
 

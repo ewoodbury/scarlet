@@ -157,8 +157,9 @@ final case class DistCollection[A](plan: Plan[A]):
 
   /**
    * Filters an int join result by its key. This explicit form can filter the three join columns
-   * without constructing a `(Int, (Int, Int))` tuple for each row. A general `filter` remains on
-   * the row path because its predicate accepts that tuple.
+   * without constructing a `(Int, (Int, Int))` tuple for each row. A general `filter` reads that
+   * tuple. On an int inner join it is columnar and drops a null component without calling the
+   * predicate. An outer join stays on the row path.
    */
   def filterJoinKey(p: Int => Boolean)(using
       ev: A =:= (Int, (Int, Int)),
