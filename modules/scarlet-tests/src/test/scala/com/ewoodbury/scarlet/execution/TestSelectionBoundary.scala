@@ -449,7 +449,7 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
     stacked.collect() shouldBe expected
   }
 
-  it should "send a long-pair filter stack to the row path" in {
+  it should "run a long-pair filter stack and match the row path" in {
     val calls = new AtomicInteger
     val source = DistCollection.ofLongPairs(Array(1L, -2L, 0L), Array(4L, 5L, 6L), 1)
     val keep = (pair: (Long, Long)) => {
@@ -458,20 +458,25 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
     }
     val stacked = source.filter(keep).filter(keep)
     arm()
-    val scan = ColumnarPlanner.lower(source.plan).getOrElse(fail("expected a long-pair scan"))
-    val op = PhysicalOp.Filter(
-      PhysicalOp.Filter(scan, PhysicalOp.Slot.Row),
-      PhysicalOp.Slot.Row,
-    )
-
-    val thrown = intercept[ColumnarFallback] {
-      ColumnarInterpreter.interpret(stacked.plan, op)
-    }
-    thrown.getMessage shouldBe "columnar op expected int pairs"
-    ColumnarPlanner.runLowered(stacked.plan, op) shouldBe None
+    val lowered = ColumnarPlanner
+      .lower(stacked.plan)
+      .getOrElse(fail("long-pair filter stack stayed on the row path"))
+    lowered.shape shouldBe "FilterRow(FilterRow(Scan))"
+    // compile casts the predicate and does not call it.
+    PredicatePlan.compile(stacked.plan, lowered)
     calls.get() shouldBe 0
-    ColumnarPlanner.lower(stacked.plan) shouldBe Option.empty[PhysicalOp]
-    stacked.collect().toList shouldBe row(stacked.collect().toList)
+    val ran = ColumnarPlanner.tryRun(stacked.plan).getOrElse(fail("stack did not run"))
+    // First filter sees three present rows and keeps (1, 4) and (0, 6). The second sees those two.
+    calls.get() shouldBe 5
+    ran.flatMap(_.data).toList shouldBe List((1L, 4L), (0L, 6L))
+    val rowCalls = new AtomicInteger
+    val rowKeep = (pair: (Long, Long)) => {
+      rowCalls.incrementAndGet()
+      pair._1 >= 0L && pair._2 > 0L
+    }
+    val rowStacked = source.filter(rowKeep).filter(rowKeep)
+    ran.flatMap(_.data).toList shouldBe row(rowStacked.collect().toList)
+    rowCalls.get() shouldBe 5
   }
 
   it should "name a type-changing pair map and keep a same-type map fused" in {

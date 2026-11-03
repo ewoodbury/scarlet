@@ -9,14 +9,15 @@ import com.ewoodbury.scarlet.core.Partition
  * node. A straight int, long, float, or string filter/project chain can be one
  * [[PhysicalOp.Pipeline]] node. A boolean filter chain is one [[PhysicalOp.Filter]] per step.
  * Other filters and projects remain one node per step. [[PhysicalOp.Project]] and `Pipeline` keep
- * the child kind. [[PhysicalOp.Column]] narrows a pair to one int column and shares its arrays.
- * [[PhysicalOp.MapValue]] rewrites an int value and keeps the pair. [[PhysicalOp.Exchange]] sits
- * under [[PhysicalOp.HashAggregate]] and [[PhysicalOp.LongHashAggregate]], and on each side of
- * [[PhysicalOp.HashJoin]], [[PhysicalOp.LongHashJoin]], [[PhysicalOp.SortMergeJoin]],
- * [[PhysicalOp.SortMergeLeftOuter]], [[PhysicalOp.SortMergeRightOuter]],
- * [[PhysicalOp.SortMergeFullOuter]], [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]],
- * and [[PhysicalOp.HashFullOuter]]. Those kernels perform the shuffle. Interpreting the boundary
- * on its own does not. [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.BroadcastLeftOuter]],
+ * the child kind. [[PhysicalOp.Column]] narrows an int or long pair to one column and shares its
+ * arrays. [[PhysicalOp.MapValue]] rewrites an int or long value and keeps the pair.
+ * [[PhysicalOp.Exchange]] sits under [[PhysicalOp.HashAggregate]] and
+ * [[PhysicalOp.LongHashAggregate]], and on each side of [[PhysicalOp.HashJoin]],
+ * [[PhysicalOp.LongHashJoin]], [[PhysicalOp.SortMergeJoin]], [[PhysicalOp.SortMergeLeftOuter]],
+ * [[PhysicalOp.SortMergeRightOuter]], [[PhysicalOp.SortMergeFullOuter]],
+ * [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]], and [[PhysicalOp.HashFullOuter]].
+ * Those kernels perform the shuffle. Interpreting the boundary on its own does not.
+ * [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.BroadcastLeftOuter]],
  * [[PhysicalOp.BroadcastRightOuter]], and [[PhysicalOp.BroadcastFullOuter]] have no exchange.
  * [[PhysicalOp.BuildSide]] chooses which logical child of an inner broadcast join is built. The
  * planner records the right child. A later cost-based pass may choose the left child. The other
@@ -30,10 +31,13 @@ enum PhysicalOp:
   case Filter(child: PhysicalOp, slot: PhysicalOp.Slot)
   case Project(child: PhysicalOp)
 
-  /** One column of an int pair. Kind is [[PhysicalOp.Kind.Ints]]. */
+  /**
+   * One column of an int or long pair. Kind is [[PhysicalOp.Kind.Ints]] or
+   * [[PhysicalOp.Kind.Longs]].
+   */
   case Column(child: PhysicalOp, columnOrdinal: Int)
 
-  /** `mapValues` whose new value is an unboxed int. Kind stays [[PhysicalOp.Kind.Pairs]]. */
+  /** `mapValues` whose new value is an unboxed int or long. Kind stays the pair kind. */
   case MapValue(child: PhysicalOp)
 
   /**
@@ -205,8 +209,14 @@ enum PhysicalOp:
     case Project(child) => child.kind
     case Pipeline(child, _) => child.kind
     case Exchange(child) => child.kind
-    case Column(_, _) => PhysicalOp.Kind.Ints
-    case MapValue(_) => PhysicalOp.Kind.Pairs
+    case Column(child, _) =>
+      child.kind match
+        case PhysicalOp.Kind.LongPairs => PhysicalOp.Kind.Longs
+        case _ => PhysicalOp.Kind.Ints
+    case MapValue(child) =>
+      child.kind match
+        case PhysicalOp.Kind.LongPairs => PhysicalOp.Kind.LongPairs
+        case _ => PhysicalOp.Kind.Pairs
     case SortByIntKey(_) => PhysicalOp.Kind.Pairs
     case SortByLongKey(_) => PhysicalOp.Kind.LongPairs
     case HashAggregate(_) => PhysicalOp.Kind.Pairs

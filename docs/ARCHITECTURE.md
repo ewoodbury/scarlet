@@ -63,7 +63,7 @@ asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors
 
 ### Columnar completion contract
 
-The following 180 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. `sortByLongKey` of a long-pair scan moves from the excluded list into this table. This is a move, not a new fixture. 179 + 1 = 180. The excluded list drops from 53 to 52. 180 + 52 = 232. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
+The following 184 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. `keys`, `values`, `mapValues`, and `filter` of long pairs move from the excluded list into this table. This is a move, not a new fixture. 180 + 4 = 184. The excluded list drops from 52 to 48. 184 + 48 = 232. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
 `Unknown(2)` denotes the two source partitions in the small contract fixtures. Aggregate and join
 outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. `sortByIntKey` and `sortByLongKey`
 use `Range(defaultShufflePartitions, Seq(0))` and `Sorted(Seq(0), Seq(true))`. That ordering tag is
@@ -82,6 +82,7 @@ ascending by effective key: a null key orders as zero and stays null. Shape stri
 | `sortByLongKey` of a long-pair scan. Rank boundaries match `sortByIntKey`. A null key orders as zero and stays null. A null value is retained. Ties keep input order. Distribution is `Range(defaultShufflePartitions, Seq(0))` and ordering is `Sorted(Seq(0), Seq(true))`. A filter, map, mapValues, projection, or any other non-scan child stays on the row path. A filter above the sort stays on the row path. Over the budget, with spill on, each input partition is one sorted run and the runs are merged `spillFanIn` at a time. The result matches this in-memory split. One input partition is still sorted in memory. At or under the budget, and whenever spill is off, the in-memory split runs and writes nothing | `Columnar` | `SortByLongKey(Scan)` |
 | Empty typed int-pair source | `Columnar` | `Scan` |
 | Long-pair source, including an empty source | `Columnar` | `Scan` |
+| Long-pair `keys`, `values`, `mapValues`, and row `filter` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `FilterRow(Scan)` |
 | Pair `keys`, `values`, int `mapValues`, mapped key/value columns, filtered int `mapValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `Project(Key(Scan))`, `Project(Value(Scan))`, `FilterValue(MapValue(Scan))` |
 | Int `reduceByKey`, after a value filter or int `mapValues`, and nested reduction | `Columnar` | `HashAggregate(Exchange(Scan))`, `HashAggregate(Exchange(FilterValue(Scan)))`, `HashAggregate(Exchange(MapValue(Scan)))`, `HashAggregate(Exchange(HashAggregate(Exchange(Scan))))` |
 | Long `reduceByKey` | `Columnar` | `LongHashAggregate(Exchange(Scan))` |
@@ -197,17 +198,19 @@ the pair type, such as `(Int, Int) => (Long, Int)`, is excluded: `partitioning`,
 `tryGroupedSum` stay on the row path. The structural peel label is still
 `GroupedSum(MapPair(Scan))`.
 
-These 52 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+These 48 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
 `sortBy`, map on join triples, a general tuple filter on join
 triples, non-Int `mapValues`, string/double pair projection or pair filters, string/double-key
-`groupByKey`, `reduceByKey`, and join, long-pair `keys`, `values`, `mapValues`, an element map,
-`filter`, `filterKeys`, `filterValues`, `groupedSum`, and `sortBy` (`take` of a long-pair scan is
-accepted, and an unhinted or shuffle-hash inner join of long pairs is accepted),
+`groupByKey`, `reduceByKey`, and join, an element map of long pairs, `filterKeys`, `filterValues`,
+`groupedSum`, and `sortBy` of a non-scan (`take` of a long-pair scan is accepted, and `keys`,
+`values`, `mapValues`, and a row `filter` of long pairs are accepted, and an unhinted or
+shuffle-hash inner join of long pairs is accepted),
 single-precision `Float` sources/maps, all-null strings, empty generic sources without a type
 descriptor, and element maps that do not preserve the column type.
-That is 53 previous exclusions. `sortByLongKey` moves to the accepted list. This is a move, not a
-new fixture. 53 - 1 = 52. Accepted moves from 179 to 180. 180 + 52 = 232.
+That is 52 previous exclusions. `keys`, `values`, `mapValues`, and `filter` of long pairs move to
+the accepted list. This is a move, not a new fixture. 52 - 4 = 48. Accepted moves from 180 to 184.
+184 + 48 = 232.
 Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by execution
 tests, not contract fixtures, because the contract does not track the int refusals either.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then

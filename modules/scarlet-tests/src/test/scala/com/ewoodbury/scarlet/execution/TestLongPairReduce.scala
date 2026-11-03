@@ -278,21 +278,25 @@ class TestLongPairReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     ColumnarPlanner.tryTake(rows.plan, 3).map(_.toList) shouldBe Some(prefix)
   }
 
-  "a long-pair source" should "keep keys, values, mapValues, and filter on the row path" in {
+  "a long-pair source" should "lower keys, values, mapValues, and filter and match the row path" in {
     val rows = DistCollection.ofLongPairs(Array(1L, -2L, 1L), Array(10L, 20L, 5L), 4)
     val keyed = rows.keys
     val valued = rows.values
     val mapped = rows.mapValues[Long, Long, Long](_ + 1L)
     val filtered = rows.filter { case (key, _) => key < 0L }
 
-    ColumnarPlanner.partitioning(keyed.plan) shouldBe Option.empty[PartitioningInfo]
-    ColumnarPlanner.partitioning(valued.plan) shouldBe Option.empty[PartitioningInfo]
-    ColumnarPlanner.partitioning(mapped.plan) shouldBe Option.empty[PartitioningInfo]
-    ColumnarPlanner.partitioning(filtered.plan) shouldBe Option.empty[PartitioningInfo]
-    keyed.collect().toList should contain theSameElementsAs row(keyed.collect().toList)
-    valued.collect().toList should contain theSameElementsAs row(valued.collect().toList)
-    mapped.collect().toList should contain theSameElementsAs row(mapped.collect().toList)
-    filtered.collect().toList should contain theSameElementsAs row(filtered.collect().toList)
+    ColumnarPlanner.lower(keyed.plan).map(_.shape) shouldBe Some("Key(Scan)")
+    ColumnarPlanner.lower(valued.plan).map(_.shape) shouldBe Some("Value(Scan)")
+    ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some("MapValue(Scan)")
+    ColumnarPlanner.lower(filtered.plan).map(_.shape) shouldBe Some("FilterRow(Scan)")
+    ColumnarPlanner.lower(keyed.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.Longs)
+    ColumnarPlanner.lower(valued.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.Longs)
+    ColumnarPlanner.lower(mapped.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.LongPairs)
+    ColumnarPlanner.lower(filtered.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.LongPairs)
+    keyed.collect().toList shouldBe row(keyed.collect().toList)
+    valued.collect().toList shouldBe row(valued.collect().toList)
+    mapped.collect().toList shouldBe row(mapped.collect().toList)
+    filtered.collect().toList shouldBe row(filtered.collect().toList)
   }
 
   private def longPairBatches(plan: Plan[_]): Vector[ColumnBatch] =

@@ -10,7 +10,8 @@ import com.ewoodbury.scarlet.core.Plan
  * root. A map over a pair or a triple is opaque and reads every ordinal of that input. A node this
  * walk cannot follow demands every ordinal of its kind, which is wider than the true set and still
  * correct. One column is the optimization. [[ColumnarInterpreter]] reads the result from
- * [[encodePairs]] only. Grouped sum, long pairs, and the absence-preserving copy do not.
+ * [[encodePairs]] and from the long-pair encode. Grouped sum and the absence-preserving copy do
+ * not.
  */
 private[execution] object ColumnUse:
 

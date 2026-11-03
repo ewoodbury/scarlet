@@ -226,6 +226,30 @@ object BatchCodec:
 
   def decodeLongs(batch: ColumnBatch): Seq[Long] = decodeLongs(batch, batch.length)
 
+  /**
+   * Reads one `Int64` column and keeps a clear bit as a null `Long`. A fully present column still
+   * decodes to the stored longs. [[decodeLongs]] rejects a clear bit. `keys` and `values` of a
+   * long pair are the callers that keep those nulls.
+   *
+   * Named erasure boundary. The cells are `java.lang.Long` references in an `Array[AnyRef]`. A
+   * `scala.Long` cell would unbox a null to `0`.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private[scarlet] def decodeLongsPreservingAbsence(
+      batch: ColumnBatch,
+      maxRows: Int,
+  ): Seq[Long] =
+    val column = int64(batch)
+    val rows = decodedLength(batch, maxRows)
+    ColumnMetrics.decoded(rows)
+    val boxed = Array.tabulate[AnyRef](rows)(row => longRef(column, row))
+    ArraySeq.unsafeWrapArray(boxed).asInstanceOf[Seq[Long]]
+
   def decodeLongs(batch: ColumnBatch, maxRows: Int): Seq[Long] =
     val column = int64(batch)
     val rows = decodedLength(batch, maxRows)
@@ -339,6 +363,26 @@ object BatchCodec:
    */
   private[scarlet] def longPairs(values: Iterable[(Long, Long)]): ColumnBatch =
     fillLongPairs(values)
+
+  /**
+   * One `Int64` column from boxed long pairs. `ordinal` 0 reads the key and 1 the value. The other
+   * component is not read. The argument is a `Product` so the read is `productElement`, not a
+   * `Tuple2` cast. A null stays absent. This does not call [[ColumnMetrics.primitiveEncode]] and
+   * does not use [[longs]], which would unbox a null.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private[scarlet] def longPairSide(values: Iterable[Product], ordinal: Int): ColumnBatch =
+    val count = values.size
+    val filled = new Array[Long](count)
+    val rows = values.iterator
+    var row = 0
+    var absent = Option.empty[Array[Boolean]]
+    while (row < count) {
+      val pair = rows.next()
+      absent = writeLongComponent(pair, ordinal, filled, absent, count, row)
+      row += 1
+    }
+    batch(Int64Column.of(filled, componentValidity(absent, count), count))
 
   def decodeLongPairs(batch: ColumnBatch): Seq[(Long, Long)] =
     decodeLongPairs(batch, batch.length)
@@ -666,7 +710,7 @@ object BatchCodec:
     ),
   )
   private def writeLongComponent(
-      pair: (Long, Long),
+      pair: Product,
       ordinal: Int,
       into: Array[Long],
       absent: Option[Array[Boolean]],
