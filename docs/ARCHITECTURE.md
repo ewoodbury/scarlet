@@ -63,7 +63,7 @@ asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors
 
 ### Columnar completion contract
 
-The following 184 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. `keys`, `values`, `mapValues`, and `filter` of long pairs move from the excluded list into this table. This is a move, not a new fixture. 180 + 4 = 184. The excluded list drops from 52 to 48. 184 + 48 = 232. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
+The following 186 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. `map on triples` and `generic triple filter` move from the excluded list into this table. This is a move, not a new fixture. 184 + 2 = 186. The excluded list drops from 48 to 46. 186 + 46 = 232. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
 `Unknown(2)` denotes the two source partitions in the small contract fixtures. Aggregate and join
 outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. `sortByIntKey` and `sortByLongKey`
 use `Range(defaultShufflePartitions, Seq(0))` and `Sorted(Seq(0), Seq(true))`. That ordering tag is
@@ -101,6 +101,7 @@ ascending by effective key: a null key orders as zero and stays null. Shape stri
 | Shuffle-hash full outer int join, including an absent hint. Both exchanges carry a null key to partition 0. Each partition keeps one bitmap and emits its own unmatched build rows. There is no cross-partition OR | `Columnar` | `HashFullOuter(Exchange(Scan), Exchange(Scan))` |
 | Join after an int aggregate | `Columnar` | `HashJoin(Exchange(HashAggregate(Exchange(Scan))), Exchange(Scan))` |
 | Int join key/left-value/right-value filters | `Columnar` | `FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))`, `FilterTripleLeftValue(HashJoin(Exchange(Scan), Exchange(Scan)))`, `FilterTripleRightValue(HashJoin(Exchange(Scan), Exchange(Scan)))` |
+| Int join whole-row filter and same-type map | `Columnar` | `FilterTripleRow(HashJoin(Exchange(Scan), Exchange(Scan)))`, `Project(HashJoin(Exchange(Scan), Exchange(Scan)))` |
 
 `sum` and `count` of an int column fold a trailing filter/map chain into the action when the
 chain starts at an int scan or at `keys` or `values`, including `mapValues(...).values`. A long
@@ -198,19 +199,19 @@ the pair type, such as `(Int, Int) => (Long, Int)`, is excluded: `partitioning`,
 `tryGroupedSum` stay on the row path. The structural peel label is still
 `GroupedSum(MapPair(Scan))`.
 
-These 48 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+These 46 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
-`sortBy`, map on join triples, a general tuple filter on join
-triples, non-Int `mapValues`, string/double pair projection or pair filters, string/double-key
+`sortBy`, non-Int `mapValues`, string/double pair projection or pair filters, string/double-key
 `groupByKey`, `reduceByKey`, and join, an element map of long pairs, `filterKeys`, `filterValues`,
 `groupedSum`, and `sortBy` of a non-scan (`take` of a long-pair scan is accepted, and `keys`,
 `values`, `mapValues`, and a row `filter` of long pairs are accepted, and an unhinted or
-shuffle-hash inner join of long pairs is accepted),
+shuffle-hash inner join of long pairs is accepted, and a same-type map and a whole-row filter of
+an int inner join are accepted),
 single-precision `Float` sources/maps, all-null strings, empty generic sources without a type
 descriptor, and element maps that do not preserve the column type.
-That is 52 previous exclusions. `keys`, `values`, `mapValues`, and `filter` of long pairs move to
-the accepted list. This is a move, not a new fixture. 52 - 4 = 48. Accepted moves from 180 to 184.
-184 + 48 = 232.
+That is 48 previous exclusions. `map on triples` and `generic triple filter` move to the accepted
+list. This is a move, not a new fixture. 48 - 2 = 46. Accepted moves from 184 to 186.
+186 + 46 = 232.
 Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by execution
 tests, not contract fixtures, because the contract does not track the int refusals either.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then

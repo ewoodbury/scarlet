@@ -80,7 +80,7 @@ private[execution] object ColumnUse:
     case PhysicalOp.Slot.Value => Set(1)
     case PhysicalOp.Slot.Row => Set(0, 1)
     case PhysicalOp.Slot.TripleKey | PhysicalOp.Slot.TripleLeftValue |
-        PhysicalOp.Slot.TripleRightValue =>
+        PhysicalOp.Slot.TripleRightValue | PhysicalOp.Slot.TripleRow =>
       Set(0, 1, 2)
 
   private def fullWidth(op: PhysicalOp): Set[Int] = op.kind match

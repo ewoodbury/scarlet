@@ -220,7 +220,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     assertHashed(all)
   }
 
-  it should "leave a general later join predicate on the row path" in {
+  it should "filter a general later join predicate columnarly" in {
     val build = DistCollection(Seq(1 -> 10, 2 -> 20, 1 -> 11), 1)
     val probe = DistCollection(Seq(1 -> 7, 2 -> 8, 1 -> 9), 1)
     val filtered = build.join(probe).filter { case (_, (left, right)) => left + right > 15 }
@@ -229,7 +229,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     actual should contain theSameElementsAs row {
       build.join(probe).filter { case (_, (left, right)) => left + right > 15 }.collect().toSeq
     }
-    columnar(infoOf(filtered)) shouldBe Option.empty[PartitioningInfo]
+    columnar(infoOf(filtered)) shouldBe defined
   }
 
   it should "scan a joined triple once and publish only the compacted partitions" in {

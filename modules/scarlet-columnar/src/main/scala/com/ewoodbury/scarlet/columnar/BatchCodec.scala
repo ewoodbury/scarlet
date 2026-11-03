@@ -432,6 +432,36 @@ object BatchCodec:
         )
 
   /**
+   * Reads an int-triple batch and keeps a clear bit as a null `Int`. A fully present batch still
+   * decodes to the stored ints. [[decodeIntTriples]] rejects a clear bit. A triple map is the
+   * caller that keeps those nulls. A whole-row filter drops them before decode.
+   */
+  private[scarlet] def decodeIntTriplesPreservingAbsence(
+      batch: ColumnBatch,
+  ): Seq[(Int, (Int, Int))] =
+    decodeIntTriplesPreservingAbsence(batch, batch.length)
+
+  private[scarlet] def decodeIntTriplesPreservingAbsence(
+      batch: ColumnBatch,
+      maxRows: Int,
+  ): Seq[(Int, (Int, Int))] =
+    batch.columns match
+      case Seq(keys: Int32Column, left: Int32Column, right: Int32Column) =>
+        require(
+          keys.length == batch.length && left.length == batch.length && right.length == batch.length,
+          "join columns disagree on length",
+        )
+        val rows = decodedLength(batch, maxRows)
+        ColumnMetrics.decoded(rows)
+        Seq.tabulate(rows) { row =>
+          erasedIntTriple(intRef(keys, row), intRef(left, row), intRef(right, row))
+        }
+      case _ =>
+        throw new IllegalArgumentException(
+          s"join output is not three Int32 columns: ${batch.schema}",
+        )
+
+  /**
    * Long-key join rows are `(key, left, right)`. A null stays an error: the decoded `Long` would
    * otherwise be the stored zero. A full decode checks live bits by word; a prefix decode checks
    * only the rows it returns. Spare capacity past `length` is ignored. This does not call
@@ -745,6 +775,19 @@ object BatchCodec:
   @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
   private def erasedIntPair(key: java.lang.Integer, value: java.lang.Integer): (Int, Int) =
     Tuple2(key, value).asInstanceOf[(Int, Int)]
+
+  /**
+   * Named erasure boundary. The decoded triple has to carry a null component so a map that
+   * preserves absence matches the column bits. Building it from `java.lang.Integer` keeps the null
+   * from becoming `0`.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
+  private def erasedIntTriple(
+      key: java.lang.Integer,
+      left: java.lang.Integer,
+      right: java.lang.Integer,
+  ): (Int, (Int, Int)) =
+    Tuple2(key, Tuple2(left, right)).asInstanceOf[(Int, (Int, Int))]
 
   /**
    * A present cell is the stored long. A clear bit is a null reference, not `0`.

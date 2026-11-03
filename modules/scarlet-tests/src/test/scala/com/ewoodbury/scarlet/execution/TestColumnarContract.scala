@@ -30,15 +30,15 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 184 accepted fixtures. keys, values, mapValues, and filter of long pairs moved from the
-    // excluded list. This is a move, not a new fixture. 180 + 4 = 184.
-    accepted.size shouldBe 184
-    // 48 exclusions. Those four moved to the accepted list. This is a move, not a new fixture.
-    // 52 - 4 = 48. 184 + 48 = 232.
+    // 186 accepted fixtures. map on triples and generic triple filter moved from the excluded
+    // list. This is a move, not a new fixture. 184 + 2 = 186.
+    accepted.size shouldBe 186
+    // 46 exclusions. Those two moved to the accepted list. This is a move, not a new fixture.
+    // 48 - 2 = 46. 186 + 46 = 232.
     // Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by
     // execution tests, not contract fixtures, because the contract does not track the int
     // refusals either.
-    excluded.size shouldBe 48
+    excluded.size shouldBe 46
     (accepted.size + excluded.size) shouldBe 232
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
@@ -393,6 +393,14 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val joinKeyFilter = joinedCollection.filterJoinKey(_ > 0).plan
     val joinLeftFilter = joinedCollection.filterJoinLeft(_ > 0).plan
     val joinRightFilter = joinedCollection.filterJoinRight(_ > 0).plan
+    val tripleMapped = Plan.MapOp(
+      tripleSource,
+      (row: (Int, (Int, Int))) => (row._1, (row._2._1, row._2._2)),
+    )
+    val genericTripleFilter = Plan.FilterOp(
+      tripleSource,
+      (row: (Int, (Int, Int))) => row._2._1 > 0,
+    )
     val layout = columnarLayout
     val stringLayout = utf8Layout
 
@@ -561,6 +569,18 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       AcceptedCase("join-key filter", joinKeyFilter, hashedInfo(layout), Some("FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))")),
       AcceptedCase("join-left-value filter", joinLeftFilter, hashedInfo(layout), Some("FilterTripleLeftValue(HashJoin(Exchange(Scan), Exchange(Scan)))")),
       AcceptedCase("join-right-value filter", joinRightFilter, hashedInfo(layout), Some("FilterTripleRightValue(HashJoin(Exchange(Scan), Exchange(Scan)))")),
+      AcceptedCase(
+        "map on triples",
+        tripleMapped,
+        hashedInfo(layout),
+        Some("Project(HashJoin(Exchange(Scan), Exchange(Scan)))"),
+      ),
+      AcceptedCase(
+        "generic triple filter",
+        genericTripleFilter,
+        hashedInfo(layout),
+        Some("FilterTripleRow(HashJoin(Exchange(Scan), Exchange(Scan)))"),
+      ),
     ) ++
       elementPipelineCases(
         "int",
@@ -627,14 +647,6 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val doubleKeys = Plan.KeysOp(doubleKeySource)
     val doubleValues = Plan.ValuesOp(doubleKeySource)
     val floatMap = Plan.MapOp(floatSource, (value: Float) => value + 1.0f)
-    val tripleMapped = Plan.MapOp(
-      tripleSource,
-      (row: (Int, (Int, Int))) => (row._1, (row._2._1, row._2._2)),
-    )
-    val genericTripleFilter = Plan.FilterOp(
-      tripleSource,
-      (row: (Int, (Int, Int))) => row._2._1 > 0,
-    )
     val reduceStringKeys = Plan.ReduceByKeyOp(
       stringKeySource,
       (left: Int, right: Int) => left + right,
@@ -664,8 +676,6 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ExcludedCase("groupByKey int", Plan.GroupByKeyOp(pairSource)),
       ExcludedCase("cogroup", Plan.CoGroupOp(pairSource, rightPairSource)),
       ExcludedCase("sortBy", Plan.SortByOp(intSource, (value: Int) => value, Ordering.Int)),
-      ExcludedCase("map on triples", tripleMapped),
-      ExcludedCase("generic triple filter", genericTripleFilter),
       ExcludedCase("mapValues to string", stringMapValues),
       ExcludedCase("mapValues to double", doubleMapValues),
       ExcludedCase("keys of string pairs", stringKeys),

@@ -235,6 +235,35 @@ enum PhysicalOp:
     case HashFullOuter(_, _) => PhysicalOp.Kind.Triples
     case BroadcastFullOuter(_, _) => PhysicalOp.Kind.Triples
 
+  /**
+   * An int inner join, or a filter or project stacked on one. An outer join is a triple batch with
+   * an absent side, so a whole-row filter or a map on it stays on the row path.
+   */
+  def isInnerTriple: Boolean = this match
+    case HashJoin(_, _) | SortMergeJoin(_, _) | BroadcastJoin(_, _, _) => true
+    case Filter(child, _) => child.isInnerTriple
+    case Project(child) => child.isInnerTriple
+    case _ => false
+
+  /**
+   * A null value can ride along. A whole-row filter or a map above an inner join still wants that
+   * bit. A slot filter does not: its kernel rejects a null component.
+   */
+  def keepsTripleAbsence: Boolean = this match
+    case HashJoin(_, _) | SortMergeJoin(_, _) | BroadcastJoin(_, _, _) => true
+    case Filter(child, PhysicalOp.Slot.TripleRow) => child.keepsTripleAbsence
+    case Project(child) => child.keepsTripleAbsence
+    case _ => false
+
+  /**
+   * Root of a whole-row filter or a map. [[ColumnarInterpreter.interpret]] asks the join to keep
+   * null values only for this root. A bare join stays on the unboxing encode.
+   */
+  def requestsTripleAbsence: Boolean = this match
+    case Project(child) => child.keepsTripleAbsence
+    case Filter(child, PhysicalOp.Slot.TripleRow) => child.keepsTripleAbsence
+    case _ => false
+
   /** Operator nesting, without data. */
   def shape: String = this match
     case Scan(_, _) => "Scan"
@@ -278,10 +307,11 @@ object PhysicalOp:
   /**
    * `Element` is the single column, an int, a long, a double, a boolean, or a string, and its
    * shape label is `Filter`. `Row` is a predicate on both columns of a pair. `Key` and `Value`
-   * name which pair column. The triple slots select one of the three int columns in a join result.
+   * name which pair column. The triple column slots select one of the three int columns in a join
+   * result. `TripleRow` is a predicate on the whole `(Int, (Int, Int))` row.
    */
   enum Slot:
-    case Element, Row, Key, Value, TripleKey, TripleLeftValue, TripleRightValue
+    case Element, Row, Key, Value, TripleKey, TripleLeftValue, TripleRightValue, TripleRow
 
     def label: String = this match
       case Element => "Filter"
@@ -291,3 +321,4 @@ object PhysicalOp:
       case TripleKey => "FilterTripleKey"
       case TripleLeftValue => "FilterTripleLeftValue"
       case TripleRightValue => "FilterTripleRightValue"
+      case TripleRow => "FilterTripleRow"

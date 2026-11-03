@@ -21,12 +21,12 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * `apply`, so that function stays on the row path too. Other user functions are cast to the
  * selected operation. A result that is not that type throws `ClassCastException`. [[tryRun]]
  * catches it and returns `None`, and the row path runs the whole plan. Any unsupported node
- * (union, flatMap, distinct, generic sortBy, a map that is not fed by `Int`, `Long`, `Double`, or
- * `String`, any `Boolean` map, and the rest) makes the whole plan ineligible, so a supported
- * prefix is not executed on its own. `sortByIntKey` of an int-pair scan and `sortByLongKey` of a
- * long-pair scan lower to a rank split. A null key orders as zero and stays null. Over the budget,
- * with spill on, a long sort writes one run per input partition. At or under the budget, and
- * whenever spill is off, it stays in memory and writes nothing.
+ * (union, flatMap, distinct, generic sortBy, a map that is not fed by `Int`, `Long`, `Double`,
+ * `String`, or an int inner join, any `Boolean` map, and the rest) makes the whole plan
+ * ineligible, so a supported prefix is not executed on its own. `sortByIntKey` of an int-pair scan
+ * and `sortByLongKey` of a long-pair scan lower to a rank split. A null key orders as zero and
+ * stays null. Over the budget, with spill on, a long sort writes one run per input partition. At
+ * or under the budget, and whenever spill is off, it stays in memory and writes nothing.
  *
  * [[lower]] and interpretation walk the same logical plan. The physical node records the operator
  * and not the function, so each logical node is matched to the node [[lower]] built for it. A
@@ -48,34 +48,35 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * counts codes from that mask and does not write the filtered column. Any other string step still
  * writes its column. Take decodes a prefix. Pair filters, aggregates, and joins stay one node per
  * operator. Narrow map and filter keep input order and the input partition count. `Double` and
- * `String` select filter and map only. A filter over an int join result is columnar only for
- * explicit key, left-value, and right-value filters; general tuple predicates stay on the row
- * path. `keys` and `values` of an int pair or a long pair are that column. The arrays are shared:
- * a published column is not mutated, so a view is cheaper than a copy and still correct.
- * `mapValues` lowers when the function declares an unboxed `Int` or `Long` result and every other
- * `apply` is an erasure bridge. A wider primitive, a reference result, or an overloaded `apply`
- * stays on the row path. A long-pair row filter lowers too. `filterKeys` and `filterValues` of a
- * long pair stay on the row path. That check reads the method descriptor and does not call the
- * function. `getDeclaredMethods` does not see an inherited `apply`, so that function stays on the
- * row path too. `reduceByKey` on `(Int, Int)` applies the user's function and wraps at `Int`. A
- * `(Long, Long)` source lowers to [[PhysicalOp.LongHashAggregate]] and wraps at `Long`. Any other
- * pair type stays on the row path. A `(Long, Long)` inner join with no hint, or with an explicit
- * shuffle-hash hint, lowers to [[PhysicalOp.LongHashJoin]]. Both sides are exchanged on
- * `Long.hashCode`. There is no spill and no build budget. A null value is not a decoded long:
- * interpretation reads the value columns and leaves the plan on the row path. A broadcast hint, a
- * sort-merge hint, and every outer join on long keys stay on the row path. An int `join` with no
- * hint, or with an explicit shuffle-hash hint, hash-partitions both sides and probes one bucket at
- * a time. A broadcast hint records both children and builds the right input. A later cost-based
- * pass may build the left input instead. The other child is probed in place, with no exchange on
- * either side. Output columns stay `(key, left, right)`. Multiplicity, values, and null semantics
- * match the shuffle-hash join. Order is unspecified. The build table is estimated before it is
- * allocated. That estimate covers the table only, not the rest of the query. An estimate above
- * `broadcastBuildBudgetBytes` throws `IllegalStateException`. Both inputs are already evaluated,
- * so [[tryRun]] does not turn that failure into a row-path fallback. An inner sort-merge on int
- * pairs lowers to [[PhysicalOp.SortMergeJoin]]. A left, right, or full outer sort-merge on int
- * pairs lowers to the matching sort-merge node. Sort-merge on a non-int key, including a long key,
- * makes `lower` return `None`. A `(Long, Long)` inner shuffle-hash join still lowers. Output width
- * for a shuffle-hash join or an aggregate is `defaultShufflePartitions`. A broadcast join's output
+ * `String` select filter and map only. An int inner join lowers a whole-row filter and a map that
+ * stays `(Int, (Int, Int))`. A map result of another type throws `ColumnarFallback` before the
+ * output batch is published. An outer join stays on the row path. `keys` and `values` of an int
+ * pair or a long pair are that column. The arrays are shared: a published column is not mutated,
+ * so a view is cheaper than a copy and still correct. `mapValues` lowers when the function
+ * declares an unboxed `Int` or `Long` result and every other `apply` is an erasure bridge. A wider
+ * primitive, a reference result, or an overloaded `apply` stays on the row path. A long-pair row
+ * filter lowers too. `filterKeys` and `filterValues` of a long pair stay on the row path. That
+ * check reads the method descriptor and does not call the function. `getDeclaredMethods` does not
+ * see an inherited `apply`, so that function stays on the row path too. `reduceByKey` on
+ * `(Int, Int)` applies the user's function and wraps at `Int`. A `(Long, Long)` source lowers to
+ * [[PhysicalOp.LongHashAggregate]] and wraps at `Long`. Any other pair type stays on the row path.
+ * A `(Long, Long)` inner join with no hint, or with an explicit shuffle-hash hint, lowers to
+ * [[PhysicalOp.LongHashJoin]]. Both sides are exchanged on `Long.hashCode`. There is no spill and
+ * no build budget. A null value is not a decoded long: interpretation reads the value columns and
+ * leaves the plan on the row path. A broadcast hint, a sort-merge hint, and every outer join on
+ * long keys stay on the row path. An int `join` with no hint, or with an explicit shuffle-hash
+ * hint, hash-partitions both sides and probes one bucket at a time. A broadcast hint records both
+ * children and builds the right input. A later cost-based pass may build the left input instead.
+ * The other child is probed in place, with no exchange on either side. Output columns stay
+ * `(key, left, right)`. Multiplicity, values, and null semantics match the shuffle-hash join.
+ * Order is unspecified. The build table is estimated before it is allocated. That estimate covers
+ * the table only, not the rest of the query. An estimate above `broadcastBuildBudgetBytes` throws
+ * `IllegalStateException`. Both inputs are already evaluated, so [[tryRun]] does not turn that
+ * failure into a row-path fallback. An inner sort-merge on int pairs lowers to
+ * [[PhysicalOp.SortMergeJoin]]. A left, right, or full outer sort-merge on int pairs lowers to the
+ * matching sort-merge node. Sort-merge on a non-int key, including a long key, makes `lower`
+ * return `None`. A `(Long, Long)` inner shuffle-hash join still lowers. Output width for a
+ * shuffle-hash join or an aggregate is `defaultShufflePartitions`. A broadcast join's output
  * follows the probe side, whichever child that is; `take` still refuses a join, so the prefix path
  * does not use that count. A left outer join on int pairs lowers for a broadcast hint, a
  * shuffle-hash hint, or an absent hint. Broadcast is [[PhysicalOp.BroadcastLeftOuter]]: the right
@@ -874,11 +875,16 @@ object ColumnarPlanner:
           case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs =>
             Some(PhysicalOp.Filter(child, PhysicalOp.Slot.Row))
           case PhysicalOp.Kind.Triples =>
-            tripleFilterSlot(predicate).map { slot =>
-              PhysicalOp.Filter(child, slot)
-            }
+            tripleFilterSlot(predicate) match
+              case Some(slot) => Some(PhysicalOp.Filter(child, slot))
+              case None if child.isInnerTriple =>
+                Some(PhysicalOp.Filter(child, PhysicalOp.Slot.TripleRow))
+              case None => None
           case _ => None
-      case ElementStep.Project(_) => None
+      case ElementStep.Project(_) =>
+        Option.when(child.kind == PhysicalOp.Kind.Triples && child.isInnerTriple)(
+          PhysicalOp.Project(child),
+        )
 
   private def tripleFilterSlot(predicate: Any): Option[PhysicalOp.Slot] = predicate match
     case recognized: IntJoinTriplePredicate[?] =>
