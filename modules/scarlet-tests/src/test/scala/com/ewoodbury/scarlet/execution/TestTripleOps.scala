@@ -21,6 +21,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * is a real value. Those null rules are checked on their own. Present rows, including a present
  * 0, match the row path.
  */
+@SuppressWarnings(Array("org.wartremover.warts.Any"))
 class TestTripleOps extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   private val original = ScarletConf.get
@@ -447,6 +448,16 @@ class TestTripleOps extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def absent: java.lang.Integer = null
+
+  it should "apply a slot filter and a whole-row filter in one chain" in {
+    val joined = presentJoin
+    val chained = joined
+      .filterJoinKey(_ > 0)
+      .filter { case (_, (left, right)) => left + right > 15 }
+    val actual = chained.collect().toSeq
+    actual should contain theSameElementsAs row(chained.collect().toSeq)
+    ColumnarPlanner.lower(chained.plan) shouldBe defined
+  }
 
   private def intRef(value: Int): java.lang.Integer = java.lang.Integer.valueOf(value)
 

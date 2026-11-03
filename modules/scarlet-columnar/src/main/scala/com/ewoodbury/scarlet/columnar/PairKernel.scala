@@ -18,15 +18,7 @@ package com.ewoodbury.scarlet.columnar
  * published. `productElement` is the erasure boundary: it keeps a null component visible, and a
  * null is stored as `0` with a clear bit.
  */
-@SuppressWarnings(
-  Array(
-    "org.wartremover.warts.Any",
-    "org.wartremover.warts.AsInstanceOf",
-    "org.wartremover.warts.Null",
-    "org.wartremover.warts.Throw",
-    "org.wartremover.warts.Var",
-  ),
-)
+@SuppressWarnings(Array("org.wartremover.warts.Var"))
 object PairKernel:
 
   trait IntPairPredicate:
@@ -293,6 +285,7 @@ object PairKernel:
    * `productElement` keeps a null visible. A null component is absence. Any other shape is
    * [[ColumnarFallback]], thrown before the output batch is published.
    */
+  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
   private def writeMapped(
       projected: Any,
       keys: Array[Int],
@@ -315,6 +308,7 @@ object PairKernel:
           case other => decline(foundName(other))
       case other => decline(foundName(other))
 
+  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
   private def writeComponent(cell: Any, into: Array[Int], words: Array[Long], out: Int): Unit =
     cell match
       case null => into(out) = 0
@@ -323,9 +317,11 @@ object PairKernel:
         Validity.setBit(words, out)
       case other => decline(foundName(other))
 
+  @SuppressWarnings(Array("org.wartremover.warts.Throw"))
   private def decline(found: String): Nothing =
     throw new ColumnarFallback(s"triple map did not stay (Int, (Int, Int)): found $found")
 
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
   private def foundName(value: Any): String = value match
     case null => "null"
     case other => other.asInstanceOf[AnyRef].getClass.getName
