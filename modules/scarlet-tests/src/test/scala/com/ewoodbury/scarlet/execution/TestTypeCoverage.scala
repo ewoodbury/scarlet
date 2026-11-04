@@ -155,6 +155,7 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       PhysicalOp.Kind.LongPairs,
       PhysicalOp.Kind.LongTriples,
       PhysicalOp.Kind.StringPairs,
+      PhysicalOp.Kind.StringTriples,
     )
   }
 
@@ -188,10 +189,19 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     longPairs.collect().toList should contain theSameElementsAs rowPath(longPairs.collect().toList)
   }
 
-  "string keys" should "keep groupByKey and join on the row path" in {
+  "string keys" should "keep groupByKey on the row path and hash the inner join" in {
     val keyed = DistCollection(Seq("a" -> 1, "b" -> 2, "a" -> 4), Partitions)
     refuse(keyed.groupByKey.plan)
-    refuse(keyed.join(keyed).plan)
+    val joined = keyed.join(keyed)
+    ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
+      "StringHashJoin(Exchange(Scan), Exchange(Scan))",
+    )
+    ColumnarPlanner.partitioning(joined.plan).map(_.layout) shouldBe Some(
+      Layout.StringTriple(ScarletConf.get.columnarBatchSize),
+    )
+    val columnar = joined.collect().toList
+    ScarletRuntime.get.shuffle.clear()
+    columnar should contain theSameElementsAs rowPath(joined.collect().toList)
   }
 
   "ofStrings" should "select an empty array and leave an empty iterable unknown" in {

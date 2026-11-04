@@ -99,6 +99,7 @@ final case class PartitioningInfo(
       case Layout.Columnar(batchSize) => batchReason("Columnar", batchSize)
       case Layout.Utf8Dict(batchSize) => batchReason("Utf8Dict", batchSize)
       case Layout.StringPair(batchSize) => batchReason("StringPair", batchSize)
+      case Layout.StringTriple(batchSize) => batchReason("StringTriple", batchSize)
     }
 
     val orderingReason = ordering match {
@@ -146,13 +147,15 @@ enum OrderingTag:
  * (`LogicalType.Utf8Dict` / `DictUtf8Column`). Each batch has its own dictionary. A string lambda
  * still sees the decoded string, and a null string is a value. [[Layout.StringPair]] is a string
  * key and an int value in one batch. `keys` switches to [[Layout.Utf8Dict]] and `values` switches
- * to [[Layout.Columnar]].
+ * to [[Layout.Columnar]]. [[Layout.StringTriple]] is a string key and two int values, the inner
+ * string join result `(String, (Int, Int))`.
  */
 enum Layout:
   case BoxedRows
   case Columnar(batchSize: Int)
   case Utf8Dict(batchSize: Int)
   case StringPair(batchSize: Int)
+  case StringTriple(batchSize: Int)
 
 object PartitioningInfo:
 

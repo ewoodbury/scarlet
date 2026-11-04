@@ -143,6 +143,14 @@ object ColumnBatches:
       0,
     )
 
+  /** Zero-row `(Utf8Dict key, Int32, Int32)` join. A fresh batch on every call. */
+  private[columnar] def emptyStringJoin: ColumnBatch =
+    new ColumnBatch(
+      Vector(LogicalType.Utf8Dict, LogicalType.Int32, LogicalType.Int32),
+      Vector(emptyUtf8, emptyInt32, emptyInt32),
+      0,
+    )
+
   private def emptyInt32: Int32Column =
     Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0)
 

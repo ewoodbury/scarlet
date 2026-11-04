@@ -536,6 +536,41 @@ object BatchCodec:
         )
 
   /**
+   * String-key join rows are `(key, left, right)`. The key is the dictionary string for that row's
+   * code. A null stays an error: a clear key bit has no string, and a clear value bit would decode
+   * as the stored zero. A full decode checks live bits by word; a prefix decode checks only the
+   * rows it returns. Spare capacity past `length` is ignored. This does not call
+   * [[decodeLongTriples]] or [[decodeStringPairs]].
+   */
+  def decodeStringJoin(batch: ColumnBatch): Seq[(String, (Int, Int))] =
+    decodeStringJoin(batch, batch.length)
+
+  def decodeStringJoin(batch: ColumnBatch, maxRows: Int): Seq[(String, (Int, Int))] =
+    batch.columns match
+      case Seq(keys: DictUtf8Column, left: Int32Column, right: Int32Column) =>
+        require(
+          keys.length == batch.length && left.length == batch.length && right.length == batch.length,
+          "join columns disagree on length",
+        )
+        val rows = decodedLength(batch, maxRows)
+        if (rows == batch.length) then
+          requireLive(keys)
+          requireLive(left)
+          requireLive(right)
+        else
+          requireLivePrefix(keys, rows)
+          requireLivePrefix(left, rows)
+          requireLivePrefix(right, rows)
+        ColumnMetrics.decoded(rows)
+        Seq.tabulate(rows) { row =>
+          (keys.dictionary(keys.codes(row)), (left.values(row), right.values(row)))
+        }
+      case _ =>
+        throw new IllegalArgumentException(
+          s"join output is not Utf8Dict and two Int32 columns: ${batch.schema}",
+        )
+
+  /**
    * Outer-join rows are `(key, left, right)`. `absent` names the value column wrapped in `Option`.
    * [[AbsentSide.Left]] returns `(key, (Option[Int], Int))`. [[AbsentSide.Right]] returns
    * `(key, (Int, Option[Int]))`. [[AbsentSide.Both]] returns `(key, (Option[Int], Option[Int]))`.

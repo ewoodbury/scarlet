@@ -17,6 +17,7 @@ private[execution] object ColumnsConcat:
     case (Columns.LongTriples(a), Columns.LongTriples(b)) => Columns.LongTriples(a ++ b)
     case (Columns.Strings(a), Columns.Strings(b)) => Columns.Strings(a ++ b)
     case (Columns.StringPairs(a), Columns.StringPairs(b)) => Columns.StringPairs(a ++ b)
+    case (Columns.StringTriples(a), Columns.StringTriples(b)) => Columns.StringTriples(a ++ b)
     case (Columns.Bools(a), Columns.Bools(b)) => Columns.Bools(a ++ b)
     case (Columns.Outer(a, side), Columns.Outer(b, same)) if side == same =>
       Columns.Outer(a ++ b, side)

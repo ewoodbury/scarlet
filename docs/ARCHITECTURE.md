@@ -63,7 +63,7 @@ asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors
 
 ### Columnar completion contract
 
-The following 195 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. The excluded list has 38 shapes, for 233 covered in total. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
+The following 196 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. The excluded list has 37 shapes, for 233 covered in total. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
 `Unknown(2)` denotes the two source partitions in the small contract fixtures. Aggregate and join
 outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. `sortByIntKey` and `sortByLongKey`
 use `Range(defaultShufflePartitions, Seq(0))` and `Sorted(Seq(0), Seq(true))`. That ordering tag is
@@ -91,6 +91,7 @@ ascending by effective key: a null key orders as zero and stays null. Shape stri
 | String `distinct`. One copy of each string, including one null and one empty string. Equal strings share a hash bucket. Order is unspecified | `Utf8Dict` | `Dedupe(Exchange(Scan))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
 | Automatic or explicit shuffle-hash long join. Both sides are exchanged on `Long.hashCode`. A null key is dropped. A null value stays on the row path. There is no spill and no build budget. Broadcast, sort-merge, and outer joins on long keys stay on the row path | `Columnar` | `LongHashJoin(Exchange(Scan), Exchange(Scan))` |
+| Automatic or explicit shuffle-hash string join. Both sides are exchanged on `String.hashCode`. A null key is dropped. `""` matches `""`. A null value stays on the row path. The two sides keep independent dictionaries and match by string equality. `"é"` and `"e\u0301"` do not match. There is no spill and no build budget. Broadcast, sort-merge, and outer joins stay on the row path. Output columns are `(key, left, right)` and the key is the probe row | `StringTriple` | `StringHashJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge int join. Both sides are hash-partitioned, sorted inside each partition, and merged. Null keys are dropped before the sort | `Columnar` | `SortMergeJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge left outer int join. Both sides are hash-partitioned. The left exchange carries a null key to partition 0. The right exchange drops a null key. A null key does not match. A preserved null key publishes a clear key bit. Absence is the right value's clear bit. A null value stays on the row path | `Columnar` | `SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge right outer int join. The right exchange carries a null key. The left exchange drops one. The left-outer walk runs on swapped inputs, then the value columns are swapped back to `(key, left, right)`. Absence is the left value's clear bit. A null value stays on the row path | `Columnar` | `SortMergeRightOuter(Exchange(Scan), Exchange(Scan))` |
@@ -185,7 +186,8 @@ that scan, an inner shuffle-hash join of that scan, and `sortByLongKey` of that 
 `groupedSum` of a long pair stays on the row path. Broadcast, sort-merge, and outer joins on long
 keys stay on the row path. A long sort spills over the budget the same way an int sort does.
 String `reduceByKey` is columnar: `StringHashAggregate(Exchange(Scan))` drops a null key, keeps
-`""`, and hashes each dictionary string once. String `groupByKey` and string `join` are refused.
+`""`, and hashes each dictionary string once. String `groupByKey` is refused. An inner
+shuffle-hash string join lowers to `StringHashJoin(Exchange(Scan), Exchange(Scan))`.
 The remaining exclusions are listed with the contract fixtures below.
 `min` and `max` are not in the API. Nullable long and boolean sources have no
 descriptor.
@@ -203,14 +205,14 @@ the pair type, such as `(Int, Int) => (Long, Int)`, is excluded: `partitioning`,
 `tryGroupedSum` stay on the row path. The structural peel label is still
 `GroupedSum(MapPair(Scan))`.
 
-These 38 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+These 37 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
 `coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `cogroup`, `sortBy`, `groupByKey` on int,
 string, or double keys, `mapValues` to string or double, double-pair `keys`, `values`,
-`mapValues`, `filterKeys`, and `filterValues`, double-key `reduceByKey` and `join`, string-key
-`join`, single-precision `Float` sources and maps, all-null strings, an empty int source without
+`mapValues`, `filterKeys`, and `filterValues`, double-key `reduceByKey` and `join`,
+single-precision `Float` sources and maps, all-null strings, an empty int source without
 a witness, and element maps that do not preserve the column type (`boolean` to `boolean`, `int`
 to `long`, `string`, or a pair, `long` to `int` or `string`, and `double` to `int`).
-That is 38 exclusions, and 195 accepted, for 233 covered shapes. String distinct is a new fixture. 194 + 1 = 195.
+That is 37 exclusions, and 196 accepted, for 233 covered shapes. The string inner join moved from the excluded list. 195 + 1 = 196 accepted, and 38 - 1 = 37 excluded.
 Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by execution
 tests, not contract fixtures, because the contract does not track the int refusals either.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then
@@ -240,6 +242,13 @@ exchanged on `Long.hashCode`. A null key is dropped on both sides. Output column
 `(key, left, right)`. There is no spill and no build budget. A broadcast hint, a sort-merge hint,
 and every outer join on long keys stay on the row path. Those plans are covered by execution
 tests, not contract fixtures, because the contract does not track the int refusals either.
+A `(String, Int)` inner join with an absent hint or an explicit shuffle-hash hint lowers to
+`StringHashJoin(Exchange, Exchange)`. Both sides are exchanged on `String.hashCode`. A null key
+is dropped on both sides. `""` matches `""`. Output columns are `(key, left, right)` and the key
+is taken from the probe row. The two sides keep independent dictionaries and match by string
+equality. There is no spill and no build budget. The layout is `StringTriple`. A null value stays
+on the row path. A broadcast hint, a sort-merge hint, and every outer join on string keys stay on
+the row path.
 Broadcast of int pairs records both children and builds the right input.
 A later cost-based pass may build the left input instead.
 For a broadcast join, the other child is probed in place, so the join itself adds no exchange.

@@ -30,14 +30,14 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 195 accepted fixtures. String distinct is a new fixture, not a move.
-    // 194 + 1 = 195.
-    accepted.size shouldBe 195
-    // 38 exclusions. 195 + 38 = 233.
+    // 196 accepted fixtures. The string inner join moved from the excluded list.
+    // 195 + 1 = 196.
+    accepted.size shouldBe 196
+    // 37 exclusions. 196 + 37 = 233. 38 - 1 = 37.
     // Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by
     // execution tests, not contract fixtures, because the contract does not track the int
     // refusals either.
-    excluded.size shouldBe 38
+    excluded.size shouldBe 37
     (accepted.size + excluded.size) shouldBe 233
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
@@ -403,6 +403,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val layout = columnarLayout
     val stringLayout = utf8Layout
     val stringPairLayout = Layout.StringPair(ScarletConf.get.columnarBatchSize)
+    val stringTripleLayout = Layout.StringTriple(ScarletConf.get.columnarBatchSize)
     val stringKeys = Plan.KeysOp(stringKeySource)
     val stringValues = Plan.ValuesOp(stringKeySource)
     val stringPairMapValues = Plan.MapValuesOp(stringKeySource, (value: Int) => value + 1)
@@ -520,6 +521,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         DistCollection(longPairSource).shuffleHashJoin(DistCollection(longPairSource)).plan,
         hashedInfo(layout),
         Some("LongHashJoin(Exchange(Scan), Exchange(Scan))"),
+      ),
+      AcceptedCase(
+        "join with string keys",
+        DistCollection(stringKeySource).join(DistCollection(stringKeySource)).plan,
+        hashedInfo(stringTripleLayout),
+        Some("StringHashJoin(Exchange(Scan), Exchange(Scan))"),
       ),
       AcceptedCase("filtered int reduceByKey", reducedAfterFilter, hashedInfo(layout), Some("HashAggregate(Exchange(FilterValue(Scan)))")),
       AcceptedCase("mapValues int reduceByKey", reducedAfterMapValues, hashedInfo(layout), Some("HashAggregate(Exchange(MapValue(Scan)))")),
@@ -707,7 +714,6 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     )
     val groupStringKeys = Plan.GroupByKeyOp(stringKeySource)
     val groupDoubleKeys = Plan.GroupByKeyOp(doubleKeySource)
-    val stringKeyJoin = Plan.JoinOp(stringKeySource, stringKeySource, None)
     val doubleKeyJoin = Plan.JoinOp(doubleKeySource, doubleKeySource, None)
     val stringMapValues = Plan.MapValuesOp(pairSource, (value: Int) => value.toString)
     val doubleMapValues = Plan.MapValuesOp(pairSource, (value: Int) => value.toDouble)
@@ -733,7 +739,6 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ExcludedCase("reduceByKey with double keys", reduceDoubleKeys),
       ExcludedCase("groupByKey with string keys", groupStringKeys),
       ExcludedCase("groupByKey with double keys", groupDoubleKeys),
-      ExcludedCase("join with string keys", stringKeyJoin),
       ExcludedCase("join with double keys", doubleKeyJoin),
       ExcludedCase("single-precision Float source", floatSource),
       ExcludedCase("single-precision Float map", floatMap),
@@ -847,21 +852,24 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case PhysicalOp.Kind.Ints => true
     case PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs |
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools |
-        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs =>
+        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs |
+        PhysicalOp.Kind.StringTriples =>
       false
 
   private def sumsLongs(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Longs => true
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs |
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools |
-        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs =>
+        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs |
+        PhysicalOp.Kind.StringTriples =>
       false
 
   private def sumsFloats(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Floats => true
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Pairs |
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools |
-        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs =>
+        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs |
+        PhysicalOp.Kind.StringTriples =>
       false
 
   private def preservesPartitions(op: PhysicalOp): Boolean = op match
@@ -873,7 +881,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case PhysicalOp.MapValue(child) => preservesPartitions(child)
     case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.LongHashAggregate(_) |
         PhysicalOp.StringHashAggregate(_) | PhysicalOp.HashJoin(_, _) |
-        PhysicalOp.LongHashJoin(_, _) |
+        PhysicalOp.LongHashJoin(_, _) | PhysicalOp.StringHashJoin(_, _) |
         PhysicalOp.SortMergeJoin(_, _) | PhysicalOp.SortMergeLeftOuter(_, _) |
         PhysicalOp.SortMergeRightOuter(_, _) | PhysicalOp.SortMergeFullOuter(_, _) |
         PhysicalOp.HashLeftOuter(_, _) | PhysicalOp.HashRightOuter(_, _) |

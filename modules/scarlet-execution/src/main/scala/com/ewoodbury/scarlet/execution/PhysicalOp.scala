@@ -13,11 +13,12 @@ import com.ewoodbury.scarlet.core.Partition
  * arrays. [[PhysicalOp.MapValue]] rewrites an int or long value and keeps the pair.
  * [[PhysicalOp.Exchange]] sits under [[PhysicalOp.HashAggregate]],
  * [[PhysicalOp.LongHashAggregate]], and [[PhysicalOp.StringHashAggregate]], and on each side of
- * [[PhysicalOp.HashJoin]], [[PhysicalOp.LongHashJoin]], [[PhysicalOp.SortMergeJoin]],
- * [[PhysicalOp.SortMergeLeftOuter]], [[PhysicalOp.SortMergeRightOuter]],
- * [[PhysicalOp.SortMergeFullOuter]], [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]],
- * and [[PhysicalOp.HashFullOuter]]. Those kernels perform the shuffle. Interpreting the boundary
- * on its own does not. [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.BroadcastLeftOuter]],
+ * [[PhysicalOp.HashJoin]], [[PhysicalOp.LongHashJoin]], [[PhysicalOp.StringHashJoin]],
+ * [[PhysicalOp.SortMergeJoin]], [[PhysicalOp.SortMergeLeftOuter]],
+ * [[PhysicalOp.SortMergeRightOuter]], [[PhysicalOp.SortMergeFullOuter]],
+ * [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]], and [[PhysicalOp.HashFullOuter]].
+ * Those kernels perform the shuffle. Interpreting the boundary on its own does not.
+ * [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.BroadcastLeftOuter]],
  * [[PhysicalOp.BroadcastRightOuter]], and [[PhysicalOp.BroadcastFullOuter]] have no exchange.
  * [[PhysicalOp.BuildSide]] chooses which logical child of an inner broadcast join is built. The
  * planner records the right child. A later cost-based pass may choose the left child. The other
@@ -82,6 +83,18 @@ enum PhysicalOp:
    * [[PhysicalOp.Kind.LongTriples]].
    */
   case LongHashJoin(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * In-memory shuffle-hash inner join of `(String, Int)` pairs. `left` and `right` are exchanges
+   * with the same partition count. The kernel builds the left bucket and probes the right. The two
+   * sides keep independent dictionaries, so the table matches strings, not dictionary codes. A
+   * null key is dropped on both sides by the exchange. `""` is a present key. A null value stays
+   * on the row path: classification never selects [[PhysicalOp.Kind.StringPairs]]. Output columns
+   * are `(key, left, right)`, and the key is the probe row. There is no spill and no build budget.
+   * Broadcast, sort-merge, and outer joins do not use this node. Output kind is
+   * [[PhysicalOp.Kind.StringTriples]].
+   */
+  case StringHashJoin(left: PhysicalOp, right: PhysicalOp)
 
   /**
    * In-memory sort-merge inner join of int pairs. `left` and `right` are exchanges with the same
@@ -246,6 +259,7 @@ enum PhysicalOp:
     case StringHashAggregate(_) => PhysicalOp.Kind.StringPairs
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
     case LongHashJoin(_, _) => PhysicalOp.Kind.LongTriples
+    case StringHashJoin(_, _) => PhysicalOp.Kind.StringTriples
     case SortMergeJoin(_, _) => PhysicalOp.Kind.Triples
     case SortMergeLeftOuter(_, _) => PhysicalOp.Kind.Triples
     case SortMergeRightOuter(_, _) => PhysicalOp.Kind.Triples
@@ -310,6 +324,7 @@ enum PhysicalOp:
     case StringHashAggregate(child) => s"StringHashAggregate(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
     case LongHashJoin(left, right) => s"LongHashJoin(${left.shape}, ${right.shape})"
+    case StringHashJoin(left, right) => s"StringHashJoin(${left.shape}, ${right.shape})"
     case SortMergeJoin(left, right) => s"SortMergeJoin(${left.shape}, ${right.shape})"
     case SortMergeLeftOuter(left, right) => s"SortMergeLeftOuter(${left.shape}, ${right.shape})"
     case SortMergeRightOuter(left, right) => s"SortMergeRightOuter(${left.shape}, ${right.shape})"
@@ -324,7 +339,8 @@ enum PhysicalOp:
 
 object PhysicalOp:
   enum Kind:
-    case Ints, Longs, Floats, Pairs, Triples, Strings, Bools, LongPairs, LongTriples, StringPairs
+    case Ints, Longs, Floats, Pairs, Triples, Strings, Bools, LongPairs, LongTriples, StringPairs,
+      StringTriples
 
   /** Which logical child of a broadcast join fills the build table. */
   enum BuildSide:

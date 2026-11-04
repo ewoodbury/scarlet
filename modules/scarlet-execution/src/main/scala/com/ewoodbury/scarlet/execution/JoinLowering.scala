@@ -6,8 +6,8 @@ import com.ewoodbury.scarlet.core.Plan
  * Lowers inner and outer joins for the pair kinds the columnar kernels accept.
  *
  * An int inner join accepts no hint, shuffle-hash, broadcast, and sort-merge. A long inner join
- * accepts no hint and shuffle-hash. Outer joins on int pairs accept broadcast, shuffle-hash, an
- * absent hint, and sort-merge. Any other join stays on the row path.
+ * and a string inner join accept no hint and shuffle-hash. Outer joins on int pairs accept
+ * broadcast, shuffle-hash, an absent hint, and sort-merge. Any other join stays on the row path.
  */
 @SuppressWarnings(
   Array(
@@ -38,6 +38,14 @@ private[execution] object JoinLowering:
                 if acceptsShuffleHash(strategy) =>
               Some(
                 PhysicalOp.LongHashJoin(
+                  PhysicalOp.Exchange(leftOp),
+                  PhysicalOp.Exchange(rightOp),
+                ),
+              )
+            case (PhysicalOp.Kind.StringPairs, PhysicalOp.Kind.StringPairs)
+                if acceptsShuffleHash(strategy) =>
+              Some(
+                PhysicalOp.StringHashJoin(
                   PhysicalOp.Exchange(leftOp),
                   PhysicalOp.Exchange(rightOp),
                 ),

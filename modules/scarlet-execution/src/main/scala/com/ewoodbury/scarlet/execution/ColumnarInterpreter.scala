@@ -105,6 +105,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.Strings(parts) => parts
     case Columns.Bools(parts) => parts
     case Columns.StringPairs(parts) => parts
+    case Columns.StringTriples(parts) => parts
     case Columns.Outer(parts, _) => parts
 
   private[execution] enum Columns:
@@ -120,6 +121,12 @@ private[execution] object ColumnarInterpreter:
 
     /** `(String, Int)` batches. Column 0 is the key, 1 the value; narrowed batch may carry one. */
     case StringPairs(parts: Vector[ColumnBatch])
+
+    /**
+     * `(String, (Int, Int))` batches. Schema is `[Utf8Dict, Int32, Int32]`. The key is the probe
+     * row's dictionary and code.
+     */
+    case StringTriples(parts: Vector[ColumnBatch])
 
     /**
      * Outer-join batches stay `(key, left, right)`. `absent` tells [[BatchCodec.decodeOuter]]
@@ -234,6 +241,9 @@ private[execution] object ColumnarInterpreter:
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeStrings(batch, rows))
         case Columns.StringPairs(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeStringPairs(batch, rows))
+        case Columns.StringTriples(parts) =>
+          // Joins are not partition-preserving, so `take` does not reach this arm.
+          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeStringJoin(batch, rows))
         case Columns.Bools(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeBools(batch, rows))
 
@@ -318,7 +328,8 @@ private[execution] object ColumnarInterpreter:
         case PhysicalOp.Kind.Strings => Columns.Strings(SourceEncode.encodeStrings(selected))
         case PhysicalOp.Kind.Bools => Columns.Bools(SourceEncode.encodeBools(selected))
         case PhysicalOp.Kind.StringPairs => StringPairWalk.encoded(selected, ordinals)
-        case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples =>
+        case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples |
+            PhysicalOp.Kind.StringTriples =>
           throw new IllegalStateException(
             s"physical tree does not match ${plan.getClass.getSimpleName}",
           )
@@ -458,6 +469,24 @@ private[execution] object ColumnarInterpreter:
           ColumnarPlanner.shuffleWidth,
           ColumnarPlanner.parallelism,
           ColumnarPlanner.batchSize,
+        ),
+      )
+    case (
+          Plan.JoinOp(left, right, strategy),
+          PhysicalOp.StringHashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
+        ) if JoinLowering.acceptsShuffleHash(strategy) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      Columns.StringTriples(
+        StringHashJoin.inner(
+          StringPairWalk.batches(
+            interpretAt(left, leftOp, selectedPartition, preserveAbsence, ordinals),
+          ),
+          StringPairWalk.batches(
+            interpretAt(right, rightOp, selectedPartition, preserveAbsence, ordinals),
+          ),
+          ColumnarPlanner.shuffleWidth,
+          ColumnarPlanner.parallelism,
         ),
       )
     case (
@@ -867,7 +896,8 @@ private[execution] object ColumnarInterpreter:
       case Columns.Strings(parts) =>
         Columns.Strings(onEachMorsel(parts)(morsel => ElementPipeline.strings(morsel, steps)))
       case Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.Triples(_) |
-          Columns.LongTriples(_) | Columns.StringPairs(_) | Columns.Outer(_, _) =>
+          Columns.LongTriples(_) | Columns.StringPairs(_) | Columns.StringTriples(_) |
+          Columns.Outer(_, _) =>
         rejected
 
   private def project(columns: Columns, mapper: Any): Columns = columns match
@@ -935,7 +965,7 @@ private[execution] object ColumnarInterpreter:
         PairKernel.mapTriple(morsel.batch, morsel.start, morsel.length, adapted)
       })
     case Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.LongTriples(_) |
-        Columns.StringPairs(_) | Columns.Outer(_, _) =>
+        Columns.StringPairs(_) | Columns.StringTriples(_) | Columns.Outer(_, _) =>
       throw new IllegalStateException(
         s"columnar map expects ${elementColumnList(includeBooleans = false)}",
       )
@@ -965,7 +995,7 @@ private[execution] object ColumnarInterpreter:
       throw new IllegalStateException("columnar pairs have no partitions")
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.LongPairs(_) |
         Columns.Triples(_) | Columns.LongTriples(_) | Columns.Strings(_) | Columns.Bools(_) |
-        Columns.StringPairs(_) | Columns.Outer(_, _) =>
+        Columns.StringPairs(_) | Columns.StringTriples(_) | Columns.Outer(_, _) =>
       throw new IllegalStateException("columnar op expected int pairs")
 
   private[execution] def triplesOf(columns: Columns): Vector[ColumnBatch] = columns match
@@ -974,7 +1004,7 @@ private[execution] object ColumnarInterpreter:
       throw new IllegalStateException("columnar triples have no partitions")
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Pairs(_) |
         Columns.LongPairs(_) | Columns.LongTriples(_) | Columns.Strings(_) | Columns.Bools(_) |
-        Columns.StringPairs(_) | Columns.Outer(_, _) =>
+        Columns.StringPairs(_) | Columns.StringTriples(_) | Columns.Outer(_, _) =>
       throw new IllegalStateException("columnar op expected int triples")
 
   /**
@@ -1027,7 +1057,7 @@ private[execution] object ColumnarInterpreter:
       throw new IllegalStateException("columnar long pairs have no partitions")
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Pairs(_) |
         Columns.Triples(_) | Columns.LongTriples(_) | Columns.Strings(_) | Columns.Bools(_) |
-        Columns.StringPairs(_) | Columns.Outer(_, _) =>
+        Columns.StringPairs(_) | Columns.StringTriples(_) | Columns.Outer(_, _) =>
       throw new IllegalStateException("columnar op expected long pairs")
 
   private def decodeWith(
@@ -1058,5 +1088,9 @@ private[execution] object ColumnarInterpreter:
       parts.map(batch => Partition(BatchCodec.decodeStrings(batch)))
     case Columns.StringPairs(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeStringPairs(batch)))
+    case Columns.StringTriples(parts) =>
+      // Named erasure boundary for the string join. The decoded rows are `(String, (Int, Int))`.
+      // [[ColumnarPlanner.runLowered]] casts the partition sequence to the plan's element type.
+      parts.map(batch => Partition(BatchCodec.decodeStringJoin(batch)))
     case Columns.Bools(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeBools(batch)))
