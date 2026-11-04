@@ -74,7 +74,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     DistCollection(Seq(1, 2, 3), 2).map(_.toString).collect() shouldBe Seq("1", "2", "3")
   }
 
-  "string keys" should "keep groupByKey and join on the row path and hash reduceByKey" in {
+  "string keys" should "keep groupByKey on the row path and hash reduceByKey and join" in {
     val grouped = DistCollection(Seq("a" -> 1, "a" -> 2, "b" -> 3), 2).groupByKey
     infoOf(grouped) shouldBe Option.empty[PartitioningInfo]
     grouped.collect().map { case (key, values) => key -> values.toSet }.toMap shouldBe Map(
@@ -96,7 +96,11 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
 
     val joined = DistCollection(Seq("a" -> 1), 1).join(DistCollection(Seq("a" -> 10), 1))
     joined.collect().toSeq should contain theSameElementsAs Seq("a" -> ((1, 10)))
-    infoOf(joined) shouldBe Option.empty[PartitioningInfo]
+    val joinedInfo = infoOf(joined).getOrElse(fail("string join stayed on the row path"))
+    joinedInfo.layout shouldBe Layout.StringTriple(ScarletConf.get.columnarBatchSize)
+    ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
+      "StringHashJoin(Exchange(Scan), Exchange(Scan))",
+    )
   }
 
   "union of int maps" should "concatenate both sides columnarly" in {

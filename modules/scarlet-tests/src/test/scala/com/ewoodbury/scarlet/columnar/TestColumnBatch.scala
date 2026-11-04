@@ -456,6 +456,10 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       () => ColumnBatches.emptyLongJoin,
       Vector(LogicalType.Int64, LogicalType.Int64, LogicalType.Int64),
     )
+    checkFresh(
+      () => ColumnBatches.emptyStringJoin,
+      Vector(LogicalType.Utf8Dict, LogicalType.Int32, LogicalType.Int32),
+    )
   }
 
   "batch construction" should "reject a column that does not match the schema or the row count" in {

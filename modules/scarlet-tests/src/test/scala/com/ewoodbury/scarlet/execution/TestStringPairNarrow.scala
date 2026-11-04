@@ -15,7 +15,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Columnar `keys`, `values`, `mapValues`, `filterKeys`, and `filterValues` on `(String, Int)`.
  *
  * The row path is the oracle. A null key stays in the batch. A null value stays on the row path.
- * Group, join, and a string `mapValues` stay on the row path. `reduceByKey` lowers.
+ * Group and a string `mapValues` stay on the row path. `reduceByKey` and an inner shuffle-hash
+ * join lower.
  */
 class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -163,14 +164,16 @@ class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
     ColumnarPlanner.lower(empty.plan) shouldBe None
   }
 
-  it should "lower reduceByKey and keep group, join, and a string mapValues on the row path" in {
+  it should "lower reduceByKey and an inner join, and keep group and a string mapValues on the row path" in {
     val rows = source
     ColumnarPlanner.lower(rows.reduceByKey((left: Int, right: Int) => left + right).plan).map(
       _.shape,
     ) shouldBe Some("StringHashAggregate(Exchange(Scan))")
     ColumnarPlanner.lower(rows.groupByKey.plan) shouldBe None
     ColumnarPlanner.lower(rows.distinct().plan) shouldBe None
-    ColumnarPlanner.lower(rows.join(rows).plan) shouldBe None
+    ColumnarPlanner.lower(rows.join(rows).plan).map(_.shape) shouldBe Some(
+      "StringHashJoin(Exchange(Scan), Exchange(Scan))",
+    )
     ColumnarPlanner.lower(rows.mapValues((value: Int) => value.toString).plan) shouldBe None
     ColumnarPlanner.groupedSumPeel(rows.filterKeys(isRed).plan) shouldBe None
     ColumnarPlanner.tryGroupedSum(rows.filterKeys(isRed).plan) shouldBe None
