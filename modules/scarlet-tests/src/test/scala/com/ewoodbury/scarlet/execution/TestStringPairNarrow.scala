@@ -168,6 +168,7 @@ class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
     ColumnarPlanner.lower(rows.reduceByKey((left: Int, right: Int) => left + right).plan) shouldBe
       None
     ColumnarPlanner.lower(rows.groupByKey.plan) shouldBe None
+    ColumnarPlanner.lower(rows.distinct().plan) shouldBe None
     ColumnarPlanner.lower(rows.join(rows).plan) shouldBe None
     ColumnarPlanner.lower(rows.mapValues((value: Int) => value.toString).plan) shouldBe None
     ColumnarPlanner.groupedSumPeel(rows.filterKeys(isRed).plan) shouldBe None

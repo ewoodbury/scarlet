@@ -118,7 +118,7 @@ private[execution] object ColumnarInterpreter:
     case Strings(parts: Vector[ColumnBatch])
     case Bools(parts: Vector[ColumnBatch])
 
-    /** `(String, Int)` batches. Column 0 is the key and column 1 is the value. */
+    /** `(String, Int)` batches. Column 0 is the key, 1 the value; narrowed batch may carry one. */
     case StringPairs(parts: Vector[ColumnBatch])
 
     /**

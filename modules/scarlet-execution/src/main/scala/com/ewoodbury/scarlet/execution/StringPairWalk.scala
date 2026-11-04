@@ -14,9 +14,9 @@ import ColumnarInterpreter.Columns
  * unchanged, so the new value does not inherit a clear key bit.
  *
  * [[encoded]] may publish a one-column batch when demand narrowed the read to the key or the
- * value. Only a [[PhysicalOp.Column]] consumes that shape, and it wraps the batch as
- * [[Columns.Strings]] or [[Columns.Ints]]; [[BatchCodec.decodeStringPairs]] requires both columns
- * and is never called on a narrowed batch.
+ * value. A [[PhysicalOp.Column]] or the filter path consumes that shape; a column wraps the batch
+ * as [[Columns.Strings]] or [[Columns.Ints]]. [[BatchCodec.decodeStringPairs]] requires both
+ * columns and is never called on a narrowed batch.
  *
  * Named erasure boundary. The physical slot chose the predicate, and lowering checked that
  * `mapValues` declares `Int => Int`.
