@@ -48,7 +48,9 @@ class TestLocalTransformations extends AnyFlatSpec with Matchers {
     val result = distinct.collect()
     val expected = Seq(1, 2, 3, 4)
 
-    result shouldEqual expected
+    // Distinct has no ordering guarantee. The row path happened to keep first-occurrence order;
+    // the columnar path hashes values to partitions first, so compare membership only.
+    result.toSet shouldEqual expected.toSet
   }
 
   it should "execute a simple union operation with ints" in {

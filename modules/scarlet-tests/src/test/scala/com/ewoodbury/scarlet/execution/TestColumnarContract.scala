@@ -30,14 +30,14 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 187 accepted fixtures. map on triples and generic triple filter moved from the excluded
-    // list, then union moved as well. Each is a move, not a new fixture. 184 + 3 = 187.
-    accepted.size shouldBe 187
-    // 45 exclusions. Those three moved to the accepted list. 48 - 3 = 45. 187 + 45 = 232.
+    // 188 accepted fixtures. int distinct moved from the excluded list. That is a move, not a new
+    // fixture. 187 + 1 = 188.
+    accepted.size shouldBe 188
+    // 44 exclusions. int distinct moved to the accepted list. 45 - 1 = 44. 188 + 44 = 232.
     // Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by
     // execution tests, not contract fixtures, because the contract does not track the int
     // refusals either.
-    excluded.size shouldBe 45
+    excluded.size shouldBe 44
     (accepted.size + excluded.size) shouldBe 232
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
@@ -571,6 +571,16 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         narrowInfo(4, layout),
         Some("Union(Scan, Scan)"),
       ),
+      AcceptedCase(
+        "distinct ints",
+        Plan.DistinctOp(intSource),
+        PartitioningInfo(
+          Distribution.Hash(ScarletConf.get.defaultShufflePartitions, List(0)),
+          OrderingTag.Unsorted,
+          layout,
+        ),
+        Some("Dedupe(Exchange(Scan))"),
+      ),
       AcceptedCase("join-key filter", joinKeyFilter, hashedInfo(layout), Some("FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))")),
       AcceptedCase("join-left-value filter", joinLeftFilter, hashedInfo(layout), Some("FilterTripleLeftValue(HashJoin(Exchange(Scan), Exchange(Scan)))")),
       AcceptedCase("join-right-value filter", joinRightFilter, hashedInfo(layout), Some("FilterTripleRightValue(HashJoin(Exchange(Scan), Exchange(Scan)))")),
@@ -675,7 +685,6 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ExcludedCase("coalesce", Plan.CoalesceOp(intSource, 1)),
       ExcludedCase("partitionBy", Plan.PartitionByOp(pairSource, 2)),
       ExcludedCase("flatMap", Plan.FlatMapOp(intSource, (value: Int) => List(value, value + 1))),
-      ExcludedCase("distinct", Plan.DistinctOp(intSource)),
       ExcludedCase("flatMapValues", Plan.FlatMapValuesOp(pairSource, (value: Int) => List(value))),
       ExcludedCase("groupByKey int", Plan.GroupByKeyOp(pairSource)),
       ExcludedCase("cogroup", Plan.CoGroupOp(pairSource, rightPairSource)),
@@ -842,7 +851,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.HashFullOuter(_, _) | PhysicalOp.BroadcastJoin(_, _, _) |
         PhysicalOp.BroadcastLeftOuter(_, _) | PhysicalOp.BroadcastRightOuter(_, _) |
         PhysicalOp.BroadcastFullOuter(_, _) | PhysicalOp.SortByIntKey(_) |
-        PhysicalOp.SortByLongKey(_) | PhysicalOp.Union(_, _) =>
+        PhysicalOp.SortByLongKey(_) | PhysicalOp.Union(_, _) | PhysicalOp.Dedupe(_) =>
       false
 
   /** A key sort is not partition-preserving, and `tryTake` still runs it. */

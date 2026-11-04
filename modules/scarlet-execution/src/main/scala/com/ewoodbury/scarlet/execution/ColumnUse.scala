@@ -40,6 +40,8 @@ private[execution] object ColumnUse:
       walk(source, child, parent union consumedOrdinals(child.kind))
     case (Plan.UnionOp(left, right), PhysicalOp.Union(leftOp, rightOp)) =>
       walk(left, leftOp, parent) union walk(right, rightOp, parent)
+    case (Plan.DistinctOp(source), PhysicalOp.Dedupe(child)) =>
+      walk(source, child, parent)
     case (logical, PhysicalOp.Pipeline(child, length)) =>
       val (source, steps) = ColumnarPlanner.elementSteps(logical, length)
       // elementSteps collects a MapOp with no element-type check, so a pipeline over pairs keeps
