@@ -51,3 +51,11 @@ class TestUnion extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     union.collect().toSeq shouldBe Seq(1 -> 10, 2 -> 20)
     ColumnarPlanner.lower(union.plan).map(_.shape) shouldBe Some("Union(Scan, Scan)")
   }
+
+  it should "keep empty pair sides on the row path without a witness" in {
+    val union =
+      DistCollection(Seq.empty[(Int, Int)], 2).union(DistCollection(Seq.empty[(Int, Int)], 1))
+    union.collect() shouldBe empty
+    // An empty pair source has no witness either, so the union stays on the row path.
+    ColumnarPlanner.lower(union.plan) shouldBe Option.empty[PhysicalOp]
+  }

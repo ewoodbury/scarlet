@@ -290,6 +290,9 @@ private[execution] object ColumnarInterpreter:
       ordinals: Set[Int],
   ): Columns = (plan, op) match
     case (Plan.UnionOp(leftPlan, rightPlan), PhysicalOp.Union(leftOp, rightOp)) =>
+      // A union is not partition-preserving, so take never drives it per partition. If a caller
+      // ever passes a selected partition here, both sides would read their own partition i, which
+      // is not a global union partition.
       concat(
         interpretAt(leftPlan, leftOp, selectedPartition, preserveAbsence, ordinals),
         interpretAt(rightPlan, rightOp, selectedPartition, preserveAbsence, ordinals),

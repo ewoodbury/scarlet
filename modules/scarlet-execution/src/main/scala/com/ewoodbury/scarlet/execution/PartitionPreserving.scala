@@ -16,12 +16,6 @@ private[execution] object PartitionPreserving:
     case PhysicalOp.Pipeline(child, _) => of(child)
     case PhysicalOp.Column(child, _) => of(child)
     case PhysicalOp.MapValue(child) => of(child)
-    case _: PhysicalOp.HashAggregate | _: PhysicalOp.LongHashAggregate | _: PhysicalOp.HashJoin |
-        _: PhysicalOp.LongHashJoin | _: PhysicalOp.SortMergeJoin |
-        _: PhysicalOp.SortMergeLeftOuter | _: PhysicalOp.SortMergeRightOuter |
-        _: PhysicalOp.SortMergeFullOuter | _: PhysicalOp.HashLeftOuter |
-        _: PhysicalOp.HashRightOuter | _: PhysicalOp.HashFullOuter | _: PhysicalOp.BroadcastJoin |
-        _: PhysicalOp.BroadcastLeftOuter | _: PhysicalOp.BroadcastRightOuter |
-        _: PhysicalOp.BroadcastFullOuter | _: PhysicalOp.Exchange | _: PhysicalOp.SortByIntKey |
-        _: PhysicalOp.SortByLongKey | _: PhysicalOp.Union =>
-      None
+    // Every other op re-partitions. Unlisted future ops land here too, so a new op refuses take
+    // instead of silently reading one input partition.
+    case _ => None
