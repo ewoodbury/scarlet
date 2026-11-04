@@ -84,8 +84,10 @@ ascending by effective key: a null key orders as zero and stays null. Shape stri
 | Long-pair source, including an empty source | `Columnar` | `Scan` |
 | Long-pair `keys`, `values`, `mapValues`, and row `filter` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `FilterRow(Scan)` |
 | Pair `keys`, `values`, int `mapValues`, mapped key/value columns, filtered int `mapValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `Project(Key(Scan))`, `Project(Value(Scan))`, `FilterValue(MapValue(Scan))` |
+| String-pair source and `keys`, `values`, int `mapValues`, `filterKeys`, `filterValues`. A null key is a value and `""` is distinct | `StringPair`; `Utf8Dict` for `keys`, `Columnar` for `values` | `Scan`, `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `FilterKey(Scan)`, `FilterValue(Scan)` |
 | Int `reduceByKey`, after a value filter or int `mapValues`, and nested reduction | `Columnar` | `HashAggregate(Exchange(Scan))`, `HashAggregate(Exchange(FilterValue(Scan)))`, `HashAggregate(Exchange(MapValue(Scan)))`, `HashAggregate(Exchange(HashAggregate(Exchange(Scan))))` |
 | Long `reduceByKey` | `Columnar` | `LongHashAggregate(Exchange(Scan))` |
+| String `reduceByKey`. A null key is dropped and `""` is kept. The exchange hashes each dictionary string once | `StringPair` | `StringHashAggregate(Exchange(Scan))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
 | Automatic or explicit shuffle-hash long join. Both sides are exchanged on `Long.hashCode`. A null key is dropped. A null value stays on the row path. There is no spill and no build budget. Broadcast, sort-merge, and outer joins on long keys stay on the row path | `Columnar` | `LongHashJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge int join. Both sides are hash-partitioned, sorted inside each partition, and merged. Null keys are dropped before the sort | `Columnar` | `SortMergeJoin(Exchange(Scan), Exchange(Scan))` |
@@ -181,8 +183,9 @@ first string, and an empty iterable has no witness and stays on the row path.
 that scan, an inner shuffle-hash join of that scan, and `sortByLongKey` of that scan are columnar.
 `groupedSum` of a long pair stays on the row path. Broadcast, sort-merge, and outer joins on long
 keys stay on the row path. A long sort spills over the budget the same way an int sort does.
-String `groupByKey` and string `join` are refused. Also refused, and already listed with the contract
-fixtures: `distinct`, `partitionBy`, `sortBy`, `groupByKey`, and joins on a string or double key.
+String `reduceByKey` is columnar: `StringHashAggregate(Exchange(Scan))` drops a null key, keeps
+`""`, and hashes each dictionary string once. String `groupByKey` and string `join` are refused.
+The remaining exclusions are listed with the contract fixtures below.
 `min` and `max` are not in the API. Nullable long and boolean sources have no
 descriptor.
 
@@ -199,19 +202,14 @@ the pair type, such as `(Int, Int) => (Long, Int)`, is excluded: `partitioning`,
 `tryGroupedSum` stay on the row path. The structural peel label is still
 `GroupedSum(MapPair(Scan))`.
 
-These 46 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
-`coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `distinct`, `union`, `groupByKey`, `cogroup`,
-`sortBy`, non-Int `mapValues`, string/double pair projection or pair filters, string/double-key
-`groupByKey`, `reduceByKey`, and join, an element map of long pairs, `filterKeys`, `filterValues`,
-`groupedSum`, and `sortBy` of a non-scan (`take` of a long-pair scan is accepted, and `keys`,
-`values`, `mapValues`, and a row `filter` of long pairs are accepted, and an unhinted or
-shuffle-hash inner join of long pairs is accepted, and a same-type map and a whole-row filter of
-an int inner join are accepted),
-single-precision `Float` sources/maps, all-null strings, empty generic sources without a type
-descriptor, and element maps that do not preserve the column type.
-That is 48 previous exclusions. `map on triples` and `generic triple filter` move to the accepted
-list. This is a move, not a new fixture. 48 - 2 = 46. Accepted moves from 184 to 186.
-186 + 46 = 232.
+These 38 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+`coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `cogroup`, `sortBy`, `groupByKey` on int,
+string, or double keys, `mapValues` to string or double, double-pair `keys`, `values`,
+`mapValues`, `filterKeys`, and `filterValues`, double-key `reduceByKey` and `join`, string-key
+`join`, single-precision `Float` sources and maps, all-null strings, an empty int source without
+a witness, and element maps that do not preserve the column type (`boolean` to `boolean`, `int`
+to `long`, `string`, or a pair, `long` to `int` or `string`, and `double` to `int`).
+That is 38 exclusions, and 194 accepted, for 232 covered shapes.
 Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by execution
 tests, not contract fixtures, because the contract does not track the int refusals either.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then

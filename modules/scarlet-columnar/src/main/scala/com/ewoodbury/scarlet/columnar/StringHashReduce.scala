@@ -1,0 +1,142 @@
+package com.ewoodbury.scarlet.columnar
+
+/**
+ * Hash reduce over dictionary string keys and `Int32` values.
+ *
+ * The binary operator is the caller's. It is applied as values are inserted, including when
+ * partial groups are merged, so it has to be associative and commutative. Arithmetic wraps at
+ * `Int`. This is the `(String, Int)` `reduceByKey` kernel. There is no spill path: an input that
+ * does not fit stays in memory.
+ *
+ * A null key is dropped. `""` is a present key. One batch has one dictionary, so a table keyed by
+ * dictionary code is keyed by the string. The exchange bucket is
+ * `floorMod(StringHash.hash(text), numPartitions)`, the same rule `HashPartitioner` uses, and each
+ * bucket is one dictionary: unlike dictionaries are remapped when the bucket is concatenated. The
+ * value column is all valid. A clear value bit is not a null this kernel understands. Output order
+ * is first-seen inside the bucket. The table is at least twice the row count, so one batch does
+ * not rehash.
+ */
+@SuppressWarnings(Array("org.wartremover.warts.Var"))
+object StringHashReduce:
+
+  /**
+   * Partial-reduce each batch, exchange on the string key, then reduce each bucket. An empty input
+   * is `numPartitions` empty string-pair batches.
+   */
+  def byKey(
+      batches: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+      op: (Int, Int) => Int,
+  ): Vector[ColumnBatch] =
+    require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    if (batches.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyStringPairs)
+    else
+      val combined = PartialCombine.perBatch(
+        batches,
+        batchSize,
+        parallelism,
+        morsel => reduceBatch(morsel, op),
+        partials => reduceBatch(partials, op),
+      )
+      val buckets =
+        HashExchange.partitionAllUtf8(combined, keyOrdinal = 0, numPartitions, parallelism)
+      MorselScheduler.map(buckets, parallelism) { (_, bucket) =>
+        reduceBatch(bucket, op)
+      }
+
+  private def reduceBatch(batch: ColumnBatch, op: (Int, Int) => Int): ColumnBatch =
+    val keys = utf8At(batch, 0)
+    val values = ColumnHash.int32At(batch, 1)
+    require(keys.length == values.length, "key and value columns differ in length")
+    if (keys.length == 0) then ColumnBatches.emptyStringPairs
+    else reduce(keys, values, op)
+
+  private def reduce(
+      keys: DictUtf8Column,
+      values: Int32Column,
+      op: (Int, Int) => Int,
+  ): ColumnBatch =
+    val table = new Table(ColumnHash.tableSize(keys.length), op)
+    if (ColumnHash.fullyPresent(keys)) then table.scanDense(keys, values)
+    else table.scanSparse(keys, values)
+    table.compact(keys.dictionary)
+
+  private def utf8At(batch: ColumnBatch, ordinal: Int): DictUtf8Column =
+    ColumnKernel.asUtf8(ColumnKernel.columnAt(batch, ordinal), ordinal)
+
+  private final class Table(capacity: Int, op: (Int, Int) => Int):
+    private val mask: Int = capacity - 1
+    private val limit: Int = capacity >>> 1
+    private val keys: Array[Int] = new Array[Int](capacity)
+    private val values: Array[Int] = new Array[Int](capacity)
+    private val state: Array[Byte] = new Array[Byte](capacity)
+    private val slots: Array[Int] = new Array[Int](capacity)
+    private var occupied: Int = 0
+
+    def scanDense(keyColumn: DictUtf8Column, valueColumn: Int32Column): Unit =
+      val codes = keyColumn.codes
+      val valueValues = valueColumn.values
+      val rows = keyColumn.length
+      var row = 0
+      while (row < rows) {
+        add(codes(row), valueValues(row))
+        row += 1
+      }
+
+    def scanSparse(keyColumn: DictUtf8Column, valueColumn: Int32Column): Unit =
+      val codes = keyColumn.codes
+      val valueValues = valueColumn.values
+      val keyWords = keyColumn.validity.words
+      val rows = keyColumn.length
+      var row = 0
+      while (row < rows) {
+        if (Validity.isSet(keyWords, row)) then add(codes(row), valueValues(row))
+        row += 1
+      }
+
+    /**
+     * Surviving codes keep `dictionary`. One batch has one dictionary, so a code is one string.
+     */
+    def compact(dictionary: Array[String]): ColumnBatch =
+      val rows = occupied
+      if (rows == 0) then ColumnBatches.emptyStringPairs
+      else
+        val outCodes = new Array[Int](rows)
+        val outValues = new Array[Int](rows)
+        var cursor = 0
+        while (cursor < rows) {
+          val slot = slots(cursor)
+          outCodes(cursor) = keys(slot)
+          outValues(cursor) = values(slot)
+          cursor += 1
+        }
+        val present = Validity.allValid(rows)
+        new ColumnBatch(
+          Vector(LogicalType.Utf8Dict, LogicalType.Int32),
+          Vector(
+            DictUtf8Column.of(dictionary, outCodes, present, rows),
+            Int32Column.of(outValues, present, rows),
+          ),
+          rows,
+        )
+
+    private def add(key: Int, value: Int): Unit =
+      val slot = locate(key)
+      if (state(slot) == 0) then
+        if (occupied >= limit) then
+          throw new IllegalStateException(s"hash reduce table is full at $occupied groups")
+        state(slot) = 1
+        keys(slot) = key
+        values(slot) = value
+        slots(occupied) = slot
+        occupied += 1
+      else values(slot) = op(values(slot), value)
+
+    private def locate(key: Int): Int =
+      var slot = ColumnHash.mix(key) & mask
+      while (state(slot) != 0 && keys(slot) != key) slot = (slot + 1) & mask
+      slot

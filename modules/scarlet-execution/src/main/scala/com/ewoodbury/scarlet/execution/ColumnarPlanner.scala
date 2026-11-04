@@ -59,8 +59,10 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * check reads the method descriptor and does not call the function. `getDeclaredMethods` does not
  * see an inherited `apply`, so that function stays on the row path too. `reduceByKey` on
  * `(Int, Int)` applies the user's function and wraps at `Int`. A `(Long, Long)` source lowers to
- * [[PhysicalOp.LongHashAggregate]] and wraps at `Long`. Any other pair type stays on the row path.
- * A `(Long, Long)` inner join with no hint, or with an explicit shuffle-hash hint, lowers to
+ * [[PhysicalOp.LongHashAggregate]] and wraps at `Long`. A `(String, Int)` source lowers to
+ * [[PhysicalOp.StringHashAggregate]]. A null key is dropped and `""` is kept. A null value stays
+ * on the row path. Any other pair type, including `(String, Long)`, stays on the row path. A
+ * `(Long, Long)` inner join with no hint, or with an explicit shuffle-hash hint, lowers to
  * [[PhysicalOp.LongHashJoin]]. Both sides are exchanged on `Long.hashCode`. There is no spill and
  * no build budget. A null value is not a decoded long: interpretation reads the value columns and
  * leaves the plan on the row path. A broadcast hint, a sort-merge hint, and every outer join on
@@ -980,6 +982,8 @@ object ColumnarPlanner:
         _: PhysicalOp.SortMergeRightOuter | _: PhysicalOp.SortMergeFullOuter |
         _: PhysicalOp.HashLeftOuter | _: PhysicalOp.HashRightOuter | _: PhysicalOp.HashFullOuter =>
       hashed(PhysicalOp.Kind.Pairs)
+    case _: PhysicalOp.StringHashAggregate =>
+      hashed(PhysicalOp.Kind.StringPairs)
     case _: PhysicalOp.LongHashJoin =>
       hashed(PhysicalOp.Kind.LongPairs)
     case PhysicalOp.BroadcastJoin(left, right, buildSide) =>

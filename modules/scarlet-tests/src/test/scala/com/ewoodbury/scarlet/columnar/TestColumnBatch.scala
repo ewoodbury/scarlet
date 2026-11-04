@@ -445,6 +445,10 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       Vector(LogicalType.Int64, LogicalType.Int64),
     )
     checkFresh(
+      () => ColumnBatches.emptyStringPairs,
+      Vector(LogicalType.Utf8Dict, LogicalType.Int32),
+    )
+    checkFresh(
       () => ColumnBatches.emptyIntJoin,
       Vector(LogicalType.Int32, LogicalType.Int32, LogicalType.Int32),
     )

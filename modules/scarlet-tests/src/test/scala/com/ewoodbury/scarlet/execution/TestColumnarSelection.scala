@@ -74,7 +74,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     DistCollection(Seq(1, 2, 3), 2).map(_.toString).collect() shouldBe Seq("1", "2", "3")
   }
 
-  "string keys" should "keep groupByKey, reduceByKey, and join on the row path" in {
+  "string keys" should "keep groupByKey and join on the row path and hash reduceByKey" in {
     val grouped = DistCollection(Seq("a" -> 1, "a" -> 2, "b" -> 3), 2).groupByKey
     infoOf(grouped) shouldBe Option.empty[PartitioningInfo]
     grouped.collect().map { case (key, values) => key -> values.toSet }.toMap shouldBe Map(
@@ -84,7 +84,15 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
 
     val reduced = DistCollection(Seq("a" -> 1, "a" -> 2, "b" -> 3), 2).reduceByKey[String, Int](_ + _)
     reduced.collect().toMap shouldBe Map("a" -> 3, "b" -> 3)
-    infoOf(reduced) shouldBe Option.empty[PartitioningInfo]
+    val reducedInfo = infoOf(reduced).getOrElse(fail("string reduce stayed on the row path"))
+    reducedInfo.layout shouldBe Layout.StringPair(ScarletConf.get.columnarBatchSize)
+    reducedInfo.distribution shouldBe Distribution.Hash(
+      ScarletConf.get.defaultShufflePartitions,
+      PartitioningInfo.RowKeyOrdinals,
+    )
+    ColumnarPlanner.lower(reduced.plan).map(_.shape) shouldBe Some(
+      "StringHashAggregate(Exchange(Scan))",
+    )
 
     val joined = DistCollection(Seq("a" -> 1), 1).join(DistCollection(Seq("a" -> 10), 1))
     joined.collect().toSeq should contain theSameElementsAs Seq("a" -> ((1, 10)))
