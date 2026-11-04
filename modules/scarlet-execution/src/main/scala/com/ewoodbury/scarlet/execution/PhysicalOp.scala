@@ -32,12 +32,15 @@ enum PhysicalOp:
   case Project(child: PhysicalOp)
 
   /**
-   * One column of an int or long pair. Kind is [[PhysicalOp.Kind.Ints]] or
-   * [[PhysicalOp.Kind.Longs]].
+   * One column of an int, long, or string pair. Kind is [[PhysicalOp.Kind.Ints]] or
+   * [[PhysicalOp.Kind.Longs]], or [[PhysicalOp.Kind.Strings]] for a string key.
    */
   case Column(child: PhysicalOp, columnOrdinal: Int)
 
-  /** `mapValues` whose new value is an unboxed int or long. Kind stays the pair kind. */
+  /**
+   * `mapValues` whose new value is an unboxed int or long. Kind stays the pair kind, including
+   * [[PhysicalOp.Kind.StringPairs]].
+   */
   case MapValue(child: PhysicalOp)
 
   /**
@@ -217,13 +220,16 @@ enum PhysicalOp:
     case Union(left, _) => left.kind
     case Dedupe(child) => child.kind
     case Exchange(child) => child.kind
-    case Column(child, _) =>
+    case Column(child, ordinal) =>
       child.kind match
         case PhysicalOp.Kind.LongPairs => PhysicalOp.Kind.Longs
+        case PhysicalOp.Kind.StringPairs if ordinal == 0 => PhysicalOp.Kind.Strings
+        case PhysicalOp.Kind.StringPairs => PhysicalOp.Kind.Ints
         case _ => PhysicalOp.Kind.Ints
     case MapValue(child) =>
       child.kind match
         case PhysicalOp.Kind.LongPairs => PhysicalOp.Kind.LongPairs
+        case PhysicalOp.Kind.StringPairs => PhysicalOp.Kind.StringPairs
         case _ => PhysicalOp.Kind.Pairs
     case SortByIntKey(_) => PhysicalOp.Kind.Pairs
     case SortByLongKey(_) => PhysicalOp.Kind.LongPairs
@@ -308,7 +314,7 @@ enum PhysicalOp:
 
 object PhysicalOp:
   enum Kind:
-    case Ints, Longs, Floats, Pairs, Triples, Strings, Bools, LongPairs, LongTriples
+    case Ints, Longs, Floats, Pairs, Triples, Strings, Bools, LongPairs, LongTriples, StringPairs
 
   /** Which logical child of a broadcast join fills the build table. */
   enum BuildSide:

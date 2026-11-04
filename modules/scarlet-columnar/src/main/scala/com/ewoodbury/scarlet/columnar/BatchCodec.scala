@@ -125,6 +125,29 @@ object BatchCodec:
     batch(DictUtf8Column.fromNullable(values))
 
   /**
+   * One UTF-8 dictionary column and one int column. A null key is an empty slot. `""` is a present
+   * string, including when its code is `0`. A null value cannot be represented: the value column
+   * is all-valid. The column does not retain the input.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  def stringIntPairs(values: Iterable[(String, Int)]): ColumnBatch =
+    val count = values.size
+    val texts = new Array[String](count)
+    val ints = new Array[Int](count)
+    val rows = values.iterator
+    var row = 0
+    while (row < count) {
+      val pair = rows.next()
+      texts(row) = pair._1
+      ints(row) = pair._2
+      row += 1
+    }
+    stringPairBatch(
+      DictUtf8Column.fromIterable(ArraySeq.unsafeWrapArray(texts)),
+      Int32Column.of(ints, Validity.allValid(count), count),
+    )
+
+  /**
    * Copies `keys` and `values`. The column does not retain either array. Unequal lengths are
    * rejected. See [[copiedInts]] for why the arrays are copied rather than adopted.
    */
@@ -325,6 +348,23 @@ object BatchCodec:
     val column = bool(batch)
     Seq.tabulate(column.length) { row =>
       if (column.isValid(row)) Some(column.values(row) != 0) else None
+    }
+
+  /**
+   * Reads a string-int batch. A clear key bit is a null string. Code `0` with the bit set is the
+   * dictionary string, often `""`. A clear value bit is an error: the decoded `Int` would
+   * otherwise be the stored zero. A prefix checks only the rows it returns.
+   */
+  def decodeStringPairs(batch: ColumnBatch): Seq[(String, Int)] =
+    decodeStringPairs(batch, batch.length)
+
+  def decodeStringPairs(batch: ColumnBatch, maxRows: Int): Seq[(String, Int)] =
+    val (keys, values) = stringPair(batch)
+    val rows = decodedLength(batch, maxRows)
+    ColumnMetrics.decoded(rows)
+    Seq.tabulate(rows) { row =>
+      require(values.isValid(row), s"null Int32 at row $row")
+      (stringKey(keys, row), values.values(row))
     }
 
   def decodeIntPairs(batch: ColumnBatch): Seq[(Int, Int)] = decodeIntPairs(batch, batch.length)
@@ -831,6 +871,13 @@ object BatchCodec:
       length = left.length,
     )
 
+  private def stringPairBatch(keys: DictUtf8Column, values: Int32Column): ColumnBatch =
+    new ColumnBatch(
+      schema = Vector(LogicalType.Utf8Dict, LogicalType.Int32),
+      columns = Vector(keys, values),
+      length = keys.length,
+    )
+
   private def longPairBatch(left: Int64Column, right: Int64Column): ColumnBatch =
     new ColumnBatch(
       schema = Vector(LogicalType.Int64, LogicalType.Int64),
@@ -873,6 +920,19 @@ object BatchCodec:
       case Seq(left: Int32Column, right: Int32Column) => (left, right)
       case _ =>
         throw new IllegalArgumentException(s"expected two Int32 columns, got ${batch.schema}")
+
+  private def stringPair(batch: ColumnBatch): (DictUtf8Column, Int32Column) =
+    batch.columns match
+      case Seq(keys: DictUtf8Column, values: Int32Column) => (keys, values)
+      case _ =>
+        throw new IllegalArgumentException(
+          s"expected Utf8Dict and Int32 columns, got ${batch.schema}",
+        )
+
+  /** A clear bit is a null key. A set bit is the dictionary string, even when the code is `0`. */
+  private def stringKey(column: DictUtf8Column, row: Int): String =
+    if (column.isValid(row)) then column.dictionary(column.codes(row))
+    else stringElement(None)
 
   private def longPair(batch: ColumnBatch): (Int64Column, Int64Column) =
     batch.columns match

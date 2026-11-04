@@ -26,7 +26,8 @@ import PredicatePlan.{Atom, Compiled}
 @SuppressWarnings(Array("org.wartremover.warts.Throw"))
 private[execution] object FilterChain:
 
-  def accepts(plan: Plan[_], op: PhysicalOp): Boolean = PredicatePlan.accepts(plan, op)
+  def accepts(plan: Plan[_], op: PhysicalOp): Boolean =
+    (op.kind ne PhysicalOp.Kind.StringPairs) && PredicatePlan.accepts(plan, op)
 
   def run(
       plan: Plan[_],
@@ -52,7 +53,8 @@ private[execution] object FilterChain:
       case Columns.Outer(_, _) =>
         throw new IllegalStateException(PredicatePlan.outerMessage)
       case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Strings(_) |
-          Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.Triples(_) =>
+          Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.Triples(_) |
+          Columns.StringPairs(_) =>
         val compiled = PredicatePlan.compile(plan, op).getOrElse(missing)
         applyCompiled(columns, compiled, ordinals)
 
@@ -106,7 +108,7 @@ private[execution] object FilterChain:
     case Columns.LongPairs(_) => ColumnarInterpreter.longPairsOf(columns)
     case Columns.Triples(_) => ColumnarInterpreter.triplesOf(columns)
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Strings(_) |
-        Columns.Bools(_) =>
+        Columns.Bools(_) | Columns.StringPairs(_) =>
       ColumnarInterpreter.batchesOf(columns)
     case Columns.LongTriples(_) | Columns.Outer(_, _) =>
       missing
@@ -120,6 +122,7 @@ private[execution] object FilterChain:
     case Columns.Pairs(_) => Columns.Pairs(parts)
     case Columns.LongPairs(_) => Columns.LongPairs(parts)
     case Columns.Triples(_) => Columns.Triples(parts)
+    case Columns.StringPairs(_) => Columns.StringPairs(parts)
     case Columns.LongTriples(_) | Columns.Outer(_, _) =>
       missing
 

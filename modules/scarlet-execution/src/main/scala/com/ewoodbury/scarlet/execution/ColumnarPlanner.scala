@@ -132,7 +132,9 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * An all-null source stays on the row path, because there is no witness. An accepted string plan
  * records [[Layout.Utf8Dict]]: that dictionary plus codes, one dictionary per batch. The string
  * lambda stays scalar over the decoded string. Int, long, boolean, double, int-pair, long-pair,
- * int-triple, and long-triple plans stay [[Layout.Columnar]].
+ * int-triple, and long-triple plans stay [[Layout.Columnar]]. A string-key pair uses
+ * [[Layout.StringPair]]. `keys` of that pair is [[Layout.Utf8Dict]] and `values` is
+ * [[Layout.Columnar]]. `mapValues` and both filters keep [[Layout.StringPair]].
  *
  * `take` has a separate bounded path for accepted partition-preserving shapes: it interprets one
  * source partition at a time in order and decodes only the remaining requested values. Plans with
@@ -384,7 +386,7 @@ object ColumnarPlanner:
     case (
           Plan.ValuesOp(Plan.MapValuesOp(source, mapper)),
           PhysicalOp.Column(PhysicalOp.MapValue(child), 1),
-        ) =>
+        ) if child.kind eq PhysicalOp.Kind.Pairs =>
       // Named erasure boundary. The descriptor check verified the declared `Int => Int` shape
       // before lowering, so this cast is safe.
       @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
@@ -395,7 +397,8 @@ object ColumnarPlanner:
       }
     case (Plan.KeysOp(source), PhysicalOp.Column(child, 0)) =>
       sumPairColumn(source, child, ordinal = 0)
-    case (Plan.ValuesOp(source), PhysicalOp.Column(child, 1)) =>
+    case (Plan.ValuesOp(source), PhysicalOp.Column(child, 1))
+        if child.kind ne PhysicalOp.Kind.StringPairs =>
       sumPairColumn(source, child, ordinal = 1)
     case _ =>
       ColumnReduce.sumInt32(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op)))
@@ -855,7 +858,7 @@ object ColumnarPlanner:
       steps.foldLeft(Option(child)) { (current, step) =>
         current.flatMap(op => lowerElementStep(op, step))
       }
-    case PhysicalOp.Kind.LongTriples => None
+    case PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.LongTriples => None
 
   private def lowerElementStep(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
     step match
@@ -928,7 +931,7 @@ object ColumnarPlanner:
   private def pairColumn(source: Plan[_], ordinal: Int): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
       child.kind match
-        case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs =>
+        case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs =>
           Some(PhysicalOp.Column(child, ordinal))
         case _ => None
     }
@@ -936,7 +939,7 @@ object ColumnarPlanner:
   private def mapValue(source: Plan[_], kind: PhysicalOp.Kind): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
       (child.kind, kind) match
-        case (PhysicalOp.Kind.Pairs, PhysicalOp.Kind.Pairs) =>
+        case (PhysicalOp.Kind.Pairs | PhysicalOp.Kind.StringPairs, PhysicalOp.Kind.Pairs) =>
           Some(PhysicalOp.MapValue(child))
         case (PhysicalOp.Kind.LongPairs, PhysicalOp.Kind.LongPairs) =>
           Some(PhysicalOp.MapValue(child))
@@ -964,7 +967,8 @@ object ColumnarPlanner:
   private def columnFilter(source: Plan[_], slot: PhysicalOp.Slot): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
       child.kind match
-        case PhysicalOp.Kind.Pairs => Some(PhysicalOp.Filter(child, slot))
+        case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.StringPairs =>
+          Some(PhysicalOp.Filter(child, slot))
         case _ => None
     }
 
@@ -1081,9 +1085,10 @@ object ColumnarPlanner:
 
   /**
    * The first present value selects the kind. A leading empty cell can only witness a string. A
-   * pair witness is two `Int` cells or two `Long` cells. A leading null component does not witness
-   * [[PhysicalOp.Kind.LongPairs]]. Other actions do not unbox a null. Grouped sum also accepts a
-   * null component; see [[groupedPairSource]].
+   * pair witness is two `Int` cells or two `Long` cells. A `(String, Int)` cell witnesses string
+   * pairs, and a leading null key keeps looking until a present string key. A null value does not.
+   * A leading null component does not witness [[PhysicalOp.Kind.LongPairs]]. Other actions do not
+   * unbox a null. Grouped sum also accepts a null component; see [[groupedPairSource]].
    */
   private def classifyValue(value: Any, rest: Iterator[Any]): Option[PhysicalOp.Kind] =
     Option(value) match
@@ -1092,6 +1097,8 @@ object ColumnarPlanner:
       case Some(_: Double) => Some(PhysicalOp.Kind.Floats)
       case Some((_: Int, _: Int)) => Some(PhysicalOp.Kind.Pairs)
       case Some((_: Long, _: Long)) => Some(PhysicalOp.Kind.LongPairs)
+      case Some((_: String, _: Int)) => StringPairPlan.confirm(rest)
+      case Some(value) if StringPairPlan.nullKey(value) => StringPairPlan.witness(rest)
       case Some(_: Boolean) => Some(PhysicalOp.Kind.Bools)
       case Some(_: String) => Some(PhysicalOp.Kind.Strings)
       case Some(_) => None
@@ -1114,7 +1121,8 @@ object ColumnarPlanner:
     case union: PhysicalOp.Union =>
       UnionLowering.info(union, infoOf, layoutOf(op.kind))
     case PhysicalOp.Dedupe(_) => hashed(op.kind)
-    case PhysicalOp.Column(child, _) => infoOf(child).withoutPairDistribution
+    case column @ PhysicalOp.Column(child, _) =>
+      infoOf(child).withoutPairDistribution.copy(layout = layoutOf(column.kind))
     case PhysicalOp.MapValue(child) => infoOf(child)
     case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey =>
       SortLowering.info(shuffleWidth, layoutOf(PhysicalOp.Kind.Pairs))
@@ -1167,9 +1175,10 @@ object ColumnarPlanner:
       layoutOf(kind),
     )
 
-  /** String plans name the dictionary layout. Every other classified kind stays columnar. */
+  /** String plans name the dictionary layout. String pairs name both columns. */
   private def layoutOf(kind: PhysicalOp.Kind): Layout = kind match
     case PhysicalOp.Kind.Strings => Layout.Utf8Dict(ScarletConf.get.columnarBatchSize)
+    case PhysicalOp.Kind.StringPairs => Layout.StringPair(ScarletConf.get.columnarBatchSize)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Bools | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples =>
