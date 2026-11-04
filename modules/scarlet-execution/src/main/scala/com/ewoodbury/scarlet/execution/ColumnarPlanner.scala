@@ -240,7 +240,7 @@ object ColumnarPlanner:
           ColumnarInterpreter.decodePrefixFor(ColumnarInterpreter.interpret(plan, op), n, op),
         )
       case other =>
-        preservedPartitions(other).map(count => prefixOf(plan, other, count, n))
+        PartitionPreserving.of(other).map(count => prefixOf(plan, other, count, n))
 
   /**
    * First `n` values in partition order. Decoding stops once `n` values are in hand, and every
@@ -626,23 +626,6 @@ object ColumnarPlanner:
    * partitions, and `take` decodes that prefix. `take` must not read one partition of a wide op
    * and present it as the result.
    */
-  private def preservedPartitions(op: PhysicalOp): Option[Int] = op match
-    case PhysicalOp.Scan(_, partitions) => Some(partitions.length)
-    case PhysicalOp.Filter(child, _) => preservedPartitions(child)
-    case PhysicalOp.Project(child) => preservedPartitions(child)
-    case PhysicalOp.Pipeline(child, _) => preservedPartitions(child)
-    case PhysicalOp.Column(child, _) => preservedPartitions(child)
-    case PhysicalOp.MapValue(child) => preservedPartitions(child)
-    case _: PhysicalOp.HashAggregate | _: PhysicalOp.LongHashAggregate | _: PhysicalOp.HashJoin |
-        _: PhysicalOp.LongHashJoin | _: PhysicalOp.SortMergeJoin |
-        _: PhysicalOp.SortMergeLeftOuter | _: PhysicalOp.SortMergeRightOuter |
-        _: PhysicalOp.SortMergeFullOuter | _: PhysicalOp.HashLeftOuter |
-        _: PhysicalOp.HashRightOuter | _: PhysicalOp.HashFullOuter | _: PhysicalOp.BroadcastJoin |
-        _: PhysicalOp.BroadcastLeftOuter | _: PhysicalOp.BroadcastRightOuter |
-        _: PhysicalOp.BroadcastFullOuter | _: PhysicalOp.Exchange | _: PhysicalOp.SortByIntKey |
-        _: PhysicalOp.SortByLongKey =>
-      None
-
   private def lowerPlan(plan: Plan[_]): Option[PhysicalOp] =
     val (base, steps) = elementSteps(plan, Int.MaxValue)
     if (steps.isEmpty) then lowerPlanNode(base)
@@ -673,6 +656,7 @@ object ColumnarPlanner:
       case Some(Plan.JoinStrategy.Broadcast) | Some(Plan.JoinStrategy.SortMerge) => false
 
   private def lowerPlanNode(plan: Plan[_]): Option[PhysicalOp] = plan match
+    case Plan.UnionOp(left, right) => UnionLowering.lower(left, right, lowerChild)
     case source: Plan.Source[_] =>
       classify(source).map(kind => PhysicalOp.Scan(kind, source.partitions))
     case Plan.FilterKeysOp(source, _) =>
@@ -1122,6 +1106,8 @@ object ColumnarPlanner:
     case PhysicalOp.Filter(child, _) => infoOf(child)
     case PhysicalOp.Project(child) => infoOf(child)
     case PhysicalOp.Pipeline(child, _) => infoOf(child)
+    case union: PhysicalOp.Union =>
+      UnionLowering.info(union, infoOf, layoutOf(op.kind))
     case PhysicalOp.Column(child, _) => infoOf(child).withoutPairDistribution
     case PhysicalOp.MapValue(child) => infoOf(child)
     case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey =>

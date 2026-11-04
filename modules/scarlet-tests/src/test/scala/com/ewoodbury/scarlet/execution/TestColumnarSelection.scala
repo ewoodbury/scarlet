@@ -91,12 +91,12 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     infoOf(joined) shouldBe Option.empty[PartitioningInfo]
   }
 
-  "union of int maps" should "stay on the row path" in {
+  "union of int maps" should "concatenate both sides columnarly" in {
     val left = DistCollection(Seq(1, 2, 3), 2).map(_ * 2)
     val right = DistCollection(Seq(4, 5), 1).filter(_ % 2 == 1)
     val united = left.union(right)
     united.collect() shouldBe Seq(2, 4, 6, 5)
-    infoOf(united) shouldBe Option.empty[PartitioningInfo]
+    infoOf(united).map(_.numPartitions) shouldBe Some(3)
     assertNarrow(left, 2)
   }
 

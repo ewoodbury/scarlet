@@ -246,6 +246,21 @@ private[execution] object ColumnarInterpreter:
       },
     )
 
+  /** Concatenates the partitions of two same-kind sides. */
+  private def concat(left: Columns, right: Columns): Columns = (left, right) match
+    case (Columns.Ints(a), Columns.Ints(b)) => Columns.Ints(a ++ b)
+    case (Columns.Longs(a), Columns.Longs(b)) => Columns.Longs(a ++ b)
+    case (Columns.Floats(a), Columns.Floats(b)) => Columns.Floats(a ++ b)
+    case (Columns.Pairs(a), Columns.Pairs(b)) => Columns.Pairs(a ++ b)
+    case (Columns.LongPairs(a), Columns.LongPairs(b)) => Columns.LongPairs(a ++ b)
+    case (Columns.Triples(a), Columns.Triples(b)) => Columns.Triples(a ++ b)
+    case (Columns.LongTriples(a), Columns.LongTriples(b)) => Columns.LongTriples(a ++ b)
+    case (Columns.Strings(a), Columns.Strings(b)) => Columns.Strings(a ++ b)
+    case (Columns.Bools(a), Columns.Bools(b)) => Columns.Bools(a ++ b)
+    case (Columns.Outer(a, side), Columns.Outer(b, same)) if side == same =>
+      Columns.Outer(a ++ b, side)
+    case _ => throw new ColumnarFallback("union sides have different columns")
+
   private[execution] def interpret(
       plan: Plan[_],
       op: PhysicalOp,
@@ -274,6 +289,11 @@ private[execution] object ColumnarInterpreter:
       preserveAbsence: Boolean,
       ordinals: Set[Int],
   ): Columns = (plan, op) match
+    case (Plan.UnionOp(leftPlan, rightPlan), PhysicalOp.Union(leftOp, rightOp)) =>
+      concat(
+        interpretAt(leftPlan, leftOp, selectedPartition, preserveAbsence, ordinals),
+        interpretAt(rightPlan, rightOp, selectedPartition, preserveAbsence, ordinals),
+      )
     case (Plan.Source(partitions, _), PhysicalOp.Scan(kind, _)) =>
       val selected = selectPartition(partitions, selectedPartition)
       kind match
