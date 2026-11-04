@@ -1,13 +1,14 @@
 package com.ewoodbury.scarlet.columnar
 
 /**
- * Whole-row dedupe for a single-column int source.
+ * Whole-row dedupe for a single-column int or string source.
  *
- * The input is already scattered by value hash, so every duplicate of a value lands in one bucket
- * for any positive partition count. Each bucket is then deduped with an open-addressed set, which
- * keeps memory at `O(distinct values in the bucket)` and allocates nothing per row. A null is one
+ * The input is scattered by value hash, so every duplicate of a value lands in one bucket for any
+ * positive partition count. Each bucket is then deduped with an open-addressed set, which keeps
+ * memory at `O(distinct values in the bucket)` and allocates nothing per row. A null is one
  * distinct value and survives exactly once; it is tracked by a flag rather than a sentinel, so a
- * real `0` cannot be confused with it.
+ * real `0` or `""` cannot be confused with it. String buckets are concatenated before that set is
+ * built, so a code compare is a string compare.
  */
 @SuppressWarnings(
   Array(
@@ -35,6 +36,24 @@ object DistinctKernel:
       if (parts.isEmpty) then BatchCodec.ints(Seq.empty)
       else dedupe(ColumnBatches.concat(parts))
     }
+
+  /**
+   * Scatter `batches` by string hash, keeping nulls, and dedupe each output partition. An empty
+   * input is `partitions` empty string batches.
+   */
+  def strings(batches: Vector[ColumnBatch], partitions: Int): Vector[ColumnBatch] =
+    require(partitions > 0, s"partitions must be positive, got $partitions")
+    if (batches.isEmpty) then Vector.fill(partitions)(BatchCodec.strings(Seq.empty))
+    else
+      HashExchange
+        .partitionAllUtf8(
+          batches,
+          keyOrdinal = 0,
+          numPartitions = partitions,
+          parallelism = 1,
+          carryNullKeys = true,
+        )
+        .map(dedupeStrings)
 
   private def dedupe(batch: ColumnBatch): ColumnBatch =
     val keys = ColumnHash.int32At(batch, 0)
@@ -66,6 +85,43 @@ object DistinctKernel:
     new ColumnBatch(
       batch.schema,
       Vector(Int32Column.of(trimmed, validity, written)),
+      written,
+    )
+
+  /**
+   * One bucket, one dictionary: [[HashExchange.partitionAllUtf8]] concatenates the bucket before
+   * this runs, so a code compare is a string compare. A null is a flag, not a code.
+   */
+  private def dedupeStrings(batch: ColumnBatch): ColumnBatch =
+    val keys = ColumnKernel.asUtf8(ColumnKernel.columnAt(batch, 0), 0)
+    val codes = keys.codes
+    val words = keys.validity.words
+    val rows = batch.length
+    val out = new Array[Int](rows)
+    val outWords = new Array[Long]((rows + 63) >>> 6)
+    val table = new IntSet(math.max(4, rows))
+    var hasNull = false
+    var written = 0
+    var row = 0
+    while (row < rows) do
+      if (Validity.isSet(words, row)) then
+        val code = codes(row)
+        if (table.add(code)) then
+          out(written) = code
+          Validity.setBit(outWords, written)
+          written += 1
+      else if (!hasNull) then
+        hasNull = true
+        out(written) = 0
+        written += 1
+      row += 1
+    val trimmed = out.slice(0, written)
+    val trimmedWords =
+      if (written == 0) then Validity.allocate(0) else outWords.slice(0, (written + 63) >>> 6)
+    val validity = Validity.fromWords(trimmedWords, written)
+    new ColumnBatch(
+      batch.schema,
+      Vector(DictUtf8Column.of(keys.dictionary, trimmed, validity, written)),
       written,
     )
 
