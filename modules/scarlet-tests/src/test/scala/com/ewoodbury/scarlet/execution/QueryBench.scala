@@ -713,7 +713,7 @@ object QueryBench:
     )
     source.plan match
       case sourcePlan: Plan.Source[_] =>
-        val encoded = ColumnarInterpreter.encodeGroupedPairs(sourcePlan.partitions)
+        val encoded = SourceEncode.encodeGroupedPairs(sourcePlan.partitions)
         val summed = ColumnPipeline.sumByKey(
           encoded,
           keyOrdinal = 0,

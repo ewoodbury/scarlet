@@ -96,7 +96,7 @@ class TestSelectionPushdown extends AnyFlatSpec with Matchers with BeforeAndAfte
 
     shape(queried.plan) shouldBe "FilterKey(Scan)"
     demanded(queried.plan) shouldBe Set(0, 1)
-    val encoded = ColumnarInterpreter.encodeGroupedPairs(partitionsOf(source))
+    val encoded = SourceEncode.encodeGroupedPairs(partitionsOf(source))
     encoded.map(_.columns.length) shouldBe Vector(2, 2)
     encoded.length shouldBe parts
     footprint(queried.groupedSum)._1 shouldBe 90L
