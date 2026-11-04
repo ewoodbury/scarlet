@@ -288,12 +288,16 @@ private[execution] object ColumnarInterpreter:
     case (Plan.DistinctOp(source), PhysicalOp.Dedupe(PhysicalOp.Exchange(child))) =>
       if (selectedPartition.nonEmpty) then
         throw new ColumnarFallback("a partition selector cannot run a distinct")
-      Columns.Ints(
-        DistinctKernel.ints(
-          batchesOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)),
-          ColumnarPlanner.shuffleWidth,
-        ),
-      )
+      val batches =
+        batchesOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals))
+      val width = ColumnarPlanner.shuffleWidth
+      child.kind match
+        case PhysicalOp.Kind.Ints => Columns.Ints(DistinctKernel.ints(batches, width))
+        case PhysicalOp.Kind.Strings => Columns.Strings(DistinctKernel.strings(batches, width))
+        case _ =>
+          throw new IllegalStateException(
+            s"distinct column is ${child.kind}, expected int or string",
+          )
     case (_: Plan.DistinctOp[_], _: PhysicalOp.Dedupe) =>
       throw new ColumnarFallback("distinct needs an exchange")
     case (Plan.Source(partitions, _), PhysicalOp.Scan(kind, _)) =>

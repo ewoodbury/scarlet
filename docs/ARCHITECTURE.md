@@ -63,7 +63,7 @@ asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors
 
 ### Columnar completion contract
 
-The following 186 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. `map on triples` and `generic triple filter` move from the excluded list into this table. This is a move, not a new fixture. 184 + 2 = 186. The excluded list drops from 48 to 46. 186 + 46 = 232. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
+The following 195 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. The excluded list has 38 shapes, for 233 covered in total. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
 `Unknown(2)` denotes the two source partitions in the small contract fixtures. Aggregate and join
 outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. `sortByIntKey` and `sortByLongKey`
 use `Range(defaultShufflePartitions, Seq(0))` and `Sorted(Seq(0), Seq(true))`. That ordering tag is
@@ -88,6 +88,7 @@ ascending by effective key: a null key orders as zero and stays null. Shape stri
 | Int `reduceByKey`, after a value filter or int `mapValues`, and nested reduction | `Columnar` | `HashAggregate(Exchange(Scan))`, `HashAggregate(Exchange(FilterValue(Scan)))`, `HashAggregate(Exchange(MapValue(Scan)))`, `HashAggregate(Exchange(HashAggregate(Exchange(Scan))))` |
 | Long `reduceByKey` | `Columnar` | `LongHashAggregate(Exchange(Scan))` |
 | String `reduceByKey`. A null key is dropped and `""` is kept. The exchange hashes each dictionary string once | `StringPair` | `StringHashAggregate(Exchange(Scan))` |
+| String `distinct`. One copy of each string, including one null and one empty string. Equal strings share a hash bucket. Order is unspecified | `Utf8Dict` | `Dedupe(Exchange(Scan))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
 | Automatic or explicit shuffle-hash long join. Both sides are exchanged on `Long.hashCode`. A null key is dropped. A null value stays on the row path. There is no spill and no build budget. Broadcast, sort-merge, and outer joins on long keys stay on the row path | `Columnar` | `LongHashJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge int join. Both sides are hash-partitioned, sorted inside each partition, and merged. Null keys are dropped before the sort | `Columnar` | `SortMergeJoin(Exchange(Scan), Exchange(Scan))` |
@@ -209,7 +210,7 @@ string, or double keys, `mapValues` to string or double, double-pair `keys`, `va
 `join`, single-precision `Float` sources and maps, all-null strings, an empty int source without
 a witness, and element maps that do not preserve the column type (`boolean` to `boolean`, `int`
 to `long`, `string`, or a pair, `long` to `int` or `string`, and `double` to `int`).
-That is 38 exclusions, and 194 accepted, for 232 covered shapes.
+That is 38 exclusions, and 195 accepted, for 233 covered shapes. String distinct is a new fixture. 194 + 1 = 195.
 Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by execution
 tests, not contract fixtures, because the contract does not track the int refusals either.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then

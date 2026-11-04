@@ -8,13 +8,13 @@ package com.ewoodbury.scarlet.columnar
  * `floorMod(Long.hashCode(key), numPartitions)`, the same rule for a `Long` key. The string bucket
  * is `floorMod(StringHash.hash(text), numPartitions)`. Each dictionary string is hashed once. A
  * different mix would send one key to different partitions on the two paths. Null keys are dropped
- * unless `carryNullKeys` is set. A string key has no carry: a clear bit is dropped, and `""`
- * hashes to 0 and is kept. A carried null key goes to partition 0, the bucket `HashPartitioner`
- * uses for a null key. The default is off, so an inner join and the build side of an outer join
- * still drop a null key. Null values stay null and move with the row. Order inside a bucket is
- * input order. An empty bucket is an empty batch of the same schema. String buckets keep the
- * source dictionary; [[ColumnBatches.concat]] remaps unlike dictionaries when those buckets are
- * combined, so code equality in the combined bucket is string equality.
+ * unless `carryNullKeys` is set. A carried null key goes to partition 0, the bucket
+ * `HashPartitioner` uses for a null key. The default is off, so an inner join, the build side of
+ * an outer join, and [[StringHashReduce]] still drop a null key. `""` hashes to 0 and is kept
+ * either way. Null values stay null and move with the row. Order inside a bucket is input order.
+ * An empty bucket is an empty batch of the same schema. String buckets keep the source dictionary;
+ * [[ColumnBatches.concat]] remaps unlike dictionaries when those buckets are combined, so code
+ * equality in the combined bucket is string equality.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object HashExchange:
@@ -137,18 +137,21 @@ object HashExchange:
   /**
    * Partition on a dictionary string key. The bucket is
    * `floorMod(StringHash.hash(text), numPartitions)`, matching `HashPartitioner`. The dictionary
-   * is hashed once. A clear key bit is dropped. `""` hashes to 0 and is kept.
+   * is hashed once. A clear key bit is dropped unless `carryNullKeys` is set, in which case it
+   * goes to partition 0. `""` hashes to 0 and is kept. The default is off.
    */
   def partitionUtf8(
       batch: ColumnBatch,
       keyOrdinal: Int,
       numPartitions: Int,
+      carryNullKeys: Boolean = false,
   ): Vector[ColumnBatch] =
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     val keys = utf8At(batch, keyOrdinal)
     val rows = batch.length
-    // One partition already holds every row when there is no null key to drop.
-    if (numPartitions == 1 && ColumnHash.fullyPresent(keys)) then Vector(batch)
+    // One partition already holds every row. Sharing the batch is safe when null keys are kept,
+    // and when there is no null key to drop.
+    if (numPartitions == 1 && (carryNullKeys || ColumnHash.fullyPresent(keys))) then Vector(batch)
     else
       val hashes = StringHash.hashDictionary(keys.dictionary)
       val dest = new Array[Int](rows)
@@ -161,6 +164,9 @@ object HashExchange:
           val part = Math.floorMod(hashes(codes(row)), numPartitions)
           dest(row) = part
           counts(part) += 1
+        else if (carryNullKeys) then
+          dest(row) = nullKeyPartition
+          counts(nullKeyPartition) += 1
         else dest(row) = -1
         row += 1
       }
@@ -173,16 +179,18 @@ object HashExchange:
   /**
    * [[partitionAll]] for a dictionary string key. Bucket assignment is [[partitionUtf8]].
    * Concatenation remaps unlike dictionaries, so each combined bucket has one dictionary.
+   * `carryNullKeys` defaults to false, so a null key is dropped unless the caller opts in.
    */
   def partitionAllUtf8(
       batches: Vector[ColumnBatch],
       keyOrdinal: Int,
       numPartitions: Int,
       parallelism: Int,
+      carryNullKeys: Boolean = false,
   ): Vector[ColumnBatch] =
     require(batches.nonEmpty, "partitionAllUtf8 needs at least one batch")
     val scattered = MorselScheduler.map(batches, parallelism) { (_, batch) =>
-      partitionUtf8(batch, keyOrdinal, numPartitions)
+      partitionUtf8(batch, keyOrdinal, numPartitions, carryNullKeys)
     }
     Vector.tabulate(numPartitions) { part =>
       ColumnBatches.concat(scattered.map(buckets => bucketAt(buckets, part)))

@@ -21,12 +21,12 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * `apply`, so that function stays on the row path too. Other user functions are cast to the
  * selected operation. A result that is not that type throws `ClassCastException`. [[tryRun]]
  * catches it and returns `None`, and the row path runs the whole plan. Any unsupported node
- * (union, flatMap, distinct, generic sortBy, a map that is not fed by `Int`, `Long`, `Double`,
- * `String`, or an int inner join, any `Boolean` map, and the rest) makes the whole plan
- * ineligible, so a supported prefix is not executed on its own. `sortByIntKey` of an int-pair scan
- * and `sortByLongKey` of a long-pair scan lower to a rank split. A null key orders as zero and
- * stays null. Over the budget, with spill on, a long sort writes one run per input partition. At
- * or under the budget, and whenever spill is off, it stays in memory and writes nothing.
+ * (union, flatMap, generic sortBy, a map that is not fed by `Int`, `Long`, `Double`, `String`, or
+ * an int inner join, any `Boolean` map, and the rest) makes the whole plan ineligible, so a
+ * supported prefix is not executed on its own. `sortByIntKey` of an int-pair scan and
+ * `sortByLongKey` of a long-pair scan lower to a rank split. A null key orders as zero and stays
+ * null. Over the budget, with spill on, a long sort writes one run per input partition. At or
+ * under the budget, and whenever spill is off, it stays in memory and writes nothing.
  *
  * [[lower]] and interpretation walk the same logical plan. The physical node records the operator
  * and not the function, so each logical node is matched to the node [[lower]] built for it. A
@@ -47,18 +47,18 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * has no sum. Count reads batch lengths. A string scan under only dictionary literal filters
  * counts codes from that mask and does not write the filtered column. Any other string step still
  * writes its column. Take decodes a prefix. Pair filters, aggregates, and joins stay one node per
- * operator. Narrow map and filter keep input order and the input partition count. `Double` and
- * `String` select filter and map only. An int inner join lowers a whole-row filter and a map that
- * stays `(Int, (Int, Int))`. A map result of another type throws `ColumnarFallback` before the
- * output batch is published. An outer join stays on the row path. `keys` and `values` of an int
- * pair or a long pair are that column. The arrays are shared: a published column is not mutated,
- * so a view is cheaper than a copy and still correct. `mapValues` lowers when the function
- * declares an unboxed `Int` or `Long` result and every other `apply` is an erasure bridge. A wider
- * primitive, a reference result, or an overloaded `apply` stays on the row path. A long-pair row
- * filter lowers too. `filterKeys` and `filterValues` of a long pair stay on the row path. That
- * check reads the method descriptor and does not call the function. `getDeclaredMethods` does not
- * see an inherited `apply`, so that function stays on the row path too. `reduceByKey` on
- * `(Int, Int)` applies the user's function and wraps at `Int`. A `(Long, Long)` source lowers to
+ * operator. Narrow map and filter keep input order and the input partition count. `Double` selects
+ * filter and map only. An int inner join lowers a whole-row filter and a map that stays
+ * `(Int, (Int, Int))`. A map result of another type throws `ColumnarFallback` before the output
+ * batch is published. An outer join stays on the row path. `keys` and `values` of an int pair or a
+ * long pair are that column. The arrays are shared: a published column is not mutated, so a view
+ * is cheaper than a copy and still correct. `mapValues` lowers when the function declares an
+ * unboxed `Int` or `Long` result and every other `apply` is an erasure bridge. A wider primitive,
+ * a reference result, or an overloaded `apply` stays on the row path. A long-pair row filter
+ * lowers too. `filterKeys` and `filterValues` of a long pair stay on the row path. That check
+ * reads the method descriptor and does not call the function. `getDeclaredMethods` does not see an
+ * inherited `apply`, so that function stays on the row path too. `reduceByKey` on `(Int, Int)`
+ * applies the user's function and wraps at `Int`. A `(Long, Long)` source lowers to
  * [[PhysicalOp.LongHashAggregate]] and wraps at `Long`. A `(String, Int)` source lowers to
  * [[PhysicalOp.StringHashAggregate]]. A null key is dropped and `""` is kept. A null value stays
  * on the row path. Any other pair type, including `(String, Long)`, stays on the row path. A
@@ -132,11 +132,13 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  *
  * A null string is a value. Classification skips a leading null and keeps looking for a `String`.
  * An all-null source stays on the row path, because there is no witness. An accepted string plan
- * records [[Layout.Utf8Dict]]: that dictionary plus codes, one dictionary per batch. The string
- * lambda stays scalar over the decoded string. Int, long, boolean, double, int-pair, long-pair,
- * int-triple, and long-triple plans stay [[Layout.Columnar]]. A string-key pair uses
- * [[Layout.StringPair]]. `keys` of that pair is [[Layout.Utf8Dict]] and `values` is
- * [[Layout.Columnar]]. `mapValues` and both filters keep [[Layout.StringPair]].
+ * records [[Layout.Utf8Dict]]: that dictionary plus codes, one dictionary per batch. An int or
+ * string `distinct` lowers to `Dedupe(Exchange)` and reports that column's hashed layout, which is
+ * [[Layout.Utf8Dict]] for a string. The string lambda stays scalar over the decoded string. Int,
+ * long, boolean, double, int-pair, long-pair, int-triple, and long-triple plans stay
+ * [[Layout.Columnar]]. A string-key pair uses [[Layout.StringPair]]. `keys` of that pair is
+ * [[Layout.Utf8Dict]] and `values` is [[Layout.Columnar]]. `mapValues` and both filters keep
+ * [[Layout.StringPair]].
  *
  * `take` has a separate bounded path for accepted partition-preserving shapes: it interprets one
  * source partition at a time in order and decodes only the remaining requested values. Plans with
@@ -648,9 +650,12 @@ object ColumnarPlanner:
     case Plan.UnionOp(left, right) => UnionLowering.lower(left, right, lowerChild)
     case Plan.DistinctOp(source) =>
       lowerChild(source) match
-        case Some(child) if child.kind == PhysicalOp.Kind.Ints =>
-          Some(PhysicalOp.Dedupe(PhysicalOp.Exchange(child)))
-        case _ => None
+        case Some(child) =>
+          child.kind match
+            case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Strings =>
+              Some(PhysicalOp.Dedupe(PhysicalOp.Exchange(child)))
+            case _ => None
+        case None => None
     case source: Plan.Source[_] =>
       classify(source).map(kind => PhysicalOp.Scan(kind, source.partitions))
     case Plan.FilterKeysOp(source, _) =>

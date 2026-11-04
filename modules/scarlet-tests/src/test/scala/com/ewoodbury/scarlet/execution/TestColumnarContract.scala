@@ -30,16 +30,15 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 194 accepted fixtures. String-key reduceByKey moved from the excluded list.
-    // 193 + 1 = 194.
-    accepted.size shouldBe 194
-    // 38 exclusions. That reduce moved to the accepted list. 39 - 1 = 38.
-    // 194 + 38 = 232.
+    // 195 accepted fixtures. String distinct is a new fixture, not a move.
+    // 194 + 1 = 195.
+    accepted.size shouldBe 195
+    // 38 exclusions. 195 + 38 = 233.
     // Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by
     // execution tests, not contract fixtures, because the contract does not track the int
     // refusals either.
     excluded.size shouldBe 38
-    (accepted.size + excluded.size) shouldBe 232
+    (accepted.size + excluded.size) shouldBe 233
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -615,6 +614,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
           OrderingTag.Unsorted,
           layout,
         ),
+        Some("Dedupe(Exchange(Scan))"),
+      ),
+      AcceptedCase(
+        "distinct strings",
+        Plan.DistinctOp(stringSource),
+        hashedInfo(stringLayout),
         Some("Dedupe(Exchange(Scan))"),
       ),
       AcceptedCase("join-key filter", joinKeyFilter, hashedInfo(layout), Some("FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))")),
