@@ -119,6 +119,14 @@ object ColumnBatches:
       0,
     )
 
+  /** Zero-row `(Utf8Dict, Int32)` pairs. A fresh batch on every call. */
+  private[columnar] def emptyStringPairs: ColumnBatch =
+    new ColumnBatch(
+      Vector(LogicalType.Utf8Dict, LogicalType.Int32),
+      Vector(emptyUtf8, emptyInt32),
+      0,
+    )
+
   /** Zero-row `(Int32 key, Int32, Int32)` join. A fresh batch on every call. */
   private[columnar] def emptyIntJoin: ColumnBatch =
     new ColumnBatch(
@@ -140,6 +148,9 @@ object ColumnBatches:
 
   private def emptyInt64: Int64Column =
     Int64Column.of(Array.emptyLongArray, Validity.allValid(0), 0)
+
+  private def emptyUtf8: DictUtf8Column =
+    DictUtf8Column.of(Array.empty[String], Array.emptyIntArray, Validity.allValid(0), 0)
 
   private def copy(batch: ColumnBatch, start: Int, length: Int): ColumnBatch =
     val columns = batch.columns.map(column => copyColumn(column, start, length))

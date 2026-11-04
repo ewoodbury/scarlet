@@ -30,15 +30,15 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 193 accepted fixtures. Five string-pair narrow ops moved from the excluded list.
-    // 188 + 5 = 193.
-    accepted.size shouldBe 193
-    // 39 exclusions. Those five string-pair ops moved to the accepted list. 44 - 5 = 39.
-    // 193 + 39 = 232.
+    // 194 accepted fixtures. String-key reduceByKey moved from the excluded list.
+    // 193 + 1 = 194.
+    accepted.size shouldBe 194
+    // 38 exclusions. That reduce moved to the accepted list. 39 - 1 = 38.
+    // 194 + 38 = 232.
     // Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by
     // execution tests, not contract fixtures, because the contract does not track the int
     // refusals either.
-    excluded.size shouldBe 39
+    excluded.size shouldBe 38
     (accepted.size + excluded.size) shouldBe 232
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
@@ -505,6 +505,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         Some("LongHashAggregate(Exchange(Scan))"),
       ),
       AcceptedCase(
+        "reduceByKey with string keys",
+        Plan.ReduceByKeyOp(stringKeySource, (left: Int, right: Int) => left + right),
+        hashedInfo(stringPairLayout),
+        Some("StringHashAggregate(Exchange(Scan))"),
+      ),
+      AcceptedCase(
         "long inner join",
         DistCollection(longPairSource).join(DistCollection(longPairSource)).plan,
         hashedInfo(layout),
@@ -690,10 +696,6 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val doubleKeys = Plan.KeysOp(doubleKeySource)
     val doubleValues = Plan.ValuesOp(doubleKeySource)
     val floatMap = Plan.MapOp(floatSource, (value: Float) => value + 1.0f)
-    val reduceStringKeys = Plan.ReduceByKeyOp(
-      stringKeySource,
-      (left: Int, right: Int) => left + right,
-    )
     val reduceDoubleKeys = Plan.ReduceByKeyOp(
       doubleKeySource,
       (left: Int, right: Int) => left + right,
@@ -723,7 +725,6 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ExcludedCase("mapValues on double-key pairs", doublePairMapValues),
       ExcludedCase("double filterKeys", Plan.FilterKeysOp(doubleKeySource, (key: Double) => key > 0.0)),
       ExcludedCase("double filterValues", Plan.FilterValuesOp(doubleKeySource, (value: Int) => value > 0)),
-      ExcludedCase("reduceByKey with string keys", reduceStringKeys),
       ExcludedCase("reduceByKey with double keys", reduceDoubleKeys),
       ExcludedCase("groupByKey with string keys", groupStringKeys),
       ExcludedCase("groupByKey with double keys", groupDoubleKeys),
@@ -866,7 +867,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case PhysicalOp.Column(child, _) => preservesPartitions(child)
     case PhysicalOp.MapValue(child) => preservesPartitions(child)
     case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.LongHashAggregate(_) |
-        PhysicalOp.HashJoin(_, _) | PhysicalOp.LongHashJoin(_, _) |
+        PhysicalOp.StringHashAggregate(_) | PhysicalOp.HashJoin(_, _) |
+        PhysicalOp.LongHashJoin(_, _) |
         PhysicalOp.SortMergeJoin(_, _) | PhysicalOp.SortMergeLeftOuter(_, _) |
         PhysicalOp.SortMergeRightOuter(_, _) | PhysicalOp.SortMergeFullOuter(_, _) |
         PhysicalOp.HashLeftOuter(_, _) | PhysicalOp.HashRightOuter(_, _) |

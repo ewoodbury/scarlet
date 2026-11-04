@@ -11,13 +11,13 @@ import com.ewoodbury.scarlet.core.Partition
  * Other filters and projects remain one node per step. [[PhysicalOp.Project]] and `Pipeline` keep
  * the child kind. [[PhysicalOp.Column]] narrows an int or long pair to one column and shares its
  * arrays. [[PhysicalOp.MapValue]] rewrites an int or long value and keeps the pair.
- * [[PhysicalOp.Exchange]] sits under [[PhysicalOp.HashAggregate]] and
- * [[PhysicalOp.LongHashAggregate]], and on each side of [[PhysicalOp.HashJoin]],
- * [[PhysicalOp.LongHashJoin]], [[PhysicalOp.SortMergeJoin]], [[PhysicalOp.SortMergeLeftOuter]],
- * [[PhysicalOp.SortMergeRightOuter]], [[PhysicalOp.SortMergeFullOuter]],
- * [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]], and [[PhysicalOp.HashFullOuter]].
- * Those kernels perform the shuffle. Interpreting the boundary on its own does not.
- * [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.BroadcastLeftOuter]],
+ * [[PhysicalOp.Exchange]] sits under [[PhysicalOp.HashAggregate]],
+ * [[PhysicalOp.LongHashAggregate]], and [[PhysicalOp.StringHashAggregate]], and on each side of
+ * [[PhysicalOp.HashJoin]], [[PhysicalOp.LongHashJoin]], [[PhysicalOp.SortMergeJoin]],
+ * [[PhysicalOp.SortMergeLeftOuter]], [[PhysicalOp.SortMergeRightOuter]],
+ * [[PhysicalOp.SortMergeFullOuter]], [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]],
+ * and [[PhysicalOp.HashFullOuter]]. Those kernels perform the shuffle. Interpreting the boundary
+ * on its own does not. [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.BroadcastLeftOuter]],
  * [[PhysicalOp.BroadcastRightOuter]], and [[PhysicalOp.BroadcastFullOuter]] have no exchange.
  * [[PhysicalOp.BuildSide]] chooses which logical child of an inner broadcast join is built. The
  * planner records the right child. A later cost-based pass may choose the left child. The other
@@ -63,6 +63,14 @@ enum PhysicalOp:
    * path. Output kind is [[PhysicalOp.Kind.LongPairs]].
    */
   case LongHashAggregate(child: PhysicalOp)
+
+  /**
+   * In-memory hash reduce of `(String, Int)` pairs. `child` is an [[Exchange]]. The kernel
+   * partial-reduces by dictionary code, partitions with `StringHash`, and reduces each bucket. A
+   * null key is dropped. `""` is kept. A null value stays on the row path. There is no spill path.
+   * Output kind is [[PhysicalOp.Kind.StringPairs]].
+   */
+  case StringHashAggregate(child: PhysicalOp)
   case HashJoin(left: PhysicalOp, right: PhysicalOp)
 
   /**
@@ -235,6 +243,7 @@ enum PhysicalOp:
     case SortByLongKey(_) => PhysicalOp.Kind.LongPairs
     case HashAggregate(_) => PhysicalOp.Kind.Pairs
     case LongHashAggregate(_) => PhysicalOp.Kind.LongPairs
+    case StringHashAggregate(_) => PhysicalOp.Kind.StringPairs
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
     case LongHashJoin(_, _) => PhysicalOp.Kind.LongTriples
     case SortMergeJoin(_, _) => PhysicalOp.Kind.Triples
@@ -298,6 +307,7 @@ enum PhysicalOp:
     case SortByLongKey(child) => s"SortByLongKey(${child.shape})"
     case HashAggregate(child) => s"HashAggregate(${child.shape})"
     case LongHashAggregate(child) => s"LongHashAggregate(${child.shape})"
+    case StringHashAggregate(child) => s"StringHashAggregate(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
     case LongHashJoin(left, right) => s"LongHashJoin(${left.shape}, ${right.shape})"
     case SortMergeJoin(left, right) => s"SortMergeJoin(${left.shape}, ${right.shape})"

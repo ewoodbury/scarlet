@@ -4,8 +4,10 @@ package com.ewoodbury.scarlet.execution
  * Lowers `reduceByKey` for the pair kinds the columnar kernels accept.
  *
  * An `(Int, Int)` child is [[PhysicalOp.HashAggregate]]. A `(Long, Long)` child is
- * [[PhysicalOp.LongHashAggregate]]. Every other kind stays on the row path. The exchange is the
- * child of the aggregate, and the kernel performs the shuffle.
+ * [[PhysicalOp.LongHashAggregate]]. A `(String, Int)` child is [[PhysicalOp.StringHashAggregate]].
+ * Every other kind stays on the row path. The exchange is the child of the aggregate, and the
+ * kernel performs the shuffle. A null string value is not this kind: classification keeps that
+ * source on the row path.
  */
 private[execution] object ReduceByKeyLowering:
 
@@ -14,7 +16,9 @@ private[execution] object ReduceByKeyLowering:
       Some(PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)))
     case PhysicalOp.Kind.LongPairs =>
       Some(PhysicalOp.LongHashAggregate(PhysicalOp.Exchange(child)))
+    case PhysicalOp.Kind.StringPairs =>
+      Some(PhysicalOp.StringHashAggregate(PhysicalOp.Exchange(child)))
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.Strings |
-        PhysicalOp.Kind.Bools | PhysicalOp.Kind.StringPairs =>
+        PhysicalOp.Kind.Bools =>
       None

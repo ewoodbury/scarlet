@@ -53,6 +53,8 @@ private[execution] object ColumnUse:
       walk(source, child, parent union Set(0, 1))
     case (Plan.ReduceByKeyOp(source, _), PhysicalOp.LongHashAggregate(child)) =>
       walk(source, child, parent union Set(0, 1))
+    case (Plan.ReduceByKeyOp(source, _), PhysicalOp.StringHashAggregate(child)) =>
+      walk(source, child, parent union Set(0, 1))
     case (Plan.SortByIntKeyOp(source), PhysicalOp.SortByIntKey(child)) =>
       walk(source, child, parent union Set(0, 1))
     case (Plan.SortByLongKeyOp(source), PhysicalOp.SortByLongKey(child)) =>

@@ -1,16 +1,20 @@
 package com.ewoodbury.scarlet.columnar
 
 /**
- * Hash-partitions batches on an `Int32` or `Int64` key.
+ * Hash-partitions batches on an `Int32`, `Int64`, or dictionary string key.
  *
  * The int bucket is `floorMod(key, numPartitions)`, the same rule `HashPartitioner` uses for an
  * `Int` key, because `hashCode` is the value. The long bucket is
- * `floorMod(Long.hashCode(key), numPartitions)`, the same rule for a `Long` key. A different mix
- * would send one key to different partitions on the two paths. Null keys are dropped unless
- * `carryNullKeys` is set. A carried null key goes to partition 0, the bucket `HashPartitioner`
+ * `floorMod(Long.hashCode(key), numPartitions)`, the same rule for a `Long` key. The string bucket
+ * is `floorMod(StringHash.hash(text), numPartitions)`. Each dictionary string is hashed once. A
+ * different mix would send one key to different partitions on the two paths. Null keys are dropped
+ * unless `carryNullKeys` is set. A string key has no carry: a clear bit is dropped, and `""`
+ * hashes to 0 and is kept. A carried null key goes to partition 0, the bucket `HashPartitioner`
  * uses for a null key. The default is off, so an inner join and the build side of an outer join
  * still drop a null key. Null values stay null and move with the row. Order inside a bucket is
- * input order. An empty bucket is an empty batch of the same schema.
+ * input order. An empty bucket is an empty batch of the same schema. String buckets keep the
+ * source dictionary; [[ColumnBatches.concat]] remaps unlike dictionaries when those buckets are
+ * combined, so code equality in the combined bucket is string equality.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object HashExchange:
@@ -129,6 +133,63 @@ object HashExchange:
     Vector.tabulate(numPartitions) { part =>
       ColumnBatches.concat(scattered.map(buckets => bucketAt(buckets, part)))
     }
+
+  /**
+   * Partition on a dictionary string key. The bucket is
+   * `floorMod(StringHash.hash(text), numPartitions)`, matching `HashPartitioner`. The dictionary
+   * is hashed once. A clear key bit is dropped. `""` hashes to 0 and is kept.
+   */
+  def partitionUtf8(
+      batch: ColumnBatch,
+      keyOrdinal: Int,
+      numPartitions: Int,
+  ): Vector[ColumnBatch] =
+    require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+    val keys = utf8At(batch, keyOrdinal)
+    val rows = batch.length
+    // One partition already holds every row when there is no null key to drop.
+    if (numPartitions == 1 && ColumnHash.fullyPresent(keys)) then Vector(batch)
+    else
+      val hashes = StringHash.hashDictionary(keys.dictionary)
+      val dest = new Array[Int](rows)
+      val counts = new Array[Int](numPartitions)
+      val codes = keys.codes
+      val keyWords = keys.validity.words
+      var row = 0
+      while (row < rows) {
+        if (Validity.isSet(keyWords, row)) then
+          val part = Math.floorMod(hashes(codes(row)), numPartitions)
+          dest(row) = part
+          counts(part) += 1
+        else dest(row) = -1
+        row += 1
+      }
+      val scattered = batch.columns.map(column => scatter(column, dest, counts)).toVector
+      Vector.tabulate(numPartitions) { part =>
+        val columns = scattered.map(column => bucketAt(column, part))
+        new ColumnBatch(batch.schema, columns, counts(part))
+      }
+
+  /**
+   * [[partitionAll]] for a dictionary string key. Bucket assignment is [[partitionUtf8]].
+   * Concatenation remaps unlike dictionaries, so each combined bucket has one dictionary.
+   */
+  def partitionAllUtf8(
+      batches: Vector[ColumnBatch],
+      keyOrdinal: Int,
+      numPartitions: Int,
+      parallelism: Int,
+  ): Vector[ColumnBatch] =
+    require(batches.nonEmpty, "partitionAllUtf8 needs at least one batch")
+    val scattered = MorselScheduler.map(batches, parallelism) { (_, batch) =>
+      partitionUtf8(batch, keyOrdinal, numPartitions)
+    }
+    Vector.tabulate(numPartitions) { part =>
+      ColumnBatches.concat(scattered.map(buckets => bucketAt(buckets, part)))
+    }
+
+  private def utf8At(batch: ColumnBatch, ordinal: Int): DictUtf8Column =
+    ColumnKernel.asUtf8(ColumnKernel.columnAt(batch, ordinal), ordinal)
 
   private def bucketAt[A](buckets: Vector[A], part: Int): A =
     buckets.lift(part).getOrElse {
