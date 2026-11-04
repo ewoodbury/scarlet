@@ -59,7 +59,7 @@ private[execution] object GroupedBenchCases:
   def columnarFold(source: DistCollection[(Int, Int)]): Fold =
     source.plan match
       case sourcePlan: Plan.Source[_] =>
-        val encoded = ColumnarInterpreter.encodeGroupedPairs(sourcePlan.partitions)
+        val encoded = SourceEncode.encodeGroupedPairs(sourcePlan.partitions)
         val summed = ColumnPipeline.sumByKey(
           encoded,
           keyOrdinal = 0,
@@ -131,7 +131,7 @@ private[execution] object GroupedBenchCases:
     val source = DistCollection.ofIntPairs(slice, values, 1)
     source.plan match
       case sourcePlan: Plan.Source[_] =>
-        val encoded = ColumnarInterpreter.encodeGroupedPairs(sourcePlan.partitions)
+        val encoded = SourceEncode.encodeGroupedPairs(sourcePlan.partitions)
         val (_, morsels) = GroupedSumKernel.partialMorsels(
           encoded,
           keyOrdinal = 0,
