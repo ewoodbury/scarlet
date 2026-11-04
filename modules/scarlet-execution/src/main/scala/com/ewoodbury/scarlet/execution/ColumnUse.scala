@@ -72,7 +72,8 @@ private[execution] object ColumnUse:
    * long, float, boolean, or string map adds nothing.
    */
   private def consumedOrdinals(kind: PhysicalOp.Kind): Set[Int] = kind match
-    case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs => Set(0, 1)
+    case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs =>
+      Set(0, 1)
     case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples => Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools =>
@@ -90,8 +91,8 @@ private[execution] object ColumnUse:
   private def fullWidth(op: PhysicalOp): Set[Int] = op.kind match
     case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples => Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
-        PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.Strings |
-        PhysicalOp.Kind.Bools =>
+        PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs |
+        PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools =>
       Set(0, 1)
 
   private def planChild(plan: Plan[_]): Option[Plan[_]] = plan match

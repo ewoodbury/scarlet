@@ -16,5 +16,5 @@ private[execution] object ReduceByKeyLowering:
       Some(PhysicalOp.LongHashAggregate(PhysicalOp.Exchange(child)))
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.Strings |
-        PhysicalOp.Kind.Bools =>
+        PhysicalOp.Kind.Bools | PhysicalOp.Kind.StringPairs =>
       None
