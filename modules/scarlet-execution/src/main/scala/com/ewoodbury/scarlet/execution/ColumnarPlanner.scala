@@ -657,6 +657,11 @@ object ColumnarPlanner:
 
   private def lowerPlanNode(plan: Plan[_]): Option[PhysicalOp] = plan match
     case Plan.UnionOp(left, right) => UnionLowering.lower(left, right, lowerChild)
+    case Plan.DistinctOp(source) =>
+      lowerChild(source) match
+        case Some(child) if child.kind == PhysicalOp.Kind.Ints =>
+          Some(PhysicalOp.Dedupe(PhysicalOp.Exchange(child)))
+        case _ => None
     case source: Plan.Source[_] =>
       classify(source).map(kind => PhysicalOp.Scan(kind, source.partitions))
     case Plan.FilterKeysOp(source, _) =>
@@ -1108,6 +1113,7 @@ object ColumnarPlanner:
     case PhysicalOp.Pipeline(child, _) => infoOf(child)
     case union: PhysicalOp.Union =>
       UnionLowering.info(union, infoOf, layoutOf(op.kind))
+    case PhysicalOp.Dedupe(_) => hashed(op.kind)
     case PhysicalOp.Column(child, _) => infoOf(child).withoutPairDistribution
     case PhysicalOp.MapValue(child) => infoOf(child)
     case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey =>

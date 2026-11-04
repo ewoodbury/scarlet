@@ -48,6 +48,9 @@ enum PhysicalOp:
 
   /** Concatenation of two same-kind inputs. Ordering is unknown; both sides are encoded. */
   case Union(left: PhysicalOp, right: PhysicalOp)
+
+  /** Whole-row dedupe of an [[Exchange]] child. One row per distinct value, order unspecified. */
+  case Dedupe(child: PhysicalOp)
   case Exchange(child: PhysicalOp)
   case HashAggregate(child: PhysicalOp)
 
@@ -212,6 +215,7 @@ enum PhysicalOp:
     case Project(child) => child.kind
     case Pipeline(child, _) => child.kind
     case Union(left, _) => left.kind
+    case Dedupe(child) => child.kind
     case Exchange(child) => child.kind
     case Column(child, _) =>
       child.kind match
@@ -275,6 +279,7 @@ enum PhysicalOp:
     case Project(child) => s"Project(${child.shape})"
     case Pipeline(child, length) => s"Pipeline$length(${child.shape})"
     case Union(left, right) => s"Union(${left.shape}, ${right.shape})"
+    case Dedupe(child) => s"Dedupe(${child.shape})"
     case Exchange(child) => s"Exchange(${child.shape})"
     case Column(child, columnOrdinal) =>
       val label = columnOrdinal match
