@@ -5,19 +5,23 @@ import java.util.{Arrays, HashMap}
 /**
  * Inner shuffle-hash join of dictionary string keys and `Int32` values.
  *
- * [[inner]] partitions both sides with [[HashExchange.partitionAllUtf8]], builds the left bucket,
- * and probes the right. The two sides keep independent dictionaries, so the table is not keyed by
- * dictionary code. Each distinct build string is assigned an id once. A probe row looks that
- * string up once. Duplicate build keys emit the full cartesian product. Within a probe row the
- * build chain is newest-first. That walk is a kernel detail, not a public contract.
+ * [[inner]] partitions both sides, builds the left bucket, and probes the right. A
+ * [[StringJoinInput.Dense]] side uses [[HashExchange.partitionAllUtf8]]. A
+ * [[StringJoinInput.Selected]] side uses [[HashExchange.partitionAllSelectedUtf8]] and is not
+ * sliced: the exchange scatters `rows(0 until count)`, and the build table and the probe read
+ * those rows. The batch overload wraps both sides as dense. The two sides keep independent
+ * dictionaries, so the table is not keyed by dictionary code. Each distinct build string is
+ * assigned an id once. A probe row looks that string up once. Duplicate build keys emit the full
+ * cartesian product. Within a probe row the build chain is newest-first. That walk is a kernel
+ * detail, not a public contract.
  *
  * A null key is dropped by the exchange before the table, and a clear key bit is not inserted and
  * not probed. `""` is a present key. Every live value cell must be present. Spare capacity past
- * `length` is ignored, which is what a filter publishes. The planner refuses a null value, so a
- * clear live value bit is a bug and throws `IllegalStateException`. There is no spill and no build
- * budget. Output columns are `(key, left, right)`. The key is the probe row's dictionary and code.
- * One batch per partition. An empty side, or a partition with no matches, publishes
- * [[ColumnBatches.emptyStringJoin]].
+ * `length` is ignored, which is what a filter publishes. A null value outside a selection is not
+ * live. The planner refuses a null value, so a clear live value bit is a bug and throws
+ * `IllegalStateException`. There is no spill and no build budget. Output columns are
+ * `(key, left, right)`. The key is the probe row's dictionary and code. One batch per partition.
+ * An empty side, or a partition with no matches, publishes [[ColumnBatches.emptyStringJoin]].
  */
 @SuppressWarnings(
   Array(
@@ -29,27 +33,77 @@ import java.util.{Arrays, HashMap}
 )
 object StringHashJoin:
 
+  /**
+   * The row-selection class. [[StringJoinInput.Selected]] is also named Selected, so the case
+   * parameter uses this alias and does not become a vector of the case itself.
+   */
+  type Survivor = Selected
+
+  /**
+   * One side of a string inner shuffle-hash join.
+   *
+   * [[StringJoinInput.Dense]] is read row by row. [[StringJoinInput.Selected]] names the live
+   * prefix. The exchange scatters that prefix and does not slice it.
+   */
+  enum StringJoinInput:
+    case Dense(batches: Vector[ColumnBatch])
+    case Selected(parts: Vector[Survivor])
+
+  /** Dense batches. Both sides take the [[StringJoinInput]] overload with no slice. */
   def inner(
       buildBatches: Vector[ColumnBatch],
       probeBatches: Vector[ColumnBatch],
       partitions: Int,
       parallelism: Int,
   ): Vector[ColumnBatch] =
-    require(partitions > 0, s"partitions must be positive, got $partitions")
+    inner(
+      StringJoinInput.Dense(buildBatches),
+      StringJoinInput.Dense(probeBatches),
+      partitions,
+      parallelism,
+    )
+
+  /**
+   * Inner shuffle-hash join. `build` is the left input and `probe` is the right.
+   * [[StringJoinInput.Dense]] is partitioned with [[HashExchange.partitionAllUtf8]].
+   * [[StringJoinInput.Selected]] is partitioned with [[HashExchange.partitionAllSelectedUtf8]] and
+   * is not sliced. A null key is dropped. `""` is a present key. Output columns are
+   * `(key, left, right)`.
+   */
+  def inner(
+      build: StringJoinInput,
+      probe: StringJoinInput,
+      numPartitions: Int,
+      parallelism: Int,
+  ): Vector[ColumnBatch] =
+    require(numPartitions > 0, s"partitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
-    if (buildBatches.isEmpty || probeBatches.isEmpty) then
-      Vector.fill(partitions)(ColumnBatches.emptyStringJoin)
+    if (hasNoBatches(build) || hasNoBatches(probe)) then
+      Vector.fill(numPartitions)(ColumnBatches.emptyStringJoin)
     else
-      val buildBuckets =
-        HashExchange.partitionAllUtf8(buildBatches, keyOrdinal = 0, partitions, parallelism)
-      val probeBuckets =
-        HashExchange.partitionAllUtf8(probeBatches, keyOrdinal = 0, partitions, parallelism)
+      val buildBuckets = exchange(build, numPartitions, parallelism)
+      val probeBuckets = exchange(probe, numPartitions, parallelism)
       MorselScheduler.map(probeBuckets, parallelism) { (part, probeBatch) =>
-        val build = buildBuckets.lift(part).getOrElse {
+        val built = buildBuckets.lift(part).getOrElse {
           throw new IllegalStateException(s"missing build partition $part")
         }
-        joinPartition(build, probeBatch)
+        joinPartition(built, probeBatch)
       }
+
+  private def exchange(
+      input: StringJoinInput,
+      numPartitions: Int,
+      parallelism: Int,
+  ): Vector[ColumnBatch] =
+    input match
+      case StringJoinInput.Dense(batches) =>
+        HashExchange.partitionAllUtf8(batches, keyOrdinal = 0, numPartitions, parallelism)
+      case StringJoinInput.Selected(parts) =>
+        HashExchange.partitionAllSelectedUtf8(parts, keyOrdinal = 0, numPartitions, parallelism)
+
+  private def hasNoBatches(input: StringJoinInput): Boolean = input match
+    case StringJoinInput.Dense(batches) => batches.isEmpty
+    case StringJoinInput.Selected(parts) => parts.isEmpty
 
   private def joinPartition(build: ColumnBatch, probe: ColumnBatch): ColumnBatch =
     if (build.length == 0 || probe.length == 0) then ColumnBatches.emptyStringJoin

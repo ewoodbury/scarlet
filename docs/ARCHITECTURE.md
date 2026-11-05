@@ -95,7 +95,7 @@ null. A null string key orders as `""` and stays null. Shape strings are exact.
 | String `distinct`. One copy of each string, including one null and one empty string. Equal strings share a hash bucket. Order is unspecified | `Utf8Dict` | `Dedupe(Exchange(Scan))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
 | Automatic or explicit shuffle-hash long join. Both sides are exchanged on `Long.hashCode`. A null key is dropped. A null value stays on the row path. There is no spill and no build budget. Broadcast, sort-merge, and outer joins on long keys stay on the row path | `Columnar` | `LongHashJoin(Exchange(Scan), Exchange(Scan))` |
-| Automatic or explicit shuffle-hash string join. Both sides are exchanged on `String.hashCode`. A null key is dropped. `""` matches `""`. A null value stays on the row path. The two sides keep independent dictionaries and match by string equality. `"é"` and `"e\u0301"` do not match. There is no spill and no build budget. Broadcast, sort-merge, and outer joins stay on the row path. Output columns are `(key, left, right)` and the key is the probe row | `StringTriple` | `StringHashJoin(Exchange(Scan), Exchange(Scan))` |
+| Automatic or explicit shuffle-hash string join. Both sides are exchanged on `String.hashCode`. A null key is dropped. `""` matches `""`. A null value stays on the row path. The two sides keep independent dictionaries and match by string equality. `"é"` and `"e\u0301"` do not match. A stack of two or more key or value filters on either side scatters the survivor index and does not compact. A single filter compacts, then joins. There is no spill and no build budget. Broadcast, sort-merge, and outer joins stay on the row path. Output columns are `(key, left, right)` and the key is the probe row | `StringTriple` | `StringHashJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge int join. Both sides are hash-partitioned, sorted inside each partition, and merged. Null keys are dropped before the sort | `Columnar` | `SortMergeJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge left outer int join. Both sides are hash-partitioned. The left exchange carries a null key to partition 0. The right exchange drops a null key. A null key does not match. A preserved null key publishes a clear key bit. Absence is the right value's clear bit. A null value stays on the row path | `Columnar` | `SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge right outer int join. The right exchange carries a null key. The left exchange drops one. The left-outer walk runs on swapped inputs, then the value columns are swapped back to `(key, left, right)`. Absence is the left value's clear bit. A null value stays on the row path | `Columnar` | `SortMergeRightOuter(Exchange(Scan), Exchange(Scan))` |
@@ -254,9 +254,10 @@ A `(String, Int)` inner join with an absent hint or an explicit shuffle-hash hin
 `StringHashJoin(Exchange, Exchange)`. Both sides are exchanged on `String.hashCode`. A null key
 is dropped on both sides. `""` matches `""`. Output columns are `(key, left, right)` and the key
 is taken from the probe row. The two sides keep independent dictionaries and match by string
-equality. There is no spill and no build budget. The layout is `StringTriple`. A null value stays
-on the row path. A broadcast hint, a sort-merge hint, and every outer join on string keys stay on
-the row path.
+equality. A stack of two or more key or value filters on either side scatters the survivor index
+and does not compact. A single filter compacts, then joins. There is no spill and no build
+budget. The layout is `StringTriple`. A null value stays on the row path. A broadcast hint, a
+sort-merge hint, and every outer join on string keys stay on the row path.
 Broadcast of int pairs records both children and builds the right input.
 A later cost-based pass may build the left input instead.
 For a broadcast join, the other child is probed in place, so the join itself adds no exchange.
