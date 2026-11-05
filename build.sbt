@@ -22,14 +22,8 @@ lazy val commonSettings = Seq(
   ),
   // Run tests sequentially to avoid cross-suite state interference
   Test / parallelExecution := false,
-  // Type erasure policy: asInstanceOf and Any-inference are compile ERRORS. They are allowed
-  // only at named erasure boundaries (Operation.fromPlan, StageBuilder, StageExecutor,
-  // ShuffleHandler, JoinExecutor, DAGScheduler.executePartitions, DistCollection.kvPlan,
-  // ColumnarPlanner, ColumnarInterpreter, ReduceArms, FilterChain, PredicatePlan,
-  // BatchCodec.writeComponent,
-  // DefaultExecutionService.addRows, and the storage implementations), each carrying a
-  // suppression and a comment explaining why the cast is safe.
-  // Do not add new cast sites outside those boundaries.
+  // Type erasure policy: asInstanceOf and Any-inference are compile errors. The named
+  // boundaries, and the rule for a new site, are in docs/ARCHITECTURE.md ("Type erasure policy").
   wartremoverErrors ++= Seq(Wart.AsInstanceOf, Wart.Any),
   wartremoverWarnings ++= Warts.allBut(
     Wart.Any,
