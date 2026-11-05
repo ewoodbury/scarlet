@@ -1,12 +1,15 @@
 package com.ewoodbury.scarlet.columnar
 
+import com.ewoodbury.scarlet.core.ScarletConf
+
 /**
  * Hash reduce over dictionary string keys and `Int32` values.
  *
  * The binary operator is the caller's. It is applied as values are inserted, including when
  * partial groups are merged, so it has to be associative and commutative. Arithmetic wraps at
- * `Int`. This is the `(String, Int)` `reduceByKey` kernel. There is no spill path: an input that
- * does not fit stays in memory.
+ * `Int`. This is the `(String, Int)` `reduceByKey` kernel. Spill is off unless
+ * [[ScarletConf.spillEnabled]] is set. Only the post-exchange bucket spills; the partial combine
+ * before the exchange stays in memory.
  *
  * A null key is dropped. `""` is a present key. One batch has one dictionary, so a table keyed by
  * dictionary code is keyed by the string. The exchange bucket is
@@ -14,14 +17,22 @@ package com.ewoodbury.scarlet.columnar
  * bucket is one dictionary: unlike dictionaries are remapped when the bucket is concatenated. The
  * value column is all valid. A clear value bit is not a null this kernel understands. Output order
  * is first-seen inside the bucket. The table is at least twice the row count, so one batch does
- * not rehash.
+ * not rehash. A spilled bucket may change first-seen output order.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object StringHashReduce:
 
   /**
-   * Partial-reduce each batch, exchange on the string key, then reduce each bucket. An empty input
-   * is `numPartitions` empty string-pair batches.
+   * Partial-reduce each morsel, merge those partials per input batch, exchange on the string key,
+   * then reduce each bucket. An empty input is `numPartitions` empty string-pair batches.
+   *
+   * Spill is off unless [[ScarletConf.spillEnabled]] is set. A bucket whose
+   * [[StringHashReduceSpill.retainedBytes]] estimate is above [[ScarletConf.spillBudgetBytes]] is
+   * sub-partitioned, written morsel by morsel, and folded with [[reduce]] on the concatenation of
+   * the running partial and the new one. That path runs one bucket at a time, so the bucket's file
+   * is deleted before the next bucket opens a store. A run whose buckets all fit stays on
+   * [[MorselScheduler]], including when spill is enabled and none of them exceed the budget. Spill
+   * off is the in-memory [[reduce]] result. A spilled bucket may change first-seen output order.
    */
   def byKey(
       batches: Vector[ColumnBatch],
@@ -44,9 +55,19 @@ object StringHashReduce:
       )
       val buckets =
         HashExchange.partitionAllUtf8(combined, keyOrdinal = 0, numPartitions, parallelism)
-      MorselScheduler.map(buckets, parallelism) { (_, bucket) =>
-        reduceBatch(bucket, op)
-      }
+      val conf = ScarletConf.get
+      if (buckets.exists(bucket => StringHashReduceSpill.exceeds(bucket, conf))) then
+        buckets.map { bucket =>
+          StringHashReduceSpill.finish(bucket, parallelism, batchSize, conf, op)
+        }
+      else
+        MorselScheduler.map(buckets, parallelism) { (_, bucket) =>
+          reduceBatch(bucket, op)
+        }
+
+  /** One batch. [[StringHashReduceSpill]] reduces a morsel and folds partials through this. */
+  private[scarlet] def reduce(batch: ColumnBatch, op: (Int, Int) => Int): ColumnBatch =
+    reduceBatch(batch, op)
 
   private def reduceBatch(batch: ColumnBatch, op: (Int, Int) => Int): ColumnBatch =
     val keys = utf8At(batch, 0)
