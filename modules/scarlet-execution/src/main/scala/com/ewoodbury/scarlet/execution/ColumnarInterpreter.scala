@@ -401,52 +401,25 @@ private[execution] object ColumnarInterpreter:
           Plan.ReduceByKeyOp(source, reduceFunc),
           PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)),
         ) =>
-      // Boundary guard: take refuses an aggregate, so a selector never reaches this arm.
-      require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
-      // Named erasure boundary. Grouped pair reduction declares `(Int, Int) => Int`.
-      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
-      val op = reduceFunc.asInstanceOf[(Int, Int) => Int]
-      // A two-filter int-pair stack scans survivor ids. The `None` path is the only one that
-      // interprets that child.
-      val binOp: HashReduce.IntBinOp = (left: Int, right: Int) => op(left, right)
-      val width = ColumnarPlanner.shuffleWidth
-      val workers = ColumnarPlanner.parallelism
-      val batchSize = ColumnarPlanner.batchSize
-      val reduced = FilterChain.selected(
+      ReduceArms.intByKey(
         source,
         child,
+        reduceFunc,
         selectedPartition,
         preserveAbsence,
         ordinals,
-      ) match
-        case Some(parts) =>
-          HashReduce.byKeySelected(parts, width, workers, batchSize, binOp)
-        case None =>
-          HashReduce.byKey(
-            pairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)),
-            width,
-            workers,
-            batchSize,
-            binOp,
-          )
-      Columns.Pairs(reduced)
+      )
     case (
           Plan.ReduceByKeyOp(source, reduceFunc),
           PhysicalOp.LongHashAggregate(PhysicalOp.Exchange(child)),
         ) =>
-      // Boundary guard: take refuses an aggregate, so a selector never reaches this arm.
-      require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
-      // Named erasure boundary. Grouped long-pair reduction declares `(Long, Long) => Long`.
-      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
-      val op = reduceFunc.asInstanceOf[(Long, Long) => Long]
-      Columns.LongPairs(
-        LongHashReduce.byKey(
-          longPairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)),
-          ColumnarPlanner.shuffleWidth,
-          ColumnarPlanner.parallelism,
-          ColumnarPlanner.batchSize,
-          (left, right) => op(left, right),
-        ),
+      ReduceArms.longByKey(
+        source,
+        child,
+        reduceFunc,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
       )
     case (
           Plan.ReduceByKeyOp(source, reduceFunc),
@@ -490,29 +463,14 @@ private[execution] object ColumnarInterpreter:
         ) if JoinLowering.acceptsShuffleHash(strategy) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      val leftBatches = longPairsOf(
-        interpretAt(left, leftOp, selectedPartition, preserveAbsence, ordinals),
-      )
-      val rightBatches = longPairsOf(
-        interpretAt(right, rightOp, selectedPartition, preserveAbsence, ordinals),
-      )
-      // Validity words are already on the columns. A null value is not a decoded long, so the
-      // kernel is not chosen.
-      val valuesPresent =
-        ColumnPipeline.longValuesFullyPresent(leftBatches) &&
-          ColumnPipeline.longValuesFullyPresent(rightBatches)
-      if (!valuesPresent) then
-        throw new ColumnarFallback(
-          "a null value on a long inner join stays on the row path",
-        )
-      Columns.LongTriples(
-        ColumnPipeline.longInnerJoin(
-          leftBatches,
-          rightBatches,
-          ColumnarPlanner.shuffleWidth,
-          ColumnarPlanner.parallelism,
-          ColumnarPlanner.batchSize,
-        ),
+      PipelineJoinArms.longInner(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
       )
     case (
           Plan.JoinOp(left, right, strategy),
@@ -542,14 +500,14 @@ private[execution] object ColumnarInterpreter:
         ) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      Columns.Triples(
-        ColumnPipeline.sortMergeJoin(
-          pairsOf(interpretAt(left, leftOp, selectedPartition, preserveAbsence, ordinals)),
-          pairsOf(interpretAt(right, rightOp, selectedPartition, preserveAbsence, ordinals)),
-          ColumnarPlanner.shuffleWidth,
-          ColumnarPlanner.parallelism,
-          ColumnarPlanner.batchSize,
-        ),
+      PipelineJoinArms.sortMergeInner(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
       )
     case (
           Plan.JoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
@@ -557,57 +515,31 @@ private[execution] object ColumnarInterpreter:
         ) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      val leftBatches = pairsOf(
-        interpretAt(left, leftOp, selectedPartition, preserveAbsence, ordinals),
+      PipelineJoinArms.broadcastInner(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        buildSide,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
       )
-      val rightBatches = pairsOf(
-        interpretAt(right, rightOp, selectedPartition, preserveAbsence, ordinals),
-      )
-      val (probe, build) = buildSide match
-        case PhysicalOp.BuildSide.Right => (leftBatches, rightBatches)
-        case PhysicalOp.BuildSide.Left => (rightBatches, leftBatches)
-      val joined = ColumnPipeline.broadcastJoin(
-        probe,
-        build,
-        ColumnarPlanner.parallelism,
-        ScarletConf.get.broadcastBuildBudgetBytes,
-      )
-      // The kernel writes (key, probe value, build value). Building the left child makes that
-      // (key, right, left), so the value columns are swapped back to (key, left, right).
-      val ordered = buildSide match
-        case PhysicalOp.BuildSide.Right => joined
-        case PhysicalOp.BuildSide.Left => swapValueColumns(joined)
-      Columns.Triples(ordered)
     case (
           Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
           PhysicalOp.BroadcastLeftOuter(leftOp, rightOp),
         ) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      // preserveAbsence keeps null keys. It is not the probe side. The right input is the build.
-      val probe = pairsOf(
-        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
+      PipelineJoinArms.broadcastLeft(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
       )
-      val build = pairsOf(
-        interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
-      )
-      // Validity words are already on the columns. A null value is not a probe-side row with no
-      // partner, and this path cannot represent one, so the kernel is not chosen.
-      val valuesPresent =
-        ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
-      if (!valuesPresent) then
-        throw new ColumnarFallback(
-          "a null value on a left outer join stays on the row path",
-        )
-      // The kernel writes (key, probe value, build value). The probe side is the left input, so
-      // the batch is already (key, left, right). A clear build-value bit is absence.
-      val joined = ColumnPipeline.broadcastLeftOuterJoin(
-        probe,
-        build,
-        ColumnarPlanner.parallelism,
-        ScarletConf.get.broadcastBuildBudgetBytes,
-      )
-      Columns.Outer(joined, AbsentSide.Right)
     case (
           Plan.LeftOuterJoinOp(left, right, strategy),
           PhysicalOp.HashLeftOuter(
@@ -617,55 +549,30 @@ private[execution] object ColumnarInterpreter:
         ) if JoinLowering.acceptsShuffleHash(strategy) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      // preserveAbsence keeps null keys. The left input is the probe side. Its exchange carries a
-      // null key. The right input is the build side. Its exchange drops a null key.
-      val probe = pairsOf(
-        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
+      PipelineJoinArms.hashLeft(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
       )
-      val build = pairsOf(
-        interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
-      )
-      // Validity words are already on the columns. A null value is not a probe-side row with no
-      // partner, and this path cannot represent one, so the kernel is not chosen.
-      val valuesPresent =
-        ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
-      if (!valuesPresent) then
-        throw new ColumnarFallback(
-          "a null value on a left outer join stays on the row path",
-        )
-      // The kernel writes (key, probe value, build value). The probe side is the left input, so
-      // the batch is already (key, left, right). A clear build-value bit is absence.
-      val joined = ColumnPipeline.hashLeftOuterJoin(
-        probe,
-        build,
-        ColumnarPlanner.shuffleWidth,
-        ColumnarPlanner.parallelism,
-        ColumnarPlanner.batchSize,
-        ScarletConf.get.broadcastBuildBudgetBytes,
-      )
-      Columns.Outer(joined, AbsentSide.Right)
     case (
           Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
           PhysicalOp.BroadcastRightOuter(leftOp, rightOp),
         ) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      // preserveAbsence keeps null keys. The left input is the build. The right input is the
-      // probe, so unmatched right rows are kept.
-      val build = pairsOf(
-        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
+      PipelineJoinArms.broadcastRight(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
       )
-      val probe = pairsOf(
-        interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
-      )
-      rightOuter(probe, build) { (probeBatches, buildBatches) =>
-        ColumnPipeline.broadcastLeftOuterJoin(
-          probeBatches,
-          buildBatches,
-          ColumnarPlanner.parallelism,
-          ScarletConf.get.broadcastBuildBudgetBytes,
-        )
-      }
     case (
           Plan.RightOuterJoinOp(left, right, strategy),
           PhysicalOp.HashRightOuter(
@@ -675,46 +582,30 @@ private[execution] object ColumnarInterpreter:
         ) if JoinLowering.acceptsShuffleHash(strategy) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      // preserveAbsence keeps null keys. The right input is the probe side. Its exchange carries
-      // a null key. The left input is the build side. Its exchange drops a null key.
-      val build = pairsOf(
-        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
+      PipelineJoinArms.hashRight(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
       )
-      val probe = pairsOf(
-        interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
-      )
-      rightOuter(probe, build) { (probeBatches, buildBatches) =>
-        ColumnPipeline.hashLeftOuterJoin(
-          probeBatches,
-          buildBatches,
-          ColumnarPlanner.shuffleWidth,
-          ColumnarPlanner.parallelism,
-          ColumnarPlanner.batchSize,
-          ScarletConf.get.broadcastBuildBudgetBytes,
-        )
-      }
     case (
           Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
           PhysicalOp.BroadcastFullOuter(leftOp, rightOp),
         ) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      /* preserveAbsence keeps null keys. The left input is the probe. The right input is the
-       * build. */
-      val probe = pairsOf(
-        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
+      PipelineJoinArms.broadcastFull(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
       )
-      val build = pairsOf(
-        interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
-      )
-      fullOuter(probe, build) { (probeBatches, buildBatches) =>
-        ColumnPipeline.broadcastFullOuterJoin(
-          probeBatches,
-          buildBatches,
-          ColumnarPlanner.parallelism,
-          ScarletConf.get.broadcastBuildBudgetBytes,
-        )
-      }
     case (
           Plan.FullOuterJoinOp(left, right, strategy),
           PhysicalOp.HashFullOuter(
@@ -724,24 +615,15 @@ private[execution] object ColumnarInterpreter:
         ) if JoinLowering.acceptsShuffleHash(strategy) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      // preserveAbsence keeps null keys. Both exchanges carry a null key. The right input is the
-      // build side. A null build key is carried outside the table.
-      val probe = pairsOf(
-        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
+      PipelineJoinArms.hashFull(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
       )
-      val build = pairsOf(
-        interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
-      )
-      fullOuter(probe, build) { (probeBatches, buildBatches) =>
-        ColumnPipeline.hashFullOuterJoin(
-          probeBatches,
-          buildBatches,
-          ColumnarPlanner.shuffleWidth,
-          ColumnarPlanner.parallelism,
-          ColumnarPlanner.batchSize,
-          ScarletConf.get.broadcastBuildBudgetBytes,
-        )
-      }
     case (
           Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
           PhysicalOp.SortMergeLeftOuter(
@@ -751,29 +633,14 @@ private[execution] object ColumnarInterpreter:
         ) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      // preserveAbsence keeps null keys. The left exchange carries a null key. The right exchange
-      // drops one. The kernel publishes (key, left, right).
-      val probe = pairsOf(
-        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
-      )
-      val build = pairsOf(
-        interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
-      )
-      val valuesPresent =
-        ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
-      if (!valuesPresent) then
-        throw new ColumnarFallback(
-          "a null value on a left outer join stays on the row path",
-        )
-      Columns.Outer(
-        ColumnPipeline.sortMergeLeftOuterJoin(
-          probe,
-          build,
-          ColumnarPlanner.shuffleWidth,
-          ColumnarPlanner.parallelism,
-          ColumnarPlanner.batchSize,
-        ),
-        AbsentSide.Right,
+      PipelineJoinArms.sortMergeLeft(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
       )
     case (
           Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
@@ -784,29 +651,14 @@ private[execution] object ColumnarInterpreter:
         ) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      // preserveAbsence keeps null keys. The kernel swaps the value columns back. Do not swap
-      // again here.
-      val leftBatches = pairsOf(
-        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
-      )
-      val rightBatches =
-        pairsOf(interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals))
-      val valuesPresent =
-        ColumnPipeline.valuesFullyPresent(leftBatches) &&
-          ColumnPipeline.valuesFullyPresent(rightBatches)
-      if (!valuesPresent) then
-        throw new ColumnarFallback(
-          "a null value on a right outer join stays on the row path",
-        )
-      Columns.Outer(
-        ColumnPipeline.sortMergeRightOuterJoin(
-          leftBatches,
-          rightBatches,
-          ColumnarPlanner.shuffleWidth,
-          ColumnarPlanner.parallelism,
-          ColumnarPlanner.batchSize,
-        ),
-        AbsentSide.Left,
+      PipelineJoinArms.sortMergeRight(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
       )
     case (
           Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
@@ -817,22 +669,15 @@ private[execution] object ColumnarInterpreter:
         ) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      // preserveAbsence keeps null keys. Both exchanges carry a null key.
-      val probe = pairsOf(
-        interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
+      PipelineJoinArms.sortMergeFull(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
       )
-      val build = pairsOf(
-        interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
-      )
-      fullOuter(probe, build) { (probeBatches, buildBatches) =>
-        ColumnPipeline.sortMergeFullOuterJoin(
-          probeBatches,
-          buildBatches,
-          ColumnarPlanner.shuffleWidth,
-          ColumnarPlanner.parallelism,
-          ColumnarPlanner.batchSize,
-        )
-      }
     case (Plan.SortByIntKeyOp(source), PhysicalOp.SortByIntKey(child)) =>
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
@@ -902,41 +747,6 @@ private[execution] object ColumnarInterpreter:
       throw new IllegalStateException(
         s"physical tree does not match ${plan.getClass.getSimpleName}",
       )
-
-  /**
-   * Run the left-outer kernel with `probe` as the right input and `build` as the left input, then
-   * restore `(key, left, right)`. The kernel writes `(key, probe value, build value)`, so the
-   * value columns arrive as `(right, left)`. The cleared build-value bit moves with the left
-   * column. That bit is absence. A null value is not absence, and this path cannot represent one.
-   */
-  private def rightOuter(
-      probe: Vector[ColumnBatch],
-      build: Vector[ColumnBatch],
-  )(join: (Vector[ColumnBatch], Vector[ColumnBatch]) => Vector[ColumnBatch]): Columns =
-    val valuesPresent =
-      ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
-    if (!valuesPresent) then
-      throw new ColumnarFallback(
-        "a null value on a right outer join stays on the row path",
-      )
-    Columns.Outer(swapValueColumns(join(probe, build)), AbsentSide.Left)
-
-  /**
-   * Run a full outer join. The kernel writes `(key, probe value, build value)`. The probe is the
-   * left input, so the batch is already `(key, left, right)`. A clear bit on either value column
-   * is absence. A null value is not absence, and this path cannot represent one.
-   */
-  private def fullOuter(
-      probe: Vector[ColumnBatch],
-      build: Vector[ColumnBatch],
-  )(join: (Vector[ColumnBatch], Vector[ColumnBatch]) => Vector[ColumnBatch]): Columns =
-    val valuesPresent =
-      ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
-    if (!valuesPresent) then
-      throw new ColumnarFallback(
-        "a null value on a full outer join stays on the row path",
-      )
-    Columns.Outer(join(probe, build), AbsentSide.Both)
 
   private def interpretPipeline(
       plan: Plan[_],
@@ -1043,25 +853,6 @@ private[execution] object ColumnarInterpreter:
       throw new IllegalStateException(
         s"columnar map expects ${elementColumnList(includeBooleans = false)}",
       )
-
-  /**
-   * Kernel probe output is `(key, probe value, build value)`. Exchange the two value columns so a
-   * left-side build publishes `(key, left, right)`.
-   */
-  private def swapValueColumns(batches: Vector[ColumnBatch]): Vector[ColumnBatch] =
-    batches.map { batch =>
-      batch.columns match
-        case Seq(key, probeValue, buildValue) =>
-          new ColumnBatch(
-            Vector(key.logicalType, buildValue.logicalType, probeValue.logicalType),
-            Vector(key, buildValue, probeValue),
-            batch.length,
-          )
-        case other =>
-          throw new IllegalArgumentException(
-            s"join output has ${other.size} columns",
-          )
-    }
 
   private[execution] def pairsOf(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.Pairs(parts) if parts.nonEmpty => parts
