@@ -75,6 +75,13 @@ for the run and shut down at the end. This is not a fresh-JVM isolation.
 | `grouped-shuffled` | `GroupedSum(Scan)` | the same key multiset per morsel, in shuffled order |
 | `grouped-sparse` | `GroupedSum(Scan)` | 1024 groups spread over `0` until `300000` |
 | `grouped-shifting` | `GroupedSum(Scan)` | that spread, plus 7 on every odd morsel |
+| `filter-groupbykey` | `GroupByKey(Exchange(FilterValue(FilterKey(Scan))))` | two filters, then `groupByKey`, on int pairs keyed by `row % 1024` |
+| `filter-reducebykey` | `HashAggregate(Exchange(FilterValue(FilterKey(Scan))))` | the same two filters, then `reduceByKey`, on those int pairs |
+| `filter-join` | `HashJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(Scan))` | filtered build side joined to an unfiltered unique int key |
+| `filter-sort` | `SortByIntKey(FilterValue(FilterKey(Scan)))` | the same two filters, then `sortByIntKey` |
+| `filter-string-groupbykey` | `GroupByKey(Exchange(FilterValue(FilterKey(Scan))))` | the same two filters, on string keys `(row % 1024).toString`, then `groupByKey` |
+| `filter-string-reducebykey` | `StringHashAggregate(Exchange(FilterValue(FilterKey(Scan))))` | the same string filters, then `reduceByKey` |
+| `filter-string-join` | `StringHashJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(Scan))` | filtered string build side, one probe row per key |
 
 Int, long, and double inputs share one linear-congruential generator (seed `0x12345678`). Each
 value is in `-1000000` until `1000000`. The long and double queries widen those ints. The double
@@ -106,6 +113,12 @@ the span stays wide. Both fail the density test. The harness compares one partia
 order before timing and fails the run if that partial is sorted. A repeating or shuffled morsel
 of keys `0` until `1023` has span 1024, which is inside `4 * 8192`, so those queries stay on the
 direct index.
+
+The seven filter queries run two filters (`key % 3 != 0` and `value >= 0`) at 1e6 rows, two
+source partitions, and batch 8192. The int `groupByKey` and `reduceByKey` queries key on
+`row % 1024`; `filter-join` uses the row index as a unique key, and `filter-sort` uses the sort
+permutation. String keys are `(row % 1024).toString`. The baseline tables below do not include
+them.
 
 The harness checks the physical shape before timing. It also rejects a sample whose published
 batches disagree with the layout it is about to record.

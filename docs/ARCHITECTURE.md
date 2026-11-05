@@ -336,14 +336,20 @@ never from stage IDs. `reduceByKey`'s function is treated as associative and com
 ## Type erasure policy
 
 `Plan[A]` is invariant and stages transport `Partition[_]`, so some casts are unavoidable.
-Policy (compiler-enforced — `Wart.AsInstanceOf` and `Wart.Any` are errors):
+`Wart.AsInstanceOf` and `Wart.Any` are compile errors. A cast in main source is allowed only in
+a file that already carries a suppression, next to a comment that says why the cast is safe.
+The files below are that set. A new site needs the same suppression and comment.
 
-- Casts live only at named erasure boundaries, each with a suppression and a comment explaining
-  why the cast is safe: `Operation.fromPlan`, `DistCollection.kvPlan`,
-  `StageBuilder`/`StageExecutor`/`JoinExecutor`/`ShuffleHandler` (file-level, documented),
-  `Task.BroadcastHashJoinTask`, `DAGScheduler.executePartitions`, `ColumnarPlanner`, and the
-  storage implementations (`LocalShuffleService`, `LocalBroadcastService`).
-- No new cast sites outside these boundaries without a suppression and a justification.
+- **Planner and interpreter.** `ColumnarPlanner`, `ColumnarInterpreter`, `ExecutionPlanner`,
+  `PredicatePlan`, `FunctionWitness`.
+- **Stage compiler and executor.** `StageBuilder`, `StageExecutor`, `DAGScheduler`, `Task`,
+  `Operation`, `DefaultExecutionService`, `JoinExecutor`.
+- **Shuffle.** `ShuffleHandler`.
+- **Storage.** `LocalShuffleService`, `LocalBroadcastService`.
+- **Element kernels.** `ElementPipeline`, `ElementSum`, `ReduceArms`, `PairKernel`, `IntPairCells`.
+- **String-pair walk.** `StringPairWalk`, `StringPairPlan`.
+- **Codec.** `BatchCodec`, `SourceEncode`.
+- **API.** `DistCollection`.
 
 ## Runtime SPIs
 
