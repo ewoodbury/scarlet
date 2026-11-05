@@ -457,28 +457,7 @@ private[execution] object ColumnarInterpreter:
         ) =>
       // Boundary guard: take refuses a group, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
-      val input = interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)
-      child.kind match
-        case PhysicalOp.Kind.Pairs =>
-          Columns.GroupedInts(
-            GroupByKey.int32(
-              pairsOf(input),
-              ColumnarPlanner.shuffleWidth,
-              ColumnarPlanner.parallelism,
-            ),
-          )
-        case PhysicalOp.Kind.StringPairs =>
-          Columns.GroupedStrings(
-            GroupByKey.strings(
-              StringPairWalk.batches(input),
-              ColumnarPlanner.shuffleWidth,
-              ColumnarPlanner.parallelism,
-            ),
-          )
-        case other =>
-          throw new IllegalStateException(
-            s"groupByKey column is $other, expected int or string pairs",
-          )
+      groupByKeyColumns(source, child, selectedPartition, preserveAbsence, ordinals)
     case (
           Plan.JoinOp(left, right, strategy),
           PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
@@ -1058,6 +1037,45 @@ private[execution] object ColumnarInterpreter:
             s"join output has ${other.size} columns",
           )
     }
+
+  /**
+   * Int pairs with a two-filter stack scatter survivor ids. Every other int-pair child, and every
+   * string-pair child, stays on the dense exchange. The `None` path is the only one that
+   * interprets that child.
+   */
+  private def groupByKeyColumns(
+      source: Plan[_],
+      child: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): Columns =
+    val width = ColumnarPlanner.shuffleWidth
+    val workers = ColumnarPlanner.parallelism
+    child.kind match
+      case PhysicalOp.Kind.Pairs =>
+        FilterChain.selectedPairs(
+          source,
+          child,
+          selectedPartition,
+          preserveAbsence,
+          ordinals,
+        ) match
+          case Some(parts) =>
+            Columns.GroupedInts(GroupByKey.int32Selected(parts, width, workers))
+          case None =>
+            val pairs =
+              pairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals))
+            Columns.GroupedInts(GroupByKey.int32(pairs, width, workers))
+      case PhysicalOp.Kind.StringPairs =>
+        val input = interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)
+        Columns.GroupedStrings(
+          GroupByKey.strings(StringPairWalk.batches(input), width, workers),
+        )
+      case other =>
+        throw new IllegalStateException(
+          s"groupByKey column is $other, expected int or string pairs",
+        )
 
   private[execution] def pairsOf(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.Pairs(parts) if parts.nonEmpty => parts

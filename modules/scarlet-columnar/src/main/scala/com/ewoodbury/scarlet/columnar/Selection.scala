@@ -22,10 +22,11 @@ package com.ewoodbury.scarlet.columnar
  * called on every candidate, including an empty cell. An empty cell that passes stays absent in
  * the output.
  *
- * Compact gathers every column by absolute row and copies the source validity bit. A clear bit
- * stores zero and leaves the output bit clear. [[Validity.prefixValid]] is not used: a survivor
- * may be absent, and a dense present prefix is what the gather writes when every survivor is
- * present. The output arrays are sized to the morsel. The batch length is the survivor count.
+ * [[applySelected]] returns that index and does not gather. [[materialize]] gathers every column
+ * by absolute row and copies the source validity bit. A clear bit stores zero and leaves the
+ * output bit clear. [[Validity.prefixValid]] is not used: a survivor may be absent, and a dense
+ * present prefix is what the gather writes when every survivor is present. The output arrays are
+ * sized to the index capacity, which is the morsel width. The batch length is the survivor count.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[scarlet] object Selection:
@@ -44,6 +45,13 @@ private[scarlet] object Selection:
    * empty range publishes an empty batch and does not call a predicate.
    */
   def apply(batch: ColumnBatch, start: Int, length: Int, steps: Seq[Step]): ColumnBatch =
+    materialize(applySelected(batch, start, length, steps))
+
+  /**
+   * Same walk as [[apply]], without the gather. The returned ids are absolute rows of `batch`. The
+   * index capacity is `length`, the morsel width, and `count` is the live prefix.
+   */
+  def applySelected(batch: ColumnBatch, start: Int, length: Int, steps: Seq[Step]): Selected =
     // The range message names the window. `require` is the check for an empty stack.
     Ranges.check(start, length, batch.length)
     require(steps.nonEmpty, "a filter stack needs a predicate")
@@ -53,7 +61,11 @@ private[scarlet] object Selection:
     while (iterator.hasNext) {
       count = restrict(batch, iterator.next(), index, count)
     }
-    publish(batch, index, count, length)
+    Selected(batch, index, count)
+
+  /** Gathers [[applySelected]]'s prefix. Output arrays stay the index capacity. */
+  def materialize(selected: Selected): ColumnBatch =
+    publish(selected.batch, selected.rows, selected.count, selected.rows.length)
 
   private def seed(
       batch: ColumnBatch,

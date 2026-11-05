@@ -13,6 +13,37 @@ private[scarlet] final case class Morsel(batch: ColumnBatch, start: Int, length:
   )
 
 /**
+ * Survivors of one batch. `rows` are absolute ids in `batch`, strictly ascending, so they are
+ * unique. `count` is the live prefix. `rows.length` is the capacity, and slots at `count` and
+ * beyond are undefined. The batch is not copied. Nothing here mutates `batch` or `rows`.
+ */
+private[scarlet] final case class Selected(batch: ColumnBatch, rows: Array[Int], count: Int):
+  require(count >= 0, s"selection count must be >= 0, got $count")
+  require(
+    count <= rows.length,
+    s"selection count $count exceeds capacity ${rows.length}",
+  )
+  require(
+    rows.length <= batch.length,
+    s"selection capacity ${rows.length} exceeds batch length ${batch.length}",
+  )
+  checkPrefix()
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def checkPrefix(): Unit =
+    var slot = 0
+    var previous = -1
+    while (slot < count) {
+      val row = rows(slot)
+      require(
+        row > previous && row < batch.length,
+        s"selection row $row at $slot is not an ascending id inside ${batch.length}",
+      )
+      previous = row
+      slot += 1
+    }
+
+/**
  * Cuts a batch the same way [[ColumnBatches.slice]] does, without copying columns.
  *
  * `rows == 0` is one zero-length morsel. A batch no longer than `batchSize` is one morsel. A

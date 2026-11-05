@@ -15,6 +15,10 @@ package com.ewoodbury.scarlet.columnar
  * An empty bucket is an empty batch of the same schema. String buckets keep the source dictionary;
  * [[ColumnBatches.concat]] remaps unlike dictionaries when those buckets are combined, so code
  * equality in the combined bucket is string equality.
+ *
+ * [[partitionAllSelected]] scatters an int-pair [[Selected]]. It reads `values(rows(i))` for
+ * `i < count` and does not share the source, including when `numPartitions` is 1. A null key is
+ * dropped. A null value stays null and moves with the row. The dense loops are unchanged.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object HashExchange:
@@ -116,6 +120,26 @@ object HashExchange:
     }
 
   /**
+   * [[partitionAll]] for int pairs addressed by a [[Selected]]. Only `rows(0 until count)` are
+   * scattered. `numPartitions == 1` still builds one bucket and does not return the source batch.
+   * A null key is dropped. A null value is copied with its validity bit. This is not the dense
+   * loop with an identity index.
+   */
+  def partitionAllSelected(
+      selected: Vector[Selected],
+      keyOrdinal: Int,
+      numPartitions: Int,
+      parallelism: Int,
+  ): Vector[ColumnBatch] =
+    require(selected.nonEmpty, "partitionAllSelected needs at least one batch")
+    val scattered = MorselScheduler.map(selected, parallelism) { (_, one) =>
+      partitionSelected(one, keyOrdinal, numPartitions)
+    }
+    Vector.tabulate(numPartitions) { part =>
+      ColumnBatches.concat(scattered.map(buckets => bucketAt(buckets, part)))
+    }
+
+  /**
    * [[partitionAll]] for an `Int64` key. Bucket assignment is [[partitionInt64]]. `partitionAll`
    * itself still partitions `Int32` keys with `floorMod(key, numPartitions)`.
    */
@@ -196,6 +220,38 @@ object HashExchange:
       ColumnBatches.concat(scattered.map(buckets => bucketAt(buckets, part)))
     }
 
+  private def partitionSelected(
+      selected: Selected,
+      keyOrdinal: Int,
+      numPartitions: Int,
+  ): Vector[ColumnBatch] =
+    require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+    val batch = selected.batch
+    val rows = selected.rows
+    val live = selected.count
+    val keys = ColumnHash.int32At(batch, keyOrdinal)
+    val dest = new Array[Int](live)
+    val counts = new Array[Int](numPartitions)
+    val keyValues = keys.values
+    val keyWords = keys.validity.words
+    var slot = 0
+    while (slot < live) {
+      val row = rows(slot)
+      if (Validity.isSet(keyWords, row)) then
+        val part = Math.floorMod(keyValues(row), numPartitions)
+        dest(slot) = part
+        counts(part) += 1
+      else dest(slot) = -1
+      slot += 1
+    }
+    val scattered = batch.columns.map { column =>
+      scatterSelected(column, rows, live, dest, counts)
+    }.toVector
+    Vector.tabulate(numPartitions) { part =>
+      val columns = scattered.map(column => bucketAt(column, part))
+      new ColumnBatch(batch.schema, columns, counts(part))
+    }
+
   private def utf8At(batch: ColumnBatch, ordinal: Int): DictUtf8Column =
     ColumnKernel.asUtf8(ColumnKernel.columnAt(batch, ordinal), ordinal)
 
@@ -231,6 +287,48 @@ object HashExchange:
         if (Validity.isSet(validity, row)) then Validity.setBit(words(part), at)
         cursor(part) = at + 1
       row += 1
+    }
+    outputs.indices.map { part =>
+      Int32Column.of(outputs(part), Validity.fromWords(words(part), counts(part)), counts(part))
+    }.toVector
+
+  private def scatterSelected(
+      column: Column,
+      rows: Array[Int],
+      count: Int,
+      dest: Array[Int],
+      counts: Array[Int],
+  ): Vector[Column] =
+    column match
+      case int32: Int32Column => scatterInt32Selected(int32, rows, count, dest, counts)
+      case other =>
+        throw new IllegalArgumentException(
+          s"selection scatter expected Int32, found ${other.logicalType}",
+        )
+
+  /** Same builders as [[scatterInt32]]. Each read is `values(rows(slot))`. */
+  private def scatterInt32Selected(
+      column: Int32Column,
+      rows: Array[Int],
+      count: Int,
+      dest: Array[Int],
+      counts: Array[Int],
+  ): Vector[Column] =
+    val outputs = counts.map(count => new Array[Int](count))
+    val words = counts.map(count => Validity.allocate(count))
+    val cursor = new Array[Int](counts.length)
+    val values = column.values
+    val validity = column.validity.words
+    var slot = 0
+    while (slot < count) {
+      val part = dest(slot)
+      if (part >= 0) then
+        val at = cursor(part)
+        val row = rows(slot)
+        outputs(part)(at) = values(row)
+        if (Validity.isSet(validity, row)) then Validity.setBit(words(part), at)
+        cursor(part) = at + 1
+      slot += 1
     }
     outputs.indices.map { part =>
       Int32Column.of(outputs(part), Validity.fromWords(words(part), counts(part)), counts(part))

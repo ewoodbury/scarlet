@@ -171,6 +171,43 @@ class TestHashExchange extends AnyFlatSpec with Matchers:
     )
   }
 
+  it should "scatter a selection the way a materialized batch partitions" in {
+    val batch = BatchCodec.nullableIntPairs(
+      Seq(
+        (Some(1), Some(10)),
+        (None, Some(99)),
+        (Some(2), None),
+        (Some(3), Some(30)),
+        (Some(4), Some(40)),
+      ),
+    )
+    // Row 3 is outside the live prefix. The null key is selected and then dropped. The null
+    // value stays with key 2.
+    val selected = Selected(batch, Array(0, 1, 2, 4, 0), 4)
+    val materialized = Vector(Selection.materialize(selected))
+    val wide = HashExchange.partitionAllSelected(Vector(selected), keyOrdinal = 0, 2, 1)
+
+    samePairs(wide, HashExchange.partitionAll(materialized, keyOrdinal = 0, 2, 1))
+    val kept = wide.flatMap(part => nullablePairs(part))
+    kept should contain((2, None))
+    kept.exists(_._1 == 3) shouldBe false
+    kept.exists(_._2.contains(99)) shouldBe false
+
+    val one = HashExchange.partitionAllSelected(Vector(selected), keyOrdinal = 0, 1, 1)
+    samePairs(one, HashExchange.partitionAll(materialized, keyOrdinal = 0, 1, 1))
+    one.headOption.getOrElse(fail("missing partition")) should not be theSameInstanceAs(batch)
+
+    // Keys are present, so the dense one-partition path shares the gathered batch. The selection
+    // is not the whole source, so the scatter must not share it.
+    val present = Selected(batch, Array(0, 2, 4), 3)
+    val presentBatch = Vector(Selection.materialize(present))
+    val single = HashExchange.partitionAllSelected(Vector(present), keyOrdinal = 0, 1, 1)
+    samePairs(single, HashExchange.partitionAll(presentBatch, keyOrdinal = 0, 1, 1))
+    val only = single.headOption.getOrElse(fail("missing partition"))
+    only should not be theSameInstanceAs(batch)
+    nullablePairs(only) should contain((2, None))
+  }
+
   it should "share the input batch when one partition has no null key" in {
     val batch = BatchCodec.ints(Seq(1, 2, 3))
     val parts = HashExchange.partitionInt32(batch, keyOrdinal = 0, numPartitions = 1)
@@ -290,6 +327,13 @@ class TestHashExchange extends AnyFlatSpec with Matchers:
       rows.length,
     )
   }
+
+  private def samePairs(left: Vector[ColumnBatch], right: Vector[ColumnBatch]): Unit =
+    left.length shouldBe right.length
+    left.zip(right).foreach { (actual, expected) =>
+      actual.length shouldBe expected.length
+      nullablePairs(actual) shouldBe nullablePairs(expected)
+    }
 
   private def bucket(parts: Vector[ColumnBatch], key: Int): ColumnBatch =
     parts.lift(Math.floorMod(key, parts.length)).getOrElse(fail(s"missing bucket for $key"))
