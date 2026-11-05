@@ -17,8 +17,8 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
  * Times one query per supported columnar type, plus both grouped-key patterns, a two-filter
- * `groupByKey`, a two-filter `reduceByKey`, and an int-pair and long-pair sort. Not a test, and
- * not part of `make test`.
+ * `groupByKey`, a two-filter `reduceByKey`, a two-filter inner join, and an int-pair and
+ * long-pair sort. Not a test, and not part of `make test`.
  *
  * Each query is built once. The timed region is the action. The scalar checksum is compared after
  * the timer stops. A local loop produces that scalar, and one row-path execution must match it
@@ -197,6 +197,7 @@ object QueryBench:
       .filterKeys((key: Int) => key % 3 != 0)
       .filterValues((value: Int) => value >= 0)
       .reduceByKey[Int, Int](_ + _)
+    val filteredJoin = FilterJoinChecksum.source(generated, sourcePartitions)
     Vector(
       whole("int-narrow", elementRows, "Pipeline2(Scan)", narrowSum, narrow.plan, narrow.sum),
       whole("int-chain", elementRows, "Pipeline4(Scan)", chainSum, intChain.plan, intChain.sum),
@@ -239,6 +240,14 @@ object QueryBench:
         keptReduce,
         filteredReduce.plan,
         FilterReduceChecksum.collected(filteredReduce.collect(), groups),
+      ),
+      whole(
+        "filter-join",
+        elementRows,
+        FilterJoinChecksum.shape,
+        FilterJoinChecksum.expected(generated),
+        filteredJoin.plan,
+        FilterJoinChecksum.collected(filteredJoin.collect()),
       ),
     )
 
@@ -976,10 +985,12 @@ object QueryBench:
       "the measured rounds, at each width.\n" +
       "Sort queries checksum the collected key then value, mixed by 31, in output order. The " +
       "expected value is a local stable sort of the same pairs, computed before timing.\n" +
-      "filter-groupbykey and filter-reducebykey are two int-pair filters then the wide op, at " +
-      "1e6 rows, two source partitions, and batch 8192. groupByKey checksums (key * 31) xor the " +
-      "value sum xor the value count. reduceByKey checksums (key * 31) xor the wrapped int sum. " +
-      "p50 and alloc_mb are recorded. There is no wall-clock gate.\n" +
+      "filter-groupbykey, filter-reducebykey, and filter-join are two int-pair filters then the " +
+      "wide op, at 1e6 rows, two source partitions, and batch 8192. The join filters the build " +
+      "side and probes an unfiltered unique key. groupByKey checksums (key * 31) xor the value " +
+      "sum xor the value count. reduceByKey checksums (key * 31) xor the wrapped int sum. The " +
+      "join checksums (key * 31) xor the left value xor the right value. p50 and alloc_mb are " +
+      "recorded. There is no wall-clock gate.\n" +
       "alloc_mb is the nearest-rank p50 of process-wide thread bytes, in decimal megabytes " +
       "(bytes / 1e6). The probe excludes itself. A short-lived worker missed between reads is " +
       "absent. The same estimate is reported for row and columnar, at both widths.\n" +

@@ -17,7 +17,8 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * returns another value, is still a fallback, and that function may already have run.
  * [[ColumnarFallback]] is the named form of a deliberate decline, including a null value on a
  * left, right, or full outer join: the value columns are already encoded, and the kernel is not
- * chosen. A null value on a long inner join is that fallback too.
+ * chosen. A null value on a long inner join is that fallback too. A null value on a selected row
+ * of an int inner join is that fallback too. A null on a dropped row is not.
  */
 @SuppressWarnings(
   Array(
@@ -480,12 +481,14 @@ private[execution] object ColumnarInterpreter:
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       Columns.Triples(
-        ColumnPipeline.innerJoin(
-          pairsOf(interpretAt(left, leftOp, selectedPartition, preserveAbsence, ordinals)),
-          pairsOf(interpretAt(right, rightOp, selectedPartition, preserveAbsence, ordinals)),
-          ColumnarPlanner.shuffleWidth,
-          ColumnarPlanner.parallelism,
-          ColumnarPlanner.batchSize,
+        JoinArms.inner(
+          left,
+          right,
+          leftOp,
+          rightOp,
+          selectedPartition,
+          preserveAbsence,
+          ordinals,
         ),
       )
     case (

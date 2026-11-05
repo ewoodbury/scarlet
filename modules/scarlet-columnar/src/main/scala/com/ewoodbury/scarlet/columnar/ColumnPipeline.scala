@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import scala.annotation.targetName
+
 import com.ewoodbury.scarlet.core.ScarletConf
 
 /**
@@ -14,11 +16,13 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * columns. An empty input is `numPartitions` empty sum batches, the same convention as
  * [[HashReduce.byKey]]. The hash join reads key column 0 and value column 1 on both sides,
  * exchanges each side, and probes one partition at a time. Those exchanges leave `carryNullKeys`
- * off, so a null key is dropped. [[longInnerJoin]] is that join for `Int64` keys and values. It
- * uses [[HashExchange.partitionAllInt64]] and has no spill and no build budget. The sort-merge
- * join uses that same exchange on both sides, sorts each bucket, and merges it. A bucket over the
- * spill budget is merged from sorted runs instead. A sort-merge outer join uses the same hash
- * exchange, not a range partition, and carries a null key on each preserved side.
+ * off, so a null key is dropped. A [[JoinInput.Selected]] side skips the slice: the exchange
+ * scatters `rows(0 until count)`, and the build table and the probe read those rows.
+ * [[longInnerJoin]] is that join for `Int64` keys and values. It uses
+ * [[HashExchange.partitionAllInt64]] and has no spill and no build budget. The sort-merge join
+ * uses that same exchange on both sides, sorts each bucket, and merges it. A bucket over the spill
+ * budget is merged from sorted runs instead. A sort-merge outer join uses the same hash exchange,
+ * not a range partition, and carries a null key on each preserved side.
  * [[HashExchange.partitionAll]] concatenates a bucket with [[ColumnBatches.concat]] and keeps an
  * empty bucket's index. The broadcast join builds one table from the batches chosen as the build
  * side and probes the other batches in place. When spill is on and that table's estimate exceeds
@@ -36,6 +40,22 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * carried outside the table and emitted once. Those bitmaps are not part of the build budget.
  */
 object ColumnPipeline:
+
+  /**
+   * The row-selection class. [[JoinInput.Selected]] is also named Selected, so the case parameter
+   * uses this alias and does not become a vector of the case itself.
+   */
+  type Survivor = Selected
+
+  /**
+   * One side of an int inner shuffle-hash join.
+   *
+   * [[JoinInput.Dense]] is read row by row. [[JoinInput.Selected]] names the live prefix. The
+   * exchange scatters that prefix and does not slice it.
+   */
+  enum JoinInput:
+    case Dense(batches: Vector[ColumnBatch])
+    case Selected(parts: Vector[Survivor])
 
   def sumByKey(
       batches: Vector[ColumnBatch],
@@ -169,24 +189,45 @@ object ColumnPipeline:
       parallelism: Int,
       batchSize: Int,
   ): Vector[ColumnBatch] =
-    val buildBuckets = HashExchange.partitionAll(
-      sliceAll(build, batchSize),
-      keyOrdinal = 0,
+    innerJoin(
+      JoinInput.Dense(sliceAll(build, batchSize)),
+      JoinInput.Dense(sliceAll(probe, batchSize)),
       numPartitions,
       parallelism,
     )
-    val probeBuckets = HashExchange.partitionAll(
-      sliceAll(probe, batchSize),
-      keyOrdinal = 0,
-      numPartitions,
-      parallelism,
-    )
+
+  /**
+   * Inner shuffle-hash join. `build` is the left input and `probe` is the right.
+   * [[JoinInput.Dense]] is partitioned with [[HashExchange.partitionAll]]. [[JoinInput.Selected]]
+   * is partitioned with [[HashExchange.partitionAllSelected]] and is not sliced. Bucket `i` of the
+   * probe is joined with bucket `i` of the build. A null key is dropped. Output columns are
+   * `(key, left, right)`.
+   */
+  def innerJoin(
+      build: JoinInput,
+      probe: JoinInput,
+      numPartitions: Int,
+      parallelism: Int,
+  ): Vector[ColumnBatch] =
+    val buildBuckets = exchange(build, numPartitions, parallelism)
+    val probeBuckets = exchange(probe, numPartitions, parallelism)
     MorselScheduler.map(probeBuckets, parallelism) { (part, probeBatch) =>
       HashJoin.innerInt32(
         HashJoin.JoinSide(bucketAt(buildBuckets, part), key = 0, value = 1),
         HashJoin.JoinSide(probeBatch, key = 0, value = 1),
       )
     }
+
+  private def exchange(
+      input: JoinInput,
+      numPartitions: Int,
+      parallelism: Int,
+  ): Vector[ColumnBatch] =
+    input match
+      case JoinInput.Dense(batches) =>
+        HashExchange.partitionAll(batches, keyOrdinal = 0, numPartitions, parallelism)
+      case JoinInput.Selected(parts) =>
+        HashExchange.partitionAllSelected(parts, keyOrdinal = 0, numPartitions, parallelism)
 
   /**
    * Inner shuffle-hash join of `(Long, Long)` pairs. `build` is the left input and `probe` is the
@@ -618,6 +659,23 @@ object ColumnPipeline:
       val values = ColumnHash.int32At(batch, 1)
       Validity.livePresent(values.validity, values.length)
     }
+
+  /**
+   * True when every selected value cell is present. Pair batches store the value at ordinal 1.
+   * Only `rows(0 until count)` is read, so a null on a dropped row does not count. An empty prefix
+   * is present.
+   *
+   * `targetName` keeps this overload next to the dense one. Both erase to a vector.
+   */
+  @targetName("valuesFullyPresentOnSelection")
+  private[scarlet] def valuesFullyPresent(selected: Vector[Selected]): Boolean =
+    selected.forall(selectedValuesPresent)
+
+  private def selectedValuesPresent(selected: Selected): Boolean =
+    val values = ColumnHash.int32At(selected.batch, 1)
+    val words = values.validity.words
+    val rows = selected.rows
+    (0 until selected.count).forall(slot => Validity.isSet(words, rows(slot)))
 
   /**
    * True when every live value cell is present. Long-pair batches store the value at ordinal 1 as
