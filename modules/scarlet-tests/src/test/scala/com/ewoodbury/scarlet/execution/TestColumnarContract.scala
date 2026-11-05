@@ -30,14 +30,13 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 197 accepted fixtures. sortByStringKey of a string-pair scan is new. 196 + 1 = 197.
-    // The string inner join moved from the excluded list. 195 + 1 = 196, then this fixture.
-    accepted.size shouldBe 197
-    // 37 exclusions. 197 + 37 = 234. The excluded list is unchanged. 38 - 1 = 37.
+    // 198 accepted fixtures. groupByKey int moved from the excluded list. 197 + 1 = 198.
+    accepted.size shouldBe 198
+    // 36 exclusions. 198 + 36 = 234. groupByKey int left the excluded list. 37 - 1 = 36.
     // Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by
     // execution tests, not contract fixtures, because the contract does not track the int
     // refusals either.
-    excluded.size shouldBe 37
+    excluded.size shouldBe 36
     (accepted.size + excluded.size) shouldBe 234
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
@@ -505,6 +504,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ),
       AcceptedCase("int reduceByKey", reduced, hashedInfo(layout), Some("HashAggregate(Exchange(Scan))")),
       AcceptedCase(
+        "groupByKey int",
+        Plan.GroupByKeyOp(pairSource),
+        hashedInfo(Layout.GroupedInt(ScarletConf.get.columnarBatchSize)),
+        Some("GroupByKey(Exchange(Scan))"),
+      ),
+      AcceptedCase(
         "long reduceByKey",
         Plan.ReduceByKeyOp(longPairSource, (left: Long, right: Long) => left + right),
         hashedInfo(layout),
@@ -732,7 +737,6 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
       ExcludedCase("partitionBy", Plan.PartitionByOp(pairSource, 2)),
       ExcludedCase("flatMap", Plan.FlatMapOp(intSource, (value: Int) => List(value, value + 1))),
       ExcludedCase("flatMapValues", Plan.FlatMapValuesOp(pairSource, (value: Int) => List(value))),
-      ExcludedCase("groupByKey int", Plan.GroupByKeyOp(pairSource)),
       ExcludedCase("cogroup", Plan.CoGroupOp(pairSource, rightPairSource)),
       ExcludedCase("sortBy", Plan.SortByOp(intSource, (value: Int) => value, Ordering.Int)),
       ExcludedCase("mapValues to string", stringMapValues),
@@ -860,7 +864,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs |
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools |
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs |
-        PhysicalOp.Kind.StringTriples =>
+        PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts =>
       false
 
   private def sumsLongs(op: PhysicalOp): Boolean = op.kind match
@@ -868,7 +872,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs |
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools |
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs |
-        PhysicalOp.Kind.StringTriples =>
+        PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts =>
       false
 
   private def sumsFloats(op: PhysicalOp): Boolean = op.kind match
@@ -876,7 +880,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Pairs |
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools |
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs |
-        PhysicalOp.Kind.StringTriples =>
+        PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts =>
       false
 
   private def preservesPartitions(op: PhysicalOp): Boolean = op match
@@ -887,7 +891,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case PhysicalOp.Column(child, _) => preservesPartitions(child)
     case PhysicalOp.MapValue(child) => preservesPartitions(child)
     case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.LongHashAggregate(_) |
-        PhysicalOp.StringHashAggregate(_) | PhysicalOp.HashJoin(_, _) |
+        PhysicalOp.StringHashAggregate(_) | PhysicalOp.GroupByKey(_) | PhysicalOp.HashJoin(_, _) |
         PhysicalOp.LongHashJoin(_, _) | PhysicalOp.StringHashJoin(_, _) |
         PhysicalOp.SortMergeJoin(_, _) | PhysicalOp.SortMergeLeftOuter(_, _) |
         PhysicalOp.SortMergeRightOuter(_, _) | PhysicalOp.SortMergeFullOuter(_, _) |

@@ -156,6 +156,7 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       PhysicalOp.Kind.LongTriples,
       PhysicalOp.Kind.StringPairs,
       PhysicalOp.Kind.StringTriples,
+      PhysicalOp.Kind.GroupedInts,
     )
   }
 

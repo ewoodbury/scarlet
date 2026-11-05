@@ -1,0 +1,64 @@
+package com.ewoodbury.scarlet.columnar
+
+/**
+ * One shuffle partition of int `groupByKey`.
+ *
+ * This is not a [[ColumnBatch]]. Keys are `groups` long, offsets are `groups + 1`, and values are
+ * the input cardinality. `offsets(0) == 0`, offsets are monotone, and `offsets(groups)` is
+ * `values.length`. Group `i` is `values[offsets(i) until offsets(i + 1))`. An empty bucket is `0`
+ * groups, `offsets = Array(0)`, and an empty values array. `keys` is fully present.
+ *
+ * [[valuesFor]] is a view. A published array is not mutated, and the caller does not recycle it,
+ * which is the same rule as [[Column]]. Holding one group pins the whole values array. The view is
+ * an [[IndexedSeq]], so iteration is multi-pass and `equals` is structural.
+ */
+final case class GroupedIntBatch(keys: Int32Column, offsets: Array[Int], values: Array[Int]):
+  require(
+    offsets.length == keys.length + 1,
+    s"offsets length ${offsets.length} is not groups + 1 (${keys.length + 1})",
+  )
+  require(offsets(0) == 0, s"offsets must start at 0, found ${offsets(0)}")
+  require(
+    offsets(keys.length) == values.length,
+    s"offsets end ${offsets(keys.length)} does not match ${values.length} values",
+  )
+  require(monotonicOffsets, "offsets must be monotone")
+  require(ColumnHash.fullyPresent(keys), "grouped keys must be fully present")
+
+  def length: Int = keys.length
+
+  def groups: Int = keys.length
+
+  /** View of `values[offsets(group) until offsets(group + 1))`. Does not copy. */
+  def valuesFor(group: Int): IndexedSeq[Int] =
+    require(group >= 0 && group < groups, s"group $group outside 0 until $groups")
+    new IntGroupView(values, offsets(group), offsets(group + 1))
+
+  /** One `(key, values)` row per group, in key order. Each value side is [[valuesFor]]. */
+  def rows: Seq[(Int, Iterable[Int])] =
+    Seq.tabulate(groups)(group => (keys.values(group), valuesFor(group)))
+
+  private def monotonicOffsets: Boolean =
+    offsets.indices.drop(1).forall(index => offsets(index) >= offsets(index - 1))
+
+object GroupedIntBatch:
+
+  /** A fresh empty bucket. `0` groups, `offsets = Array(0)`, and no values. */
+  def empty: GroupedIntBatch =
+    GroupedIntBatch(
+      Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0),
+      Array(0),
+      Array.emptyIntArray,
+    )
+
+/**
+ * One group's values. `apply` and `length` read `values(start + i)`. The array is not copied.
+ */
+private final class IntGroupView(values: Array[Int], start: Int, end: Int) extends IndexedSeq[Int]:
+
+  def length: Int = end - start
+
+  def apply(index: Int): Int =
+    if (index < 0 || index >= length) then
+      throw new IndexOutOfBoundsException(s"index $index outside length $length")
+    else values(start + index)
