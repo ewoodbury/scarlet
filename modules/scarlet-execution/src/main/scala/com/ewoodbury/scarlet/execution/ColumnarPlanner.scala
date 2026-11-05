@@ -228,14 +228,28 @@ object ColumnarPlanner:
    * Decode a tree [[lower]] would hand to [[tryRun]]. The catch is the row-path fallback.
    * [[ColumnarFallback]] is its named form. Any other failure, including a boolean column in the
    * element pipeline, propagates.
+   *
+   * A pair or triple stack of two or more filters decodes [[FilterChain.selected]] and does not
+   * gather. That call interprets the source under the stack, so this does not interpret the source
+   * again. Every other plan decodes [[ColumnarInterpreter.interpret]]. The result cast is the same
+   * erasure boundary as [[tryRun]]: the decoded partitions have the plan's element type.
    */
   private[execution] def runLowered[A](plan: Plan[A], op: PhysicalOp): Option[Seq[Partition[A]]] =
     try
-      Some(
-        ColumnarInterpreter
-          .decodeFor(ColumnarInterpreter.interpret(plan, op), op)
-          .asInstanceOf[Seq[Partition[A]]],
-      )
+      val decoded = FilterChain.selected(
+        plan,
+        op,
+        selectedPartition = None,
+        preserveAbsence = false,
+        ordinals = ColumnUse.ordinals(plan, op),
+      ) match
+        case Some(parts) =>
+          parts.map { selected =>
+            Partition(decodeSelected(selected, selected.count, op))
+          }
+        case None =>
+          ColumnarInterpreter.decodeFor(ColumnarInterpreter.interpret(plan, op), op)
+      Some(decoded.asInstanceOf[Seq[Partition[A]]])
     // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
     catch case _: ClassCastException => None
 
@@ -271,15 +285,52 @@ object ColumnarPlanner:
    * First `n` values in partition order. Decoding stops once `n` values are in hand, and every
    * batch of a partition contributes before the next partition is read. Each returned chunk is
    * appended once, in order.
+   *
+   * A partition-preserving pair or triple filter stack decodes a prefix of
+   * [[FilterChain.selected]]. The decoder sees `min(remaining, count)` rows, so the rest of the
+   * index is not read and the stack is not gathered. Any other plan uses
+   * [[ColumnarInterpreter.decodePrefixFor]].
    */
   private def prefixOf(plan: Plan[_], op: PhysicalOp, count: Int, n: Int): Seq[Any] =
+    val ordinals = ColumnUse.ordinals(plan, op)
     takeChunks(
       n,
       Iterator.range(0, count).map { index => (remaining: Int) =>
-        ColumnarInterpreter
-          .decodePrefixFor(ColumnarInterpreter.interpret(plan, op, Some(index)), remaining, op)
+        FilterChain.selected(
+          plan,
+          op,
+          Some(index),
+          preserveAbsence = false,
+          ordinals,
+        ) match
+          case Some(parts) => prefixSelected(parts, op, remaining)
+          case None =>
+            ColumnarInterpreter.decodePrefixFor(
+              ColumnarInterpreter.interpret(plan, op, Some(index)),
+              remaining,
+              op,
+            )
       },
     )
+
+  /** Prefix of one partition's selection. Later batches are not decoded once `limit` is filled. */
+  private def prefixSelected(parts: Vector[Selected], op: PhysicalOp, limit: Int): Seq[Any] =
+    takeChunks(
+      limit,
+      parts.iterator.map { selected => (remaining: Int) =>
+        decodeSelected(selected, math.min(remaining, selected.count), op)
+      },
+    )
+
+  /** `count` rows of `selected`, in index order. Pairs and triples are the only producers. */
+  private def decodeSelected(selected: Selected, count: Int, op: PhysicalOp): Seq[Any] =
+    op.kind match
+      case PhysicalOp.Kind.Pairs =>
+        BatchCodec.decodeIntPairs(selected.batch, selected.rows, count)
+      case PhysicalOp.Kind.Triples =>
+        BatchCodec.decodeIntTriples(selected.batch, selected.rows, count)
+      case other =>
+        throw new ColumnarFallback(s"selection decode expected pairs or triples, got $other")
 
   /** Append chunks in order and stop once `limit` elements are stored. */
   @SuppressWarnings(Array("org.wartremover.warts.MutableDataStructures"))

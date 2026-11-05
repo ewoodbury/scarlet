@@ -384,6 +384,21 @@ object BatchCodec:
     }
 
   /**
+   * Reads `rows(0 until count)` of an int-pair batch. A clear bit on a selected row is an error,
+   * the same rule as the dense decoder. A clear bit on any other row is not read. `count` is the
+   * live prefix. Slots at `count` and beyond are not decoded.
+   */
+  def decodeIntPairs(batch: ColumnBatch, rows: Array[Int], count: Int): Seq[(Int, Int)] =
+    val (left, right) = intPair(batch)
+    val live = selectionCount(rows, count)
+    ColumnMetrics.decoded(live)
+    Seq.tabulate(live) { slot =>
+      val row = rows(slot)
+      require(left.isValid(row) && right.isValid(row), s"null Int32 pair at row $row")
+      (left.values(row), right.values(row))
+    }
+
+  /**
    * Reads an int-pair batch and keeps a clear key or value bit as a null `Int`. A fully present
    * batch still decodes to the stored ints. This matches [[decodeLongPairs]]. [[decodeIntPairs]]
    * rejects a clear bit. A sort of int pairs is the caller that keeps those nulls.
@@ -464,6 +479,36 @@ object BatchCodec:
           requireLivePrefix(probe, rows)
         ColumnMetrics.decoded(rows)
         Seq.tabulate(rows) { row =>
+          (keys.values(row), (build.values(row), probe.values(row)))
+        }
+      case _ =>
+        throw new IllegalArgumentException(
+          s"join output is not three Int32 columns: ${batch.schema}",
+        )
+
+  /**
+   * Reads `rows(0 until count)` of an int-triple batch. A clear bit on a selected row is an error,
+   * the same rule as the dense decoder. A clear bit on any other row is not read. `count` is the
+   * live prefix. Slots at `count` and beyond are not decoded.
+   */
+  def decodeIntTriples(
+      batch: ColumnBatch,
+      rows: Array[Int],
+      count: Int,
+  ): Seq[(Int, (Int, Int))] =
+    batch.columns match
+      case Seq(keys: Int32Column, build: Int32Column, probe: Int32Column) =>
+        require(
+          keys.length == batch.length && build.length == batch.length &&
+            probe.length == batch.length,
+          "join columns disagree on length",
+        )
+        val live = selectionCount(rows, count)
+        ColumnMetrics.decoded(live)
+        Seq.tabulate(live) { slot =>
+          val row = rows(slot)
+          if (!keys.isValid(row) || !build.isValid(row) || !probe.isValid(row)) then
+            throw new IllegalArgumentException(s"null join value at row $row")
           (keys.values(row), (build.values(row), probe.values(row)))
         }
       case _ =>
@@ -978,3 +1023,9 @@ object BatchCodec:
   private def decodedLength(batch: ColumnBatch, maxRows: Int): Int =
     require(maxRows >= 0, s"maximum decoded rows must be >= 0, got $maxRows")
     math.min(batch.length, maxRows)
+
+  /** `count` is a live prefix of `rows`. Slots at `count` and beyond are not read. */
+  private def selectionCount(rows: Array[Int], count: Int): Int =
+    require(count >= 0, s"selection count must be >= 0, got $count")
+    require(count <= rows.length, s"selection count $count exceeds capacity ${rows.length}")
+    count

@@ -23,8 +23,9 @@ import PredicatePlan.{Atom, Compiled}
  * [[PredicatePlan.applyAtom]] does not take the compiled stack. Encoders, including the
  * absence-preserving copy under an outer join, do not run the predicate.
  *
- * [[selectedPairs]] is the one boundary that keeps the survivor index. It appends absolute ids per
- * morsel and does not compact. [[compact]] still serves every other caller.
+ * [[selected]] is the boundary that keeps the survivor index for an int-pair or int-triple stack.
+ * It appends absolute ids per morsel and does not compact. [[compact]] still serves every other
+ * caller.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Throw"))
 private[execution] object FilterChain:
@@ -63,12 +64,12 @@ private[execution] object FilterChain:
         applyCompiled(columns, compiled, ordinals)
 
   /**
-   * Survivor ids for one int-pair stack of two or more filters. Every other shape returns `None`
-   * and is not interpreted. A `Some` interprets the source under the stack once. Each batch gets
-   * one [[Selected]]: morsels append absolute ids into `rows`, in morsel order, and nothing is
-   * concatenated or compacted.
+   * Survivor ids for one int-pair or int-triple stack of two or more filters. A single filter, and
+   * every other kind, returns `None` and is not interpreted. A `Some` interprets the source under
+   * the stack once. Each batch gets one [[Selected]]: morsels append absolute ids into `rows`, in
+   * morsel order, and nothing is concatenated or compacted.
    */
-  def selectedPairs(
+  def selected(
       plan: Plan[_],
       op: PhysicalOp,
       selectedPartition: Option[Int],
@@ -76,7 +77,7 @@ private[execution] object FilterChain:
       ordinals: Set[Int],
   ): Option[Vector[Selected]] =
     op.kind match
-      case PhysicalOp.Kind.Pairs =>
+      case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples =>
         PredicatePlan.compile(plan, op) match
           case Some(compiled)
               if compiled.atoms.length > 1 &&
@@ -91,7 +92,13 @@ private[execution] object FilterChain:
               preserveAbsence,
               ordinals,
             )
-            Some(selectBatches(pairBatches(columns), steps))
+            // An outer batch is a triple with an absent side. A selection cannot represent that
+            // absence. Return `None`; the dense path re-runs the source and throws the same
+            // `IllegalStateException` it always did. Matching the interpreted child catches an
+            // outer join under any wrapper, not just at the top of the stack.
+            columns match
+              case Columns.Outer(_, _) => None
+              case _ => Some(selectBatches(kindBatches(op.kind, columns), steps))
           case _ => None
       case _ => None
 
@@ -140,10 +147,11 @@ private[execution] object FilterChain:
       })
     else compiled
 
-  private def pairBatches(columns: Columns): Vector[ColumnBatch] = columns match
-    case Columns.Pairs(_) => ColumnarInterpreter.pairsOf(columns)
-    case _ =>
-      throw new IllegalStateException("columnar op expected int pairs")
+  private def kindBatches(kind: PhysicalOp.Kind, columns: Columns): Vector[ColumnBatch] =
+    kind match
+      case PhysicalOp.Kind.Pairs => ColumnarInterpreter.pairsOf(columns)
+      case PhysicalOp.Kind.Triples => ColumnarInterpreter.triplesOf(columns)
+      case _ => missing
 
   /**
    * One index per input batch. Morsels of that batch run in parallel, then their absolute ids are
