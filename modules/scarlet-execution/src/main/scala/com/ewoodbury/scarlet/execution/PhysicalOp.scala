@@ -208,11 +208,12 @@ enum PhysicalOp:
   case BroadcastFullOuter(left: PhysicalOp, right: PhysicalOp)
 
   /**
-   * Int `groupByKey`. The child is an [[PhysicalOp.Exchange]]. The kernel shuffles. A null key is
+   * `groupByKey`. The child is an [[PhysicalOp.Exchange]]. The kernel shuffles. A null key is
    * dropped. A null value is kept, and a clear value bit is a planner bug. One grouped batch is
    * published per shuffle partition, including an empty bucket. Output kind is
-   * [[PhysicalOp.Kind.GroupedInts]] for a [[PhysicalOp.Kind.Pairs]] child. Any other child is a
-   * planner bug. There is no partial combine and no spill.
+   * [[PhysicalOp.Kind.GroupedInts]] for a [[PhysicalOp.Kind.Pairs]] child and
+   * [[PhysicalOp.Kind.GroupedStrings]] for a [[PhysicalOp.Kind.StringPairs]] child. Any other
+   * child is a planner bug. There is no partial combine, no spill, and no sort.
    */
   case GroupByKey(child: PhysicalOp)
 
@@ -285,8 +286,11 @@ enum PhysicalOp:
     case GroupByKey(child) =>
       child.kind match
         case PhysicalOp.Kind.Pairs => PhysicalOp.Kind.GroupedInts
+        case PhysicalOp.Kind.StringPairs => PhysicalOp.Kind.GroupedStrings
         case other =>
-          throw new IllegalStateException(s"groupByKey column is $other, expected int pairs")
+          throw new IllegalStateException(
+            s"groupByKey column is $other, expected int or string pairs",
+          )
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
     case LongHashJoin(_, _) => PhysicalOp.Kind.LongTriples
     case StringHashJoin(_, _) => PhysicalOp.Kind.StringTriples
@@ -372,7 +376,7 @@ enum PhysicalOp:
 object PhysicalOp:
   enum Kind:
     case Ints, Longs, Floats, Pairs, Triples, Strings, Bools, LongPairs, LongTriples, StringPairs,
-      StringTriples, GroupedInts
+      StringTriples, GroupedInts, GroupedStrings
 
   /** Which logical child of a broadcast join fills the build table. */
   enum BuildSide:

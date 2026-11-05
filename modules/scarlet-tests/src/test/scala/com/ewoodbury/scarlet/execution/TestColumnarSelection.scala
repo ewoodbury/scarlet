@@ -74,13 +74,21 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     DistCollection(Seq(1, 2, 3), 2).map(_.toString).collect() shouldBe Seq("1", "2", "3")
   }
 
-  "string keys" should "keep groupByKey on the row path and hash reduceByKey and join" in {
+  "string keys" should "lower groupByKey and hash reduceByKey and join" in {
     val grouped = DistCollection(Seq("a" -> 1, "a" -> 2, "b" -> 3), 2).groupByKey
-    infoOf(grouped) shouldBe Option.empty[PartitioningInfo]
-    grouped.collect().map { case (key, values) => key -> values.toSet }.toMap shouldBe Map(
-      "a" -> Set(1, 2),
-      "b" -> Set(3),
-    )
+    ColumnarPlanner.lower(grouped.plan).map(_.shape) shouldBe Some("GroupByKey(Exchange(Scan))")
+    val found = grouped.collect().map { case (key, values) => key -> values.toSeq }.toMap
+    val saved = ScarletConf.get
+    val expected =
+      try
+        ScarletRuntime.get.shuffle.clear()
+        ScarletConf.set(saved.copy(columnarExecution = false))
+        grouped.collect().map { case (key, values) => key -> values.toSeq }.toMap
+      finally
+        ScarletRuntime.get.shuffle.clear()
+        ScarletConf.set(saved)
+    found shouldBe expected
+    found shouldBe Map("a" -> Seq(1, 2), "b" -> Seq(3))
 
     val reduced = DistCollection(Seq("a" -> 1, "a" -> 2, "b" -> 3), 2).reduceByKey[String, Int](_ + _)
     reduced.collect().toMap shouldBe Map("a" -> 3, "b" -> 3)

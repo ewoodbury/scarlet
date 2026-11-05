@@ -146,7 +146,9 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * long, boolean, double, int-pair, long-pair, int-triple, and long-triple plans stay
  * [[Layout.Columnar]]. A string-key pair uses [[Layout.StringPair]]. `keys` of that pair is
  * [[Layout.Utf8Dict]] and `values` is [[Layout.Columnar]]. `mapValues` and both filters keep
- * [[Layout.StringPair]]. An inner string join uses [[Layout.StringTriple]].
+ * [[Layout.StringPair]]. An inner string join uses [[Layout.StringTriple]]. Int `groupByKey` uses
+ * [[Layout.GroupedInt]]. String `groupByKey` uses [[Layout.GroupedString]]. `count` is the number
+ * of groups.
  *
  * `take` has a separate bounded path for accepted partition-preserving shapes: it interprets one
  * source partition at a time in order and decodes only the remaining requested values. Plans with
@@ -742,7 +744,8 @@ object ColumnarPlanner:
         current.flatMap(op => lowerElementStep(op, step))
       }
     case PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.LongTriples |
-        PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts =>
+        PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
+        PhysicalOp.Kind.GroupedStrings =>
       None
 
   private def lowerElementStep(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
@@ -1020,8 +1023,8 @@ object ColumnarPlanner:
       hashed(PhysicalOp.Kind.Pairs)
     case _: PhysicalOp.StringHashAggregate =>
       hashed(PhysicalOp.Kind.StringPairs)
-    case _: PhysicalOp.GroupByKey =>
-      hashed(PhysicalOp.Kind.GroupedInts)
+    case group: PhysicalOp.GroupByKey =>
+      hashed(group.kind)
     case _: PhysicalOp.LongHashJoin =>
       hashed(PhysicalOp.Kind.LongPairs)
     case _: PhysicalOp.StringHashJoin =>
@@ -1074,6 +1077,8 @@ object ColumnarPlanner:
     case PhysicalOp.Kind.StringPairs => Layout.StringPair(ScarletConf.get.columnarBatchSize)
     case PhysicalOp.Kind.StringTriples => Layout.StringTriple(ScarletConf.get.columnarBatchSize)
     case PhysicalOp.Kind.GroupedInts => Layout.GroupedInt(ScarletConf.get.columnarBatchSize)
+    case PhysicalOp.Kind.GroupedStrings =>
+      Layout.GroupedString(ScarletConf.get.columnarBatchSize)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Bools | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples =>

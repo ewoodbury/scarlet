@@ -5,10 +5,10 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.core.{ExecutionService, ScarletConf}
+import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
-/** Int `groupByKey` on the columnar path, compared with the row engine per key. */
+/** Int and string `groupByKey` on the columnar path, compared with the row engine per key. */
 class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   private val originalConf = ScarletConf.get
@@ -109,6 +109,130 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     ColumnarPlanner.lower(union.plan) shouldBe None
     valuesByKey(union.collect()) shouldBe valuesByKey(row(union.collect()))
   }
+
+  "string groupByKey" should "match the row path value order and count groups" in {
+    val source = stringSource
+    val grouped = source.groupByKey
+    val found = stringValues(grouped.collect())
+
+    ColumnarPlanner.lower(grouped.plan).map(_.shape) shouldBe Some("GroupByKey(Exchange(Scan))")
+    ColumnarPlanner.partitioning(grouped.plan).map(_.layout) shouldBe Some(
+      Layout.GroupedString(ScarletConf.get.columnarBatchSize),
+    )
+    source.count() shouldBe 12L
+    grouped.count() shouldBe 5L
+    grouped.count() shouldBe row(grouped.count())
+    ColumnarPlanner.tryCount(grouped.plan) shouldBe Some(5L)
+    found shouldBe stringValues(row(grouped.collect()))
+    found shouldBe Map(
+      "" -> Seq(1, 8),
+      accent -> Seq(2, 9, 9),
+      decomposed -> Seq(3, 10),
+      emoji -> Seq(4, 7),
+      "red" -> Seq(5, 6),
+    )
+    accent should not be decomposed
+    ExecutionService.get.executePartitions(grouped.plan).size shouldBe
+      ScarletConf.get.defaultShufflePartitions
+  }
+
+  it should "keep duplicate values and several input partitions" in {
+    val source = DistCollection(Seq("red" -> 1, "red" -> 1, "blue" -> 2, "red" -> 3), 4)
+    val grouped = source.groupByKey
+
+    stringValues(grouped.collect()) shouldBe stringValues(row(grouped.collect()))
+    stringValues(grouped.collect()) shouldBe Map("red" -> Seq(1, 1, 3), "blue" -> Seq(2))
+    grouped.count() shouldBe 2L
+    ColumnarPlanner.tryCount(grouped.plan) shouldBe Some(2L)
+  }
+
+  it should "leave an empty iterable on the row path" in {
+    val grouped = DistCollection(Seq.empty[(String, Int)], 2).groupByKey
+    val parts = ExecutionService.get.executePartitions(grouped.plan)
+
+    ColumnarPlanner.lower(grouped.plan) shouldBe None
+    parts.size shouldBe ScarletConf.get.defaultShufflePartitions
+    parts.foreach(_.data shouldBe empty)
+    grouped.collect() shouldBe empty
+    grouped.count() shouldBe 0L
+    grouped.count() shouldBe row(grouped.count())
+  }
+
+  it should "publish an empty grouped batch when a filter keeps nothing" in {
+    val grouped = stringSource.filterValues((value: Int) => value < 0).groupByKey
+    val parts = ExecutionService.get.executePartitions(grouped.plan)
+
+    ColumnarPlanner.lower(grouped.plan).map(_.shape) shouldBe Some(
+      "GroupByKey(Exchange(FilterValue(Scan)))",
+    )
+    parts.size shouldBe ScarletConf.get.defaultShufflePartitions
+    parts.foreach(_.data shouldBe empty)
+    grouped.collect() shouldBe empty
+    grouped.count() shouldBe 0L
+    ColumnarPlanner.tryCount(grouped.plan) shouldBe Some(0L)
+  }
+
+  it should "lower a filterValues child and refuse projections above the group" in {
+    val filtered = stringSource.filterValues((value: Int) => value > 4).groupByKey
+    val grouped = stringSource.groupByKey
+
+    ColumnarPlanner.lower(filtered.plan).map(_.shape) shouldBe Some(
+      "GroupByKey(Exchange(FilterValue(Scan)))",
+    )
+    stringValues(filtered.collect()) shouldBe stringValues(row(filtered.collect()))
+    stringValues(filtered.collect()) shouldBe Map(
+      "" -> Seq(8),
+      accent -> Seq(9, 9),
+      decomposed -> Seq(10),
+      emoji -> Seq(7),
+      "red" -> Seq(5, 6),
+    )
+    ColumnarPlanner.lower(grouped.keys.plan) shouldBe None
+    ColumnarPlanner.lower(grouped.values.plan) shouldBe None
+    ColumnarPlanner.lower(grouped.map((row: (String, Iterable[Int])) => row._1).plan) shouldBe None
+    ColumnarPlanner.tryTake(grouped.plan, 1) shouldBe None
+    grouped.take(2) shouldBe row(grouped.take(2))
+  }
+
+  it should "refuse a union of two grouped string results" in {
+    val left = DistCollection(Seq("a" -> 1, "b" -> 2), 2).groupByKey
+    val right = DistCollection(Seq("a" -> 3, "c" -> 4), 2).groupByKey
+    val union = left.union(right)
+
+    ColumnarPlanner.lower(union.plan) shouldBe None
+    stringValues(union.collect()) shouldBe stringValues(row(union.collect()))
+  }
+
+  private val accent = "é"
+  private val decomposed = "e\u0301"
+  private val emoji = "😀"
+
+  private def stringSource: DistCollection[(String, Int)] =
+    DistCollection(Plan.Source(Seq(Partition(leftRows), Partition(rightRows))))
+
+  private def leftRows: Seq[(String, Int)] = Seq(
+    "" -> 1,
+    accent -> 2,
+    decomposed -> 3,
+    emoji -> 4,
+    "red" -> 5,
+    nullText(9),
+    "red" -> 6,
+  )
+
+  private def rightRows: Seq[(String, Int)] = Seq(
+    emoji -> 7,
+    "" -> 8,
+    accent -> 9,
+    decomposed -> 10,
+    accent -> 9,
+  )
+
+  private def stringValues(rows: Iterable[(String, Iterable[Int])]): Map[String, Seq[Int]] =
+    rows.map { case (key, values) => key -> values.toSeq }.toMap
+
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def nullText(value: Int): (String, Int) = (null: String) -> value
 
   private def valuesByKey(rows: Iterable[(Int, Iterable[Int])]): Map[Int, Seq[Int]] =
     rows.map { case (key, values) => key -> values.toSeq }.toMap

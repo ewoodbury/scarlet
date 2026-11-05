@@ -62,3 +62,57 @@ private final class IntGroupView(values: Array[Int], start: Int, end: Int) exten
     if (index < 0 || index >= length) then
       throw new IndexOutOfBoundsException(s"index $index outside length $length")
     else values(start + index)
+
+/**
+ * One shuffle partition of string `groupByKey`.
+ *
+ * The shape matches [[GroupedIntBatch]]. Keys are a dictionary column `groups` long, offsets are
+ * `groups + 1`, and values are the input cardinality. `offsets(0) == 0`, offsets are monotone, and
+ * `offsets(groups)` is `values.length`. Group `i` is `values[offsets(i) until offsets(i + 1))`. An
+ * empty bucket is `0` groups, `offsets = Array(0)`, an empty values array, and an empty
+ * dictionary. `keys` is fully present. [[rows]] reads `keys.dictionary(keys.codes(group))`.
+ *
+ * [[valuesFor]] is the same view as [[GroupedIntBatch.valuesFor]]. A published array is not
+ * mutated, and the caller does not recycle it. Holding one group pins the whole values array. The
+ * view is an [[IndexedSeq]], so iteration is multi-pass and `equals` is structural.
+ */
+final case class GroupedStringBatch(keys: DictUtf8Column, offsets: Array[Int], values: Array[Int]):
+  require(
+    offsets.length == keys.length + 1,
+    s"offsets length ${offsets.length} is not groups + 1 (${keys.length + 1})",
+  )
+  require(offsets(0) == 0, s"offsets must start at 0, found ${offsets(0)}")
+  require(
+    offsets(keys.length) == values.length,
+    s"offsets end ${offsets(keys.length)} does not match ${values.length} values",
+  )
+  require(monotonicOffsets, "offsets must be monotone")
+  require(ColumnHash.fullyPresent(keys), "grouped keys must be fully present")
+
+  def length: Int = keys.length
+
+  def groups: Int = keys.length
+
+  /** View of `values[offsets(group) until offsets(group + 1))`. Does not copy. */
+  def valuesFor(group: Int): IndexedSeq[Int] =
+    require(group >= 0 && group < groups, s"group $group outside 0 until $groups")
+    new IntGroupView(values, offsets(group), offsets(group + 1))
+
+  /** One `(key, values)` row per group, in key order. Each value side is [[valuesFor]]. */
+  def rows: Seq[(String, Iterable[Int])] =
+    Seq.tabulate(groups)(group => (keys.dictionary(keys.codes(group)), valuesFor(group)))
+
+  private def monotonicOffsets: Boolean =
+    offsets.indices.drop(1).forall(index => offsets(index) >= offsets(index - 1))
+
+object GroupedStringBatch:
+
+  /**
+   * A fresh empty bucket. `0` groups, `offsets = Array(0)`, no values, and an empty dictionary.
+   */
+  def empty: GroupedStringBatch =
+    GroupedStringBatch(
+      DictUtf8Column.of(Array.empty[String], Array.emptyIntArray, Validity.allValid(0), 0),
+      Array(0),
+      Array.emptyIntArray,
+    )

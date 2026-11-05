@@ -157,6 +157,7 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       PhysicalOp.Kind.StringPairs,
       PhysicalOp.Kind.StringTriples,
       PhysicalOp.Kind.GroupedInts,
+      PhysicalOp.Kind.GroupedStrings,
     )
   }
 
@@ -190,9 +191,13 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     longPairs.collect().toList should contain theSameElementsAs rowPath(longPairs.collect().toList)
   }
 
-  "string keys" should "keep groupByKey on the row path and hash the inner join" in {
+  "string keys" should "lower groupByKey and hash the inner join" in {
     val keyed = DistCollection(Seq("a" -> 1, "b" -> 2, "a" -> 4), Partitions)
-    refuse(keyed.groupByKey.plan)
+    val grouped = keyed.groupByKey
+    ColumnarPlanner.lower(grouped.plan).map(_.shape) shouldBe Some("GroupByKey(Exchange(Scan))")
+    grouped.collect().map { case (key, values) => key -> values.toSeq }.toMap shouldBe rowPath(
+      grouped.collect().map { case (key, values) => key -> values.toSeq }.toMap,
+    )
     val joined = keyed.join(keyed)
     ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
       "StringHashJoin(Exchange(Scan), Exchange(Scan))",
