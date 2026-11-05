@@ -44,21 +44,23 @@ final case class ScarletConf(
     /** Rows per morsel on the columnar path. */
     columnarBatchSize: Int = 8192,
     /**
-     * When true, a grouped-sum bucket, an inner broadcast build, a sort-merge partition, an
-     * int-pair sort, a long-pair sort, or a string-pair sort whose estimate exceeds
-     * `spillBudgetBytes` is spilled. Off by default, so each stays in memory. Outer hash and
-     * broadcast joins do not read this flag; an outer sort-merge does.
+     * When true, a grouped-sum bucket, an int `reduceByKey` bucket, an inner broadcast build, a
+     * sort-merge partition, an int-pair sort, a long-pair sort, or a string-pair sort whose
+     * estimate exceeds `spillBudgetBytes` is spilled. Off by default, so each stays in memory.
+     * Outer hash and broadcast joins do not read this flag; an outer sort-merge does. A spilled
+     * `reduceByKey` bucket may change first-seen output order; compare it as a map.
      */
     spillEnabled: Boolean = false,
     /**
-     * Byte budget for one grouped-sum bucket, one inner-join build table, the sorted sides of one
-     * sort-merge partition, and the sorted input of one int-pair, long-pair, or string-pair sort.
-     * The default is 64 MiB. A broadcast build over this budget is partitioned with the probe. One
-     * partition that is still over it throws. A sort-merge partition over it is written as sorted
-     * runs and merged `spillFanIn` at a time. One equal-key group that is still over it throws. An
-     * int-pair sort over it writes one sorted run per input partition and merges `spillFanIn` runs
-     * at a time. A long-pair sort and a string-pair sort do the same for their pairs. One input
-     * partition is still sorted in memory.
+     * Byte budget for one grouped-sum bucket, one int `reduceByKey` bucket, one inner-join build
+     * table, the sorted sides of one sort-merge partition, and the sorted input of one int-pair,
+     * long-pair, or string-pair sort. The default is 64 MiB. A broadcast build over this budget is
+     * partitioned with the probe. One partition that is still over it throws. A sort-merge
+     * partition over it is written as sorted runs and merged `spillFanIn` at a time. One equal-key
+     * group that is still over it throws. An int-pair sort over it writes one sorted run per input
+     * partition and merges `spillFanIn` runs at a time. A long-pair sort and a string-pair sort do
+     * the same for their pairs. One input partition is still sorted in memory. An int
+     * `reduceByKey` bucket over it is sub-partitioned and folded one morsel at a time.
      */
     spillBudgetBytes: Long = 64L * 1024L * 1024L,
     /**

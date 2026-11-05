@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import com.ewoodbury.scarlet.core.ScarletConf
+
 /**
  * Hash reduce over `Int32` keys and `Int32` values.
  *
@@ -33,6 +35,14 @@ object HashReduce:
   /**
    * Partial-reduce each morsel, merge those partials per input batch, exchange on the key, then
    * reduce each bucket. An empty input is `numPartitions` empty pair batches.
+   *
+   * Spill is off unless [[ScarletConf.spillEnabled]] is set. A bucket whose
+   * [[HashReduceSpill.retainedBytes]] estimate is above [[ScarletConf.spillBudgetBytes]] is
+   * sub-partitioned, written morsel by morsel, and folded with [[HashReduce.int32]] on the
+   * concatenation of the running partial and the new one. That path runs one bucket at a time, so
+   * the bucket's file is deleted before the next bucket opens a store. A run whose buckets all fit
+   * stays on [[MorselScheduler]], including when spill is enabled and none of them exceed the
+   * budget. Spill off is the in-memory [[int32]] result.
    */
   def byKey(
       batches: Vector[ColumnBatch],
@@ -54,9 +64,13 @@ object HashReduce:
         partials => int32(partials, keyOrdinal = 0, valueOrdinal = 1, op),
       )
       val buckets = HashExchange.partitionAll(combined, keyOrdinal = 0, numPartitions, parallelism)
-      MorselScheduler.map(buckets, parallelism) { (_, bucket) =>
-        int32(bucket, keyOrdinal = 0, valueOrdinal = 1, op)
-      }
+      val conf = ScarletConf.get
+      if (buckets.exists(bucket => HashReduceSpill.exceeds(bucket, conf))) then
+        buckets.map(bucket => HashReduceSpill.finish(bucket, parallelism, batchSize, conf, op))
+      else
+        MorselScheduler.map(buckets, parallelism) { (_, bucket) =>
+          int32(bucket, keyOrdinal = 0, valueOrdinal = 1, op)
+        }
 
   private def reduce(keys: Int32Column, values: Int32Column, op: IntBinOp): ColumnBatch =
     val table = new Table(ColumnHash.tableSize(keys.length), op)
