@@ -1,12 +1,15 @@
 package com.ewoodbury.scarlet.columnar
 
+import com.ewoodbury.scarlet.core.ScarletConf
+
 /**
  * Hash reduce over `Int64` keys and `Int64` values.
  *
  * The binary operator is the caller's. It is applied as values are inserted, including when
  * partial groups are merged, so it has to be associative and commutative. Arithmetic wraps at
- * `Long`. This is the `(Long, Long)` `reduceByKey` kernel. There is no spill path: an input that
- * does not fit stays in memory.
+ * `Long`. This is the `(Long, Long)` `reduceByKey` kernel. Spill is off unless
+ * [[ScarletConf.spillEnabled]] is set. Only the post-exchange bucket spills; the partial combine
+ * before the exchange stays in memory.
  *
  * A null key is dropped. A null value stays a null group until another value for that key arrives.
  * The row reducer unboxes a null `Long` to `0` when the operator runs, and leaves a group of one
@@ -37,6 +40,14 @@ object LongHashReduce:
    * Partial-reduce each morsel, merge those partials per input batch, exchange on the key, then
    * reduce each bucket. An empty input is `numPartitions` empty long-pair batches. The exchange
    * bucket is `Long.hashCode`, the same rule `HashPartitioner` uses for a `Long` key.
+   *
+   * Spill is off unless [[ScarletConf.spillEnabled]] is set. A bucket whose
+   * [[LongHashReduceSpill.retainedBytes]] estimate is above [[ScarletConf.spillBudgetBytes]] is
+   * sub-partitioned, written morsel by morsel, and folded with [[int64]] on the concatenation of
+   * the running partial and the new one. That path runs one bucket at a time, so the bucket's file
+   * is deleted before the next bucket opens a store. A run whose buckets all fit stays on
+   * [[MorselScheduler]], including when spill is enabled and none of them exceed the budget. Spill
+   * off is the in-memory [[int64]] result. A spilled bucket may change first-seen output order.
    */
   def byKey(
       batches: Vector[ColumnBatch],
@@ -59,9 +70,13 @@ object LongHashReduce:
       )
       val buckets =
         HashExchange.partitionAllInt64(combined, keyOrdinal = 0, numPartitions, parallelism)
-      MorselScheduler.map(buckets, parallelism) { (_, bucket) =>
-        int64(bucket, keyOrdinal = 0, valueOrdinal = 1, op)
-      }
+      val conf = ScarletConf.get
+      if (buckets.exists(bucket => LongHashReduceSpill.exceeds(bucket, conf))) then
+        buckets.map(bucket => LongHashReduceSpill.finish(bucket, parallelism, batchSize, conf, op))
+      else
+        MorselScheduler.map(buckets, parallelism) { (_, bucket) =>
+          int64(bucket, keyOrdinal = 0, valueOrdinal = 1, op)
+        }
 
   private def reduce(keys: Int64Column, values: Int64Column, op: LongBinOp): ColumnBatch =
     val table = new Table(ColumnHash.tableSize(keys.length), op)
