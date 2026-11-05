@@ -21,13 +21,13 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * value never reaches the kernel. The merged batch is the only result, so a failure during the
  * fold publishes nothing.
  *
- * Only [[StringHashReduce.byKey]] calls this, and only for the post-exchange bucket. The partial
- * combine before the exchange stays in memory. The spill path never holds more than the input
- * bucket, its sub-partitioned copy, the current piece's morsels, one read-back copy, the running
- * partial, the fold table and its dictionary, and one open file. The running partial is the result
- * so far, so it is `O(distinct keys)` and cannot be bounded by the budget.
- * [[HashExchange.partitionAllUtf8]] materialises the sub-partitioned copy, and
- * [[ColumnBatches.slice]] materialises one piece's morsels as the fold reaches that piece.
+ * Only [[StringHashReduce.byKey]] and [[StringHashReduce.byKeySelected]] call this, and only for
+ * the post-exchange bucket. The partial combine before the exchange stays in memory. The spill
+ * path never holds more than the input bucket, its sub-partitioned copy, the current piece's
+ * morsels, one read-back copy, the running partial, the fold table and its dictionary, and one
+ * open file. The running partial is the result so far, so it is `O(distinct keys)` and cannot be
+ * bounded by the budget. [[HashExchange.partitionAllUtf8]] materialises the sub-partitioned copy,
+ * and [[ColumnBatches.slice]] materialises one piece's morsels as the fold reaches that piece.
  */
 private[scarlet] object StringHashReduceSpill:
 

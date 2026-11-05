@@ -451,21 +451,13 @@ private[execution] object ColumnarInterpreter:
           Plan.ReduceByKeyOp(source, reduceFunc),
           PhysicalOp.StringHashAggregate(PhysicalOp.Exchange(child)),
         ) =>
-      // Boundary guard: take refuses an aggregate, so a selector never reaches this arm.
-      require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
-      // Named erasure boundary. Grouped string-pair reduction declares `(Int, Int) => Int`.
-      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
-      val op = reduceFunc.asInstanceOf[(Int, Int) => Int]
-      Columns.StringPairs(
-        StringHashReduce.byKey(
-          StringPairWalk.batches(
-            interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),
-          ),
-          ColumnarPlanner.shuffleWidth,
-          ColumnarPlanner.parallelism,
-          ColumnarPlanner.batchSize,
-          op,
-        ),
+      ReduceArms.stringByKey(
+        source,
+        child,
+        reduceFunc,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
       )
     case (
           Plan.GroupByKeyOp(source),
