@@ -404,15 +404,30 @@ private[execution] object ColumnarInterpreter:
       // Named erasure boundary. Grouped pair reduction declares `(Int, Int) => Int`.
       @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
       val op = reduceFunc.asInstanceOf[(Int, Int) => Int]
-      Columns.Pairs(
-        HashReduce.byKey(
-          pairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)),
-          ColumnarPlanner.shuffleWidth,
-          ColumnarPlanner.parallelism,
-          ColumnarPlanner.batchSize,
-          (left, right) => op(left, right),
-        ),
-      )
+      // A two-filter int-pair stack scans survivor ids. The `None` path is the only one that
+      // interprets that child.
+      val binOp: HashReduce.IntBinOp = (left: Int, right: Int) => op(left, right)
+      val width = ColumnarPlanner.shuffleWidth
+      val workers = ColumnarPlanner.parallelism
+      val batchSize = ColumnarPlanner.batchSize
+      val reduced = FilterChain.selectedPairs(
+        source,
+        child,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
+      ) match
+        case Some(parts) =>
+          HashReduce.byKeySelected(parts, width, workers, batchSize, binOp)
+        case None =>
+          HashReduce.byKey(
+            pairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)),
+            width,
+            workers,
+            batchSize,
+            binOp,
+          )
+      Columns.Pairs(reduced)
     case (
           Plan.ReduceByKeyOp(source, reduceFunc),
           PhysicalOp.LongHashAggregate(PhysicalOp.Exchange(child)),
@@ -457,7 +472,7 @@ private[execution] object ColumnarInterpreter:
         ) =>
       // Boundary guard: take refuses a group, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
-      groupByKeyColumns(source, child, selectedPartition, preserveAbsence, ordinals)
+      GroupByArms.columns(source, child, selectedPartition, preserveAbsence, ordinals)
     case (
           Plan.JoinOp(left, right, strategy),
           PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
@@ -1037,45 +1052,6 @@ private[execution] object ColumnarInterpreter:
             s"join output has ${other.size} columns",
           )
     }
-
-  /**
-   * Int pairs with a two-filter stack scatter survivor ids. Every other int-pair child, and every
-   * string-pair child, stays on the dense exchange. The `None` path is the only one that
-   * interprets that child.
-   */
-  private def groupByKeyColumns(
-      source: Plan[_],
-      child: PhysicalOp,
-      selectedPartition: Option[Int],
-      preserveAbsence: Boolean,
-      ordinals: Set[Int],
-  ): Columns =
-    val width = ColumnarPlanner.shuffleWidth
-    val workers = ColumnarPlanner.parallelism
-    child.kind match
-      case PhysicalOp.Kind.Pairs =>
-        FilterChain.selectedPairs(
-          source,
-          child,
-          selectedPartition,
-          preserveAbsence,
-          ordinals,
-        ) match
-          case Some(parts) =>
-            Columns.GroupedInts(GroupByKey.int32Selected(parts, width, workers))
-          case None =>
-            val pairs =
-              pairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals))
-            Columns.GroupedInts(GroupByKey.int32(pairs, width, workers))
-      case PhysicalOp.Kind.StringPairs =>
-        val input = interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)
-        Columns.GroupedStrings(
-          GroupByKey.strings(StringPairWalk.batches(input), width, workers),
-        )
-      case other =>
-        throw new IllegalStateException(
-          s"groupByKey column is $other, expected int or string pairs",
-        )
 
   private[execution] def pairsOf(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.Pairs(parts) if parts.nonEmpty => parts
