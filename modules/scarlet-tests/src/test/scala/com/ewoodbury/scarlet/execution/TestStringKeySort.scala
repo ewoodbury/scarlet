@@ -12,7 +12,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * In-memory rank split of a string-pair scan. A present key orders by `String.compareTo` (UTF-16
  * code units). A null key orders as `""` and stays null. Ties keep input order. The row path is
- * the oracle. There is no spill.
+ * the oracle. Spill is [[TestStringSortSpill]]. This suite leaves spill off.
  *
  * An empty `(String, Int)` source has no string-pair descriptor and no witness, so it stays on
  * the row path. The zero-row kernel is called directly.

@@ -11,7 +11,8 @@ import com.ewoodbury.scarlet.core.Plan
  * child is a scan of string pairs, to [[PhysicalOp.SortByStringKey]]. Any other child stays on the
  * row path. [[acceptsAsChild]] refuses every sort, so a filter, join, aggregate, or projection
  * above a sort stays on the row path. A long sort spills through the same budget as an int sort.
- * The physical op stays [[PhysicalOp.SortByLongKey]]. A string sort does not spill.
+ * The physical op stays [[PhysicalOp.SortByLongKey]]. A string sort spills through that same
+ * budget. The physical op stays [[PhysicalOp.SortByStringKey]].
  *
  * The sorts share one ordering tag: range distribution on the row key, ascending by effective key.
  * A null int or long key orders as zero and stays null. A null string key orders as `""` and stays

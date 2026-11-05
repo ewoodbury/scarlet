@@ -834,14 +834,16 @@ private[execution] object ColumnarInterpreter:
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
       // String-pair encode keeps a null key. preserveAbsence matches the other sorts. A null
-      // key orders as "" and stays null. There is no spill. Take decodes the prefix.
+      // key orders as "" and stays null. StringRankSplitRuns chooses the in-memory split or
+      // spilled runs. Take decodes the prefix of the result.
       val batches = StringPairWalk.batches(
         interpretAt(source, child, selectedPartition = None, preserveAbsence = true, ordinals),
       )
-      val sorted = StringRankSplit.sortAndSplit(
+      val sorted = StringRankSplitRuns.sortAndSplit(
         batches,
         ColumnarPlanner.shuffleWidth,
         ColumnarPlanner.parallelism,
+        ScarletConf.get,
       )
       Columns.StringPairs(sorted)
     case _ =>

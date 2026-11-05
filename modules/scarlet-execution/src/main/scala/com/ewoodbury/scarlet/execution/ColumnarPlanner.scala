@@ -27,8 +27,10 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * `sortByLongKey` of a long-pair scan lower to a rank split. A null key orders as zero and stays
  * null. Over the budget, with spill on, a long sort writes one run per input partition. At or
  * under the budget, and whenever spill is off, it stays in memory and writes nothing.
- * `sortByStringKey` of a string-pair scan lowers to an in-memory rank split. A null string key
- * orders as `""` and stays null. A string sort does not spill.
+ * `sortByStringKey` of a string-pair scan lowers to a rank split. A null string key orders as `""`
+ * and stays null. Over the budget, with spill on, a string sort writes one run per input
+ * partition. At or under the budget, and whenever spill is off, it stays in memory and writes
+ * nothing.
  *
  * [[lower]] and interpretation walk the same logical plan. The physical node records the operator
  * and not the function, so each logical node is matched to the node [[lower]] built for it. A
@@ -201,7 +203,8 @@ object ColumnarPlanner:
    * typed key sort only for a scan of the matching pair kind. Any other child, and any parent of
    * that sort, stays on the row path. A long sort spills when `spillEnabled` is on and the
    * retained estimate exceeds `spillBudgetBytes`. The physical op stays `SortByLongKey`. A string
-   * sort of a string-pair scan stays in memory. The physical op is `SortByStringKey`.
+   * sort spills on that same budget. The physical op stays `SortByStringKey`. At or under the
+   * budget, and whenever spill is off, the string split stays in memory and writes nothing.
    * [[partitioning]] and [[tryRun]] follow a refusal. They also drop a lowered tree whose layout
    * is invalid.
    */
