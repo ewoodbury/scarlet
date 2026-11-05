@@ -367,6 +367,22 @@ object BatchCodec:
       (stringKey(keys, row), values.values(row))
     }
 
+  /**
+   * Reads `rows(0 until count)` of a string-int batch. A clear key bit is a null string. A clear
+   * value bit on a selected row is an error, the same rule as the dense decoder. A clear value bit
+   * on any other row is not read. `count` is the live prefix. Slots at `count` and beyond are not
+   * decoded.
+   */
+  def decodeStringPairs(batch: ColumnBatch, rows: Array[Int], count: Int): Seq[(String, Int)] =
+    val (keys, values) = stringPair(batch)
+    val live = selectionCount(rows, count)
+    ColumnMetrics.decoded(live)
+    Seq.tabulate(live) { slot =>
+      val row = rows(slot)
+      require(values.isValid(row), s"null Int32 at row $row")
+      (stringKey(keys, row), values.values(row))
+    }
+
   def decodeIntPairs(batch: ColumnBatch): Seq[(Int, Int)] = decodeIntPairs(batch, batch.length)
 
   /**

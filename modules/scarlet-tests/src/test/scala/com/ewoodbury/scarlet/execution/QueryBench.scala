@@ -16,43 +16,28 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
- * Times one query per supported columnar type, plus both grouped-key patterns, a two-filter
- * `groupByKey`, `reduceByKey`, inner join, and int sort, plus an unfiltered int-pair and
- * long-pair sort. Not a test, and not part of `make test`.
+ * Times one query per supported columnar type, plus grouped-key patterns, two-filter int and
+ * string `groupByKey`, `reduceByKey`, inner join, and int sort, plus unfiltered int-pair and
+ * long-pair sorts. Not a test, and not part of `make test`.
  *
- * Each query is built once. The timed region is the action. The scalar checksum is compared after
- * the timer stops. A local loop produces that scalar, and one row-path execution must match it
- * before any sample is kept. A mismatch fails the run.
- *
- * Grouped queries also checksum per-group sums. The row-path oracle folds the pairs that path
- * reads. `groupedSum` itself returns only the grand total, which is unchanged if those pairs are
- * reassigned across keys. The columnar check folds the groups `ColumnPipeline.sumByKey` returns
- * and must match the oracle. Both checks run at every width, before warmup and again after the
- * measured rounds, outside the timer. `grouped-shuffled` uses the same fold. The repeating and
- * shuffled checksums must differ, because the shuffle reassigns keys and the grand totals stay
- * equal.
- *
- * `grouped-sparse` spreads 1024 groups across `0` until `300000`. `grouped-shifting` uses that
- * spread and adds 7 on every odd morsel. Both spans fail the density test, so the partial hashes.
- * The harness checks one morsel of each pattern, outside the timer, and fails if that partial is
- * sorted.
+ * Each query is built once. The timed region is the action. The scalar checksum is compared
+ * after the timer stops, against a local loop and one row-path execution. A mismatch fails the
+ * run. Grouped queries also checksum per-group sums outside the timer. `grouped-shuffled` must
+ * differ from the repeating checksum. `grouped-sparse` and `grouped-shifting` spread groups so
+ * the partial hashes, and one morsel of each must not be sorted.
  *
  * Every sample installs a [[CountingSink]] outside the timer. A columnar sample must publish at
- * least one batch. A row sample must publish none. The check runs at each width and each layout.
- * A mismatch fails the run.
+ * least one batch. A row sample must publish none.
  *
- * `runMain` executes in the sbt JVM. `Test / fork` is left false, so absolute times carry sbt and
- * JIT noise. Comparisons within one run are the signal.
- *
- * Width and layout order are counterbalanced on different bits of the round. The measure phase
- * starts one step later than warmup, so round 0 of measure is not round 0 of warmup. One
+ * `runMain` executes in the sbt JVM. `Test / fork` is left false, so absolute times carry sbt
+ * and JIT noise. Comparisons within one run are the signal. Width and layout order are
+ * counterbalanced. The measure phase starts one step later than warmup. One
  * [[LocalTaskScheduler]] per width is built for the run and shut down at the end.
  *
- * An optional `large` argument runs [[SortScaleBench]] instead of this suite. That mode times
- * only the int-key and long-key sorts, at 5e6 rows, columnar only, at widths 1 and 4, then a 1e6
- * spill stress at width 1. It discards two warmup rounds and measures ten. The row path is not
- * run there. With no arguments, the suite described above runs. Those are the only accepted
- * invocations. Any other argument prints usage to stderr and exits nonzero.
+ * An optional `large` argument runs [[SortScaleBench]] instead: int-key and long-key sorts at
+ * 5e6 rows, columnar only, widths 1 and 4, then a 1e6 spill stress at width 1. Two warmup
+ * rounds are discarded and ten are measured. The row path is not run. Any other argument
+ * prints usage to stderr and exits nonzero.
  *
  * {{{
  * sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.QueryBench"
@@ -182,6 +167,7 @@ object QueryBench:
       .filterKeys((key: Int) => key % 3 != 0)
       .filterValues((value: Int) => value >= 0)
       .groupByKey
+    val stringGroups = FilterStringGroupChecksum.source(generated, sourcePartitions)
     val keptReduce = FilterReduceChecksum.expected(groupKeys, generated, groups)
     val filteredReduce = DistCollection
       .ofIntPairs(groupKeys, generated, sourcePartitions)
@@ -224,6 +210,14 @@ object QueryBench:
         keptGroups,
         filteredGroups.plan,
         checksumGroups(filteredGroups.collect()),
+      ),
+      whole(
+        "filter-string-groupbykey",
+        elementRows,
+        FilterStringGroupChecksum.shape,
+        FilterStringGroupChecksum.expected(generated),
+        stringGroups.plan,
+        FilterStringGroupChecksum.collected(stringGroups.collect()),
       ),
       whole(
         "filter-reducebykey",
@@ -985,13 +979,14 @@ object QueryBench:
       "the measured rounds, at each width.\n" +
       "Sort queries checksum the collected key then value, mixed by 31, in output order. The " +
       "expected value is a local stable sort of the kept pairs, computed before timing.\n" +
-      "filter-groupbykey, filter-reducebykey, filter-join, and filter-sort are two int-pair " +
-      "filters then the wide op, at 1e6 rows, two source partitions, and batch 8192. The join " +
-      "filters the build side and probes an unfiltered unique key. groupByKey checksums " +
-      "(key * 31) xor the value sum xor the value count. reduceByKey checksums (key * 31) xor " +
-      "the wrapped int sum. The join checksums (key * 31) xor the left value xor the right " +
-      "value. filter-sort uses the sort checksum. p50 and alloc_mb are recorded. There is no " +
-      "wall-clock gate.\n" +
+      "filter-groupbykey, filter-string-groupbykey, filter-reducebykey, filter-join, and " +
+      "filter-sort are two filters then the wide op, at 1e6 rows, two source partitions, and " +
+      "batch 8192. The string keys are `(row % 1024).toString`. The join filters the build " +
+      "side and probes an unfiltered unique key. groupByKey checksums (key * 31) xor the " +
+      "value sum xor the value count. The string case uses key.hashCode in place of the key. " +
+      "reduceByKey checksums (key * 31) xor the wrapped int sum. The join checksums " +
+      "(key * 31) xor the left value xor the right value. filter-sort uses the sort checksum. " +
+      "p50 and alloc_mb are recorded. There is no wall-clock gate.\n" +
       "alloc_mb is the nearest-rank p50 of process-wide thread bytes, in decimal megabytes " +
       "(bytes / 1e6). The probe excludes itself. A short-lived worker missed between reads is " +
       "absent. The same estimate is reported for row and columnar, at both widths.\n" +

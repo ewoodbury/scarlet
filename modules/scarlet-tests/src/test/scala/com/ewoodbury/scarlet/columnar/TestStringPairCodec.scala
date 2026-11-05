@@ -61,6 +61,25 @@ class TestStringPairCodec extends AnyFlatSpec with Matchers:
     BatchCodec.decodeStringPairs(batch, 1) shouldBe Seq("red" -> 4)
   }
 
+  it should "decode a selected prefix and ignore a clear value bit past it" in {
+    val batch = pairBatch(
+      DictUtf8Column.of(
+        Array("red", ""),
+        Array(0, 0, 1),
+        Validity.pack(3, row => row != 1),
+        3,
+      ),
+      Int32Column.of(Array(4, 5, 0), Validity.pack(3, row => row != 2), 3),
+      3,
+    )
+
+    BatchCodec.decodeStringPairs(batch, Array(0, 1, 99), 2) shouldBe Seq("red" -> 4, nullKey(5))
+    val caught = intercept[IllegalArgumentException] {
+      BatchCodec.decodeStringPairs(batch, Array(0, 2), 2)
+    }
+    caught.getMessage shouldBe "requirement failed: null Int32 at row 2"
+  }
+
   it should "reject a batch that is not a string key and an int value" in {
     val caught = intercept[IllegalArgumentException] {
       BatchCodec.decodeStringPairs(BatchCodec.ints(Seq(1, 2)))

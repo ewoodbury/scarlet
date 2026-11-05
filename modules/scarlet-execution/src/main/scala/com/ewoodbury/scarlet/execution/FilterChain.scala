@@ -12,20 +12,22 @@ import PredicatePlan.{Atom, Compiled}
  * [[PredicatePlan.compile]] casts every predicate before a kernel runs, and stops at a map. The
  * child is interpreted first, so a later mistyped predicate still does not run the earlier ones. A
  * lone filter is one [[PredicatePlan.applyAtom]] on the existing kernel. Two or more pair or
- * triple filters compact through [[PredicatePlan.selectionSteps]] in one pass. An int, long,
- * float, string, or boolean stack chains [[PredicatePlan.applyAtom]], one kernel per filter. The
- * survivor index is four bytes per row, which costs more than the intermediate column a chained
- * kernel writes for the next filter to read. A boolean column is one bit per row. A long-pair row
- * filter chains the same way, one [[LongPairKernel]] per filter. A whole-row triple filter chains
- * too: it is not a slot atom, so it does not compact through [[Selection]]. Long triples and outer
- * batches still refuse. A map or a pipeline is not a filter and stops the peel.
+ * triple filters compact through [[PredicatePlan.selectionSteps]] in one pass. A string-pair stack
+ * of two or more key or value filters publishes that same index and does not compact. The dense
+ * string path stays in [[StringPairWalk]]. An int, long, float, string, or boolean stack chains
+ * [[PredicatePlan.applyAtom]], one kernel per filter. The survivor index is four bytes per row,
+ * which costs more than the intermediate column a chained kernel writes for the next filter to
+ * read. A boolean column is one bit per row. A long-pair row filter chains the same way, one
+ * [[LongPairKernel]] per filter. A whole-row triple filter chains too: it is not a slot atom, so
+ * it does not compact through [[Selection]]. Long triples and outer batches still refuse. A map or
+ * a pipeline is not a filter and stops the peel.
  *
  * [[PredicatePlan.applyAtom]] does not take the compiled stack. Encoders, including the
  * absence-preserving copy under an outer join, do not run the predicate.
  *
- * [[selected]] is the boundary that keeps the survivor index for an int-pair or int-triple stack.
- * It appends absolute ids per morsel and does not compact. [[compact]] still serves every other
- * caller.
+ * [[selected]] is the boundary that keeps the survivor index for an int-pair, int-triple, or
+ * string-pair stack. It appends absolute ids per morsel and does not compact. [[compact]] still
+ * serves every other caller. A string-pair whole-row filter is not a slot atom, so it is `None`.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Throw"))
 private[execution] object FilterChain:
@@ -64,10 +66,11 @@ private[execution] object FilterChain:
         applyCompiled(columns, compiled, ordinals)
 
   /**
-   * Survivor ids for one int-pair or int-triple stack of two or more filters. A single filter, and
-   * every other kind, returns `None` and is not interpreted. A `Some` interprets the source under
-   * the stack once. Each batch gets one [[Selected]]: morsels append absolute ids into `rows`, in
-   * morsel order, and nothing is concatenated or compacted.
+   * Survivor ids for one int-pair, int-triple, or string-pair stack of two or more filters. A
+   * single filter, a whole-row string filter, and every other kind return `None` and are not
+   * interpreted. A `Some` interprets the source under the stack once. Each batch gets one
+   * [[Selected]]: morsels append absolute ids into `rows`, in morsel order, and nothing is
+   * concatenated or compacted.
    */
   def selected(
       plan: Plan[_],
@@ -77,7 +80,7 @@ private[execution] object FilterChain:
       ordinals: Set[Int],
   ): Option[Vector[Selected]] =
     op.kind match
-      case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples =>
+      case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples | PhysicalOp.Kind.StringPairs =>
         PredicatePlan.compile(plan, op) match
           case Some(compiled)
               if compiled.atoms.length > 1 &&
@@ -151,6 +154,7 @@ private[execution] object FilterChain:
     kind match
       case PhysicalOp.Kind.Pairs => ColumnarInterpreter.pairsOf(columns)
       case PhysicalOp.Kind.Triples => ColumnarInterpreter.triplesOf(columns)
+      case PhysicalOp.Kind.StringPairs => StringPairWalk.batches(columns)
       case _ => missing
 
   /**

@@ -15,9 +15,11 @@ import java.util.Arrays
  * Each bucket keeps first-seen key order and input value order. A null value is not dropped. A
  * clear value bit is a planner bug and throws `IllegalArgumentException`, including a null value
  * on a row whose key is also null. That check runs before the exchange, which would otherwise drop
- * the null key and hide the value. [[int32Selected]] checks only `rows(0 until count)`, so a null
- * value on a dropped row does not throw. One grouped batch is published per partition, including
- * an empty bucket. There is no partial combine, no spill, and no sort.
+ * the null key and hide the value. [[int32Selected]] and [[stringsSelected]] check only
+ * `rows(0 until count)`, so a null value on a dropped row does not throw. [[stringsSelected]]
+ * scatters with [[HashExchange.partitionAllSelectedUtf8]], which drops a null key, keeps `""`, and
+ * shares the source dictionary. One grouped batch is published per partition, including an empty
+ * bucket. There is no partial combine, no spill, and no sort.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object GroupByKey:
@@ -85,6 +87,28 @@ object GroupByKey:
         HashExchange.partitionAllUtf8(batches, keyOrdinal = 0, partitions, parallelism)
       MorselScheduler.map(buckets, parallelism)((_, bucket) => groupStrings(bucket))
 
+  /**
+   * [[strings]] for a selection. Present values are checked on `rows(0 until count)` only. The
+   * exchange scatters those rows, then each bucket uses the dense [[groupStrings]].
+   */
+  def stringsSelected(
+      selected: Vector[Selected],
+      partitions: Int,
+      parallelism: Int,
+  ): Vector[GroupedStringBatch] =
+    require(partitions > 0, s"partitions must be positive, got $partitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    if (selected.isEmpty) then Vector.fill(partitions)(GroupedStringBatch.empty)
+    else
+      require(
+        selected.forall(one => isStringPair(one.batch)),
+        "groupByKey expects (Utf8Dict, Int32) batches",
+      )
+      selected.foreach(requirePresentSelection)
+      val buckets =
+        HashExchange.partitionAllSelectedUtf8(selected, keyOrdinal = 0, partitions, parallelism)
+      MorselScheduler.map(buckets, parallelism)((_, bucket) => groupStrings(bucket))
+
   private def requirePresentValues(batch: ColumnBatch): Unit =
     val values = ColumnHash.int32At(batch, 1)
     require(
@@ -105,6 +129,10 @@ object GroupByKey:
 
   private def isIntPair(batch: ColumnBatch): Boolean =
     batch.schema.length == 2 && batch.schema(0) == LogicalType.Int32 &&
+      batch.schema(1) == LogicalType.Int32
+
+  private def isStringPair(batch: ColumnBatch): Boolean =
+    batch.schema.length == 2 && batch.schema(0) == LogicalType.Utf8Dict &&
       batch.schema(1) == LogicalType.Int32
 
   private val nullValueMessage =
