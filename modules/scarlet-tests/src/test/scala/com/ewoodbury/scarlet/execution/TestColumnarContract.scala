@@ -30,15 +30,15 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 196 accepted fixtures. The string inner join moved from the excluded list.
-    // 195 + 1 = 196.
-    accepted.size shouldBe 196
-    // 37 exclusions. 196 + 37 = 233. 38 - 1 = 37.
+    // 197 accepted fixtures. sortByStringKey of a string-pair scan is new. 196 + 1 = 197.
+    // The string inner join moved from the excluded list. 195 + 1 = 196, then this fixture.
+    accepted.size shouldBe 197
+    // 37 exclusions. 197 + 37 = 234. The excluded list is unchanged. 38 - 1 = 37.
     // Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by
     // execution tests, not contract fixtures, because the contract does not track the int
     // refusals either.
     excluded.size shouldBe 37
-    (accepted.size + excluded.size) shouldBe 233
+    (accepted.size + excluded.size) shouldBe 234
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -452,6 +452,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         rangeSortedInfo(layout),
         Some("SortByLongKey(Scan)"),
       ),
+      AcceptedCase(
+        "sortByStringKey of a string-pair scan",
+        Plan.SortByStringKeyOp(stringKeySource),
+        rangeSortedInfo(stringPairLayout),
+        Some("SortByStringKey(Scan)"),
+      ),
       AcceptedCase("int pair keys", keys, narrowInfo(2, layout), Some("Key(Scan)")),
       AcceptedCase("int pair values", values, narrowInfo(2, layout), Some("Value(Scan)")),
       AcceptedCase("int mapValues", mapValues, narrowInfo(2, layout), Some("MapValue(Scan)")),
@@ -818,8 +824,9 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
    * `lower` and the action gates share one decision. A refused plan, including a non-int
    * sort-merge and a type-changing pair map, makes every gate return `None`. An accepted plan
    * runs `tryRun` and `tryCount`. `tryTake` runs when the physical tree keeps input partitions,
-   * and for an int-key or long-key sort, which runs the whole sort and then decodes the prefix.
-   * `trySumInt`, `trySumLong`, and `trySumDouble` run only for that numeric kind. `tryGroupedSum`
+   * and for an int-key, long-key, or string-key sort, which runs the whole sort and then decodes
+   * the prefix. `trySumInt`, `trySumLong`, and `trySumDouble` run only for that numeric kind.
+   * `tryGroupedSum`
    * equals `groupedSum` for an accepted grouped pair source and for an accepted row, key, or
    * value filter of one, and is `None` for every other accepted plan. The peel label follows
    * [[expectedGroupedPeel]]. A pair map that stays `(Int, Int)` is outside these lists:
@@ -888,12 +895,15 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.HashFullOuter(_, _) | PhysicalOp.BroadcastJoin(_, _, _) |
         PhysicalOp.BroadcastLeftOuter(_, _) | PhysicalOp.BroadcastRightOuter(_, _) |
         PhysicalOp.BroadcastFullOuter(_, _) | PhysicalOp.SortByIntKey(_) |
-        PhysicalOp.SortByLongKey(_) | PhysicalOp.Union(_, _) | PhysicalOp.Dedupe(_) =>
+        PhysicalOp.SortByLongKey(_) | PhysicalOp.SortByStringKey(_) | PhysicalOp.Union(_, _) |
+        PhysicalOp.Dedupe(_) =>
       false
 
   /** A key sort is not partition-preserving, and `tryTake` still runs it. */
   private def acceptsTake(op: PhysicalOp): Boolean = op match
-    case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey => true
+    case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey |
+        _: PhysicalOp.SortByStringKey =>
+      true
     case other => preservesPartitions(other)
 
   private def assertRowPath[A](plan: Plan[A]): Unit =
@@ -1027,6 +1037,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     // Typed key nodes deliberately share the generic PlanNode.SortBy label.
     case Plan.SortByIntKeyOp(_) => PlanNode.SortBy
     case Plan.SortByLongKeyOp(_) => PlanNode.SortBy
+    case Plan.SortByStringKeyOp(_) => PlanNode.SortBy
     case Plan.JoinOp(_, _, _) => PlanNode.Join
     case Plan.LeftOuterJoinOp(_, _, _) => PlanNode.Join
     case Plan.RightOuterJoinOp(_, _, _) => PlanNode.Join

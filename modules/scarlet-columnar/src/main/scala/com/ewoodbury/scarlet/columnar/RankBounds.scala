@@ -1,7 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
 /**
- * Rank boundaries shared by the int split and the long split.
+ * Rank boundaries shared by the int split, the long split, and the string split.
  *
  * Global rank `r` is written into output partition `r * partitions / rows`. Both factors are
  * non-negative, and `/` is integer division. That quotient is the inverse of the partition start:
@@ -12,7 +12,7 @@ package com.ewoodbury.scarlet.columnar
  * [[RankScatter]] and [[RankScatterLong]] both call [[outputSizes]] and [[place]]. The column type
  * is the only difference: each caller writes its own sink. [[RankSplitRuns]] reaches the same
  * boundaries through [[RankScatter]]. [[RankSplitLongRuns]] reaches them through
- * [[RankScatterLong]].
+ * [[RankScatterLong]]. [[StringRankSplit]] calls [[outputSizes]] and [[place]] directly.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[columnar] object RankBounds:

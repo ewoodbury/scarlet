@@ -256,6 +256,17 @@ final case class DistCollection[A](plan: Plan[A]):
     DistCollection(Plan.SortByLongKeyOp(kvPlan))
 
   /**
+   * Sorts `(String, Int)` pairs ascending by column 0. Builds [[Plan.SortByStringKeyOp]] from the
+   * key-value plan. Generic [[sortBy]] stays an opaque [[Plan.SortByOp]] and runs on the row path.
+   * A scan of string pairs lowers to a columnar rank split. Any other child stays on the row path.
+   * A present key orders by `String.compareTo` (UTF-16 code units). A null key orders as `""` and
+   * stays null. Ties keep input order. This matches
+   * `sortBy(pair => if (pair._1 == null) "" else pair._1)`. There is no spill.
+   */
+  def sortByStringKey(using ev: A =:= (String, Int)): DistCollection[(String, Int)] =
+    DistCollection(Plan.SortByStringKeyOp(kvPlan))
+
+  /**
    * Transformation: Joins this collection with another collection by key, requiring a shuffle
    * operation. A null key is dropped on both sides and does not match, for every strategy. Returns
    * a new DistCollection representing the joined data. Does not trigger computation.
