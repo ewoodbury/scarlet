@@ -237,7 +237,10 @@ enum PhysicalOp:
    * Global sort of a string-pair scan. Each source partition is sorted by effective key, then the
    * sorted runs are rank-merged into `defaultShufflePartitions`. A present key orders by
    * `String.compareTo` (UTF-16 code units). A null key orders as `""` and stays null. Ties keep
-   * input order. Output kind is [[PhysicalOp.Kind.StringPairs]]. There is no spill.
+   * input order. Output kind is [[PhysicalOp.Kind.StringPairs]]. Over the budget, with spill on,
+   * each input partition is one sorted run and the runs are merged. One input partition is still
+   * sorted in memory. At or under the budget, and whenever spill is off, the in-memory split runs
+   * and writes nothing.
    *
    * The ordering tag is [[OrderingTag.Sorted]] with `Seq(0)` and `Seq(true)`. That is ascending by
    * effective key: a null key orders as `""` and stays null in the output. The tag is not a claim

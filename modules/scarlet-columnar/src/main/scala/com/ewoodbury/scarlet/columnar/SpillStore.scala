@@ -18,8 +18,12 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * A spill file is a header, a payload, a footer, and a CRC32 of the footer. The header holds the
  * magic `SCRSPILL`, the version, the schema, the batch count, and the footer offset and length.
  * Each footer record holds the batch's file offset, byte length, row count, and a CRC32 of that
- * batch's bytes. Int32 and Int64 columns are stored with their validity words. A zero-row batch is
- * legal. Every other column type is refused, including a dictionary string column.
+ * batch's bytes. Int32 and Int64 columns are stored with their validity words. A dictionary string
+ * column stores its validity words, then the dictionary, then the codes. The dictionary is an int
+ * count followed by each entry's UTF-16 code-unit count and code units. A zero-row batch is legal.
+ * Float64, Bool, and any other column type are refused. The version is 2; the Utf8 tag is new to
+ * that version, so a version-2 reader from before this change refuses these files by tag, not by
+ * version.
  *
  * The bytes are written to `<id>.<pid>.tmp`, fsynced, then moved into `<id>.<pid>.spill` with an
  * atomic move. `maxFiles` and `maxBytes` are exclusive upper bounds on the files this store has
@@ -238,6 +242,7 @@ object SpillStore:
   private[columnar] def supported(column: Column): Unit = column match
     case _: Int32Column => ()
     case _: Int64Column => ()
+    case _: DictUtf8Column => ()
     case other =>
       throw new IllegalArgumentException(s"${other.logicalType} columns cannot be spilled")
 
@@ -316,6 +321,7 @@ private[columnar] object SpillLayout:
   val Version: Int = 2
   val Int32Tag: Int = 1
   val Int64Tag: Int = 2
+  val Utf8Tag: Int = 3
 
   /** Offset, length, row count, and the CRC32 of that batch. */
   val FooterEntryBytes: Int = 24
@@ -333,11 +339,13 @@ private[columnar] object SpillLayout:
   def tag(logicalType: LogicalType): Int = logicalType match
     case LogicalType.Int32 => Int32Tag
     case LogicalType.Int64 => Int64Tag
+    case LogicalType.Utf8Dict => Utf8Tag
     case other => throw new IllegalArgumentException(s"$other columns cannot be spilled")
 
   def logicalType(tag: Int): LogicalType = tag match
     case Int32Tag => LogicalType.Int32
     case Int64Tag => LogicalType.Int64
+    case Utf8Tag => LogicalType.Utf8Dict
     case other => throw new IllegalArgumentException(s"unknown spill column tag $other")
 
 private object SpillCodec:
@@ -399,8 +407,38 @@ private object SpillCodec:
     case int64: Int64Column =>
       writeValidity(channel, crc, int64.validity, int64.length) +
         writeLongs(channel, crc, int64.values, int64.length)
+    case utf8: DictUtf8Column =>
+      writeValidity(channel, crc, utf8.validity, utf8.length) +
+        writeDictionary(channel, crc, utf8.dictionary) +
+        writeInts(channel, crc, utf8.codes, utf8.length)
     case other =>
       throw new IllegalArgumentException(s"${other.logicalType} columns cannot be spilled")
+
+  /**
+   * Count, then each entry's UTF-16 code-unit count and code units. UTF-16 is lossless for every
+   * JVM string, including an unpaired surrogate, which UTF-8 would replace. Codes are written by
+   * the caller.
+   */
+  private def writeDictionary(
+      channel: FileChannel,
+      crc: CRC32,
+      dictionary: Array[String],
+  ): Long =
+    val counted = writeFully(channel, crc, intBytes(dictionary.length), checksum = true)
+    dictionary.foldLeft(counted) { (written, entry) =>
+      written +
+        writeFully(channel, crc, intBytes(entry.length), checksum = true) +
+        writeChars(channel, crc, entry)
+    }
+
+  private def writeChars(channel: FileChannel, crc: CRC32, text: String): Long =
+    val buffer = ByteBuffer.allocate(text.length * 2).order(ByteOrder.LITTLE_ENDIAN)
+    var index = 0
+    while (index < text.length) {
+      buffer.putChar(text.charAt(index))
+      index += 1
+    }
+    writeFully(channel, crc, buffer.array(), checksum = true)
 
   private def writeValidity(
       channel: FileChannel,
@@ -687,7 +725,27 @@ private object SpillCodec:
     logicalType match
       case LogicalType.Int32 => Int32Column.of(readInts(cursor, rows), validity, rows)
       case LogicalType.Int64 => Int64Column.of(readLongs(cursor, rows), validity, rows)
+      case LogicalType.Utf8Dict =>
+        val dictionary = readDictionary(cursor)
+        DictUtf8Column.of(dictionary, readInts(cursor, rows), validity, rows)
       case other => throw new IllegalArgumentException(s"$other columns cannot be spilled")
+
+  private def readDictionary(cursor: Cursor): Array[String] =
+    val count = cursor.getInt
+    require(count >= 0, s"dictionary count must be >= 0, got $count")
+    require(count.toLong <= cursor.remaining.toLong / 4L, "truncated spill dictionary")
+    Array.tabulate(count) { _ =>
+      val length = cursor.getInt
+      require(length >= 0, s"dictionary code-unit count must be >= 0, got $length")
+      require(cursor.remaining.toLong >= length.toLong * 2L, "truncated spill dictionary")
+      val chars = new Array[Char](length)
+      var index = 0
+      while (index < length) {
+        chars(index) = cursor.getChar
+        index += 1
+      }
+      new String(chars)
+    }
 
   private def readValidity(cursor: Cursor, rows: Int): Validity =
     val count = cursor.getInt
@@ -719,6 +777,10 @@ private object SpillCodec:
     def getLong: Long =
       require(buffer.remaining >= 8, "truncated spill file")
       buffer.getLong
+
+    def getChar: Char =
+      require(buffer.remaining >= 2, "truncated spill file")
+      buffer.getChar
 
     def getBytes(count: Int): Array[Byte] =
       require(buffer.remaining >= count, "truncated spill file")

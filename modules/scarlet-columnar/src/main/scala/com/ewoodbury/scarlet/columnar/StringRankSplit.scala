@@ -17,11 +17,11 @@ package com.ewoodbury.scarlet.columnar
  * partition order. Each run is already tie-sorted by row, so equal keys keep global input order.
  *
  * Partition `i` starts at `ceil(i * rows / partitions)` and ends at `ceil((i + 1) * rows /
- * partitions)`, the same boundaries as [[RankBounds]]. Each output partition has its own
- * dictionary: the key text is interned once per distinct string, a null key is a clear bit, and
- * the value bit is copied. Output partition `i` is sorted. Sizes differ by at most one. The last
- * effective key of a non-empty partition is at most the first effective key of the next non-empty
- * partition. Concatenation is globally sorted.
+ * partitions)`, the same boundaries as [[RankBounds]]. [[StringRankScatter]] builds each output.
+ * Each output partition has its own dictionary: the key text is interned once per distinct string,
+ * a null key is a clear bit, and the value bit is copied. Output partition `i` is sorted. Sizes
+ * differ by at most one. The last effective key of a non-empty partition is at most the first
+ * effective key of the next non-empty partition. Concatenation is globally sorted.
  *
  * `rows == 0` returns `partitions` fresh empty string-pair batches and does not sort, including an
  * empty `batches` vector. `partitions <= 0` and `parallelism <= 0` are rejected. This object does
@@ -173,7 +173,7 @@ object StringRankSplit:
         Validity.setBit(valueWords, out)
       out += 1
     }
-    publish(keys.dictionary, outCodes, keyWords, outValues, valueWords, count)
+    StringRankScatter.pairs(keys.dictionary, outCodes, keyWords, outValues, valueWords, count)
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def merge(runs: Vector[ColumnBatch], rows: Int, partitions: Int): Vector[ColumnBatch] =
@@ -186,15 +186,13 @@ object StringRankSplit:
       if (opened(run).length > 0) then pushRun(heap, keys, opened, cursors, run)
       run += 1
     }
-    val sizes = RankBounds.outputSizes(rows, partitions)
-    val sinks = Array.tabulate(partitions)(part => new Sink(sizes(part)))
-    RankBounds.place(rows, partitions, () => !heap.isEmpty) { part =>
+    StringRankScatter.scatter(rows, partitions, () => !heap.isEmpty) { sink =>
       val chosen = heap.pop()
       val cursor = cursors(chosen)
       val source = opened(chosen)
       val keyOn = Validity.isSet(source.keyWords, cursor)
       val valueOn = Validity.isSet(source.valueWords, cursor)
-      sinks(part).write(
+      sink.write(
         keyOn,
         if (keyOn) source.text(cursor) else "",
         valueOn,
@@ -202,10 +200,6 @@ object StringRankSplit:
       )
       cursors(chosen) = cursor + 1
       if (cursors(chosen) < source.length) then pushRun(heap, keys, opened, cursors, chosen)
-    }
-    Vector.tabulate(partitions) { part =>
-      if (sizes(part) == 0) then ColumnBatches.emptyStringPairs
-      else sinks(part).toBatch
     }
 
   /**
@@ -246,26 +240,6 @@ object StringRankSplit:
       s"key length ${keys.length}, value length ${values.length}, and batch length ${batch.length} disagree",
     )
     (keys, values)
-
-  private def publish(
-      dictionary: Array[String],
-      codes: Array[Int],
-      keyWords: Array[Long],
-      values: Array[Int],
-      valueWords: Array[Long],
-      rows: Int,
-  ): ColumnBatch =
-    new ColumnBatch(
-      pairSchema,
-      Vector(
-        DictUtf8Column.of(dictionary, codes, Validity.fromWords(keyWords, rows), rows),
-        Int32Column.of(values, Validity.fromWords(valueWords, rows), rows),
-      ),
-      rows,
-    )
-
-  private val pairSchema: Vector[LogicalType] =
-    Vector(LogicalType.Utf8Dict, LogicalType.Int32)
 
   private final class Run(
       val dictionary: Array[String],
@@ -336,28 +310,3 @@ object StringRankSplit:
       val held = nodes(left)
       nodes(left) = nodes(right)
       nodes(right) = held
-
-  /** One output partition. A null key is not interned. A missing value is not copied. */
-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private final class Sink(val size: Int):
-
-    private val codes = new Array[Int](size)
-    private val values = new Array[Int](size)
-    private val keyWords = Validity.allocate(size)
-    private val valueWords = Validity.allocate(size)
-    private val words = DictUtf8Column.Words.empty
-    private var filled: Int = 0
-
-    def write(keyPresent: Boolean, key: String, valuePresent: Boolean, value: Int): Unit =
-      require(filled < size, s"rank split overflowed a partition of $size rows")
-      if (keyPresent) then
-        codes(filled) = words.intern(key)
-        Validity.setBit(keyWords, filled)
-      if (valuePresent) then
-        values(filled) = value
-        Validity.setBit(valueWords, filled)
-      filled += 1
-
-    def toBatch: ColumnBatch =
-      require(filled == size, s"rank split filled $filled of $size")
-      publish(words.toArray, codes, keyWords, values, valueWords, size)

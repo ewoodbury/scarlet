@@ -261,7 +261,10 @@ final case class DistCollection[A](plan: Plan[A]):
    * A scan of string pairs lowers to a columnar rank split. Any other child stays on the row path.
    * A present key orders by `String.compareTo` (UTF-16 code units). A null key orders as `""` and
    * stays null. Ties keep input order. This matches
-   * `sortBy(pair => if (pair._1 == null) "" else pair._1)`. There is no spill.
+   * `sortBy(pair => if (pair._1 == null) "" else pair._1)`. When `spillEnabled` is on and the
+   * retained estimate exceeds `spillBudgetBytes`, each input partition is one sorted run and the
+   * runs are merged `spillFanIn` at a time. One input partition is still sorted in memory. At or
+   * under the budget, and whenever spill is off, the in-memory split runs and writes nothing.
    */
   def sortByStringKey(using ev: A =:= (String, Int)): DistCollection[(String, Int)] =
     DistCollection(Plan.SortByStringKeyOp(kvPlan))

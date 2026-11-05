@@ -12,7 +12,8 @@ package com.ewoodbury.scarlet.columnar
  * [[RankScatter]] and [[RankScatterLong]] both call [[outputSizes]] and [[place]]. The column type
  * is the only difference: each caller writes its own sink. [[RankSplitRuns]] reaches the same
  * boundaries through [[RankScatter]]. [[RankSplitLongRuns]] reaches them through
- * [[RankScatterLong]]. [[StringRankSplit]] calls [[outputSizes]] and [[place]] directly.
+ * [[RankScatterLong]]. [[StringRankSplit]] and [[StringRankSplitRuns]] reach them through
+ * [[StringRankScatter]].
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[columnar] object RankBounds:
