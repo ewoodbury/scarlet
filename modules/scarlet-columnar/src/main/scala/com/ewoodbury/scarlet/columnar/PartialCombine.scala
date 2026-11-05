@@ -23,6 +23,29 @@ object PartialCombine:
       val (sizes, partials) = partialMorsels(batches, batchSize, parallelism, partial)
       mergeMorsels(sizes, partials, parallelism, merge)
 
+  /**
+   * [[perBatch]] for a selection. Each live prefix `[0, count)` is cut into index ranges of
+   * `batchSize`. The id array is not copied. A `count` of zero is one empty range, so the exchange
+   * still sees one partial per input batch. The partials are dense, and [[mergeMorsels]] combines
+   * them.
+   */
+  def perBatchSelected(
+      selected: Vector[Selected],
+      batchSize: Int,
+      parallelism: Int,
+      partial: (Selected, Int, Int) => ColumnBatch,
+      merge: ColumnBatch => ColumnBatch,
+  ): Vector[ColumnBatch] =
+    require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    if (selected.isEmpty) then Vector.empty
+    else
+      val groups = selected.map(one => ranges(one, batchSize))
+      val partials = MorselScheduler.map(groups.flatten, parallelism) { (_, span) =>
+        partial(span.selected, span.from, span.until)
+      }
+      mergeMorsels(groups.map(_.length), partials, parallelism, merge)
+
   /** One partial per morsel, in input order. `sizes` counts the morsels of each input batch. */
   def partialMorsels(
       batches: Vector[ColumnBatch],
@@ -79,6 +102,14 @@ object PartialCombine:
     if (left.nonEmpty) then
       throw new IllegalArgumentException(s"${left.length} partials were not grouped")
     groups
+
+  private final case class Span(selected: Selected, from: Int, until: Int)
+
+  /** Index ranges of one live prefix. `count == 0` is one empty range. The id array is shared. */
+  private def ranges(one: Selected, batchSize: Int): Vector[Span] =
+    ColumnBatches.cuts(one.count, batchSize).map { case (start, length) =>
+      Span(one, start, start + length)
+    }
 
   private final case class Piece(batch: ColumnBatch, combine: Boolean)
 
