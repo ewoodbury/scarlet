@@ -317,6 +317,46 @@ class TestColumnBatch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     thrown.getMessage shouldBe "null join value at row 65"
   }
 
+  it should "decode selected int pairs and ignore a null outside that prefix" in {
+    val batch = BatchCodec.nullableIntPairs(
+      Seq((Some(1), Some(10)), (None, Some(20)), (Some(3), Some(30))),
+    )
+    val rows = Array(0, 2, 1)
+
+    BatchCodec.decodeIntPairs(batch, rows, 0) shouldBe Seq.empty[(Int, Int)]
+    BatchCodec.decodeIntPairs(batch, rows, 2) shouldBe Seq((1, 10), (3, 30))
+    BatchCodec.decodeIntPairs(batch, 1) shouldBe Seq((1, 10))
+    val thrown = intercept[IllegalArgumentException] {
+      BatchCodec.decodeIntPairs(batch, rows, 3)
+    }
+    thrown.getMessage should include("null Int32 pair at row 1")
+    an[IllegalArgumentException] should be thrownBy {
+      BatchCodec.decodeIntPairs(batch, 2)
+    }
+  }
+
+  it should "decode selected join rows and ignore a null outside that prefix" in {
+    val live = 4
+    def column(present: Int => Boolean): Int32Column =
+      Int32Column.of(Array.tabulate(live)(identity), Validity.pack(live, present), live)
+    val batch = new ColumnBatch(
+      Vector(LogicalType.Int32, LogicalType.Int32, LogicalType.Int32),
+      Vector(column(_ => true), column(row => row != 1), column(_ => true)),
+      live,
+    )
+    val rows = Array(0, 2, 1, 3)
+
+    BatchCodec.decodeIntTriples(batch, rows, 2) shouldBe Seq((0, (0, 0)), (2, (2, 2)))
+    BatchCodec.decodeIntTriples(batch, 1) shouldBe Seq((0, (0, 0)))
+    val thrown = intercept[IllegalArgumentException] {
+      BatchCodec.decodeIntTriples(batch, rows, 3)
+    }
+    thrown.getMessage shouldBe "null join value at row 1"
+    an[IllegalArgumentException] should be thrownBy {
+      BatchCodec.decodeIntTriples(batch)
+    }
+  }
+
   it should "store zero in a null slot and reject a non-null decode" in {
     val column = Int32Column.fromNullable(Seq(Some(4), None))
     column.isValid(0) shouldBe true

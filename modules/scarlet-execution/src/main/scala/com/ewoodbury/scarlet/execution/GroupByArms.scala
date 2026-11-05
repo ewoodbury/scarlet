@@ -25,7 +25,7 @@ private[execution] object GroupByArms:
     val workers = ColumnarPlanner.parallelism
     child.kind match
       case PhysicalOp.Kind.Pairs =>
-        FilterChain.selectedPairs(
+        FilterChain.selected(
           source,
           child,
           selectedPartition,

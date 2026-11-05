@@ -410,7 +410,7 @@ private[execution] object ColumnarInterpreter:
       val width = ColumnarPlanner.shuffleWidth
       val workers = ColumnarPlanner.parallelism
       val batchSize = ColumnarPlanner.batchSize
-      val reduced = FilterChain.selectedPairs(
+      val reduced = FilterChain.selected(
         source,
         child,
         selectedPartition,

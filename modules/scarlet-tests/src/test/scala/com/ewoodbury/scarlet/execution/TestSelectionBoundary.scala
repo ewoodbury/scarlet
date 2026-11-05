@@ -13,9 +13,10 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
  * Plan-level proof of where a stack of unfused filters compacts. Counts are
- * [[ColumnMetrics.batchCount]], not wall time. Pair and triple batches compact once. A
- * single-column chain publishes one batch per filter. A lone filter is left to the existing
- * kernels, whose formulas live in the morsel and pair suites.
+ * [[ColumnMetrics.batchCount]], not wall time. Collect and take of a two-filter int-pair or
+ * int-triple stack decode the survivor index and do not publish the compact. Interpreting that
+ * stack still compacts. A single-column chain publishes one batch per filter. A lone filter is
+ * left to the existing kernels, whose formulas live in the morsel and pair suites.
  */
 class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -175,7 +176,7 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
     row(piped.collect()) shouldBe footprint(piped.collect())._1
   }
 
-  "pair filters" should "compact FilterValue(FilterKey) once" in {
+  "pair filters" should "decode FilterValue(FilterKey) without publishing the compact" in {
     val firstCalls = new AtomicInteger
     val secondCalls = new AtomicInteger
     val stacked = DistCollection(Seq((1, 2), (3, 4), (5, 0), (0, 7)), 1)
@@ -196,13 +197,14 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
     val (collected, batches, visits, _) = footprint(stacked.collect())
     collected shouldBe Seq((1, 2), (3, 4), (5, 0))
     collected shouldBe expected
-    batches shouldBe 2L
+    // Encode only. The survivor index is decoded in place, so the compact is not published.
+    batches shouldBe 1L
     visits shouldBe 1L
     firstCalls.get() shouldBe 4
     secondCalls.get() shouldBe 3
   }
 
-  it should "compact two FilterKey nodes once" in {
+  it should "decode two FilterKey nodes without publishing the compact" in {
     val stacked = DistCollection(Seq((1, 2), (3, 4), (4, 8), (0, 3)), 1)
       .filterKeys((key: Int) => key != 4)
       .filterKeys((key: Int) => key >= 0)
@@ -210,11 +212,12 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
     shape(stacked.plan) shouldBe "FilterKey(FilterKey(Scan))"
     val (collected, batches, visits, _) = footprint(stacked.collect())
     collected shouldBe Seq((1, 2), (3, 4), (0, 3))
-    batches shouldBe 2L
+    // Encode only. The survivor index is decoded in place, so the compact is not published.
+    batches shouldBe 1L
     visits shouldBe 1L
   }
 
-  it should "compact FilterRow(FilterKey) once" in {
+  it should "decode FilterRow(FilterKey) without publishing the compact" in {
     val stacked = DistCollection(Seq((1, 5), (4, 1), (0, 3)), 1)
       .filterKeys((key: Int) => key > 0)
       .filter { case (key, value) => key < value }
@@ -222,7 +225,8 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
     shape(stacked.plan) shouldBe "FilterRow(FilterKey(Scan))"
     val (collected, batches, visits, _) = footprint(stacked.collect())
     collected shouldBe Seq((1, 5))
-    batches shouldBe 2L
+    // Encode only. The survivor index is decoded in place, so the compact is not published.
+    batches shouldBe 1L
     visits shouldBe 1L
   }
 
@@ -291,7 +295,7 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
     rowCalls.get() shouldBe 2
   }
 
-  "triple filters" should "compact two column filters once" in {
+  "triple filters" should "decode two column filters without publishing the compact" in {
     val build = DistCollection.ofIntPairs(Array(1, 2, 3, 4), Array(10, 20, 30, 40), 1)
     val probe = DistCollection.ofIntPairs(Array(1, 2, 4), Array(7, 8, 9), 1)
     val stacked = build.join(probe).filterJoinKey(_ % 2 == 0).filterJoinLeft(_ >= 20)
@@ -312,12 +316,189 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
       (value, ColumnMetrics.batchCount, ColumnMetrics.visitCount)
     }
     collected shouldBe expected
-    // One shuffle partition. The join is not a single encode: both sides and the output
-    // publish before the filter. Two column filters then compact in that one morsel.
+    // One shuffle partition. The join publishes before the filter. Collect decodes the survivor
+    // index and does not publish the compact. The selection still visits that morsel.
     joinedBatches shouldBe 3L
     joinedVisits shouldBe 3L
-    batches shouldBe joinedBatches + 1L
+    batches shouldBe joinedBatches
     visits shouldBe joinedVisits + 1L
+
+    onePartition()
+    stacked.take(0) shouldBe empty
+    onePartition()
+    stacked.take(1) shouldBe rowUnder(stacked.take(1))
+    onePartition()
+    val rest = stacked.take(10)
+    rest shouldBe rowUnder(stacked.take(10))
+    rest.length should be > 1
+  }
+
+  "collect and take" should "decode a two-filter int-pair stack and skip the compact" in {
+    val source = DistCollection.ofIntPairs(Array(1, 2, 3, 4), Array(10, 20, 30, 40), 2)
+    val keyCalls = new AtomicInteger
+    val valueCalls = new AtomicInteger
+    val stacked = source
+      .filterKeys { (key: Int) =>
+        keyCalls.incrementAndGet()
+        key > 1
+      }
+      .filterValues { (value: Int) =>
+        valueCalls.incrementAndGet()
+        value < 40
+      }
+    val expected = row(stacked.collect().toList)
+    keyCalls.set(0)
+    valueCalls.set(0)
+
+    val (collected, batches, _, decoded) = footprint(stacked.collect().toList)
+    collected shouldBe expected
+    collected shouldBe List((2, 20), (3, 30))
+    decoded shouldBe 2L
+    // One pass over both partitions. A second interpret would double the counts.
+    keyCalls.get() shouldBe 4
+    valueCalls.get() shouldBe 3
+
+    val encode = published {
+      val scan = ColumnarPlanner.lower(source.plan).getOrElse(fail("expected a pair scan"))
+      val _ = ColumnarInterpreter.interpret(source.plan, scan)
+    }
+    val compacting = published {
+      val op = ColumnarPlanner.lower(stacked.plan).getOrElse(fail("expected a pair filter"))
+      val _ = ColumnarInterpreter.interpret(stacked.plan, op)
+    }
+    val compactPublishes = compacting - encode
+    compactPublishes should be > 0L
+    (compacting - batches) shouldBe compactPublishes
+
+    keyCalls.set(0)
+    valueCalls.set(0)
+    val (prefix, prefixBatches, _, prefixDecoded) = footprint(stacked.take(1))
+    // Partition 0 holds (1, 10) and (2, 20). One survivor is enough, so partition 1 stays unread.
+    prefix shouldBe List((2, 20))
+    prefixDecoded shouldBe 1L
+    prefixBatches shouldBe 1L
+    keyCalls.get() shouldBe 2
+    valueCalls.get() shouldBe 1
+    prefix shouldBe row(stacked.take(1))
+
+    val (rest, restBatches, _, restDecoded) = footprint(stacked.take(10))
+    rest shouldBe expected
+    restDecoded shouldBe 2L
+    restBatches shouldBe encode
+
+    keyCalls.set(0)
+    val (zero, zeroBatches, _, zeroDecoded) = footprint(stacked.take(0))
+    zero shouldBe empty
+    zeroBatches shouldBe 0L
+    zeroDecoded shouldBe 0L
+    keyCalls.get() shouldBe 0
+
+    val rejected = source.filterKeys((_: Int) => false).filterValues((_: Int) => true)
+    val (dropped, droppedBatches, _, droppedDecoded) = footprint(rejected.collect().toList)
+    dropped shouldBe empty
+    droppedDecoded shouldBe 0L
+    droppedBatches shouldBe encode
+    dropped shouldBe row(rejected.collect().toList)
+    val (droppedTake, droppedTakeBatches, _, droppedTakeDecoded) = footprint(rejected.take(1))
+    droppedTake shouldBe empty
+    droppedTakeDecoded shouldBe 0L
+    droppedTakeBatches shouldBe encode
+    val rejectedCompact = published {
+      val op = ColumnarPlanner.lower(rejected.plan).getOrElse(fail("expected a pair filter"))
+      val _ = ColumnarInterpreter.interpret(rejected.plan, op)
+    }
+    (rejectedCompact - droppedBatches) shouldBe (rejectedCompact - encode)
+
+    val single = source.filterKeys((key: Int) => key > 1)
+    val singleBatches = footprint(single.collect().toList)._2
+    val singleInterpret = published {
+      val op = ColumnarPlanner.lower(single.plan).getOrElse(fail("expected a pair filter"))
+      val _ = ColumnarInterpreter.interpret(single.plan, op)
+    }
+    singleBatches shouldBe singleInterpret
+    singleInterpret should be > encode
+    val (singlePrefix, singlePrefixBatches, _, singleDecoded) = footprint(single.take(1))
+    singlePrefix shouldBe List((2, 20))
+    singleDecoded shouldBe 1L
+    // Encode plus the kernel publish. A selection decode would publish the encode only.
+    singlePrefixBatches shouldBe 2L
+
+    // A bare scan collect returns its partitions and does not enter the planner. `keys` does.
+    val projected = source.keys
+    val projectedBatches = footprint(projected.collect().toList)._2
+    val projectedInterpret = published {
+      val op = ColumnarPlanner.lower(projected.plan).getOrElse(fail("expected keys"))
+      val _ = ColumnarInterpreter.interpret(projected.plan, op)
+    }
+    projectedBatches shouldBe projectedInterpret
+    val projectedOnce = published {
+      val op = ColumnarPlanner.lower(projected.plan).getOrElse(fail("expected keys"))
+      val _ = ColumnarInterpreter.interpret(projected.plan, op, Some(0))
+    }
+    val (projectedPrefix, projectedPrefixBatches, _, projectedDecoded) =
+      footprint(projected.take(1))
+    projectedPrefix shouldBe List(1)
+    projectedDecoded shouldBe 1L
+    projectedPrefixBatches shouldBe projectedOnce
+
+    val (scanPrefix, scanPrefixBatches, _, scanDecoded) = footprint(source.take(1))
+    val scanOnce = published {
+      val scan = ColumnarPlanner.lower(source.plan).getOrElse(fail("expected a pair scan"))
+      val _ = ColumnarInterpreter.interpret(source.plan, scan, Some(0))
+    }
+    scanPrefix shouldBe List((1, 10))
+    scanDecoded shouldBe 1L
+    scanPrefixBatches shouldBe scanOnce
+  }
+
+  it should "decode a two-filter int-triple stack on collect and match take to the row path" in {
+    val build = DistCollection.ofIntPairs(Array(1, 2, 3, 4), Array(10, 20, 30, 40), 1)
+    val probe = DistCollection.ofIntPairs(Array(1, 2, 4), Array(7, 8, 9), 1)
+    val joined = build.join(probe)
+    val stacked = joined.filterJoinKey(_ % 2 == 0).filterJoinLeft(_ >= 20)
+    val rejected = joined.filterJoinKey(_ < 0).filterJoinLeft(_ >= 0)
+
+    onePartition()
+    val expected = rowUnder(stacked.collect().toList)
+    onePartition()
+    val (joinedBatches, _) = ColumnMetrics.withSink(new CountingSink) {
+      val _ = joined.collect()
+      (ColumnMetrics.batchCount, ColumnMetrics.visitCount)
+    }
+    onePartition()
+    val (collected, batches, _, decoded) = footprintKeeping {
+      stacked.collect().toList
+    }
+    collected shouldBe expected
+    decoded shouldBe expected.length.toLong
+    batches shouldBe joinedBatches
+    onePartition()
+    val compacting = ColumnMetrics.withSink(new CountingSink) {
+      val op = ColumnarPlanner.lower(stacked.plan).getOrElse(fail("expected a triple filter"))
+      val _ = ColumnarInterpreter.interpret(stacked.plan, op)
+      ColumnMetrics.batchCount
+    }
+    val compactPublishes = compacting - joinedBatches
+    compactPublishes should be > 0L
+    (compacting - batches) shouldBe compactPublishes
+
+    onePartition()
+    stacked.take(0) shouldBe empty
+    onePartition()
+    stacked.take(1) shouldBe rowUnder(stacked.take(1))
+    onePartition()
+    val rest = stacked.take(expected.length + 5)
+    rest shouldBe rowUnder(stacked.take(expected.length + 5))
+    rest shouldBe expected
+
+    onePartition()
+    val (dropped, droppedBatches, _, droppedDecoded) = footprintKeeping {
+      rejected.collect().toList
+    }
+    dropped shouldBe empty
+    droppedDecoded shouldBe 0L
+    droppedBatches shouldBe joinedBatches
+    dropped shouldBe rowUnder(rejected.collect().toList)
   }
 
   "take" should "decode only the requested prefix of a filter stack" in {
@@ -702,10 +883,20 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
 
   private def footprint[A](body: => A): (A, Long, Long, Long) =
     arm()
+    measure(body)
+
+  /** Same notes as [[footprint]] without replacing the caller's shuffle and batch settings. */
+  private def footprintKeeping[A](body: => A): (A, Long, Long, Long) =
+    measure(body)
+
+  private def measure[A](body: => A): (A, Long, Long, Long) =
     ColumnMetrics.withSink(new CountingSink) {
       val value = body
       (value, ColumnMetrics.batchCount, ColumnMetrics.visitCount, ColumnMetrics.decodedValueCount)
     }
+
+  private def published(body: => Unit): Long =
+    footprint(body)._2
 
   private def row[A](body: => A): A =
     ScarletRuntime.get.shuffle.clear()

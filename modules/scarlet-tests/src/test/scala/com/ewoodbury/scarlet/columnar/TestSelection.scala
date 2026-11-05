@@ -120,6 +120,59 @@ class TestSelection extends AnyFlatSpec with Matchers:
     stored.toSeq shouldBe Seq(-1, -1, 1, 0, 2, -1)
   }
 
+  it should "decode a pair index and a triple index without gathering" in {
+    val pairs = BatchCodec.intPairs(Seq((1, 10), (2, 20), (3, 30), (4, 40)))
+    val pairIndex = Selection.applySelected(
+      pairs,
+      0,
+      pairs.length,
+      Seq(
+        Selection.Step.Int32(0, (value: Int) => value > 1),
+        Selection.Step.Int32(1, (value: Int) => value < 40),
+      ),
+    )
+    val pairGathered = Selection.materialize(pairIndex)
+    val pairPrefix = BatchCodec.decodeIntPairs(pairGathered, 1)
+    BatchCodec.decodeIntPairs(pairIndex.batch, pairIndex.rows, pairIndex.count) shouldBe
+      BatchCodec.decodeIntPairs(pairGathered)
+    ColumnMetrics.withSink(new CountingSink) {
+      val prefix = BatchCodec.decodeIntPairs(pairIndex.batch, pairIndex.rows, 1)
+      prefix shouldBe pairPrefix
+      prefix shouldBe Seq((2, 20))
+      ColumnMetrics.batchCount shouldBe 0L
+      ColumnMetrics.decodedValueCount shouldBe 1L
+    }
+
+    val tripleBatch = triples(
+      Array(1, 2, 3, 4),
+      Array(10, 20, 30, 40),
+      Array(7, 8, -1, 9),
+      Array(true, true, true, true),
+      Array(true, true, true, true),
+      Array(true, true, true, true),
+    )
+    val tripleIndex = Selection.applySelected(
+      tripleBatch,
+      0,
+      tripleBatch.length,
+      Seq(
+        Selection.Step.IntTriple(2, (value: Int) => value > 0),
+        Selection.Step.IntTriple(0, (value: Int) => value < 4),
+      ),
+    )
+    val tripleGathered = Selection.materialize(tripleIndex)
+    val triplePrefix = BatchCodec.decodeIntTriples(tripleGathered, 1)
+    BatchCodec.decodeIntTriples(tripleIndex.batch, tripleIndex.rows, tripleIndex.count) shouldBe
+      BatchCodec.decodeIntTriples(tripleGathered)
+    ColumnMetrics.withSink(new CountingSink) {
+      val prefix = BatchCodec.decodeIntTriples(tripleIndex.batch, tripleIndex.rows, 1)
+      prefix shouldBe triplePrefix
+      prefix shouldBe Seq((1, (10, 7)))
+      ColumnMetrics.batchCount shouldBe 0L
+      ColumnMetrics.decodedValueCount shouldBe 1L
+    }
+  }
+
   it should "skip null longs and doubles and keep a present zero" in {
     val longs = Int64Column.fromNullable(Seq(Some(0L), None, Some(-1L), Some(4L)))
     val longCalls = new AtomicInteger
