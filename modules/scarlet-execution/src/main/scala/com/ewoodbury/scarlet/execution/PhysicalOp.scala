@@ -89,9 +89,10 @@ enum PhysicalOp:
    * with the same partition count. The kernel builds the left bucket and probes the right. The two
    * sides keep independent dictionaries, so the table matches strings, not dictionary codes. A
    * null key is dropped on both sides by the exchange. `""` is a present key. A null value stays
-   * on the row path: classification never selects [[PhysicalOp.Kind.StringPairs]]. Output columns
-   * are `(key, left, right)`, and the key is the probe row. There is no spill and no build budget.
-   * Broadcast, sort-merge, and outer joins do not use this node. Output kind is
+   * on the row path: classification never selects [[PhysicalOp.Kind.StringPairs]]. A stack of two
+   * or more key or value filters on either side scatters survivor ids and does not slice them.
+   * Output columns are `(key, left, right)`, and the key is the probe row. There is no spill and
+   * no build budget. Broadcast, sort-merge, and outer joins do not use this node. Output kind is
    * [[PhysicalOp.Kind.StringTriples]].
    */
   case StringHashJoin(left: PhysicalOp, right: PhysicalOp)

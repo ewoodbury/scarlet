@@ -18,7 +18,8 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * [[ColumnarFallback]] is the named form of a deliberate decline, including a null value on a
  * left, right, or full outer join: the value columns are already encoded, and the kernel is not
  * chosen. A null value on a long inner join is that fallback too. A null value on a selected row
- * of an int inner join is that fallback too. A null on a dropped row is not.
+ * of an int inner join is that fallback too. A null on a dropped row is not. A string join does
+ * not use that fallback: a null value never lowers, and a clear live value bit still throws.
  */
 @SuppressWarnings(
   Array(
@@ -518,17 +519,18 @@ private[execution] object ColumnarInterpreter:
           PhysicalOp.StringHashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
         ) if JoinLowering.acceptsShuffleHash(strategy) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      // A two-filter stack on either side keeps the survivor index. Both dense sides stay on
+      // the batch exchange.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       Columns.StringTriples(
-        StringHashJoin.inner(
-          StringPairWalk.batches(
-            interpretAt(left, leftOp, selectedPartition, preserveAbsence, ordinals),
-          ),
-          StringPairWalk.batches(
-            interpretAt(right, rightOp, selectedPartition, preserveAbsence, ordinals),
-          ),
-          ColumnarPlanner.shuffleWidth,
-          ColumnarPlanner.parallelism,
+        StringJoinArms.inner(
+          left,
+          right,
+          leftOp,
+          rightOp,
+          selectedPartition,
+          preserveAbsence,
+          ordinals,
         ),
       )
     case (

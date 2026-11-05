@@ -17,8 +17,8 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
  * Times one query per supported columnar type, plus grouped-key patterns, two-filter int and
- * string `groupByKey` and `reduceByKey`, inner join, and int sort, plus unfiltered int-pair and
- * long-pair sorts. Not a test, and not part of `make test`.
+ * string `groupByKey` and `reduceByKey`, int and string inner joins, and int sort, plus
+ * unfiltered int-pair and long-pair sorts. Not a test, and not part of `make test`.
  *
  * Each query is built once. The timed region is the action. The scalar checksum is compared
  * after the timer stops, against a local loop and one row-path execution. A mismatch fails the
@@ -161,7 +161,7 @@ object QueryBench:
     require(sparse.hash != repeatFold.hash, "sparse checksum collided with repeating groups")
     GroupedBenchCases.requireHashFallback(sparse, shifting, batchSize)
     val groupKeys = Array.tabulate(elementRows)(row => row % groups)
-    val keptGroups = filteredGroupChecksum(groupKeys, generated)
+    val keptGroups = FilterGroupChecksum.expected(groupKeys, generated, groups)
     val filteredGroups = DistCollection
       .ofIntPairs(groupKeys, generated, sourcePartitions)
       .filterKeys((key: Int) => key % 3 != 0)
@@ -176,6 +176,7 @@ object QueryBench:
       .filterValues((value: Int) => value >= 0)
       .reduceByKey[Int, Int](_ + _)
     val filteredJoin = FilterJoinChecksum.source(generated, sourcePartitions)
+    val stringJoin = FilterStringJoinChecksum.source(generated, sourcePartitions)
     val filteredSort = FilterSortChecksum.source(sortKeys, generated, sourcePartitions)
     Vector(
       whole("int-narrow", elementRows, "Pipeline2(Scan)", narrowSum, narrow.plan, narrow.sum),
@@ -210,7 +211,7 @@ object QueryBench:
         "GroupByKey(Exchange(FilterValue(FilterKey(Scan))))",
         keptGroups,
         filteredGroups.plan,
-        checksumGroups(filteredGroups.collect()),
+        FilterGroupChecksum.collected(filteredGroups.collect(), groups),
       ),
       whole(
         "filter-string-groupbykey",
@@ -243,6 +244,14 @@ object QueryBench:
         FilterJoinChecksum.expected(generated),
         filteredJoin.plan,
         FilterJoinChecksum.collected(filteredJoin.collect()),
+      ),
+      whole(
+        "filter-string-join",
+        elementRows,
+        FilterStringJoinChecksum.shape,
+        FilterStringJoinChecksum.expected(generated),
+        stringJoin.plan,
+        FilterStringJoinChecksum.collected(stringJoin.collect()),
       ),
       whole(
         "filter-sort",
@@ -989,60 +998,20 @@ object QueryBench:
       "Sort queries checksum the collected key then value, mixed by 31, in output order. The " +
       "expected value is a local stable sort of the kept pairs, computed before timing.\n" +
       "filter-groupbykey, filter-string-groupbykey, filter-reducebykey, " +
-      "filter-string-reducebykey, filter-join, and filter-sort are two filters, at 1e6 rows, " +
-      "two source partitions, and batch 8192. String keys are `(row % 1024).toString`. The " +
-      "join filters the build side and probes an unfiltered unique key. groupByKey checksums " +
-      "(key * 31) xor the value sum xor the value count. String cases use key.hashCode. " +
-      "reduceByKey checksums (key * 31) xor the wrapped int sum. The join checksums " +
-      "(key * 31) xor the left value xor the right value. filter-sort uses the sort checksum. " +
+      "filter-string-reducebykey, filter-join, filter-string-join, and filter-sort are two " +
+      "filters, at 1e6 rows, two source partitions, and batch 8192. String keys are " +
+      "`(row % 1024).toString`. The int join filters the build side and probes an unfiltered " +
+      "unique key. filter-string-join filters the build side and probes one row per string " +
+      "key, with that integer as the right value. groupByKey checksums (key * 31) xor the " +
+      "value sum xor the value count. String cases use key.hashCode. reduceByKey checksums " +
+      "(key * 31) xor the wrapped int sum. The join checksums (key * 31) xor the left value " +
+      "xor the right value. The string join uses key.hashCode in place of the key. " +
+      "filter-sort uses the sort checksum. " +
       "p50 and alloc_mb are recorded. There is no wall-clock gate.\n" +
       "alloc_mb is the nearest-rank p50 of process-wide thread bytes, in decimal megabytes " +
       "(bytes / 1e6). The probe excludes itself. A short-lived worker missed between reads is " +
       "absent. The same estimate is reported for row and columnar, at both widths.\n" +
       s"java=${runtime.getVmName} ${runtime.getVmVersion}"
-
-  /**
-   * `(key * 31) ^ valueSum ^ valueCount`, summed over keys. Key order does not matter. Keys are
-   * `row % groups`. The filters drop keys divisible by 3 and negative values.
-   */
-  private def filteredGroupChecksum(keys: Array[Int], values: Array[Int]): Long =
-    val sums = new Array[Long](groups)
-    val seen = new Array[Int](groups)
-    var index = 0
-    while (index < keys.length) {
-      val key = keys(index)
-      val value = values(index)
-      if (key % 3 != 0 && value >= 0) then
-        sums(key) += value.toLong
-        seen(key) += 1
-      index += 1
-    }
-    foldSeen(sums, seen)
-
-  private def checksumGroups(rows: Iterable[(Int, Iterable[Int])]): Long =
-    val sums = new Array[Long](groups)
-    val seen = new Array[Int](groups)
-    val iterator = rows.iterator
-    while (iterator.hasNext) {
-      val row = iterator.next()
-      val key = row._1
-      require(key >= 0 && key < groups, s"filter-groupbykey key $key outside 0 until $groups")
-      val values = row._2.iterator
-      while (values.hasNext) {
-        sums(key) += values.next().toLong
-        seen(key) += 1
-      }
-    }
-    foldSeen(sums, seen)
-
-  private def foldSeen(sums: Array[Long], seen: Array[Int]): Long =
-    var key = 0
-    var hash = 0L
-    while (key < sums.length) {
-      if (seen(key) > 0) then hash += (key.toLong * 31L) ^ sums(key) ^ seen(key).toLong
-      key += 1
-    }
-    hash
 
   private def checksumOf(answer: Answer): Long = answer match
     case Answer.Whole(value) => value
