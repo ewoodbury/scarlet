@@ -17,7 +17,7 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
  * Times one query per supported columnar type, plus both grouped-key patterns, a two-filter
- * `groupByKey`, a two-filter `reduceByKey`, a two-filter inner join, and an int-pair and
+ * `groupByKey`, `reduceByKey`, inner join, and int sort, plus an unfiltered int-pair and
  * long-pair sort. Not a test, and not part of `make test`.
  *
  * Each query is built once. The timed region is the action. The scalar checksum is compared after
@@ -47,15 +47,6 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * Width and layout order are counterbalanced on different bits of the round. The measure phase
  * starts one step later than warmup, so round 0 of measure is not round 0 of warmup. One
  * [[LocalTaskScheduler]] per width is built for the run and shut down at the end.
- *
- * `alloc_mb` is a process-wide estimate for both layouts and both widths: a probe sums
- * `getThreadAllocatedBytes` across live threads while the action runs, then the nearest-rank p50
- * of those samples is reported. The probe's own bytes are excluded. A worker that starts and
- * exits between reads is missing. Unrelated JVM threads are included. The same method is used for
- * row and columnar, so the column is comparable inside this run. It is still an estimate.
- *
- * Nearest-rank percentiles use 1-based rank `ceil(p / 100 * n)` with no interpolation. p95 has
- * samples above it; it is not a stable tail. `max` is the largest sample.
  *
  * An optional `large` argument runs [[SortScaleBench]] instead of this suite. That mode times
  * only the int-key and long-key sorts, at 5e6 rows, columnar only, at widths 1 and 4, then a 1e6
@@ -198,6 +189,7 @@ object QueryBench:
       .filterValues((value: Int) => value >= 0)
       .reduceByKey[Int, Int](_ + _)
     val filteredJoin = FilterJoinChecksum.source(generated, sourcePartitions)
+    val filteredSort = FilterSortChecksum.source(sortKeys, generated, sourcePartitions)
     Vector(
       whole("int-narrow", elementRows, "Pipeline2(Scan)", narrowSum, narrow.plan, narrow.sum),
       whole("int-chain", elementRows, "Pipeline4(Scan)", chainSum, intChain.plan, intChain.sum),
@@ -248,6 +240,14 @@ object QueryBench:
         FilterJoinChecksum.expected(generated),
         filteredJoin.plan,
         FilterJoinChecksum.collected(filteredJoin.collect()),
+      ),
+      whole(
+        "filter-sort",
+        elementRows,
+        FilterSortChecksum.shape,
+        FilterSortChecksum.expected(sortKeys, generated),
+        filteredSort.plan,
+        FilterSortChecksum.collected(filteredSort.collect()),
       ),
     )
 
@@ -984,13 +984,14 @@ object QueryBench:
       "reads the pairs. The columnar check reads sumByKey. Both run before warmup and after " +
       "the measured rounds, at each width.\n" +
       "Sort queries checksum the collected key then value, mixed by 31, in output order. The " +
-      "expected value is a local stable sort of the same pairs, computed before timing.\n" +
-      "filter-groupbykey, filter-reducebykey, and filter-join are two int-pair filters then the " +
-      "wide op, at 1e6 rows, two source partitions, and batch 8192. The join filters the build " +
-      "side and probes an unfiltered unique key. groupByKey checksums (key * 31) xor the value " +
-      "sum xor the value count. reduceByKey checksums (key * 31) xor the wrapped int sum. The " +
-      "join checksums (key * 31) xor the left value xor the right value. p50 and alloc_mb are " +
-      "recorded. There is no wall-clock gate.\n" +
+      "expected value is a local stable sort of the kept pairs, computed before timing.\n" +
+      "filter-groupbykey, filter-reducebykey, filter-join, and filter-sort are two int-pair " +
+      "filters then the wide op, at 1e6 rows, two source partitions, and batch 8192. The join " +
+      "filters the build side and probes an unfiltered unique key. groupByKey checksums " +
+      "(key * 31) xor the value sum xor the value count. reduceByKey checksums (key * 31) xor " +
+      "the wrapped int sum. The join checksums (key * 31) xor the left value xor the right " +
+      "value. filter-sort uses the sort checksum. p50 and alloc_mb are recorded. There is no " +
+      "wall-clock gate.\n" +
       "alloc_mb is the nearest-rank p50 of process-wide thread bytes, in decimal megabytes " +
       "(bytes / 1e6). The probe excludes itself. A short-lived worker missed between reads is " +
       "absent. The same estimate is reported for row and columnar, at both widths.\n" +

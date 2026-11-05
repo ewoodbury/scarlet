@@ -179,7 +179,7 @@ class TestSortByIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     storedInt(pair, 0) shouldBe 1
   }
 
-  it should "leave a filter above the sort, and any non-scan child, on the row path" in {
+  it should "leave a filter above the sort, and a non-filter child, on the row path" in {
     val source = DistCollection.ofIntPairs(Array(3, 1, 2, 2), Array(30, 10, 20, 21), 2)
     val above = source.sortByIntKey.filter((pair: (Int, Int)) => pair._2 != 20)
     val below = source.filter((pair: (Int, Int)) => pair._1 > 0).sortByIntKey
@@ -189,7 +189,9 @@ class TestSortByIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.partitioning(above.plan) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.lower(above.plan) shouldBe Option.empty[PhysicalOp]
     collect(above) shouldBe rowCollect(above)
-    ColumnarPlanner.partitioning(below.plan) shouldBe Option.empty[PartitioningInfo]
+    // One row filter compacts, then takes the dense rank split.
+    ColumnarPlanner.lower(below.plan).map(_.shape) shouldBe Some("SortByIntKey(FilterRow(Scan))")
+    collect(below) shouldBe rowCollect(below)
     ColumnarPlanner.partitioning(mapped.plan) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.partitioning(rewritten.plan) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.partitioning(source.sortByIntKey.keys.plan) shouldBe

@@ -23,14 +23,14 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * catches it and returns `None`, and the row path runs the whole plan. Any unsupported node
  * (union, flatMap, generic sortBy, a map that is not fed by `Int`, `Long`, `Double`, `String`, or
  * an int inner join, any `Boolean` map, and the rest) makes the whole plan ineligible, so a
- * supported prefix is not executed on its own. `sortByIntKey` of an int-pair scan and
- * `sortByLongKey` of a long-pair scan lower to a rank split. A null key orders as zero and stays
- * null. Over the budget, with spill on, a long sort writes one run per input partition. At or
- * under the budget, and whenever spill is off, it stays in memory and writes nothing.
- * `sortByStringKey` of a string-pair scan lowers to a rank split. A null string key orders as `""`
- * and stays null. Over the budget, with spill on, a string sort writes one run per input
+ * supported prefix is not executed on its own. `sortByIntKey` of an int-pair scan, or a filter
+ * chain over one, and `sortByLongKey` of a long-pair scan lower to a rank split. A null key orders
+ * as zero and stays null. Over the budget, with spill on, a long sort writes one run per input
  * partition. At or under the budget, and whenever spill is off, it stays in memory and writes
- * nothing.
+ * nothing. `sortByStringKey` of a string-pair scan lowers to a rank split. A null string key
+ * orders as `""` and stays null. Over the budget, with spill on, a string sort writes one run per
+ * input partition. At or under the budget, and whenever spill is off, it stays in memory and
+ * writes nothing.
  *
  * [[lower]] and interpretation walk the same logical plan. The physical node records the operator
  * and not the function, so each logical node is matched to the node [[lower]] built for it. A
