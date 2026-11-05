@@ -20,5 +20,6 @@ private[execution] object ReduceByKeyLowering:
       Some(PhysicalOp.StringHashAggregate(PhysicalOp.Exchange(child)))
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.Strings |
-        PhysicalOp.Kind.Bools | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts =>
+        PhysicalOp.Kind.Bools | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
+        PhysicalOp.Kind.GroupedStrings =>
       None

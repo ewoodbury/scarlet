@@ -78,7 +78,7 @@ private[execution] object ColumnUse:
    */
   private def consumedOrdinals(kind: PhysicalOp.Kind): Set[Int] = kind match
     case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs |
-        PhysicalOp.Kind.GroupedInts =>
+        PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings =>
       Set(0, 1)
     case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples =>
       Set(0, 1, 2)
@@ -100,7 +100,8 @@ private[execution] object ColumnUse:
       Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs |
-        PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools | PhysicalOp.Kind.GroupedInts =>
+        PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools | PhysicalOp.Kind.GroupedInts |
+        PhysicalOp.Kind.GroupedStrings =>
       Set(0, 1)
 
   private def planChild(plan: Plan[_]): Option[Plan[_]] = plan match

@@ -15,8 +15,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Columnar `keys`, `values`, `mapValues`, `filterKeys`, and `filterValues` on `(String, Int)`.
  *
  * The row path is the oracle. A null key stays in the batch. A null value stays on the row path.
- * Group and a string `mapValues` stay on the row path. `reduceByKey` and an inner shuffle-hash
- * join lower.
+ * Distinct and a string `mapValues` stay on the row path. `reduceByKey`, `groupByKey`, and an
+ * inner shuffle-hash join lower.
  */
 class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -164,12 +164,14 @@ class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
     ColumnarPlanner.lower(empty.plan) shouldBe None
   }
 
-  it should "lower reduceByKey and an inner join, and keep group and a string mapValues on the row path" in {
+  it should "lower reduceByKey, groupByKey, and an inner join, and keep distinct and a string mapValues on the row path" in {
     val rows = source
+    val grouped = rows.groupByKey
     ColumnarPlanner.lower(rows.reduceByKey((left: Int, right: Int) => left + right).plan).map(
       _.shape,
     ) shouldBe Some("StringHashAggregate(Exchange(Scan))")
-    ColumnarPlanner.lower(rows.groupByKey.plan) shouldBe None
+    ColumnarPlanner.lower(grouped.plan).map(_.shape) shouldBe Some("GroupByKey(Exchange(Scan))")
+    valuesByKey(columnar(grouped)) shouldBe valuesByKey(rowOf(grouped))
     ColumnarPlanner.lower(rows.distinct().plan) shouldBe None
     ColumnarPlanner.lower(rows.join(rows).plan).map(_.shape) shouldBe Some(
       "StringHashJoin(Exchange(Scan), Exchange(Scan))",
@@ -218,6 +220,9 @@ class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
   )
 
   private def rowCount: Int = leftRows.length + rightRows.length
+
+  private def valuesByKey(rows: Seq[(String, Iterable[Int])]): Map[String, Seq[Int]] =
+    rows.map { case (key, values) => key -> values.toSeq }.toMap
 
   private def pairs(rows: Seq[(String, Int)]): DistCollection[(String, Int)] =
     DistCollection(Plan.Source(Seq(Partition(rows))))

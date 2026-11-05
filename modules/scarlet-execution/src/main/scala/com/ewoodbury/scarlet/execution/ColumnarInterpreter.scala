@@ -107,12 +107,14 @@ private[execution] object ColumnarInterpreter:
     case Columns.StringPairs(parts) => parts
     case Columns.StringTriples(parts) => parts
     case Columns.Outer(parts, _) => parts
-    case Columns.GroupedInts(_) =>
+    case Columns.GroupedInts(_) | Columns.GroupedStrings(_) =>
       throw new IllegalStateException("grouped batches are not column batches")
 
   /** Number of groups. Other columns are not a grouped result. */
   private[execution] def groupCount(columns: Columns): Long = columns match
     case Columns.GroupedInts(parts) =>
+      parts.foldLeft(0L)((total, batch) => total + batch.length.toLong)
+    case Columns.GroupedStrings(parts) =>
       parts.foldLeft(0L)((total, batch) => total + batch.length.toLong)
     case _ =>
       throw new IllegalStateException("group count is only defined for a grouped batch")
@@ -146,6 +148,9 @@ private[execution] object ColumnarInterpreter:
 
     /** Int `groupByKey` batches. Not a [[ColumnBatch]]. */
     case GroupedInts(parts: Vector[GroupedIntBatch])
+
+    /** String `groupByKey` batches. Not a [[ColumnBatch]]. */
+    case GroupedStrings(parts: Vector[GroupedStringBatch])
 
   private def selectPartition[A](
       partitions: Seq[Partition[A]],
@@ -263,7 +268,7 @@ private[execution] object ColumnarInterpreter:
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeStringJoin(batch, rows))
         case Columns.Bools(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeBools(batch, rows))
-        case Columns.GroupedInts(_) =>
+        case Columns.GroupedInts(_) | Columns.GroupedStrings(_) =>
           throw new IllegalStateException("take refuses a grouped batch")
 
   private def prefixRows[A](
@@ -348,7 +353,8 @@ private[execution] object ColumnarInterpreter:
         case PhysicalOp.Kind.Bools => Columns.Bools(SourceEncode.encodeBools(selected))
         case PhysicalOp.Kind.StringPairs => StringPairWalk.encoded(selected, ordinals)
         case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples |
-            PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts =>
+            PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
+            PhysicalOp.Kind.GroupedStrings =>
           throw new IllegalStateException(
             s"physical tree does not match ${plan.getClass.getSimpleName}",
           )
@@ -451,13 +457,28 @@ private[execution] object ColumnarInterpreter:
         ) =>
       // Boundary guard: take refuses a group, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
-      Columns.GroupedInts(
-        GroupByKey.int32(
-          pairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)),
-          ColumnarPlanner.shuffleWidth,
-          ColumnarPlanner.parallelism,
-        ),
-      )
+      val input = interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)
+      child.kind match
+        case PhysicalOp.Kind.Pairs =>
+          Columns.GroupedInts(
+            GroupByKey.int32(
+              pairsOf(input),
+              ColumnarPlanner.shuffleWidth,
+              ColumnarPlanner.parallelism,
+            ),
+          )
+        case PhysicalOp.Kind.StringPairs =>
+          Columns.GroupedStrings(
+            GroupByKey.strings(
+              StringPairWalk.batches(input),
+              ColumnarPlanner.shuffleWidth,
+              ColumnarPlanner.parallelism,
+            ),
+          )
+        case other =>
+          throw new IllegalStateException(
+            s"groupByKey column is $other, expected int or string pairs",
+          )
     case (
           Plan.JoinOp(left, right, strategy),
           PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
@@ -945,7 +966,7 @@ private[execution] object ColumnarInterpreter:
         Columns.Strings(onEachMorsel(parts)(morsel => ElementPipeline.strings(morsel, steps)))
       case Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.Triples(_) |
           Columns.LongTriples(_) | Columns.StringPairs(_) | Columns.StringTriples(_) |
-          Columns.Outer(_, _) | Columns.GroupedInts(_) =>
+          Columns.Outer(_, _) | Columns.GroupedInts(_) | Columns.GroupedStrings(_) =>
         rejected
 
   private def project(columns: Columns, mapper: Any): Columns = columns match
@@ -1014,7 +1035,7 @@ private[execution] object ColumnarInterpreter:
       })
     case Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.LongTriples(_) |
         Columns.StringPairs(_) | Columns.StringTriples(_) | Columns.Outer(_, _) |
-        Columns.GroupedInts(_) =>
+        Columns.GroupedInts(_) | Columns.GroupedStrings(_) =>
       throw new IllegalStateException(
         s"columnar map expects ${elementColumnList(includeBooleans = false)}",
       )
@@ -1045,7 +1066,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.LongPairs(_) |
         Columns.Triples(_) | Columns.LongTriples(_) | Columns.Strings(_) | Columns.Bools(_) |
         Columns.StringPairs(_) | Columns.StringTriples(_) | Columns.Outer(_, _) |
-        Columns.GroupedInts(_) =>
+        Columns.GroupedInts(_) | Columns.GroupedStrings(_) =>
       throw new IllegalStateException("columnar op expected int pairs")
 
   private[execution] def triplesOf(columns: Columns): Vector[ColumnBatch] = columns match
@@ -1055,7 +1076,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Pairs(_) |
         Columns.LongPairs(_) | Columns.LongTriples(_) | Columns.Strings(_) | Columns.Bools(_) |
         Columns.StringPairs(_) | Columns.StringTriples(_) | Columns.Outer(_, _) |
-        Columns.GroupedInts(_) =>
+        Columns.GroupedInts(_) | Columns.GroupedStrings(_) =>
       throw new IllegalStateException("columnar op expected int triples")
 
   /**
@@ -1109,7 +1130,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Pairs(_) |
         Columns.Triples(_) | Columns.LongTriples(_) | Columns.Strings(_) | Columns.Bools(_) |
         Columns.StringPairs(_) | Columns.StringTriples(_) | Columns.Outer(_, _) |
-        Columns.GroupedInts(_) =>
+        Columns.GroupedInts(_) | Columns.GroupedStrings(_) =>
       throw new IllegalStateException("columnar op expected long pairs")
 
   private def decodeWith(
@@ -1147,4 +1168,6 @@ private[execution] object ColumnarInterpreter:
     case Columns.Bools(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeBools(batch)))
     case Columns.GroupedInts(parts) =>
+      parts.map(batch => Partition(batch.rows))
+    case Columns.GroupedStrings(parts) =>
       parts.map(batch => Partition(batch.rows))

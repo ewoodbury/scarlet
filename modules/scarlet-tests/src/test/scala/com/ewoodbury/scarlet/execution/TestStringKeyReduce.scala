@@ -15,8 +15,8 @@ import com.ewoodbury.scarlet.runtime.local.HashPartitioner
  *
  * The row path is the oracle. Each input partition interns its own dictionary, and the second
  * partition sees the same strings in a different order. A null key is dropped. `""` is kept.
- * Output order inside a bucket is first-seen. `(String, Long)` and `groupByKey` stay on the row
- * path. An inner shuffle-hash join lowers.
+ * Output order inside a bucket is first-seen. `(String, Long)` stays on the row path.
+ * `groupByKey` and an inner shuffle-hash join lower.
  */
 class TestStringKeyReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -137,8 +137,9 @@ class TestStringKeyReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
     hasNullKey(named.collect().toMap.keys) shouldBe false
   }
 
-  it should "keep a long value and groupByKey on the row path and lower an inner join" in {
+  it should "keep a long value on the row path, lower groupByKey, and lower an inner join" in {
     val rows = source
+    val grouped = rows.groupByKey
     val longs = DistCollection(Seq("a" -> 1L, "b" -> 2L), 2)
     val nullValue = DistCollection(
       Plan.Source(Seq(Partition(Seq(erasedNullValue("blue"), "red" -> 1)))),
@@ -147,7 +148,10 @@ class TestStringKeyReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
     ColumnarPlanner.lower(
       longs.reduceByKey[String, Long]((left, right) => left + right).plan,
     ) shouldBe None
-    ColumnarPlanner.lower(rows.groupByKey.plan) shouldBe None
+    ColumnarPlanner.lower(grouped.plan).map(_.shape) shouldBe Some("GroupByKey(Exchange(Scan))")
+    grouped.collect().map { case (key, values) => key -> values.toSeq }.toMap shouldBe row(
+      grouped.collect().map { case (key, values) => key -> values.toSeq }.toMap,
+    )
     ColumnarPlanner.lower(rows.join(rows).plan).map(_.shape) shouldBe Some(
       "StringHashJoin(Exchange(Scan), Exchange(Scan))",
     )

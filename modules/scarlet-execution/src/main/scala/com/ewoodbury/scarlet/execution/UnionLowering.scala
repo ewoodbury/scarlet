@@ -20,7 +20,8 @@ private[execution] object UnionLowering:
       // A grouped batch is not a ColumnBatch, so ColumnsConcat cannot join two of them. Refusing
       // here keeps both sides on the row path instead of running them and then falling back.
       case (Some(leftOp), Some(rightOp))
-          if leftOp.kind == rightOp.kind && leftOp.kind != PhysicalOp.Kind.GroupedInts =>
+          if leftOp.kind == rightOp.kind && leftOp.kind != PhysicalOp.Kind.GroupedInts &&
+            leftOp.kind != PhysicalOp.Kind.GroupedStrings =>
         Some(PhysicalOp.Union(leftOp, rightOp))
       case _ => None
 

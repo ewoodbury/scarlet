@@ -3,16 +3,20 @@ package com.ewoodbury.scarlet.columnar
 import java.util.Arrays
 
 /**
- * Groups `(Int, Int)` pairs by key.
+ * Groups pair batches by key.
  *
- * [[HashExchange.partitionAll]] drops a null key and buckets with `floorMod(key, partitions)`, the
- * same rule `HashPartitioner` uses because `Int.hashCode` is the value. Each bucket keeps
- * first-seen key order and input value order. A null value is not dropped. A clear value bit is a
- * planner bug and throws `IllegalArgumentException`, including a null value on a row whose key is
- * also null. That check runs before the exchange, which would otherwise drop the null key and hide
- * the value. Classification and `copiedIntPairs` only produce a fully present value column. One
- * [[GroupedIntBatch]] is published per partition, including an empty bucket. There is no partial
- * combine and no spill.
+ * [[int32]] groups `(Int, Int)`. [[HashExchange.partitionAll]] drops a null key and buckets with
+ * `floorMod(key, partitions)`, the same rule `HashPartitioner` uses because `Int.hashCode` is the
+ * value. [[strings]] groups `(String, Int)`. [[HashExchange.partitionAllUtf8]] drops a null key
+ * and buckets with `floorMod(StringHash.hash(text), partitions)`. `""` is a present key. Each
+ * bucket is one dictionary: unlike dictionaries are remapped when the bucket is concatenated, so
+ * code equality is string equality.
+ *
+ * Each bucket keeps first-seen key order and input value order. A null value is not dropped. A
+ * clear value bit is a planner bug and throws `IllegalArgumentException`, including a null value
+ * on a row whose key is also null. That check runs before the exchange, which would otherwise drop
+ * the null key and hide the value. One grouped batch is published per partition, including an
+ * empty bucket. There is no partial combine, no spill, and no sort.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object GroupByKey:
@@ -37,6 +41,27 @@ object GroupByKey:
       val buckets = HashExchange.partitionAll(batches, keyOrdinal = 0, partitions, parallelism)
       MorselScheduler.map(buckets, parallelism)((_, bucket) => group(bucket))
 
+  def strings(
+      batches: Vector[ColumnBatch],
+      partitions: Int,
+      parallelism: Int,
+  ): Vector[GroupedStringBatch] =
+    require(partitions > 0, s"partitions must be positive, got $partitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    if (batches.isEmpty) then Vector.fill(partitions)(GroupedStringBatch.empty)
+    else
+      require(
+        batches.forall(batch =>
+          batch.schema.length == 2 && batch.schema(0) == LogicalType.Utf8Dict &&
+            batch.schema(1) == LogicalType.Int32,
+        ),
+        "groupByKey expects (Utf8Dict, Int32) batches",
+      )
+      batches.foreach(requirePresentValues)
+      val buckets =
+        HashExchange.partitionAllUtf8(batches, keyOrdinal = 0, partitions, parallelism)
+      MorselScheduler.map(buckets, parallelism)((_, bucket) => groupStrings(bucket))
+
   private def requirePresentValues(batch: ColumnBatch): Unit =
     val values = ColumnHash.int32At(batch, 1)
     require(
@@ -58,7 +83,9 @@ object GroupByKey:
       presentKeys: Boolean,
   ): GroupedIntBatch =
     val rows = keys.length
-    val table = new GroupTable(ColumnHash.tableSize(rows))
+    val capacity = ColumnHash.tableSize(rows)
+    require(capacity >= 2 * rows, s"group table capacity $capacity is below 2 * $rows")
+    val table = new GroupTable(capacity)
     val keyValues = keys.values
     val valueValues = values.values
     val keyWords = keys.validity.words
@@ -101,6 +128,69 @@ object GroupByKey:
         offsets,
         outValues,
       )
+
+  private def groupStrings(batch: ColumnBatch): GroupedStringBatch =
+    val keys = utf8At(batch, 0)
+    val values = ColumnHash.int32At(batch, 1)
+    require(keys.length == values.length, "key and value columns differ in length")
+    requirePresentValues(batch)
+    if (keys.length == 0) then GroupedStringBatch.empty
+    else fillStrings(keys, values, ColumnHash.fullyPresent(keys))
+
+  private def fillStrings(
+      keys: DictUtf8Column,
+      values: Int32Column,
+      presentKeys: Boolean,
+  ): GroupedStringBatch =
+    val rows = keys.length
+    val capacity = ColumnHash.tableSize(rows)
+    require(capacity >= 2 * rows, s"group table capacity $capacity is below 2 * $rows")
+    val table = new GroupTable(capacity)
+    val codes = keys.codes
+    val valueValues = values.values
+    val keyWords = keys.validity.words
+    var row = 0
+    while (row < rows) {
+      if (presentKeys || Validity.isSet(keyWords, row)) then table.add(codes(row))
+      row += 1
+    }
+    val groups = table.groups
+    if (groups == 0) then GroupedStringBatch.empty
+    else
+      val offsets = new Array[Int](groups + 1)
+      var cursor = 0
+      var group = 0
+      while (group < groups) {
+        offsets(group) = cursor
+        cursor += table.count(group)
+        group += 1
+      }
+      offsets(groups) = cursor
+      val outValues = new Array[Int](cursor)
+      val writeAt = Arrays.copyOf(offsets, groups)
+      row = 0
+      while (row < rows) {
+        if (presentKeys || Validity.isSet(keyWords, row)) then
+          val atGroup = table.indexOf(codes(row))
+          val dest = writeAt(atGroup)
+          outValues(dest) = valueValues(row)
+          writeAt(atGroup) = dest + 1
+        row += 1
+      }
+      val outCodes = new Array[Int](groups)
+      group = 0
+      while (group < groups) {
+        outCodes(group) = table.key(group)
+        group += 1
+      }
+      GroupedStringBatch(
+        DictUtf8Column.of(keys.dictionary, outCodes, Validity.allValid(groups), groups),
+        offsets,
+        outValues,
+      )
+
+  private def utf8At(batch: ColumnBatch, ordinal: Int): DictUtf8Column =
+    ColumnKernel.asUtf8(ColumnKernel.columnAt(batch, ordinal), ordinal)
 
   private final class GroupTable(capacity: Int):
     private val mask: Int = capacity - 1
