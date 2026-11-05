@@ -18,7 +18,10 @@ package com.ewoodbury.scarlet.columnar
  *
  * [[partitionAllSelected]] scatters an int-pair [[Selected]]. It reads `values(rows(i))` for
  * `i < count` and does not share the source, including when `numPartitions` is 1. A null key is
- * dropped. A null value stays null and moves with the row. The dense loops are unchanged.
+ * dropped. A null value stays null and moves with the row. [[partitionAllSelectedUtf8]] is that
+ * scatter for a dictionary string key. It reads `rows(0 until count)`, drops a null key, keeps
+ * `""`, and shares the source dictionary. `numPartitions == 1` still scatters when the selection
+ * is not the whole batch. The dense loops are unchanged.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object HashExchange:
@@ -140,6 +143,27 @@ object HashExchange:
     }
 
   /**
+   * [[partitionAllUtf8]] for a dictionary string key addressed by a [[Selected]]. Only
+   * `rows(0 until count)` are scattered. A null key is dropped. `""` hashes to 0 and is kept. Each
+   * bucket shares the source dictionary. `numPartitions == 1` still builds one bucket and does not
+   * return the source batch when the selection is not the whole batch. This is not the dense loop
+   * with an identity index.
+   */
+  def partitionAllSelectedUtf8(
+      selected: Vector[Selected],
+      keyOrdinal: Int,
+      numPartitions: Int,
+      parallelism: Int,
+  ): Vector[ColumnBatch] =
+    require(selected.nonEmpty, "partitionAllSelectedUtf8 needs at least one batch")
+    val scattered = MorselScheduler.map(selected, parallelism) { (_, one) =>
+      partitionSelectedUtf8(one, keyOrdinal, numPartitions)
+    }
+    Vector.tabulate(numPartitions) { part =>
+      ColumnBatches.concat(scattered.map(buckets => bucketAt(buckets, part)))
+    }
+
+  /**
    * [[partitionAll]] for an `Int64` key. Bucket assignment is [[partitionInt64]]. `partitionAll`
    * itself still partitions `Int32` keys with `floorMod(key, numPartitions)`.
    */
@@ -246,6 +270,39 @@ object HashExchange:
     }
     val scattered = batch.columns.map { column =>
       scatterSelected(column, rows, live, dest, counts)
+    }.toVector
+    Vector.tabulate(numPartitions) { part =>
+      val columns = scattered.map(column => bucketAt(column, part))
+      new ColumnBatch(batch.schema, columns, counts(part))
+    }
+
+  private def partitionSelectedUtf8(
+      selected: Selected,
+      keyOrdinal: Int,
+      numPartitions: Int,
+  ): Vector[ColumnBatch] =
+    require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+    val batch = selected.batch
+    val rows = selected.rows
+    val live = selected.count
+    val keys = utf8At(batch, keyOrdinal)
+    val hashes = StringHash.hashDictionary(keys.dictionary)
+    val dest = new Array[Int](live)
+    val counts = new Array[Int](numPartitions)
+    val codes = keys.codes
+    val keyWords = keys.validity.words
+    var slot = 0
+    while (slot < live) {
+      val row = rows(slot)
+      if (Validity.isSet(keyWords, row)) then
+        val part = Math.floorMod(hashes(codes(row)), numPartitions)
+        dest(slot) = part
+        counts(part) += 1
+      else dest(slot) = -1
+      slot += 1
+    }
+    val scattered = batch.columns.map { column =>
+      scatterSelectedUtf8(column, rows, live, dest, counts)
     }.toVector
     Vector.tabulate(numPartitions) { part =>
       val columns = scattered.map(column => bucketAt(column, part))
@@ -425,6 +482,56 @@ object HashExchange:
         if (Validity.isSet(validity, row)) then Validity.setBit(words(part), at)
         cursor(part) = at + 1
       row += 1
+    }
+    outputs.indices.map { part =>
+      DictUtf8Column.of(
+        column.dictionary,
+        outputs(part),
+        Validity.fromWords(words(part), counts(part)),
+        counts(part),
+      )
+    }.toVector
+
+  private def scatterSelectedUtf8(
+      column: Column,
+      rows: Array[Int],
+      count: Int,
+      dest: Array[Int],
+      counts: Array[Int],
+  ): Vector[Column] =
+    column match
+      case utf8: DictUtf8Column => scatterUtf8Rows(utf8, rows, count, dest, counts)
+      case int32: Int32Column => scatterInt32Selected(int32, rows, count, dest, counts)
+      case other =>
+        throw new IllegalArgumentException(
+          s"utf8 selection scatter expected Utf8Dict or Int32, found ${other.logicalType}",
+        )
+
+  /**
+   * Same builders as [[scatterUtf8]]. Each read is `codes(rows(slot))`. The dictionary is shared.
+   */
+  private def scatterUtf8Rows(
+      column: DictUtf8Column,
+      rows: Array[Int],
+      count: Int,
+      dest: Array[Int],
+      counts: Array[Int],
+  ): Vector[Column] =
+    val outputs = counts.map(count => new Array[Int](count))
+    val words = counts.map(count => Validity.allocate(count))
+    val cursor = new Array[Int](counts.length)
+    val values = column.codes
+    val validity = column.validity.words
+    var slot = 0
+    while (slot < count) {
+      val part = dest(slot)
+      if (part >= 0) then
+        val at = cursor(part)
+        val row = rows(slot)
+        outputs(part)(at) = values(row)
+        if (Validity.isSet(validity, row)) then Validity.setBit(words(part), at)
+        cursor(part) = at + 1
+      slot += 1
     }
     outputs.indices.map { part =>
       DictUtf8Column.of(

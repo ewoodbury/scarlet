@@ -12,9 +12,10 @@ import com.ewoodbury.scarlet.core.Plan
  * [[compile]] walks consecutive filters and stops at a map, the same cut as [[FilterChain]]. The
  * cast reads the erased function once and does not call it. [[applyAtom]] runs one existing kernel
  * on the given range. It does not take a [[Compiled]], so an encoder cannot apply the predicate a
- * second time. [[selectionSteps]] returns steps only for a pair or triple stack. An element stack
- * is `None`, and the caller chains [[applyAtom]], one morsel visit per atom. [[pairSteps]] is the
- * keep vector for a pair stack. It is not a second compile, and it is not [[selectionSteps]].
+ * second time. [[selectionSteps]] returns steps only for a pair, triple, or string-pair slot
+ * stack. An element stack is `None`, and the caller chains [[applyAtom]], one morsel visit per
+ * atom. [[pairSteps]] is the keep vector for a pair stack. It is not a second compile, and it is
+ * not [[selectionSteps]].
  *
  * Named erasure boundary. The physical slot chose the function. A wrong erased type throws
  * [[ColumnarFallback]], and [[ColumnarPlanner.tryRun]] returns `None`. A cast that fails while a
@@ -49,6 +50,9 @@ private[execution] object PredicatePlan:
     final case class LongPairRow(keep: LongPairKernel.LongPairPredicate) extends Atom
     final case class PairKey(keep: ColumnKernel.Int32Predicate) extends Atom
     final case class PairValue(ordinal: Int, keep: ColumnKernel.Int32Predicate) extends Atom
+
+    /** A whole-row `(String, Int)` predicate. It is not a slot atom, so it does not compact. */
+    case object StringRow extends Atom
 
   final case class Compiled(atoms: Vector[Atom])
 
@@ -109,15 +113,21 @@ private[execution] object PredicatePlan:
         ColumnKernel.filterInt32(batch, encodedOrdinal(batch, 0), start, length, keep)
       case Atom.PairValue(ordinal, keep) =>
         ColumnKernel.filterInt32(batch, encodedOrdinal(batch, ordinal), start, length, keep)
+      case Atom.StringRow =>
+        throw new ColumnarFallback("string pair row filter does not lower")
 
   /**
-   * Pair and triple steps only. An element atom, including an int filter at ordinal 0, is `None`
-   * so the stack is not one [[Selection]] pass.
+   * Pair, triple, and string-pair slot steps. An element atom, including an int filter at ordinal
+   * 0, is `None`, so that stack is not one [[Selection]] pass. A string-pair key is
+   * [[Selection.Step.Utf8]]. A string-pair value is [[Selection.Step.Int32]], the same step a pair
+   * value already uses. A whole-row atom is not a slot atom, so that stack is `None`.
    */
   def selectionSteps(compiled: Compiled): Option[Vector[Selection.Step]] =
     if (compiled.atoms.isEmpty) then None
     else if (compiled.atoms.forall(isPairAtom)) then Some(compiled.atoms.map(pairSelection))
     else if (compiled.atoms.forall(isTripleAtom)) then Some(compiled.atoms.map(tripleSelection))
+    else if (compiled.atoms.forall(isStringPairAtom)) then
+      Some(compiled.atoms.map(stringPairSelection))
     else None
 
   /**
@@ -289,6 +299,12 @@ private[execution] object PredicatePlan:
       case (PhysicalOp.Kind.LongPairs, PhysicalOp.Slot.Key | PhysicalOp.Slot.Value) =>
         throw new ColumnarFallback(longPairColumnMessage)
       case (PhysicalOp.Kind.LongPairs, slot) => unsupported(slot)
+      case (PhysicalOp.Kind.StringPairs, PhysicalOp.Slot.Key) =>
+        stringAtom(0, layer.predicate, strict)
+      case (PhysicalOp.Kind.StringPairs, PhysicalOp.Slot.Value) =>
+        pairValue(layer.predicate)
+      case (PhysicalOp.Kind.StringPairs, PhysicalOp.Slot.Row) =>
+        Atom.StringRow
       case (PhysicalOp.Kind.Triples, PhysicalOp.Slot.TripleKey) => triple(0, layer.predicate)
       case (PhysicalOp.Kind.Triples, PhysicalOp.Slot.TripleLeftValue) =>
         triple(1, layer.predicate)
@@ -388,14 +404,23 @@ private[execution] object PredicatePlan:
   private def isPairAtom(atom: Atom): Boolean = atom match
     case Atom.PairRow(_) | Atom.PairKey(_) | Atom.PairValue(_, _) => true
     case Atom.TripleRow(_) | Atom.LongPairRow(_) | Atom.Int32(_, _) | Atom.Int64(_, _) |
-        Atom.Float64(_, _) | Atom.Bool(_, _) | Atom.Utf8(_, _) | Atom.Utf8Literals(_, _) =>
+        Atom.Float64(_, _) | Atom.Bool(_, _) | Atom.Utf8(_, _) | Atom.Utf8Literals(_, _) |
+        Atom.StringRow =>
       false
 
   private def isTripleAtom(atom: Atom): Boolean = atom match
     case Atom.Int32(_, _: JoinColumn) => true
     case Atom.TripleRow(_) | Atom.Int32(_, _) | Atom.Int64(_, _) | Atom.Float64(_, _) |
         Atom.Bool(_, _) | Atom.Utf8(_, _) | Atom.Utf8Literals(_, _) | Atom.PairRow(_) |
-        Atom.LongPairRow(_) | Atom.PairKey(_) | Atom.PairValue(_, _) =>
+        Atom.LongPairRow(_) | Atom.PairKey(_) | Atom.PairValue(_, _) | Atom.StringRow =>
+      false
+
+  /** Key [[Selection.Step.Utf8]] or value [[Selection.Step.Int32]]. A row atom is not one. */
+  private def isStringPairAtom(atom: Atom): Boolean = atom match
+    case Atom.Utf8(_, _) | Atom.Utf8Literals(_, _) | Atom.PairValue(_, _) => true
+    case Atom.Int32(_, _) | Atom.Int64(_, _) | Atom.Float64(_, _) | Atom.Bool(_, _) |
+        Atom.PairRow(_) | Atom.TripleRow(_) | Atom.LongPairRow(_) | Atom.PairKey(_) |
+        Atom.StringRow =>
       false
 
   private def pairSelection(atom: Atom): Selection.Step = atom match
@@ -403,15 +428,27 @@ private[execution] object PredicatePlan:
     case Atom.PairValue(ordinal, keep) => Selection.Step.Int32(ordinal, keep)
     case Atom.PairRow(keep) => Selection.Step.IntPair(keep)
     case Atom.TripleRow(_) | Atom.LongPairRow(_) | Atom.Int32(_, _) | Atom.Int64(_, _) |
-        Atom.Float64(_, _) | Atom.Bool(_, _) | Atom.Utf8(_, _) | Atom.Utf8Literals(_, _) =>
+        Atom.Float64(_, _) | Atom.Bool(_, _) | Atom.Utf8(_, _) | Atom.Utf8Literals(_, _) |
+        Atom.StringRow =>
       throw new IllegalStateException(pairMessage)
 
   private def tripleSelection(atom: Atom): Selection.Step = atom match
     case Atom.Int32(ordinal, keep) => Selection.Step.IntTriple(ordinal, keep)
     case Atom.TripleRow(_) | Atom.Int64(_, _) | Atom.Float64(_, _) | Atom.Bool(_, _) |
         Atom.Utf8(_, _) | Atom.Utf8Literals(_, _) | Atom.PairRow(_) | Atom.LongPairRow(_) |
-        Atom.PairKey(_) | Atom.PairValue(_, _) =>
+        Atom.PairKey(_) | Atom.PairValue(_, _) | Atom.StringRow =>
       throw new IllegalStateException(tripleMessage)
+
+  private def stringPairSelection(atom: Atom): Selection.Step = atom match
+    case Atom.Utf8(ordinal, keep) => Selection.Step.Utf8(ordinal, keep)
+    case Atom.Utf8Literals(ordinal, groups) =>
+      val keep: ColumnKernel.Utf8Predicate = value => groups.exists(_.contains(value))
+      Selection.Step.Utf8(ordinal, keep)
+    case Atom.PairValue(ordinal, keep) => Selection.Step.Int32(ordinal, keep)
+    case Atom.Int32(_, _) | Atom.Int64(_, _) | Atom.Float64(_, _) | Atom.Bool(_, _) |
+        Atom.PairRow(_) | Atom.TripleRow(_) | Atom.LongPairRow(_) | Atom.PairKey(_) |
+        Atom.StringRow =>
+      throw new IllegalStateException("string pair selection expected a key or a value")
 
   /** A one-column encode stores the demanded ordinal at index 0. */
   private def encodedOrdinal(batch: ColumnBatch, ordinal: Int): Int =

@@ -8,9 +8,9 @@ import ColumnarInterpreter.Columns
 /**
  * Int and string `groupByKey`.
  *
- * Int pairs with a two-filter stack scatter survivor ids. Every other int-pair child, and every
- * string-pair child, stays on the dense exchange. The `None` path is the only one that interprets
- * that child.
+ * A two-filter key or value stack scatters survivor ids. A whole-row string stack is not lowered;
+ * a single filter, and every other child, stays on the dense exchange. The `None` path is the only
+ * one that interprets that child.
  */
 private[execution] object GroupByArms:
 
@@ -46,16 +46,26 @@ private[execution] object GroupByArms:
             )
             Columns.GroupedInts(GroupByKey.int32(pairs, width, workers))
       case PhysicalOp.Kind.StringPairs =>
-        val input = ColumnarInterpreter.interpretAt(
+        FilterChain.selected(
           source,
           child,
           selectedPartition,
           preserveAbsence,
           ordinals,
-        )
-        Columns.GroupedStrings(
-          GroupByKey.strings(StringPairWalk.batches(input), width, workers),
-        )
+        ) match
+          case Some(parts) =>
+            Columns.GroupedStrings(GroupByKey.stringsSelected(parts, width, workers))
+          case None =>
+            val input = ColumnarInterpreter.interpretAt(
+              source,
+              child,
+              selectedPartition,
+              preserveAbsence,
+              ordinals,
+            )
+            Columns.GroupedStrings(
+              GroupByKey.strings(StringPairWalk.batches(input), width, workers),
+            )
       case other =>
         throw new IllegalStateException(
           s"groupByKey column is $other, expected int or string pairs",
