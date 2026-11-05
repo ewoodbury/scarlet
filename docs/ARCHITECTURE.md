@@ -27,7 +27,9 @@ Two vocabularies, separated at the module level:
 - **Physical** (`scarlet-execution`): `StageGraph` — stages, dependencies, shuffle boundaries.
   Narrow operations are fused into stages; wide operations become shuffle stages carrying a
   structured `WideOp` record. `ColumnarPlanner` builds and interprets a separate `PhysicalOp`
-  tree for eligible plans; its scaladoc documents selection and fusion.
+  tree for eligible plans; selection and fusion are documented under "Columnar completion
+  contract" below, and declared-apply and boolean-pipeline details in `FunctionWitness` and
+  `BoolPipeline`.
 
 The rule: `Plan` is legal in the compiler (`StageBuilder` reads it to compile), illegal in the
 executor (`StageExecutor`/`ShuffleHandler`/`ExecutionPlanner` dispatch only on `WideOp`).
@@ -361,6 +363,18 @@ Tasks retry per `ScarletConf` (`maxTaskRetries`, exponential backoff) inside
 `TaskExecutionWrapper`; permanent failure propagates to the caller. Lineage-based recovery was
 removed: it could not safely reconstruct arbitrary user functions. Retry is honest and tested
 (`TestLocalTaskSchedulerRetry`).
+
+### Columnar fallback
+
+`ColumnarFallback` is a deliberate decline: the planner or interpreter chose not to run a kernel,
+and the row path runs instead. A `ClassCastException` from a filter, or from a string map that
+declares `String` and returns another value, is also a fallback, and that function may already
+have run. An `IllegalStateException` from a physical/logical mismatch or a broadcast build table
+above `broadcastBuildBudgetBytes` is not a fallback, and neither is the `IllegalArgumentException`
+from a partition-selector `require`. A null value on a left, right, or full outer join, and on a
+long inner join, is a `ColumnarFallback`. A null value on a selected row of an int inner join is
+also a `ColumnarFallback`; a null on a dropped row is not. A string join does not use that
+fallback: a null value never lowers, and a clear live value bit still throws.
 
 ## Ordering guarantees
 
