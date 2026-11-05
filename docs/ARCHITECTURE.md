@@ -63,7 +63,7 @@ asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors
 
 ### Columnar completion contract
 
-The following 197 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. The excluded list has 37 shapes, for 234 covered in total. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
+The following 198 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. The excluded list has 36 shapes, for 234 covered in total. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
 `Unknown(2)` denotes the two source partitions in the small contract fixtures. Aggregate and join
 outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. `sortByIntKey`, `sortByLongKey`, and
 `sortByStringKey` use `Range(defaultShufflePartitions, Seq(0))` and `Sorted(Seq(0), Seq(true))`.
@@ -90,6 +90,7 @@ null. A null string key orders as `""` and stays null. Shape strings are exact.
 | Int `reduceByKey`, after a value filter or int `mapValues`, and nested reduction | `Columnar` | `HashAggregate(Exchange(Scan))`, `HashAggregate(Exchange(FilterValue(Scan)))`, `HashAggregate(Exchange(MapValue(Scan)))`, `HashAggregate(Exchange(HashAggregate(Exchange(Scan))))` |
 | Long `reduceByKey` | `Columnar` | `LongHashAggregate(Exchange(Scan))` |
 | String `reduceByKey`. A null key is dropped and `""` is kept. The exchange hashes each dictionary string once | `StringPair` | `StringHashAggregate(Exchange(Scan))` |
+| Int `groupByKey`. The exchange drops a null key and keeps every value. Value order inside a key is input order. Key order inside a partition is first-seen. One batch is published per shuffle partition, including an empty bucket. `count` is the number of groups. There is no partial combine and no spill. `keys`, `values`, `take`, and a map above the group stay on the row path | `GroupedInt` | `GroupByKey(Exchange(Scan))` |
 | String `distinct`. One copy of each string, including one null and one empty string. Equal strings share a hash bucket. Order is unspecified | `Utf8Dict` | `Dedupe(Exchange(Scan))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
 | Automatic or explicit shuffle-hash long join. Both sides are exchanged on `Long.hashCode`. A null key is dropped. A null value stays on the row path. There is no spill and no build budget. Broadcast, sort-merge, and outer joins on long keys stay on the row path | `Columnar` | `LongHashJoin(Exchange(Scan), Exchange(Scan))` |
@@ -188,7 +189,9 @@ that scan, an inner shuffle-hash join of that scan, and `sortByLongKey` of that 
 `groupedSum` of a long pair stays on the row path. Broadcast, sort-merge, and outer joins on long
 keys stay on the row path. A long sort spills over the budget the same way an int sort does.
 String `reduceByKey` is columnar: `StringHashAggregate(Exchange(Scan))` drops a null key, keeps
-`""`, and hashes each dictionary string once. String `groupByKey` is refused. An inner
+`""`, and hashes each dictionary string once. Int `groupByKey` is columnar:
+`GroupByKey(Exchange(Scan))`, layout `GroupedInt`, and `count` is the number of groups. String
+and double `groupByKey` stay refused. An inner
 shuffle-hash string join lowers to `StringHashJoin(Exchange(Scan), Exchange(Scan))`.
 `sortByStringKey` of a string-pair scan is columnar. Over the budget, with spill on, it spills the
 same way an int sort does. A null key orders as `""` and stays null.
@@ -209,14 +212,14 @@ the pair type, such as `(Int, Int) => (Long, Int)`, is excluded: `partitioning`,
 `tryGroupedSum` stay on the row path. The structural peel label is still
 `GroupedSum(MapPair(Scan))`.
 
-These 37 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
-`coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `cogroup`, `sortBy`, `groupByKey` on int,
-string, or double keys, `mapValues` to string or double, double-pair `keys`, `values`,
+These 36 row-path fixture shapes report `partitioning = None`: `mapPartitions`, `repartition`,
+`coalesce`, `partitionBy`, `flatMap`, `flatMapValues`, `cogroup`, `sortBy`, `groupByKey` on
+string or double keys, `mapValues` to string or double, double-pair `keys`, `values`,
 `mapValues`, `filterKeys`, and `filterValues`, double-key `reduceByKey` and `join`,
 single-precision `Float` sources and maps, all-null strings, an empty int source without
 a witness, and element maps that do not preserve the column type (`boolean` to `boolean`, `int`
 to `long`, `string`, or a pair, `long` to `int` or `string`, and `double` to `int`).
-That is 37 exclusions, and 197 accepted, for 234 covered shapes. The string inner join moved from the excluded list, so 38 - 1 = 37 excluded. `sortByStringKey` of a string-pair scan is a new accepted fixture. 196 + 1 = 197.
+That is 36 exclusions, and 198 accepted, for 234 covered shapes. Int `groupByKey` moved from the excluded list, so 37 - 1 = 36 excluded. 197 + 1 = 198.
 Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by execution
 tests, not contract fixtures, because the contract does not track the int refusals either.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then

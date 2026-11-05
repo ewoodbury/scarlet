@@ -12,13 +12,13 @@ import com.ewoodbury.scarlet.core.Partition
  * the child kind. [[PhysicalOp.Column]] narrows an int or long pair to one column and shares its
  * arrays. [[PhysicalOp.MapValue]] rewrites an int or long value and keeps the pair.
  * [[PhysicalOp.Exchange]] sits under [[PhysicalOp.HashAggregate]],
- * [[PhysicalOp.LongHashAggregate]], and [[PhysicalOp.StringHashAggregate]], and on each side of
- * [[PhysicalOp.HashJoin]], [[PhysicalOp.LongHashJoin]], [[PhysicalOp.StringHashJoin]],
- * [[PhysicalOp.SortMergeJoin]], [[PhysicalOp.SortMergeLeftOuter]],
- * [[PhysicalOp.SortMergeRightOuter]], [[PhysicalOp.SortMergeFullOuter]],
- * [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]], and [[PhysicalOp.HashFullOuter]].
- * Those kernels perform the shuffle. Interpreting the boundary on its own does not.
- * [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.BroadcastLeftOuter]],
+ * [[PhysicalOp.LongHashAggregate]], [[PhysicalOp.StringHashAggregate]], and
+ * [[PhysicalOp.GroupByKey]], and on each side of [[PhysicalOp.HashJoin]],
+ * [[PhysicalOp.LongHashJoin]], [[PhysicalOp.StringHashJoin]], [[PhysicalOp.SortMergeJoin]],
+ * [[PhysicalOp.SortMergeLeftOuter]], [[PhysicalOp.SortMergeRightOuter]],
+ * [[PhysicalOp.SortMergeFullOuter]], [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]],
+ * and [[PhysicalOp.HashFullOuter]]. Those kernels perform the shuffle. Interpreting the boundary
+ * on its own does not. [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.BroadcastLeftOuter]],
  * [[PhysicalOp.BroadcastRightOuter]], and [[PhysicalOp.BroadcastFullOuter]] have no exchange.
  * [[PhysicalOp.BuildSide]] chooses which logical child of an inner broadcast join is built. The
  * planner records the right child. A later cost-based pass may choose the left child. The other
@@ -208,6 +208,15 @@ enum PhysicalOp:
   case BroadcastFullOuter(left: PhysicalOp, right: PhysicalOp)
 
   /**
+   * Int `groupByKey`. The child is an [[PhysicalOp.Exchange]]. The kernel shuffles. A null key is
+   * dropped. A null value is kept, and a clear value bit is a planner bug. One grouped batch is
+   * published per shuffle partition, including an empty bucket. Output kind is
+   * [[PhysicalOp.Kind.GroupedInts]] for a [[PhysicalOp.Kind.Pairs]] child. Any other child is a
+   * planner bug. There is no partial combine and no spill.
+   */
+  case GroupByKey(child: PhysicalOp)
+
+  /**
    * Global sort of an int-pair scan. Each source partition is sorted by effective key, then the
    * sorted runs are rank-merged into `defaultShufflePartitions`. A null key orders as zero and
    * stays null. A null value stays null. Ties keep input order. Output kind is
@@ -273,6 +282,11 @@ enum PhysicalOp:
     case HashAggregate(_) => PhysicalOp.Kind.Pairs
     case LongHashAggregate(_) => PhysicalOp.Kind.LongPairs
     case StringHashAggregate(_) => PhysicalOp.Kind.StringPairs
+    case GroupByKey(child) =>
+      child.kind match
+        case PhysicalOp.Kind.Pairs => PhysicalOp.Kind.GroupedInts
+        case other =>
+          throw new IllegalStateException(s"groupByKey column is $other, expected int pairs")
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
     case LongHashJoin(_, _) => PhysicalOp.Kind.LongTriples
     case StringHashJoin(_, _) => PhysicalOp.Kind.StringTriples
@@ -339,6 +353,7 @@ enum PhysicalOp:
     case HashAggregate(child) => s"HashAggregate(${child.shape})"
     case LongHashAggregate(child) => s"LongHashAggregate(${child.shape})"
     case StringHashAggregate(child) => s"StringHashAggregate(${child.shape})"
+    case GroupByKey(child) => s"GroupByKey(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
     case LongHashJoin(left, right) => s"LongHashJoin(${left.shape}, ${right.shape})"
     case StringHashJoin(left, right) => s"StringHashJoin(${left.shape}, ${right.shape})"
@@ -357,7 +372,7 @@ enum PhysicalOp:
 object PhysicalOp:
   enum Kind:
     case Ints, Longs, Floats, Pairs, Triples, Strings, Bools, LongPairs, LongTriples, StringPairs,
-      StringTriples
+      StringTriples, GroupedInts
 
   /** Which logical child of a broadcast join fills the build table. */
   enum BuildSide:

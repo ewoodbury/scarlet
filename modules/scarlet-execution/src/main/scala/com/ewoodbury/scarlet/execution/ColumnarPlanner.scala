@@ -311,9 +311,15 @@ object ColumnarPlanner:
         catch case _: ClassCastException => None
 
   private def finishedCount(plan: Plan[_], op: PhysicalOp): Option[Long] =
-    Some(
-      ColumnReduce.count(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op))),
-    )
+    op match
+      case _: PhysicalOp.GroupByKey =>
+        Some(ColumnarInterpreter.groupCount(ColumnarInterpreter.interpret(plan, op)))
+      case _ =>
+        Some(
+          ColumnReduce.count(
+            ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op)),
+          ),
+        )
 
   /**
    * Wide sum of a finished int column. `None` means the row path, including a plan whose result is
@@ -689,6 +695,8 @@ object ColumnarPlanner:
       else None
     case Plan.ReduceByKeyOp(source, _) =>
       lowerChild(source).flatMap(ReduceByKeyLowering.apply)
+    case Plan.GroupByKeyOp(source) =>
+      lowerChild(source).flatMap(GroupByKeyLowering.apply)
     case plan if JoinLowering.isJoin(plan) => JoinLowering.lower(plan, lowerChild)
     case Plan.SortByIntKeyOp(source) =>
       SortLowering.lowerInt(source, lowerPlan)
@@ -734,7 +742,7 @@ object ColumnarPlanner:
         current.flatMap(op => lowerElementStep(op, step))
       }
     case PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.LongTriples |
-        PhysicalOp.Kind.StringTriples =>
+        PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts =>
       None
 
   private def lowerElementStep(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
@@ -1012,6 +1020,8 @@ object ColumnarPlanner:
       hashed(PhysicalOp.Kind.Pairs)
     case _: PhysicalOp.StringHashAggregate =>
       hashed(PhysicalOp.Kind.StringPairs)
+    case _: PhysicalOp.GroupByKey =>
+      hashed(PhysicalOp.Kind.GroupedInts)
     case _: PhysicalOp.LongHashJoin =>
       hashed(PhysicalOp.Kind.LongPairs)
     case _: PhysicalOp.StringHashJoin =>
@@ -1063,6 +1073,7 @@ object ColumnarPlanner:
     case PhysicalOp.Kind.Strings => Layout.Utf8Dict(ScarletConf.get.columnarBatchSize)
     case PhysicalOp.Kind.StringPairs => Layout.StringPair(ScarletConf.get.columnarBatchSize)
     case PhysicalOp.Kind.StringTriples => Layout.StringTriple(ScarletConf.get.columnarBatchSize)
+    case PhysicalOp.Kind.GroupedInts => Layout.GroupedInt(ScarletConf.get.columnarBatchSize)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Bools | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples =>

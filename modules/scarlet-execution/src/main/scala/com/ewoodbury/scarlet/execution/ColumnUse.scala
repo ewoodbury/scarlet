@@ -55,6 +55,8 @@ private[execution] object ColumnUse:
       walk(source, child, parent union Set(0, 1))
     case (Plan.ReduceByKeyOp(source, _), PhysicalOp.StringHashAggregate(child)) =>
       walk(source, child, parent union Set(0, 1))
+    case (Plan.GroupByKeyOp(source), PhysicalOp.GroupByKey(child)) =>
+      walk(source, child, parent union Set(0, 1))
     case (Plan.SortByIntKeyOp(source), PhysicalOp.SortByIntKey(child)) =>
       walk(source, child, parent union Set(0, 1))
     case (Plan.SortByLongKeyOp(source), PhysicalOp.SortByLongKey(child)) =>
@@ -75,7 +77,8 @@ private[execution] object ColumnUse:
    * long, float, boolean, or string map adds nothing.
    */
   private def consumedOrdinals(kind: PhysicalOp.Kind): Set[Int] = kind match
-    case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs =>
+    case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs |
+        PhysicalOp.Kind.GroupedInts =>
       Set(0, 1)
     case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples =>
       Set(0, 1, 2)
@@ -97,7 +100,7 @@ private[execution] object ColumnUse:
       Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs |
-        PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools =>
+        PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools | PhysicalOp.Kind.GroupedInts =>
       Set(0, 1)
 
   private def planChild(plan: Plan[_]): Option[Plan[_]] = plan match
