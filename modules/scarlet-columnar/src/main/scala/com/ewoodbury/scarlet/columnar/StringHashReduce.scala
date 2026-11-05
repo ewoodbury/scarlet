@@ -18,6 +18,10 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * value column is all valid. A clear value bit is not a null this kernel understands. Output order
  * is first-seen inside the bucket. The table is at least twice the row count, so one batch does
  * not rehash. A spilled bucket may change first-seen output order.
+ *
+ * [[reduceSelected]] scans a survivor index. [[byKeySelected]] partial-reduces that index, then
+ * exchanges and spills the dense partials the same way [[byKey]] does. The exchange does not see
+ * the source rows.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object StringHashReduce:
@@ -53,21 +57,88 @@ object StringHashReduce:
         morsel => reduceBatch(morsel, op),
         partials => reduceBatch(partials, op),
       )
-      val buckets =
-        HashExchange.partitionAllUtf8(combined, keyOrdinal = 0, numPartitions, parallelism)
-      val conf = ScarletConf.get
-      if (buckets.exists(bucket => StringHashReduceSpill.exceeds(bucket, conf))) then
-        buckets.map { bucket =>
-          StringHashReduceSpill.finish(bucket, parallelism, batchSize, conf, op)
-        }
-      else
-        MorselScheduler.map(buckets, parallelism) { (_, bucket) =>
-          reduceBatch(bucket, op)
-        }
+      reduceExchanged(combined, numPartitions, parallelism, batchSize, op)
+
+  /**
+   * [[byKey]] for a selection. Each live prefix is partial-reduced, the dense partials are
+   * exchanged, and each bucket is reduced. Filtered rows die in the scan. An empty input is
+   * `numPartitions` empty string-pair batches. Spill matches [[byKey]].
+   */
+  private[scarlet] def byKeySelected(
+      selected: Vector[Selected],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+      op: (Int, Int) => Int,
+  ): Vector[ColumnBatch] =
+    require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    if (selected.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyStringPairs)
+    else
+      val combined = PartialCombine.perBatchSelected(
+        selected,
+        batchSize,
+        parallelism,
+        (one, from, until) => reduceSelected(one, from, until, op),
+        partials => reduce(partials, op),
+      )
+      reduceExchanged(combined, numPartitions, parallelism, batchSize, op)
+
+  /**
+   * [[reduce]] over `rows(from until until)`. A null key is dropped. `""` is a present key. A
+   * clear value bit is not a null this kernel understands, matching [[reduce]]: the stored int is
+   * combined. Slots at `count` and beyond are not read. An empty range publishes an empty
+   * string-pair batch.
+   */
+  private[scarlet] def reduceSelected(
+      selected: Selected,
+      from: Int,
+      until: Int,
+      op: (Int, Int) => Int,
+  ): ColumnBatch =
+    require(from >= 0, s"selection start must be >= 0, got $from")
+    require(until >= from, s"selection end $until is before start $from")
+    require(
+      until <= selected.count,
+      s"selection end $until exceeds count ${selected.count}",
+    )
+    val keys = utf8At(selected.batch, 0)
+    val values = ColumnHash.int32At(selected.batch, 1)
+    require(keys.length == values.length, "key and value columns differ in length")
+    if (until == from) then ColumnBatches.emptyStringPairs
+    else
+      val table = new Table(ColumnHash.tableSize(until - from), op)
+      if (ColumnHash.fullyPresent(keys)) then
+        table.scanDenseSelected(keys, values, selected.rows, from, until)
+      else table.scanSparseSelected(keys, values, selected.rows, from, until)
+      table.compact(keys.dictionary)
 
   /** One batch. [[StringHashReduceSpill]] reduces a morsel and folds partials through this. */
   private[scarlet] def reduce(batch: ColumnBatch, op: (Int, Int) => Int): ColumnBatch =
     reduceBatch(batch, op)
+
+  /**
+   * Exchange combined partials and reduce each bucket. Shared by [[byKey]] and [[byKeySelected]].
+   */
+  private def reduceExchanged(
+      combined: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+      op: (Int, Int) => Int,
+  ): Vector[ColumnBatch] =
+    val buckets =
+      HashExchange.partitionAllUtf8(combined, keyOrdinal = 0, numPartitions, parallelism)
+    val conf = ScarletConf.get
+    if (buckets.exists(bucket => StringHashReduceSpill.exceeds(bucket, conf))) then
+      buckets.map { bucket =>
+        StringHashReduceSpill.finish(bucket, parallelism, batchSize, conf, op)
+      }
+    else
+      MorselScheduler.map(buckets, parallelism) { (_, bucket) =>
+        reduceBatch(bucket, op)
+      }
 
   private def reduceBatch(batch: ColumnBatch, op: (Int, Int) => Int): ColumnBatch =
     val keys = utf8At(batch, 0)
@@ -117,6 +188,39 @@ object StringHashReduce:
       while (row < rows) {
         if (Validity.isSet(keyWords, row)) then add(codes(row), valueValues(row))
         row += 1
+      }
+
+    def scanDenseSelected(
+        keyColumn: DictUtf8Column,
+        valueColumn: Int32Column,
+        ids: Array[Int],
+        from: Int,
+        until: Int,
+    ): Unit =
+      val codes = keyColumn.codes
+      val valueValues = valueColumn.values
+      var slot = from
+      while (slot < until) {
+        val row = ids(slot)
+        add(codes(row), valueValues(row))
+        slot += 1
+      }
+
+    def scanSparseSelected(
+        keyColumn: DictUtf8Column,
+        valueColumn: Int32Column,
+        ids: Array[Int],
+        from: Int,
+        until: Int,
+    ): Unit =
+      val codes = keyColumn.codes
+      val valueValues = valueColumn.values
+      val keyWords = keyColumn.validity.words
+      var slot = from
+      while (slot < until) {
+        val row = ids(slot)
+        if (Validity.isSet(keyWords, row)) then add(codes(row), valueValues(row))
+        slot += 1
       }
 
     /**
