@@ -5,14 +5,15 @@ import com.ewoodbury.scarlet.core.Plan
 /**
  * Lowers a typed key sort and reports its layout.
  *
- * [[Plan.SortByIntKeyOp]] lowers only when its child is a scan of int pairs, to
- * [[PhysicalOp.SortByIntKey]]. [[Plan.SortByLongKeyOp]] lowers only when its child is a scan of
- * long pairs, to [[PhysicalOp.SortByLongKey]]. [[Plan.SortByStringKeyOp]] lowers only when its
- * child is a scan of string pairs, to [[PhysicalOp.SortByStringKey]]. Any other child stays on the
- * row path. [[acceptsAsChild]] refuses every sort, so a filter, join, aggregate, or projection
- * above a sort stays on the row path. A long sort spills through the same budget as an int sort.
- * The physical op stays [[PhysicalOp.SortByLongKey]]. A string sort spills through that same
- * budget. The physical op stays [[PhysicalOp.SortByStringKey]].
+ * [[Plan.SortByIntKeyOp]] lowers when its child is a scan of int pairs, or filters over that scan,
+ * to [[PhysicalOp.SortByIntKey]]. A map, aggregate, or join under the sort stays on the row path.
+ * [[Plan.SortByLongKeyOp]] lowers only when its child is a scan of long pairs, to
+ * [[PhysicalOp.SortByLongKey]]. [[Plan.SortByStringKeyOp]] lowers only when its child is a scan of
+ * string pairs, to [[PhysicalOp.SortByStringKey]]. [[acceptsAsChild]] refuses every sort, so a
+ * filter, join, aggregate, or projection above a sort stays on the row path. A long sort spills
+ * through the same budget as an int sort. The physical op stays [[PhysicalOp.SortByLongKey]]. A
+ * string sort spills through that same budget. The physical op stays
+ * [[PhysicalOp.SortByStringKey]].
  *
  * The sorts share one ordering tag: range distribution on the row key, ascending by effective key.
  * A null int or long key orders as zero and stays null. A null string key orders as `""` and stays
@@ -33,9 +34,15 @@ private[execution] object SortLowering:
       lowerPlan: Plan[_] => Option[PhysicalOp],
   ): Option[PhysicalOp] =
     lowerPlan(source) match
-      case Some(scan @ PhysicalOp.Scan(PhysicalOp.Kind.Pairs, _)) =>
-        Some(PhysicalOp.SortByIntKey(scan))
+      case Some(child) if acceptsIntSortChild(child) =>
+        Some(PhysicalOp.SortByIntKey(child))
       case _ => None
+
+  /** A pair scan, or filters over one. A map, aggregate, or join is not a sort child. */
+  private def acceptsIntSortChild(op: PhysicalOp): Boolean = op match
+    case PhysicalOp.Scan(PhysicalOp.Kind.Pairs, _) => true
+    case PhysicalOp.Filter(child, _) => acceptsIntSortChild(child)
+    case _ => false
 
   def lowerLong(
       source: Plan[(Long, Long)],

@@ -254,9 +254,11 @@ object Plan {
   /**
    * Sorts `(Int, Int)` pairs ascending by column 0. This node is planned like [[SortByOp]] with
    * the key taken from column 0 and [[Ordering.Int]]. Generic [[SortByOp]] stays opaque. A scan of
-   * int pairs lowers to a columnar rank split. Any other child stays on the row path. A null `Int`
-   * key orders as zero and the row is retained. This matches `sortBy(_._1)` and is not a null-safe
-   * ordering.
+   * int pairs, or a filter chain over one, lowers to a columnar rank split. Two or more filters
+   * sort the survivor index; a single filter compacts, then sorts. A map or any other child stays
+   * on the row path. A null `Int` key orders as zero and the row is retained. This matches
+   * `sortBy(_._1)` and is not a null-safe ordering. A key or value filter drops a null in that
+   * column before the sort, while the row path unboxes the null to `0`.
    *
    * @param source
    *   The preceding plan node.

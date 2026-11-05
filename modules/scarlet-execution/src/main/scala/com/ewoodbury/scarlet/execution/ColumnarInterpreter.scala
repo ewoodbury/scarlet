@@ -843,18 +843,31 @@ private[execution] object ColumnarInterpreter:
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
       // preserveAbsence keeps a null key and a null value. A null key still orders as zero.
-      // The physical op stays SortByIntKey. Run and take both reach this arm. RankSplitRuns
-      // chooses the in-memory split or spilled runs. Take decodes only the prefix of the result.
-      val batches =
-        pairsOf(
-          interpretAt(source, child, selectedPartition = None, preserveAbsence = true, ordinals),
-        )
-      val sorted = RankSplitRuns.sortAndSplit(
-        batches,
-        ColumnarPlanner.shuffleWidth,
-        ColumnarPlanner.parallelism,
-        ScarletConf.get,
-      )
+      // A two-filter stack sorts survivor ids and does not gather first. The `None` path is the
+      // only one that interprets that child. RankSplitRuns chooses the in-memory split or spilled
+      // runs. Over the budget it materialises the selection. Take decodes the prefix.
+      val width = ColumnarPlanner.shuffleWidth
+      val workers = ColumnarPlanner.parallelism
+      val sorted = FilterChain.selected(
+        source,
+        child,
+        selectedPartition = None,
+        preserveAbsence = true,
+        ordinals,
+      ) match
+        case Some(parts) =>
+          RankSplitRuns.sortAndSplitSelected(parts, width, workers, ScarletConf.get)
+        case None =>
+          val batches = pairsOf(
+            interpretAt(
+              source,
+              child,
+              selectedPartition = None,
+              preserveAbsence = true,
+              ordinals,
+            ),
+          )
+          RankSplitRuns.sortAndSplit(batches, width, workers, ScarletConf.get)
       Columns.Pairs(sorted)
     case (Plan.SortByLongKeyOp(source), PhysicalOp.SortByLongKey(child)) =>
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.

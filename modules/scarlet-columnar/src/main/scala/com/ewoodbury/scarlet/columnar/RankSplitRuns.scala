@@ -139,6 +139,37 @@ private[scarlet] object RankSplitRuns:
       RankSplit.sortAndSplit(batches, partitions, parallelism)
     else spill(batches, partitions, rows, conf)
 
+  /**
+   * [[sortAndSplit]] for a survivor index. Spill off, or an estimate at or under the budget, calls
+   * [[RankSplit.sortAndSplitSelected]] and writes nothing. The estimate charges `count` rows per
+   * selection, the same per-row price as [[retainedBytes]]. Over the budget, with spill on, this
+   * materialises each live prefix and calls [[sortAndSplit]] on those dense batches. There is no
+   * selected spill writer: the dense writer sorts and spills the gathered rows.
+   */
+  private[scarlet] def sortAndSplitSelected(
+      selected: Vector[Selected],
+      partitions: Int,
+      parallelism: Int,
+      conf: ScarletConf,
+  ): Vector[ColumnBatch] =
+    require(partitions > 0, s"numPartitions must be positive, got $partitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(selected.nonEmpty, "sortAndSplitSelected needs at least one batch")
+    val rows = selectedRows(selected)
+    if (rows == 0 || !exceedsSelected(selected, conf)) then
+      RankSplit.sortAndSplitSelected(selected, partitions, parallelism)
+    else sortAndSplit(selected.map(Selection.materialize), partitions, parallelism, conf)
+
+  private def selectedRows(selected: Vector[Selected]): Int =
+    val total = selected.iterator.map(_.count.toLong).sum
+    require(total <= Int.MaxValue.toLong, s"sortAndSplitSelected input reached $total rows")
+    total.toInt
+
+  /** Live-prefix charge. Same per-row price as [[retainedBytes]]. */
+  private def exceedsSelected(selected: Vector[Selected], conf: ScarletConf): Boolean =
+    conf.spillEnabled &&
+      selected.iterator.map(one => partitionBytes(one.count)).sum > conf.spillBudgetBytes
+
   /** Spill files published since the last [[resetForTest]], including intermediate runs. */
   private[scarlet] def filesWrittenForTest: Long = filesWritten.get
 
