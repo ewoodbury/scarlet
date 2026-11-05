@@ -341,8 +341,8 @@ object StageBuilder:
    *   4. **Wide Transformations (Shuffle Operations)**:
    *      - GroupByKeyOp, ReduceByKeyOp: Supports shuffle bypass optimization when already
    *        partitioned correctly
-   *      - SortByOp, SortByIntKeyOp, SortByLongKeyOp, PartitionByOp, RepartitionOp, CoalesceOp:
-   *        Always creates shuffle boundaries
+   *      - SortByOp, SortByIntKeyOp, SortByLongKeyOp, SortByStringKeyOp, PartitionByOp,
+   *        RepartitionOp, CoalesceOp: Always creates shuffle boundaries
    *      - JoinOp, LeftOuterJoinOp, RightOuterJoinOp, FullOuterJoinOp, CoGroupOp: Multi-input wide
    *        operations with side tagging for disambiguation
    *      - Uses WideOp metadata structures for shuffle execution planning
@@ -640,6 +640,17 @@ object StageBuilder:
           dependencies,
         )
 
+      case stringSort: Plan.SortByStringKeyOp =>
+        sortByShuffle(
+          ctx,
+          stringSort.source,
+          (pair: (String, Int)) => stringSortKey(pair),
+          Ordering.String,
+          stringSort,
+          builderMap,
+          dependencies,
+        )
+
       case pby: Plan.PartitionByOp[_, _] =>
         val (sourceStageId, _) = buildStagesFromPlan(ctx, pby.source, builderMap, dependencies)
         val src = builderMap(sourceStageId)
@@ -911,9 +922,17 @@ object StageBuilder:
     (shuffleId, Some(plan))
   }
 
+  /** Effective string sort key. A null key orders as `""` and the original row stays null. */
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def stringSortKey(pair: (String, Int)): String =
+    pair._1 match
+      case null => ""
+      case key => key
+
   /**
-   * Range-partitions and locally sorts. `SortByOp`, `SortByIntKeyOp`, and `SortByLongKeyOp` share
-   * this shuffle. The caller supplies the key function and the ordering.
+   * Range-partitions and locally sorts. `SortByOp`, `SortByIntKeyOp`, `SortByLongKeyOp`, and
+   * `SortByStringKeyOp` share this shuffle. The caller supplies the key function and the ordering.
+   * A null string key orders as `""` and the original row stays null.
    */
   private def sortByShuffle[A, B](
       ctx: BuildContext,

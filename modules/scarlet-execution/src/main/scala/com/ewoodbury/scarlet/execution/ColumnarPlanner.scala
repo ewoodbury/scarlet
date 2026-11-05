@@ -27,6 +27,8 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * `sortByLongKey` of a long-pair scan lower to a rank split. A null key orders as zero and stays
  * null. Over the budget, with spill on, a long sort writes one run per input partition. At or
  * under the budget, and whenever spill is off, it stays in memory and writes nothing.
+ * `sortByStringKey` of a string-pair scan lowers to an in-memory rank split. A null string key
+ * orders as `""` and stays null. A string sort does not spill.
  *
  * [[lower]] and interpretation walk the same logical plan. The physical node records the operator
  * and not the function, so each logical node is matched to the node [[lower]] built for it. A
@@ -147,9 +149,10 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * `take` has a separate bounded path for accepted partition-preserving shapes: it interprets one
  * source partition at a time in order and decodes only the remaining requested values. Plans with
  * an exchange or aggregate stay on the row path because their output cannot be produced with this
- * narrow short-circuit. An int-key or long-key sort of a pair scan is not partition-preserving.
- * Take runs the whole sort, then decodes the requested prefix across the sorted output partitions
- * in order. Long-pair decode already keeps a null. `take(0)` returns empty without running.
+ * narrow short-circuit. An int-key, long-key, or string-key sort of a pair scan is not
+ * partition-preserving. Take runs the whole sort, then decodes the requested prefix across the
+ * sorted output partitions in order. Long-pair decode already keeps a null. String-pair decode
+ * already keeps a null key. `take(0)` returns empty without running.
  *
  * [[ColumnarInterpreter]] runs that lowered tree and encodes the source partitions.
  */
@@ -197,7 +200,8 @@ object ColumnarPlanner:
    * reads the value columns and returns `None`, and the row path runs. [[SortLowering]] accepts a
    * typed key sort only for a scan of the matching pair kind. Any other child, and any parent of
    * that sort, stays on the row path. A long sort spills when `spillEnabled` is on and the
-   * retained estimate exceeds `spillBudgetBytes`. The physical op stays `SortByLongKey`.
+   * retained estimate exceeds `spillBudgetBytes`. The physical op stays `SortByLongKey`. A string
+   * sort of a string-pair scan stays in memory. The physical op is `SortByStringKey`.
    * [[partitioning]] and [[tryRun]] follow a refusal. They also drop a lowered tree whose layout
    * is invalid.
    */
@@ -232,7 +236,7 @@ object ColumnarPlanner:
 
   /**
    * Run an accepted plan until its first `n` results are available. Partition-preserving plans
-   * interpret one source partition at a time. An int-key or long-key sort is not
+   * interpret one source partition at a time. An int-key, long-key, or string-key sort is not
    * partition-preserving: the whole sort runs, then only the requested prefix is decoded across
    * the output partitions in order. An exchange, aggregate, or join is refused. `n <= 0` returns
    * empty without running. The catch is the row-path fallback. [[ColumnarFallback]] is its named
@@ -250,7 +254,8 @@ object ColumnarPlanner:
 
   private def takeAccepted(plan: Plan[_], op: PhysicalOp, n: Int): Option[Seq[Any]] =
     op match
-      case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey =>
+      case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey |
+          _: PhysicalOp.SortByStringKey =>
         Some(
           ColumnarInterpreter.decodePrefixFor(ColumnarInterpreter.interpret(plan, op), n, op),
         )
@@ -686,6 +691,8 @@ object ColumnarPlanner:
       SortLowering.lowerInt(source, lowerPlan)
     case Plan.SortByLongKeyOp(source) =>
       SortLowering.lowerLong(source, lowerPlan)
+    case Plan.SortByStringKeyOp(source) =>
+      SortLowering.lowerString(source, lowerPlan)
     case _ => None
 
   private[execution] def elementSteps(
@@ -993,6 +1000,8 @@ object ColumnarPlanner:
     case PhysicalOp.MapValue(child) => infoOf(child)
     case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey =>
       SortLowering.info(shuffleWidth, layoutOf(PhysicalOp.Kind.Pairs))
+    case _: PhysicalOp.SortByStringKey =>
+      SortLowering.info(shuffleWidth, layoutOf(PhysicalOp.Kind.StringPairs))
     case _: PhysicalOp.HashAggregate | _: PhysicalOp.LongHashAggregate | _: PhysicalOp.HashJoin |
         _: PhysicalOp.SortMergeJoin | _: PhysicalOp.SortMergeLeftOuter |
         _: PhysicalOp.SortMergeRightOuter | _: PhysicalOp.SortMergeFullOuter |

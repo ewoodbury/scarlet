@@ -180,9 +180,9 @@ private[execution] object ColumnarInterpreter:
     case _ => false
 
   /**
-   * Int-pair decoder for `op`. [[PhysicalOp.SortByLongKey]] is its own arm. Long-pair decode does
-   * not call the returned function, and this arm must not fall through to
-   * [[BatchCodec.decodeIntPairs]], which rejects a clear bit.
+   * Int-pair decoder for `op`. [[PhysicalOp.SortByLongKey]] and [[PhysicalOp.SortByStringKey]] are
+   * their own arms. Those decoders do not call the returned function, and these arms must not fall
+   * through to [[BatchCodec.decodeIntPairs]], which rejects a clear bit.
    */
   private def intPairDecoder(op: PhysicalOp): (ColumnBatch, Int) => Seq[(Int, Int)] =
     op match
@@ -191,6 +191,11 @@ private[execution] object ColumnarInterpreter:
         (_, _) =>
           throw new IllegalStateException(
             "SortByLongKey is decoded as long pairs, not int pairs",
+          )
+      case _: PhysicalOp.SortByStringKey =>
+        (_, _) =>
+          throw new IllegalStateException(
+            "SortByStringKey is decoded as string pairs, not int pairs",
           )
       case _ => (batch, rows) => BatchCodec.decodeIntPairs(batch, rows)
 
@@ -825,6 +830,20 @@ private[execution] object ColumnarInterpreter:
         ScarletConf.get,
       )
       Columns.LongPairs(sorted)
+    case (Plan.SortByStringKeyOp(source), PhysicalOp.SortByStringKey(child)) =>
+      // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
+      // String-pair encode keeps a null key. preserveAbsence matches the other sorts. A null
+      // key orders as "" and stays null. There is no spill. Take decodes the prefix.
+      val batches = StringPairWalk.batches(
+        interpretAt(source, child, selectedPartition = None, preserveAbsence = true, ordinals),
+      )
+      val sorted = StringRankSplit.sortAndSplit(
+        batches,
+        ColumnarPlanner.shuffleWidth,
+        ColumnarPlanner.parallelism,
+      )
+      Columns.StringPairs(sorted)
     case _ =>
       throw new IllegalStateException(
         s"physical tree does not match ${plan.getClass.getSimpleName}",

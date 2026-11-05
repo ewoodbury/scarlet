@@ -58,7 +58,8 @@ inferred from record order.
   partition of the stage's output. This is what fuses `map(f).filter(p)` into one pass and lets
   narrow work follow a shuffle without a data movement boundary.
 - **Wide operations** (`groupByKey`, `reduceByKey`, `sortBy`, `sortByIntKey`, `sortByLongKey`,
-  `partitionBy`, `repartition`, `coalesce`, `join`, `cogroup`): cut a stage boundary via
+  `sortByStringKey`, `partitionBy`, `repartition`, `coalesce`, `join`, `cogroup`): cut a stage
+  boundary via
   `createShuffleStageUnified`, which attaches the `WideOp` dispatch record, `ShuffleInput`
   sources (side-tagged for join/cogroup), and output partitioning metadata.
 - **Shuffle bypass** (`Operation.canBypassShuffle`): when upstream partitioning already matches

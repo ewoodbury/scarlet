@@ -233,6 +233,18 @@ enum PhysicalOp:
    */
   case SortByLongKey(child: PhysicalOp)
 
+  /**
+   * Global sort of a string-pair scan. Each source partition is sorted by effective key, then the
+   * sorted runs are rank-merged into `defaultShufflePartitions`. A present key orders by
+   * `String.compareTo` (UTF-16 code units). A null key orders as `""` and stays null. Ties keep
+   * input order. Output kind is [[PhysicalOp.Kind.StringPairs]]. There is no spill.
+   *
+   * The ordering tag is [[OrderingTag.Sorted]] with `Seq(0)` and `Seq(true)`. That is ascending by
+   * effective key: a null key orders as `""` and stays null in the output. The tag is not a claim
+   * that column 0 is non-null.
+   */
+  case SortByStringKey(child: PhysicalOp)
+
   def kind: PhysicalOp.Kind = this match
     case Scan(sourceKind, _) => sourceKind
     case Filter(child, _) => child.kind
@@ -254,6 +266,7 @@ enum PhysicalOp:
         case _ => PhysicalOp.Kind.Pairs
     case SortByIntKey(_) => PhysicalOp.Kind.Pairs
     case SortByLongKey(_) => PhysicalOp.Kind.LongPairs
+    case SortByStringKey(_) => PhysicalOp.Kind.StringPairs
     case HashAggregate(_) => PhysicalOp.Kind.Pairs
     case LongHashAggregate(_) => PhysicalOp.Kind.LongPairs
     case StringHashAggregate(_) => PhysicalOp.Kind.StringPairs
@@ -319,6 +332,7 @@ enum PhysicalOp:
     case MapValue(child) => s"MapValue(${child.shape})"
     case SortByIntKey(child) => s"SortByIntKey(${child.shape})"
     case SortByLongKey(child) => s"SortByLongKey(${child.shape})"
+    case SortByStringKey(child) => s"SortByStringKey(${child.shape})"
     case HashAggregate(child) => s"HashAggregate(${child.shape})"
     case LongHashAggregate(child) => s"LongHashAggregate(${child.shape})"
     case StringHashAggregate(child) => s"StringHashAggregate(${child.shape})"

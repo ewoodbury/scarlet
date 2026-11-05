@@ -279,6 +279,18 @@ object Plan {
   case class SortByLongKeyOp(source: Plan[(Long, Long)]) extends Plan[(Long, Long)]
 
   /**
+   * Sorts `(String, Int)` pairs ascending by the effective key. A present key orders by
+   * `String.compareTo` (UTF-16 code units). A null key orders as `""` and stays null. Ties keep
+   * input order. This matches `sortBy(pair => if (pair._1 == null) "" else pair._1)`. Generic
+   * [[SortByOp]] stays opaque. A scan of string pairs lowers to a columnar rank split. Any other
+   * child stays on the row path. There is no spill.
+   *
+   * @param source
+   *   The preceding plan node.
+   */
+  case class SortByStringKeyOp(source: Plan[(String, Int)]) extends Plan[(String, Int)]
+
+  /**
    * Join execution strategies for physical planning.
    */
   enum JoinStrategy {

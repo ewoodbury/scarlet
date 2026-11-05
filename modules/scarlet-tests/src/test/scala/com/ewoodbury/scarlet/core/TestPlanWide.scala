@@ -16,6 +16,7 @@ class TestPlanWide extends AnyFlatSpec with Matchers {
   private val source = Plan.Source(Seq(Partition(Seq(1, 2, 3))))
   private val intPairs = Plan.MapOp(source, (x: Int) => (x, x))
   private val longPairs = Plan.MapOp(source, (x: Int) => (x.toLong, x.toLong))
+  private val stringPairs = Plan.MapOp(source, (x: Int) => (x.toString, x))
   private val kvSource = Plan.MapOp(source, (x: Int) => (x, x.toString))
   private val kvSource2 = Plan.MapOp(source, (x: Int) => (x + 10, (x * 2).toString))
 
@@ -29,6 +30,7 @@ class TestPlanWide extends AnyFlatSpec with Matchers {
     PlanWide.isWide(Plan.SortByOp(source, (x: Int) => x, Ordering.Int)) shouldBe true
     PlanWide.isWide(Plan.SortByIntKeyOp(intPairs)) shouldBe true
     PlanWide.isWide(Plan.SortByLongKeyOp(longPairs)) shouldBe true
+    PlanWide.isWide(Plan.SortByStringKeyOp(stringPairs)) shouldBe true
     PlanWide.isWide(Plan.RepartitionOp(source, 4)) shouldBe true
     PlanWide.isWide(Plan.CoalesceOp(source, 2)) shouldBe true
     
@@ -156,6 +158,7 @@ class TestPlanWide extends AnyFlatSpec with Matchers {
     PlanWide.isDirectlyWide(Plan.SortByOp(source, identity, Ordering.Int)) shouldBe true
     PlanWide.isDirectlyWide(Plan.SortByIntKeyOp(intPairs)) shouldBe true
     PlanWide.isDirectlyWide(Plan.SortByLongKeyOp(longPairs)) shouldBe true
+    PlanWide.isDirectlyWide(Plan.SortByStringKeyOp(stringPairs)) shouldBe true
     PlanWide.isDirectlyWide(Plan.PartitionByOp(kvSource, 4)) shouldBe true
     PlanWide.isDirectlyWide(Plan.RepartitionOp(source, 4)) shouldBe true
     PlanWide.isDirectlyWide(Plan.CoalesceOp(source, 2)) shouldBe true
@@ -200,6 +203,7 @@ class TestPlanWide extends AnyFlatSpec with Matchers {
       Plan.SortByOp(source, identity, Ordering.Int),
       Plan.SortByIntKeyOp(intPairs),
       Plan.SortByLongKeyOp(longPairs),
+      Plan.SortByStringKeyOp(stringPairs),
       Plan.PartitionByOp(kvSource, 4),
       Plan.RepartitionOp(source, 4),
       Plan.CoalesceOp(source, 2),
