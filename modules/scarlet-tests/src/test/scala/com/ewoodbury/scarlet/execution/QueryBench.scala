@@ -16,8 +16,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
- * Times one query per supported columnar type, plus both grouped-key patterns and an int-pair and
- * long-pair sort. Not a test, and not part of `make test`.
+ * Times one query per supported columnar type, plus both grouped-key patterns, a two-filter
+ * `groupByKey`, and an int-pair and long-pair sort. Not a test, and not part of `make test`.
  *
  * Each query is built once. The timed region is the action. The scalar checksum is compared after
  * the timer stops. A local loop produces that scalar, and one row-path execution must match it
@@ -183,6 +183,13 @@ object QueryBench:
     require(sparse.hash != shifting.hash, "spread checksums collided")
     require(sparse.hash != repeatFold.hash, "sparse checksum collided with repeating groups")
     GroupedBenchCases.requireHashFallback(sparse, shifting, batchSize)
+    val groupKeys = Array.tabulate(elementRows)(row => row % groups)
+    val keptGroups = filteredGroupChecksum(groupKeys, generated)
+    val filteredGroups = DistCollection
+      .ofIntPairs(groupKeys, generated, sourcePartitions)
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+      .groupByKey
     Vector(
       whole("int-narrow", elementRows, "Pipeline2(Scan)", narrowSum, narrow.plan, narrow.sum),
       whole("int-chain", elementRows, "Pipeline4(Scan)", chainSum, intChain.plan, intChain.sum),
@@ -210,6 +217,14 @@ object QueryBench:
       grouped("grouped-shuffled", shuffled, shuffledFold.hash),
       openGrouped("grouped-sparse", sparse),
       openGrouped("grouped-shifting", shifting),
+      whole(
+        "filter-groupbykey",
+        elementRows,
+        "GroupByKey(Exchange(FilterValue(FilterKey(Scan))))",
+        keptGroups,
+        filteredGroups.plan,
+        checksumGroups(filteredGroups.collect()),
+      ),
     )
 
   private def whole(
@@ -946,10 +961,56 @@ object QueryBench:
       "the measured rounds, at each width.\n" +
       "Sort queries checksum the collected key then value, mixed by 31, in output order. The " +
       "expected value is a local stable sort of the same pairs, computed before timing.\n" +
+      "filter-groupbykey is two int-pair filters then groupByKey, at 1e6 rows, two source " +
+      "partitions, and batch 8192. Its checksum sums (key * 31) xor the value sum xor the value " +
+      "count. p50 and alloc_mb are recorded. There is no wall-clock gate.\n" +
       "alloc_mb is the nearest-rank p50 of process-wide thread bytes, in decimal megabytes " +
       "(bytes / 1e6). The probe excludes itself. A short-lived worker missed between reads is " +
       "absent. The same estimate is reported for row and columnar, at both widths.\n" +
       s"java=${runtime.getVmName} ${runtime.getVmVersion}"
+
+  /**
+   * `(key * 31) ^ valueSum ^ valueCount`, summed over keys. Key order does not matter. Keys are
+   * `row % groups`. The filters drop keys divisible by 3 and negative values.
+   */
+  private def filteredGroupChecksum(keys: Array[Int], values: Array[Int]): Long =
+    val sums = new Array[Long](groups)
+    val seen = new Array[Int](groups)
+    var index = 0
+    while (index < keys.length) {
+      val key = keys(index)
+      val value = values(index)
+      if (key % 3 != 0 && value >= 0) then
+        sums(key) += value.toLong
+        seen(key) += 1
+      index += 1
+    }
+    foldSeen(sums, seen)
+
+  private def checksumGroups(rows: Iterable[(Int, Iterable[Int])]): Long =
+    val sums = new Array[Long](groups)
+    val seen = new Array[Int](groups)
+    val iterator = rows.iterator
+    while (iterator.hasNext) {
+      val row = iterator.next()
+      val key = row._1
+      require(key >= 0 && key < groups, s"filter-groupbykey key $key outside 0 until $groups")
+      val values = row._2.iterator
+      while (values.hasNext) {
+        sums(key) += values.next().toLong
+        seen(key) += 1
+      }
+    }
+    foldSeen(sums, seen)
+
+  private def foldSeen(sums: Array[Long], seen: Array[Int]): Long =
+    var key = 0
+    var hash = 0L
+    while (key < sums.length) {
+      if (seen(key) > 0) then hash += (key.toLong * 31L) ^ sums(key) ^ seen(key).toLong
+      key += 1
+    }
+    hash
 
   private def checksumOf(answer: Answer): Long = answer match
     case Answer.Whole(value) => value

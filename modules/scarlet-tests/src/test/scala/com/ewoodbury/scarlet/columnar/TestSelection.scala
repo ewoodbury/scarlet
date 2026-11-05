@@ -97,6 +97,29 @@ class TestSelection extends AnyFlatSpec with Matchers:
     stored.toSeq shouldBe Seq(-1, -1, 1, 0, 2, -1)
   }
 
+  it should "store absolute ids for a window starting at row 2 and materialize those rows" in {
+    val stored = Array(-1, -1, 1, 0, 2, -1)
+    val column = Int32Column.of(stored, Validity.allValid(stored.length), stored.length)
+    val batch = single(column)
+    val steps = Seq(
+      Selection.Step.Int32(0, (value: Int) => value >= 0),
+      Selection.Step.Int32(0, (value: Int) => value != 0),
+    )
+    val indexed = Selection.applySelected(batch, 2, 3, steps)
+    val gathered = Selection.materialize(indexed)
+    val direct = Selection(batch, 2, 3, steps)
+
+    indexed.count shouldBe 2
+    indexed.rows(0) shouldBe 2
+    indexed.rows(1) shouldBe 4
+    indexed.rows.length shouldBe 3
+    BatchCodec.decodeInts(gathered) shouldBe BatchCodec.decodeInts(direct)
+    BatchCodec.decodeInts(gathered) shouldBe Seq(1, 2)
+    int32(gathered, 0).values.length shouldBe int32(direct, 0).values.length
+    int32(gathered, 0).values.length shouldBe 3
+    stored.toSeq shouldBe Seq(-1, -1, 1, 0, 2, -1)
+  }
+
   it should "skip null longs and doubles and keep a present zero" in {
     val longs = Int64Column.fromNullable(Seq(Some(0L), None, Some(-1L), Some(4L)))
     val longCalls = new AtomicInteger

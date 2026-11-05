@@ -15,8 +15,9 @@ import java.util.Arrays
  * Each bucket keeps first-seen key order and input value order. A null value is not dropped. A
  * clear value bit is a planner bug and throws `IllegalArgumentException`, including a null value
  * on a row whose key is also null. That check runs before the exchange, which would otherwise drop
- * the null key and hide the value. One grouped batch is published per partition, including an
- * empty bucket. There is no partial combine, no spill, and no sort.
+ * the null key and hide the value. [[int32Selected]] checks only `rows(0 until count)`, so a null
+ * value on a dropped row does not throw. One grouped batch is published per partition, including
+ * an empty bucket. There is no partial combine, no spill, and no sort.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object GroupByKey:
@@ -39,6 +40,28 @@ object GroupByKey:
       )
       batches.foreach(requirePresentValues)
       val buckets = HashExchange.partitionAll(batches, keyOrdinal = 0, partitions, parallelism)
+      MorselScheduler.map(buckets, parallelism)((_, bucket) => group(bucket))
+
+  /**
+   * [[int32]] for a selection. Present values are checked on `rows(0 until count)` only. The
+   * exchange scatters those rows, then each bucket uses the dense [[group]].
+   */
+  def int32Selected(
+      selected: Vector[Selected],
+      partitions: Int,
+      parallelism: Int,
+  ): Vector[GroupedIntBatch] =
+    require(partitions > 0, s"partitions must be positive, got $partitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    if (selected.isEmpty) then Vector.fill(partitions)(GroupedIntBatch.empty)
+    else
+      require(
+        selected.forall(one => isIntPair(one.batch)),
+        "groupByKey expects (Int32, Int32) batches",
+      )
+      selected.foreach(requirePresentSelection)
+      val buckets =
+        HashExchange.partitionAllSelected(selected, keyOrdinal = 0, partitions, parallelism)
       MorselScheduler.map(buckets, parallelism)((_, bucket) => group(bucket))
 
   def strings(
@@ -66,8 +89,26 @@ object GroupByKey:
     val values = ColumnHash.int32At(batch, 1)
     require(
       Validity.livePresent(values.validity, values.length),
-      "groupByKey value column has a null; a clear value bit is a planner bug",
+      nullValueMessage,
     )
+
+  /** A null value on a dropped row is ignored. A null value on a selected row still throws. */
+  private def requirePresentSelection(selected: Selected): Unit =
+    val values = ColumnHash.int32At(selected.batch, 1)
+    val words = values.validity.words
+    val rows = selected.rows
+    var slot = 0
+    while (slot < selected.count) {
+      require(Validity.isSet(words, rows(slot)), nullValueMessage)
+      slot += 1
+    }
+
+  private def isIntPair(batch: ColumnBatch): Boolean =
+    batch.schema.length == 2 && batch.schema(0) == LogicalType.Int32 &&
+      batch.schema(1) == LogicalType.Int32
+
+  private val nullValueMessage =
+    "groupByKey value column has a null; a clear value bit is a planner bug"
 
   private def group(batch: ColumnBatch): GroupedIntBatch =
     val keys = ColumnHash.int32At(batch, 0)

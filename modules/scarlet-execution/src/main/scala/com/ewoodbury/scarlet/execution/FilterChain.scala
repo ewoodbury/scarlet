@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{ColumnBatch, Selection}
+import com.ewoodbury.scarlet.columnar.{ColumnBatch, MorselScheduler, Morsels, Selected, Selection}
 import com.ewoodbury.scarlet.core.Plan
 
 import ColumnarInterpreter.Columns
@@ -22,6 +22,9 @@ import PredicatePlan.{Atom, Compiled}
  *
  * [[PredicatePlan.applyAtom]] does not take the compiled stack. Encoders, including the
  * absence-preserving copy under an outer join, do not run the predicate.
+ *
+ * [[selectedPairs]] is the one boundary that keeps the survivor index. It appends absolute ids per
+ * morsel and does not compact. [[compact]] still serves every other caller.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Throw"))
 private[execution] object FilterChain:
@@ -58,6 +61,39 @@ private[execution] object FilterChain:
           Columns.StringPairs(_) =>
         val compiled = PredicatePlan.compile(plan, op).getOrElse(missing)
         applyCompiled(columns, compiled, ordinals)
+
+  /**
+   * Survivor ids for one int-pair stack of two or more filters. Every other shape returns `None`
+   * and is not interpreted. A `Some` interprets the source under the stack once. Each batch gets
+   * one [[Selected]]: morsels append absolute ids into `rows`, in morsel order, and nothing is
+   * concatenated or compacted.
+   */
+  def selectedPairs(
+      plan: Plan[_],
+      op: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): Option[Vector[Selected]] =
+    op.kind match
+      case PhysicalOp.Kind.Pairs =>
+        PredicatePlan.compile(plan, op) match
+          case Some(compiled)
+              if compiled.atoms.length > 1 &&
+                PredicatePlan.selectionSteps(compiled).nonEmpty =>
+            val steps =
+              PredicatePlan.selectionSteps(encoded(compiled, ordinals)).getOrElse(missing)
+            val (source, child) = PredicatePlan.childOf(plan, op)
+            val columns = ColumnarInterpreter.interpretAt(
+              source,
+              child,
+              selectedPartition,
+              preserveAbsence,
+              ordinals,
+            )
+            Some(selectBatches(pairBatches(columns), steps))
+          case _ => None
+      case _ => None
 
   /** One kernel per filter. The intermediate column is the survivor set the next kernel reads. */
   private def applyCompiled(columns: Columns, compiled: Compiled, ordinals: Set[Int]): Columns =
@@ -103,6 +139,46 @@ private[execution] object FilterChain:
         case atom => atom
       })
     else compiled
+
+  private def pairBatches(columns: Columns): Vector[ColumnBatch] = columns match
+    case Columns.Pairs(_) => ColumnarInterpreter.pairsOf(columns)
+    case _ =>
+      throw new IllegalStateException("columnar op expected int pairs")
+
+  /**
+   * One index per input batch. Morsels of that batch run in parallel, then their absolute ids are
+   * appended in morsel order. The id array is the batch length. `count` is the survivor total.
+   */
+  private def selectBatches(
+      parts: Vector[ColumnBatch],
+      steps: Vector[Selection.Step],
+  ): Vector[Selected] =
+    val cuts = parts.map(part => Morsels.of(part, ColumnarPlanner.batchSize))
+    val flat = MorselScheduler.map(cuts.flatten, ColumnarPlanner.parallelism) { (_, morsel) =>
+      Selection.applySelected(morsel.batch, morsel.start, morsel.length, steps)
+    }
+    val consumed = (flat, Vector.empty[Vector[Selected]])
+    val (rest, groups) = cuts.foldLeft(consumed) { (state, morsels) =>
+      val (remaining, acc) = state
+      val (group, tail) = remaining.splitAt(morsels.length)
+      (tail, acc :+ group)
+    }
+    require(rest.isEmpty, "selection morsels did not cover the batches")
+    parts.zip(groups).map { (batch, morsels) =>
+      assemble(batch, morsels)
+    }
+
+  private def assemble(batch: ColumnBatch, morsels: Vector[Selected]): Selected =
+    val rows = new Array[Int](batch.length)
+    val total = morsels.foldLeft(0) { (written, morsel) =>
+      require(
+        written + morsel.count <= rows.length,
+        s"selection morsels exceed capacity ${rows.length}",
+      )
+      System.arraycopy(morsel.rows, 0, rows, written, morsel.count)
+      written + morsel.count
+    }
+    Selected(batch, rows, total)
 
   private def inputs(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.Pairs(_) => ColumnarInterpreter.pairsOf(columns)

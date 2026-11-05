@@ -5,6 +5,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
+import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -99,6 +100,63 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     ColumnarPlanner.lower(grouped.map((row: (Int, Iterable[Int])) => row._1).plan) shouldBe None
     ColumnarPlanner.tryTake(grouped.plan, 1) shouldBe None
     grouped.take(2) shouldBe row(grouped.take(2))
+  }
+
+  it should "match the row path for two pair filters and skip the compact" in {
+    val source = DistCollection.ofIntPairs(keys, values, 4)
+    val filtered = source
+      .filterKeys((key: Int) => key > 0)
+      .filterValues((value: Int) => value > 20)
+    val grouped = filtered.groupByKey
+
+    ColumnarPlanner.lower(grouped.plan).map(_.shape) shouldBe Some(
+      "GroupByKey(Exchange(FilterValue(FilterKey(Scan))))",
+    )
+    valuesByKey(grouped.collect()) shouldBe valuesByKey(row(grouped.collect()))
+    valuesByKey(grouped.collect()) shouldBe Map(2 -> Seq(21), 4 -> Seq(40, 41))
+
+    // A bare scan collect stays on the row path, so it publishes nothing. The encode baseline is
+    // the columnar scan both groupByKey paths start from.
+    val encode = published {
+      val scan = ColumnarPlanner.lower(source.plan).getOrElse(fail("expected a pair scan"))
+      ColumnarInterpreter.interpret(source.plan, scan)
+    }
+    val selected = published(grouped.collect())
+    val (afterFilter, dense) = ColumnMetrics.withSink(new CountingSink) {
+      val op = ColumnarPlanner.lower(filtered.plan).getOrElse(fail("expected a pair filter plan"))
+      val columns = ColumnarInterpreter.interpret(filtered.plan, op)
+      val mid = ColumnMetrics.batchCount
+      val _ = GroupByKey.int32(
+        ColumnarInterpreter.pairsOf(columns),
+        ScarletConf.get.defaultShufflePartitions,
+        ScarletConf.get.threadPoolSize,
+      )
+      (mid, ColumnMetrics.batchCount)
+    }
+    val compactPublishes = afterFilter - encode
+    compactPublishes should be > 0L
+    (dense - selected) shouldBe compactPublishes
+  }
+
+  it should "ignore a null value on a dropped row and reject one on a selected row" in {
+    val keyColumn = Int32Column.of(Array(0, 1), Validity.pack(2, row => row == 1), 2)
+    val valueColumn = Int32Column.of(Array(0, 10), Validity.pack(2, row => row == 1), 2)
+    val batch = new ColumnBatch(
+      Vector(LogicalType.Int32, LogicalType.Int32),
+      Vector(keyColumn, valueColumn),
+      2,
+    )
+    val dropped = Selected(batch, Array(1, 0), 1)
+    val grouped = GroupByKey.int32Selected(Vector(dropped), partitions = 1, parallelism = 1)
+
+    grouped.flatMap(_.rows).map { case (key, groupedValues) =>
+      key -> groupedValues.toSeq
+    } shouldBe Seq(1 -> Seq(10))
+
+    val selectedNull = Selected(batch, Array(0), 1)
+    an[IllegalArgumentException] should be thrownBy {
+      GroupByKey.int32Selected(Vector(selectedNull), partitions = 1, parallelism = 1)
+    }
   }
 
   it should "refuse a union of two grouped results" in {
@@ -233,6 +291,12 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def nullText(value: Int): (String, Int) = (null: String) -> value
+
+  private def published[A](body: => A): Long =
+    ColumnMetrics.withSink(new CountingSink) {
+      val _ = body
+      ColumnMetrics.batchCount
+    }
 
   private def valuesByKey(rows: Iterable[(Int, Iterable[Int])]): Map[Int, Seq[Int]] =
     rows.map { case (key, values) => key -> values.toSeq }.toMap
