@@ -65,7 +65,7 @@ asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors
 
 ### Columnar completion contract
 
-The following 200 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. The excluded list has 35 shapes, for 235 covered in total. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
+The following 202 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. The excluded list has 35 shapes, for 237 covered in total. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
 `Unknown(2)` denotes the two source partitions in the small contract fixtures. Aggregate and join
 outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. `sortByIntKey`, `sortByLongKey`, and
 `sortByStringKey` use `Range(defaultShufflePartitions, Seq(0))` and `Sorted(Seq(0), Seq(true))`.
@@ -86,7 +86,7 @@ null. A null string key orders as `""` and stays null. Shape strings are exact.
 | `sortByStringKey` of a string-pair scan. Rank boundaries match `sortByIntKey`. A present key orders by `String.compareTo` (UTF-16 code units). A null key orders as `""` and stays null. Ties keep input order. Distribution is `Range(defaultShufflePartitions, Seq(0))` and ordering is `Sorted(Seq(0), Seq(true))`. A filter, map, mapValues, projection, or any other non-scan child stays on the row path. A filter above the sort stays on the row path. Over the budget, with spill on, each input partition is one sorted run and the runs are merged `spillFanIn` at a time. The result matches this in-memory split. One input partition is still sorted in memory. At or under the budget, and whenever spill is off, the in-memory split runs and writes nothing | `StringPair` | `SortByStringKey(Scan)` |
 | Empty typed int-pair source | `Columnar` | `Scan` |
 | Long-pair source, including an empty source | `Columnar` | `Scan` |
-| Long-pair `keys`, `values`, `mapValues`, and row `filter` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `FilterRow(Scan)` |
+| Long-pair `keys`, `values`, `mapValues`, row `filter`, `filterKeys`, and `filterValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `FilterRow(Scan)`, `FilterKey(Scan)`, `FilterValue(Scan)` |
 | Pair `keys`, `values`, int `mapValues`, mapped key/value columns, filtered int `mapValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `Project(Key(Scan))`, `Project(Value(Scan))`, `FilterValue(MapValue(Scan))` |
 | String-pair source and `keys`, `values`, int `mapValues`, `filterKeys`, `filterValues`. A null key is a value and `""` is distinct | `StringPair`; `Utf8Dict` for `keys`, `Columnar` for `values` | `Scan`, `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `FilterKey(Scan)`, `FilterValue(Scan)` |
 | Int `reduceByKey`, after a value filter or int `mapValues`, and nested reduction | `Columnar` | `HashAggregate(Exchange(Scan))`, `HashAggregate(Exchange(FilterValue(Scan)))`, `HashAggregate(Exchange(MapValue(Scan)))`, `HashAggregate(Exchange(HashAggregate(Exchange(Scan))))` |
@@ -223,7 +223,7 @@ double keys, `mapValues` to string or double, double-pair `keys`, `values`,
 single-precision `Float` sources and maps, all-null strings, an empty int source without
 a witness, and element maps that do not preserve the column type (`boolean` to `boolean`, `int`
 to `long`, `string`, or a pair, `long` to `int` or `string`, and `double` to `int`).
-That is 35 exclusions, and 200 accepted, for 235 covered shapes. String `groupByKey` moved from the excluded list, so 36 - 1 = 35 excluded. Long `groupByKey` is a new accepted fixture, so 199 + 1 = 200 and 234 + 1 = 235.
+That is 35 exclusions, and 202 accepted, for 237 covered shapes. String `groupByKey` moved from the excluded list, so 36 - 1 = 35 excluded. Long `groupByKey` is a new accepted fixture, so 199 + 1 = 200 and 234 + 1 = 235. Long `filterKeys` and `filterValues` are new accepted fixtures, so 200 + 2 = 202 and 235 + 2 = 237.
 Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by execution
 tests, not contract fixtures, because the contract does not track the int refusals either.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then

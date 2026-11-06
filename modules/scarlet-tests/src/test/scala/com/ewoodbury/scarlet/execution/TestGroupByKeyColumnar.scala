@@ -349,9 +349,11 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     grouped.count() shouldBe 2L
   }
 
-  it should "lower a whole-row filter and refuse slot filters and projections" in {
+  it should "lower a whole-row filter and a slot filter, and refuse projections" in {
     val source = DistCollection.ofLongPairs(longKeys, longPayloads, 4)
     val filtered = source.filter((pair: (Long, Long)) => pair._2 > 10L).groupByKey
+    val keyed = source.filterKeys[Long, Long](_ > 0L).groupByKey
+    val valued = source.filterValues[Long, Long](_ > 10L).groupByKey
     val grouped = source.groupByKey
 
     ColumnarPlanner.lower(filtered.plan).map(_.shape) shouldBe Some(
@@ -359,8 +361,14 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     )
     longByKey(filtered.collect()) shouldBe longByKey(row(filtered.collect()))
     longByKey(filtered.collect())(1L) shouldBe Seq(11L, 12L)
-    ColumnarPlanner.lower(source.filterKeys[Long, Long](_ > 0L).groupByKey.plan) shouldBe None
-    ColumnarPlanner.lower(source.filterValues[Long, Long](_ > 10L).groupByKey.plan) shouldBe None
+    ColumnarPlanner.lower(keyed.plan).map(_.shape) shouldBe Some(
+      "GroupByKey(Exchange(FilterKey(Scan)))",
+    )
+    ColumnarPlanner.lower(valued.plan).map(_.shape) shouldBe Some(
+      "GroupByKey(Exchange(FilterValue(Scan)))",
+    )
+    longByKey(keyed.collect()) shouldBe longByKey(row(keyed.collect()))
+    longByKey(valued.collect()) shouldBe longByKey(row(valued.collect()))
     ColumnarPlanner.lower(grouped.keys.plan) shouldBe None
     ColumnarPlanner.lower(grouped.values.plan) shouldBe None
     ColumnarPlanner.lower(grouped.map((row: (Long, Iterable[Long])) => row._1).plan) shouldBe None

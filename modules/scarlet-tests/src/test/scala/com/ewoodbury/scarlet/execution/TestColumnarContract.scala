@@ -30,14 +30,14 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 200 accepted fixtures. Long groupByKey is a new accepted case. 199 + 1 = 200.
-    accepted.size shouldBe 200
-    // 35 exclusions. 200 + 35 = 235. Long groupByKey was not on the excluded list.
+    // 202 accepted fixtures. Long filterKeys and filterValues are new. 200 + 2 = 202.
+    accepted.size shouldBe 202
+    // 35 exclusions. 202 + 35 = 237. Those two filters were not excluded.
     // Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by
     // execution tests, not contract fixtures, because the contract does not track the int
     // refusals either.
     excluded.size shouldBe 35
-    (accepted.size + excluded.size) shouldBe 235
+    (accepted.size + excluded.size) shouldBe 237
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -363,6 +363,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val longMapValues = Plan.MapValuesOp(longPairSource, (value: Long) => value + 1L)
     val longPairFilter =
       Plan.FilterOp(longPairSource, (pair: (Long, Long)) => pair._1 > 0L)
+    val longKeyFilter = Plan.FilterKeysOp(longPairSource, (key: Long) => key > 0L)
+    val longValueFilter = Plan.FilterValuesOp(longPairSource, (value: Long) => value > 0L)
     val reduced = Plan.ReduceByKeyOp(pairSource, (left: Int, right: Int) => left + right)
     val reducedAfterFilter = Plan.ReduceByKeyOp(
       pairValueFilter,
@@ -501,6 +503,18 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         longPairFilter,
         narrowInfo(2, layout),
         Some("FilterRow(Scan)"),
+      ),
+      AcceptedCase(
+        "filterKeys of long pairs",
+        longKeyFilter,
+        narrowInfo(2, layout),
+        Some("FilterKey(Scan)"),
+      ),
+      AcceptedCase(
+        "filterValues of long pairs",
+        longValueFilter,
+        narrowInfo(2, layout),
+        Some("FilterValue(Scan)"),
       ),
       AcceptedCase("int reduceByKey", reduced, hashedInfo(layout), Some("HashAggregate(Exchange(Scan))")),
       AcceptedCase(

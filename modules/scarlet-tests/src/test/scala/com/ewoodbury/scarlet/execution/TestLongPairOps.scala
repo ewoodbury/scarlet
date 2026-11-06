@@ -7,7 +7,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.{ColumnMetrics, ColumnarFallback, CountingSink, LogicalType}
+import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, LogicalType}
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -205,22 +205,15 @@ class TestLongPairOps extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     columnar(nullMapped) shouldBe row(nullMapped.collect().toList)
   }
 
-  "filterKeys and filterValues" should "stay on the row path" in {
+  "filterKeys and filterValues" should "lower to the key and value kernels" in {
     val source = DistCollection.ofLongPairs(Array(1L, 2L), Array(10L, 20L), 1)
     val keyed = source.filterKeys[Long, Long](_ > 0L)
     val valued = source.filterValues[Long, Long](_ > 0L)
-    val scan = ColumnarPlanner.lower(source.plan).getOrElse(fail("expected a long-pair scan"))
 
-    ColumnarPlanner.lower(keyed.plan) shouldBe Option.empty[PhysicalOp]
-    ColumnarPlanner.lower(valued.plan) shouldBe Option.empty[PhysicalOp]
-    intercept[ColumnarFallback] {
-      ColumnarInterpreter.interpret(keyed.plan, PhysicalOp.Filter(scan, PhysicalOp.Slot.Key))
-    }.getMessage shouldBe "long-pair filterKeys and filterValues stay on the row path"
-    intercept[ColumnarFallback] {
-      ColumnarInterpreter.interpret(valued.plan, PhysicalOp.Filter(scan, PhysicalOp.Slot.Value))
-    }.getMessage shouldBe "long-pair filterKeys and filterValues stay on the row path"
-    keyed.collect().toList shouldBe row(keyed.collect().toList)
-    valued.collect().toList shouldBe row(valued.collect().toList)
+    ColumnarPlanner.lower(keyed.plan).map(_.shape) shouldBe Some("FilterKey(Scan)")
+    ColumnarPlanner.lower(valued.plan).map(_.shape) shouldBe Some("FilterValue(Scan)")
+    columnar(keyed) shouldBe row(keyed.collect().toList)
+    columnar(valued) shouldBe row(valued.collect().toList)
   }
 
   private def wide: DistCollection[(Long, Long)] =

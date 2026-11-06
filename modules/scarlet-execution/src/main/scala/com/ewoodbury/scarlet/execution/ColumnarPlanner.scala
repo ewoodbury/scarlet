@@ -764,7 +764,7 @@ object ColumnarPlanner:
   private def columnFilter(source: Plan[_], slot: PhysicalOp.Slot): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
       child.kind match
-        case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.StringPairs =>
+        case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.LongPairs =>
           Some(PhysicalOp.Filter(child, slot))
         case _ => None
     }
