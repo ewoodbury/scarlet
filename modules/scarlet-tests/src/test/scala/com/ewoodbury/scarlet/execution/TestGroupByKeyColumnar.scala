@@ -9,7 +9,9 @@ import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
-/** Int and string `groupByKey` on the columnar path, compared with the row engine per key. */
+/**
+ * Int, long, and string `groupByKey` on the columnar path, compared with the row engine per key.
+ */
 class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   private val originalConf = ScarletConf.get
@@ -261,6 +263,130 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     stringValues(union.collect()) shouldBe stringValues(row(union.collect()))
   }
 
+  "long groupByKey" should "match the row path value order and count groups" in {
+    val source = DistCollection.ofLongPairs(longKeys, longPayloads, 4)
+    val grouped = source.groupByKey
+    val found = longByKey(grouped.collect())
+
+    ColumnarPlanner.lower(grouped.plan).map(_.shape) shouldBe Some("GroupByKey(Exchange(Scan))")
+    ColumnarPlanner.partitioning(grouped.plan).map(_.layout) shouldBe Some(
+      Layout.GroupedLong(ScarletConf.get.columnarBatchSize),
+    )
+    source.count() shouldBe 9L
+    grouped.count() shouldBe 5L
+    grouped.count() shouldBe row(grouped.count())
+    found shouldBe longByKey(row(grouped.collect()))
+    found shouldBe Map(
+      1L -> Seq(10L, 11L, 12L),
+      2L -> Seq(20L, 21L),
+      -1L -> Seq(30L),
+      4L -> Seq(40L, 41L),
+      Long.MinValue -> Seq(50L),
+    )
+    ExecutionService.get.executePartitions(grouped.plan).size shouldBe
+      ScarletConf.get.defaultShufflePartitions
+  }
+
+  it should "drop a null key and keep the other values in order" in {
+    val batch = longBatch(
+      Array(1L, 2L, 1L),
+      Array(10L, 99L, 11L),
+      keyPresent = row => row != 1,
+      valuePresent = _ => true,
+    )
+    val parts = GroupByKey.int64(Vector(batch), partitions = 4, parallelism = 1)
+
+    parts.length shouldBe 4
+    longRows(parts(1)) shouldBe Seq(1L -> Seq(10L, 11L))
+    parts.zipWithIndex.foreach { (grouped, index) =>
+      if (index == 1) then grouped.groups shouldBe 1
+      else grouped.groups shouldBe 0
+    }
+  }
+
+  it should "reject a clear value bit, including one beside a null key" in {
+    val presentKey = longBatch(
+      Array(1L, 1L),
+      Array(10L, 20L),
+      keyPresent = _ => true,
+      valuePresent = row => row != 1,
+    )
+    val nullKey = longBatch(
+      Array(2L, 1L),
+      Array(99L, 10L),
+      keyPresent = row => row != 0,
+      valuePresent = row => row != 0,
+    )
+    val present = the[IllegalArgumentException] thrownBy {
+      GroupByKey.int64(Vector(presentKey), partitions = 2, parallelism = 1)
+    }
+    val absentKey = the[IllegalArgumentException] thrownBy {
+      GroupByKey.int64(Vector(nullKey), partitions = 2, parallelism = 1)
+    }
+
+    present.getMessage should include("clear value bit")
+    absentKey.getMessage should include("clear value bit")
+  }
+
+  it should "publish an empty batch for every shuffle slot of an empty source" in {
+    val grouped = DistCollection.ofLongPairs(Array.empty[Long], Array.empty[Long], 2).groupByKey
+    val parts = ExecutionService.get.executePartitions(grouped.plan)
+
+    ColumnarPlanner.lower(grouped.plan).map(_.shape) shouldBe Some("GroupByKey(Exchange(Scan))")
+    parts.size shouldBe ScarletConf.get.defaultShufflePartitions
+    parts.foreach(_.data shouldBe empty)
+    grouped.collect() shouldBe empty
+    grouped.count() shouldBe 0L
+    grouped.count() shouldBe row(grouped.count())
+  }
+
+  it should "keep duplicate values and several input partitions" in {
+    val source = DistCollection.ofLongPairs(Array(3L, 3L, 5L, 3L), Array(1L, 2L, 3L, 4L), 4)
+    val grouped = source.groupByKey
+
+    longByKey(grouped.collect()) shouldBe longByKey(row(grouped.collect()))
+    longByKey(grouped.collect()) shouldBe Map(3L -> Seq(1L, 2L, 4L), 5L -> Seq(3L))
+    grouped.count() shouldBe 2L
+  }
+
+  it should "lower a whole-row filter and refuse slot filters and projections" in {
+    val source = DistCollection.ofLongPairs(longKeys, longPayloads, 4)
+    val filtered = source.filter((pair: (Long, Long)) => pair._2 > 10L).groupByKey
+    val grouped = source.groupByKey
+
+    ColumnarPlanner.lower(filtered.plan).map(_.shape) shouldBe Some(
+      "GroupByKey(Exchange(FilterRow(Scan)))",
+    )
+    longByKey(filtered.collect()) shouldBe longByKey(row(filtered.collect()))
+    longByKey(filtered.collect())(1L) shouldBe Seq(11L, 12L)
+    ColumnarPlanner.lower(source.filterKeys[Long, Long](_ > 0L).groupByKey.plan) shouldBe None
+    ColumnarPlanner.lower(source.filterValues[Long, Long](_ > 10L).groupByKey.plan) shouldBe None
+    ColumnarPlanner.lower(grouped.keys.plan) shouldBe None
+    ColumnarPlanner.lower(grouped.values.plan) shouldBe None
+    ColumnarPlanner.lower(grouped.map((row: (Long, Iterable[Long])) => row._1).plan) shouldBe None
+    ColumnarPlanner.tryTake(grouped.plan, 1) shouldBe None
+    grouped.take(2) shouldBe row(grouped.take(2))
+  }
+
+  it should "refuse a union of two grouped long results" in {
+    val left = DistCollection.ofLongPairs(Array(1L, 2L), Array(10L, 20L), 2).groupByKey
+    val right = DistCollection.ofLongPairs(Array(1L, 3L), Array(11L, 30L), 2).groupByKey
+    val union = left.union(right)
+
+    ColumnarPlanner.lower(union.plan) shouldBe None
+    longByKey(union.collect()) shouldBe longByKey(row(union.collect()))
+  }
+
+  it should "refuse grouped batches as column batches" in {
+    val source = DistCollection.ofLongPairs(Array(1L, 2L), Array(10L, 20L), 2)
+    val grouped = source.groupByKey
+    val op = ColumnarPlanner.lower(grouped.plan).getOrElse(fail("expected long groupByKey"))
+    val columns = ColumnarInterpreter.interpret(grouped.plan, op)
+    val refused = the[IllegalStateException] thrownBy ColumnarInterpreter.batchesOf(columns)
+
+    refused.getMessage shouldBe "grouped batches are not column batches"
+  }
+
   private val accent = "é"
   private val decomposed = "e\u0301"
   private val emoji = "😀"
@@ -297,6 +423,31 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
       val _ = body
       ColumnMetrics.batchCount
     }
+
+  private val longKeys = Array(1L, 2L, -1L, 4L, Long.MinValue, 1L, 2L, 1L, 4L)
+  private val longPayloads = Array(10L, 20L, 30L, 40L, 50L, 11L, 21L, 12L, 41L)
+
+  private def longBatch(
+      keyValues: Array[Long],
+      valueValues: Array[Long],
+      keyPresent: Int => Boolean,
+      valuePresent: Int => Boolean,
+  ): ColumnBatch =
+    val rows = keyValues.length
+    new ColumnBatch(
+      Vector(LogicalType.Int64, LogicalType.Int64),
+      Vector(
+        Int64Column.of(keyValues, Validity.pack(rows, keyPresent), rows),
+        Int64Column.of(valueValues, Validity.pack(rows, valuePresent), rows),
+      ),
+      rows,
+    )
+
+  private def longRows(batch: GroupedLongBatch): Seq[(Long, Seq[Long])] =
+    batch.rows.map { case (key, values) => (key, values.toSeq) }
+
+  private def longByKey(rows: Iterable[(Long, Iterable[Long])]): Map[Long, Seq[Long]] =
+    rows.map { case (key, values) => key -> values.toSeq }.toMap
 
   private def valuesByKey(rows: Iterable[(Int, Iterable[Int])]): Map[Int, Seq[Int]] =
     rows.map { case (key, values) => key -> values.toSeq }.toMap
