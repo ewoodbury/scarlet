@@ -25,8 +25,8 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * been probed, and that batch is the only result. A partition that is still over the budget, a hot
  * key or a bad split, throws. The join does not degrade past that.
  *
- * Only [[ColumnPipeline.broadcastJoin]] calls this. Shuffle-hash inner join, outer joins, and
- * sort-merge do not.
+ * Only [[ColumnPipeline.broadcastJoin]] calls this. The int shuffle-hash path has its own spill,
+ * [[HashJoinSpill]], and does not call this. Outer joins and sort-merge do not.
  *
  * Both sides are partitioned before any file is written, so peak heap is the two inputs plus one
  * partition's table, not the inputs plus the whole build table. The inputs are already resident

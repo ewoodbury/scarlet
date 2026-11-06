@@ -15,29 +15,30 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * `Int64` sum. Fold the sum with [[ColumnReduce.sumInt64]] at ordinal 1; the batch has two
  * columns. An empty input is `numPartitions` empty sum batches, the same convention as
  * [[HashReduce.byKey]]. The hash join reads key column 0 and value column 1 on both sides,
- * exchanges each side, and probes one partition at a time. Those exchanges leave `carryNullKeys`
- * off, so a null key is dropped. A [[JoinInput.Selected]] side skips the slice: the exchange
- * scatters `rows(0 until count)`, and the build table and the probe read those rows.
- * [[longInnerJoin]] is that join for `Int64` keys and values. It uses
- * [[HashExchange.partitionAllInt64]] and has no spill and no build budget. The sort-merge join
- * uses that same exchange on both sides, sorts each bucket, and merges it. A bucket over the spill
- * budget is merged from sorted runs instead. A sort-merge outer join uses the same hash exchange,
- * not a range partition, and carries a null key on each preserved side.
- * [[HashExchange.partitionAll]] concatenates a bucket with [[ColumnBatches.concat]] and keeps an
- * empty bucket's index. The broadcast join builds one table from the batches chosen as the build
- * side and probes the other batches in place. When spill is on and that table's estimate exceeds
- * the spill budget, the build and the probe are partitioned and each build partition is spilled.
- * Broadcast and shuffle-hash outer joins do not spill. The left outer broadcast join uses that
- * table and keeps the probe side. The shuffle-hash left outer join exchanges both sides, carries a
- * null key on the probe side only, and builds one table per partition. A right outer join calls
- * those same entry points with the right input as the probe and the left input as the build, then
- * swaps the value columns back to `(key, left, right)`. A probe-side row with no partner is kept,
- * and the build value's validity bit is clear. That bit is absence. A null value is not absence.
- * Match order is a kernel detail. The published multiset is multiplicity, values, and null
- * semantics. A full outer join probes the left input and also emits build rows no probe matched.
- * Broadcast gives each probe thread its own bitmap and ORs them after the probes join. Shuffle
- * keeps one bitmap per partition and finishes that partition immediately. Null build keys are
- * carried outside the table and emitted once. Those bitmaps are not part of the build budget.
+ * exchanges each side, and probes one partition at a time. An int build bucket over the spill
+ * budget is finished by [[HashJoinSpill]]. Those exchanges leave `carryNullKeys` off, so a null
+ * key is dropped. A [[JoinInput.Selected]] side skips the slice: the exchange scatters
+ * `rows(0 until count)`, and the build table and the probe read those rows. [[longInnerJoin]] is
+ * that join for `Int64` keys and values. It uses [[HashExchange.partitionAllInt64]] and has no
+ * spill and no build budget. The sort-merge join uses that same exchange on both sides, sorts each
+ * bucket, and merges it. A bucket over the spill budget is merged from sorted runs instead. A
+ * sort-merge outer join uses the same hash exchange, not a range partition, and carries a null key
+ * on each preserved side. [[HashExchange.partitionAll]] concatenates a bucket with
+ * [[ColumnBatches.concat]] and keeps an empty bucket's index. The broadcast join builds one table
+ * from the batches chosen as the build side and probes the other batches in place. When spill is
+ * on and that table's estimate exceeds the spill budget, the build and the probe are partitioned
+ * and each build partition is spilled. Broadcast and shuffle-hash outer joins do not spill. The
+ * left outer broadcast join uses that table and keeps the probe side. The shuffle-hash left outer
+ * join exchanges both sides, carries a null key on the probe side only, and builds one table per
+ * partition. A right outer join calls those same entry points with the right input as the probe
+ * and the left input as the build, then swaps the value columns back to `(key, left, right)`. A
+ * probe-side row with no partner is kept, and the build value's validity bit is clear. That bit is
+ * absence. A null value is not absence. Match order is a kernel detail. The published multiset is
+ * multiplicity, values, and null semantics. A full outer join probes the left input and also emits
+ * build rows no probe matched. Broadcast gives each probe thread its own bitmap and ORs them after
+ * the probes join. Shuffle keeps one bitmap per partition and finishes that partition immediately.
+ * Null build keys are carried outside the table and emitted once. Those bitmaps are not part of
+ * the build budget.
  */
 object ColumnPipeline:
 
@@ -202,6 +203,10 @@ object ColumnPipeline:
    * is partitioned with [[HashExchange.partitionAllSelected]] and is not sliced. Bucket `i` of the
    * probe is joined with bucket `i` of the build. A null key is dropped. Output columns are
    * `(key, left, right)`.
+   *
+   * Spill is off unless [[ScarletConf.spillEnabled]] is set. A build bucket whose
+   * [[HashJoin.retainedBuildBytes]] estimate is above [[ScarletConf.spillBudgetBytes]] is finished
+   * by [[HashJoinSpill]]. A run whose buckets all fit stays on [[MorselScheduler]].
    */
   def innerJoin(
       build: JoinInput,
@@ -211,12 +216,16 @@ object ColumnPipeline:
   ): Vector[ColumnBatch] =
     val buildBuckets = exchange(build, numPartitions, parallelism)
     val probeBuckets = exchange(probe, numPartitions, parallelism)
-    MorselScheduler.map(probeBuckets, parallelism) { (part, probeBatch) =>
-      HashJoin.innerInt32(
-        HashJoin.JoinSide(bucketAt(buildBuckets, part), key = 0, value = 1),
-        HashJoin.JoinSide(probeBatch, key = 0, value = 1),
-      )
-    }
+    val conf = ScarletConf.get
+    if (buildBuckets.exists(bucket => HashJoinSpill.exceeds(bucket, conf))) then
+      HashJoinSpill.finish(buildBuckets, probeBuckets, parallelism, conf)
+    else
+      MorselScheduler.map(probeBuckets, parallelism) { (part, probeBatch) =>
+        HashJoin.innerInt32(
+          HashJoin.JoinSide(bucketAt(buildBuckets, part), key = 0, value = 1),
+          HashJoin.JoinSide(probeBatch, key = 0, value = 1),
+        )
+      }
 
   private def exchange(
       input: JoinInput,

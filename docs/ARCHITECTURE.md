@@ -435,8 +435,9 @@ The rules that hold for every kind:
 
 ## Spill
 
-Grouped sum, an inner broadcast join's build, sort-merge joins, an int-pair `sortByIntKey`, a
-long-pair `sortByLongKey`, and a string-pair `sortByStringKey` spill when `spillEnabled` is on.
+Grouped sum, an inner broadcast join's build, an int shuffle-hash build bucket, sort-merge joins,
+an int-pair `sortByIntKey`, a long-pair `sortByLongKey`, and a string-pair `sortByStringKey` spill
+when `spillEnabled` is on.
 `spillBudgetBytes` is the in-memory trigger. The flag defaults off. `spillMaxFiles` and
 `spillMaxBytes` cap one spill store. Long hash reduce never spills; an input that does not fit
 stays in memory. String-key reduce and the string-key join do not spill.
@@ -465,6 +466,11 @@ the codes. A null key orders as `""` and stays null. One input partition is stil
 memory. At or under the budget, and whenever spill is off, the in-memory split runs and writes
 nothing.
 
+An int shuffle-hash build bucket over `spillBudgetBytes` is sub-partitioned by the quotient of
+the parent width. Each non-empty build piece is one spill file. One piece is joined at a time.
+A piece still over the budget throws. At or under the budget, and whenever spill is off, that
+bucket stays in memory and writes nothing.
+
 ## Known limitations (deferred work)
 
 Roadmap and sequencing are tracked externally; the headline items:
@@ -474,6 +480,6 @@ Roadmap and sequencing are tracked externally; the headline items:
 - Fusion has no cost model or general predicate pushdown. `collect` decodes every output row into a
   `Seq`.
 - The sort-merge operator still materialises its inputs and its result.
-- A shuffle-hash join does not spill. The long-key inner join is the same: no spill and no build budget.
+- The int shuffle-hash build bucket spills. The long and string shuffle-hash joins, including `longInnerJoin`, do not spill and have no build budget.
 - Long hash reduce never spills; an input that does not fit stays in memory.
 - String-key reduce and the string-key join do not spill. An input that does not fit stays in memory.
