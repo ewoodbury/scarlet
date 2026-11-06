@@ -654,7 +654,7 @@ object ColumnarPlanner:
       }
     case PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
-        PhysicalOp.Kind.GroupedStrings =>
+        PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
       None
 
   private def lowerElementStep(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
@@ -988,6 +988,8 @@ object ColumnarPlanner:
     case PhysicalOp.Kind.GroupedInts => Layout.GroupedInt(ScarletConf.get.columnarBatchSize)
     case PhysicalOp.Kind.GroupedStrings =>
       Layout.GroupedString(ScarletConf.get.columnarBatchSize)
+    case PhysicalOp.Kind.GroupedLongs =>
+      Layout.GroupedLong(ScarletConf.get.columnarBatchSize)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Bools | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples =>

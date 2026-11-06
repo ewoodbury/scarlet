@@ -6,11 +6,12 @@ import com.ewoodbury.scarlet.core.Plan
 import ColumnarInterpreter.Columns
 
 /**
- * Int and string `groupByKey`.
+ * Int, long, and string `groupByKey`.
  *
  * A two-filter key or value stack scatters survivor ids. A whole-row string stack is not lowered;
- * a single filter, and every other child, stays on the dense exchange. The `None` path is the only
- * one that interprets that child.
+ * a single filter, and every other child, stays on the dense exchange. Long pairs have no
+ * selection variant: a whole-row filter still reaches the dense exchange, and key or value filters
+ * stay on the row path. The `None` path is the only one that interprets that child.
  */
 private[execution] object GroupByArms:
 
@@ -66,7 +67,18 @@ private[execution] object GroupByArms:
             Columns.GroupedStrings(
               GroupByKey.strings(StringPairWalk.batches(input), width, workers),
             )
+      case PhysicalOp.Kind.LongPairs =>
+        val input = ColumnarInterpreter.interpretAt(
+          source,
+          child,
+          selectedPartition,
+          preserveAbsence,
+          ordinals,
+        )
+        Columns.GroupedLongs(
+          GroupByKey.int64(ColumnarInterpreter.longPairsOf(input), width, workers),
+        )
       case other =>
         throw new IllegalStateException(
-          s"groupByKey column is $other, expected int or string pairs",
+          s"groupByKey column is $other, expected int, long, or string pairs",
         )

@@ -52,7 +52,7 @@ private[execution] object FilterChain:
     )
     columns match
       case Columns.LongTriples(_) | Columns.StringTriples(_) | Columns.GroupedInts(_) |
-          Columns.GroupedStrings(_) =>
+          Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
         PredicatePlan.unsupported(opening(plan, op))
       // An outer batch is a triple with an absent side. This must stay an IllegalStateException:
       // the planner catches ClassCastException, including ColumnarFallback, and falls back to
@@ -200,7 +200,7 @@ private[execution] object FilterChain:
         Columns.Bools(_) | Columns.StringPairs(_) =>
       ColumnarInterpreter.batchesOf(columns)
     case Columns.LongTriples(_) | Columns.StringTriples(_) | Columns.Outer(_, _) |
-        Columns.GroupedInts(_) | Columns.GroupedStrings(_) =>
+        Columns.GroupedInts(_) | Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
       missing
 
   private def copy(columns: Columns, parts: Vector[ColumnBatch]): Columns = columns match
@@ -214,7 +214,7 @@ private[execution] object FilterChain:
     case Columns.Triples(_) => Columns.Triples(parts)
     case Columns.StringPairs(_) => Columns.StringPairs(parts)
     case Columns.LongTriples(_) | Columns.StringTriples(_) | Columns.Outer(_, _) |
-        Columns.GroupedInts(_) | Columns.GroupedStrings(_) =>
+        Columns.GroupedInts(_) | Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
       missing
 
   private def opening(plan: Plan[_], op: PhysicalOp): PhysicalOp.Slot =

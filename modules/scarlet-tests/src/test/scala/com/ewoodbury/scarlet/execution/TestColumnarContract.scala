@@ -30,14 +30,14 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 199 accepted fixtures. groupByKey string moved from the excluded list. 198 + 1 = 199.
-    accepted.size shouldBe 199
-    // 35 exclusions. 199 + 35 = 234. groupByKey string left the excluded list. 36 - 1 = 35.
+    // 200 accepted fixtures. Long groupByKey is a new accepted case. 199 + 1 = 200.
+    accepted.size shouldBe 200
+    // 35 exclusions. 200 + 35 = 235. Long groupByKey was not on the excluded list.
     // Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by
     // execution tests, not contract fixtures, because the contract does not track the int
     // refusals either.
     excluded.size shouldBe 35
-    (accepted.size + excluded.size) shouldBe 234
+    (accepted.size + excluded.size) shouldBe 235
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -516,6 +516,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         Some("GroupByKey(Exchange(Scan))"),
       ),
       AcceptedCase(
+        "groupByKey with long keys",
+        Plan.GroupByKeyOp(longPairSource),
+        hashedInfo(Layout.GroupedLong(ScarletConf.get.columnarBatchSize)),
+        Some("GroupByKey(Exchange(Scan))"),
+      ),
+      AcceptedCase(
         "long reduceByKey",
         Plan.ReduceByKeyOp(longPairSource, (left: Long, right: Long) => left + right),
         hashedInfo(layout),
@@ -869,7 +875,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools |
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs |
         PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
-        PhysicalOp.Kind.GroupedStrings =>
+        PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
       false
 
   private def sumsLongs(op: PhysicalOp): Boolean = op.kind match
@@ -878,7 +884,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools |
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs |
         PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
-        PhysicalOp.Kind.GroupedStrings =>
+        PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
       false
 
   private def sumsFloats(op: PhysicalOp): Boolean = op.kind match
@@ -887,7 +893,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools |
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs |
         PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
-        PhysicalOp.Kind.GroupedStrings =>
+        PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
       false
 
   private def preservesPartitions(op: PhysicalOp): Boolean = op match

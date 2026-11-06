@@ -21,7 +21,8 @@ private[execution] object UnionLowering:
       // here keeps both sides on the row path instead of running them and then falling back.
       case (Some(leftOp), Some(rightOp))
           if leftOp.kind == rightOp.kind && leftOp.kind != PhysicalOp.Kind.GroupedInts &&
-            leftOp.kind != PhysicalOp.Kind.GroupedStrings =>
+            leftOp.kind != PhysicalOp.Kind.GroupedStrings &&
+            leftOp.kind != PhysicalOp.Kind.GroupedLongs =>
         Some(PhysicalOp.Union(leftOp, rightOp))
       case _ => None
 

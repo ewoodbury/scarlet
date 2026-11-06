@@ -102,6 +102,7 @@ final case class PartitioningInfo(
       case Layout.StringTriple(batchSize) => batchReason("StringTriple", batchSize)
       case Layout.GroupedInt(batchSize) => batchReason("GroupedInt", batchSize)
       case Layout.GroupedString(batchSize) => batchReason("GroupedString", batchSize)
+      case Layout.GroupedLong(batchSize) => batchReason("GroupedLong", batchSize)
     }
 
     val orderingReason = ordering match {
@@ -150,9 +151,10 @@ enum OrderingTag:
  * still sees the decoded string, and a null string is a value. [[Layout.StringPair]] is a string
  * key and an int value in one batch. `keys` switches to [[Layout.Utf8Dict]] and `values` switches
  * to [[Layout.Columnar]]. [[Layout.StringTriple]] is a string key and two int values, the inner
- * string join result `(String, (Int, Int))`. [[Layout.GroupedInt]] is int `groupByKey` and
- * [[Layout.GroupedString]] is string `groupByKey`: one grouped batch per shuffle partition. Keys,
- * offsets, and values do not share one row width, so neither is [[Layout.Columnar]].
+ * string join result `(String, (Int, Int))`. [[Layout.GroupedInt]] is int `groupByKey`,
+ * [[Layout.GroupedString]] is string `groupByKey`, and [[Layout.GroupedLong]] is long
+ * `groupByKey`: one grouped batch per shuffle partition. Keys, offsets, and values do not share
+ * one row width, so none of them is [[Layout.Columnar]].
  */
 enum Layout:
   case BoxedRows
@@ -162,6 +164,7 @@ enum Layout:
   case StringTriple(batchSize: Int)
   case GroupedInt(batchSize: Int)
   case GroupedString(batchSize: Int)
+  case GroupedLong(batchSize: Int)
 
 object PartitioningInfo:
 

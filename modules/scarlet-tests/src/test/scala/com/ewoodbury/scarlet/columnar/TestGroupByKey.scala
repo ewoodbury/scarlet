@@ -246,6 +246,23 @@ class TestGroupByKey extends AnyFlatSpec with Matchers:
     an[IndexOutOfBoundsException] should be thrownBy view(view.length)
   }
 
+  // `1L << 32` and `0L` share `toInt`. `1L << 32` and `1L` share `Long.hashCode`. Storing either
+  // of those as the key merges two of the three groups.
+  "long groupByKey" should "keep keys that share a truncated int or a hash code" in {
+    val wide = 1L << 32
+    wide.toInt shouldBe 0
+    java.lang.Long.hashCode(wide) shouldBe java.lang.Long.hashCode(1L)
+    val grouped = GroupByKey.int64(
+      Vector(BatchCodec.longPairs(Seq(wide -> 10L, 0L -> 20L, 1L -> 30L))),
+      partitions = 1,
+      parallelism = 1,
+    )
+
+    grouped.flatMap(_.rows).map { case (key, groupedValues) =>
+      key -> groupedValues.toSeq
+    } shouldBe Seq(wide -> Seq(10L), 0L -> Seq(20L), 1L -> Seq(30L))
+  }
+
   private def group(partitions: Int, parallelism: Int): Vector[GroupedIntBatch] =
     GroupByKey.int32(
       Vector(
