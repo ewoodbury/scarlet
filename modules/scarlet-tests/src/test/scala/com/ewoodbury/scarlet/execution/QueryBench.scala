@@ -16,9 +16,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
- * Times one query per supported columnar type, plus grouped-key patterns, two-filter int and
- * string `groupByKey` and `reduceByKey`, int and string inner joins, and int sort, plus
- * unfiltered int-pair and long-pair sorts. Not a test, and not part of `make test`.
+ * Times one query per supported columnar type, plus grouped-key patterns, a two-filter count,
+ * two-filter int and string `groupByKey` and `reduceByKey`, int and string inner joins, and int
+ * sort, plus unfiltered int-pair and long-pair sorts. Not a test, and not part of `make test`.
  *
  * Each query is built once. The timed region is the action. The scalar checksum is compared
  * after the timer stops, against a local loop and one row-path execution. A mismatch fails the
@@ -167,6 +167,10 @@ object QueryBench:
       .filterKeys((key: Int) => key % 3 != 0)
       .filterValues((value: Int) => value >= 0)
       .groupByKey
+    val filteredCount = DistCollection
+      .ofIntPairs(groupKeys, generated, sourcePartitions)
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
     val stringGroups = FilterStringGroupChecksum.source(generated, sourcePartitions)
     val stringReduce = FilterStringReduceChecksum.source(generated, sourcePartitions)
     val keptReduce = FilterReduceChecksum.expected(groupKeys, generated, groups)
@@ -212,6 +216,14 @@ object QueryBench:
         keptGroups,
         filteredGroups.plan,
         FilterGroupChecksum.collected(filteredGroups.collect(), groups),
+      ),
+      whole(
+        "filter-count",
+        elementRows,
+        "FilterValue(FilterKey(Scan))",
+        FilterReduceChecksum.expectedCount(groupKeys, generated),
+        filteredCount.plan,
+        filteredCount.count(),
       ),
       whole(
         "filter-string-groupbykey",
@@ -997,7 +1009,7 @@ object QueryBench:
       "the measured rounds, at each width.\n" +
       "Sort queries checksum the collected key then value, mixed by 31, in output order. The " +
       "expected value is a local stable sort of the kept pairs, computed before timing.\n" +
-      "filter-groupbykey, filter-string-groupbykey, filter-reducebykey, " +
+      "filter-count, filter-groupbykey, filter-string-groupbykey, filter-reducebykey, " +
       "filter-string-reducebykey, filter-join, filter-string-join, and filter-sort are two " +
       "filters, at 1e6 rows, two source partitions, and batch 8192. String keys are " +
       "`(row % 1024).toString`. The int join filters the build side and probes an unfiltered " +
@@ -1006,7 +1018,7 @@ object QueryBench:
       "value sum xor the value count. String cases use key.hashCode. reduceByKey checksums " +
       "(key * 31) xor the wrapped int sum. The join checksums (key * 31) xor the left value " +
       "xor the right value. The string join uses key.hashCode in place of the key. " +
-      "filter-sort uses the sort checksum. " +
+      "filter-sort uses the sort checksum. filter-count checksums the kept row count. " +
       "p50 and alloc_mb are recorded. There is no wall-clock gate.\n" +
       "alloc_mb is the nearest-rank p50 of process-wide thread bytes, in decimal megabytes " +
       "(bytes / 1e6). The probe excludes itself. A short-lived worker missed between reads is " +
