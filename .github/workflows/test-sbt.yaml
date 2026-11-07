@@ -23,4 +23,7 @@ jobs:
         uses: sbt/setup-sbt@v1
 
       - name: Run tests
-        run: sbt test 
+        run: sbt test
+
+      - name: Performance smoke check
+        run: sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.PerfCheck"
