@@ -765,8 +765,8 @@ object SpillBench:
       "percentile=nearest-rank ceil(p/100*n) no-interpolation n=" + measure +
       " p50_rank=" + p50Rank + " p95_rank=" + p95Rank + " max_rank=" + measure + "\n" +
       "p95 is rank " + p95Rank + " of " + measure + ", so it is the largest sample.\n" +
-      "runMain executes in the sbt JVM with Test / fork left false. Absolute numbers carry " +
-      "sbt and JIT noise. Comparisons within this run are the signal.\n" +
+      "runMain executes in the sbt JVM unless Test / fork is set, so absolute numbers carry " +
+      "JVM and JIT noise. Comparisons within this run are the signal.\n" +
       "Widths 1 and 4 share one JVM. Off runs before the default budget, then stress. " +
       "The default budget is width 1.\n" +
       "grouped-sum checksum is the folded total. sort-merge checksum mixes (key, left, right) " +
