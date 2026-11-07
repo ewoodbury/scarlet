@@ -253,6 +253,7 @@ object ColumnarPlanner:
     val steps = PredicatePlan
       .selectionSteps(PredicatePlan.encoded(compiled, ordinals))
       .getOrElse(missingPairCount)
+      .toList
     val batches = PredicatePlan.childOf(plan, op) match
       case (_, PhysicalOp.Scan(PhysicalOp.Kind.Pairs, partitions)) =>
         SourceEncode.encodePairs(partitions, ordinals)

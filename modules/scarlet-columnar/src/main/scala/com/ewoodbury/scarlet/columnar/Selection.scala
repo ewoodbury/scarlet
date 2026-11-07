@@ -75,12 +75,11 @@ private[scarlet] object Selection:
    * [[Step.IntPair]] row calls its predicate only when both ordinals are present. An empty range
    * counts zero and does not call a predicate.
    */
-  def count(batch: ColumnBatch, start: Int, length: Int, steps: Seq[Step]): Long =
+  def count(batch: ColumnBatch, start: Int, length: Int, steps: List[Step]): Long =
     Ranges.check(start, length, batch.length)
     require(steps.nonEmpty, "a filter stack needs a predicate")
-    val stack = steps.toList
-    requireCountSteps(stack)
-    val mask = ordinalMask(stack)
+    requireCountSteps(steps)
+    val mask = ordinalMask(steps)
     val key = columnIfRead(batch, mask, bit = 1, ordinal = 0)
     val value = columnIfRead(batch, mask, bit = 2, ordinal = 1)
     if ((mask & 1) != 0) then Ranges.check(start, length, key.length)
@@ -92,8 +91,8 @@ private[scarlet] object Selection:
     val valueValues = value.values
     val valueWords = value.validity.words
     if (denseRange(batch, start, length, mask)) then
-      tally(start, length, stack, keyValues, keyWords, valueValues, valueWords, false)
-    else tally(start, length, stack, keyValues, keyWords, valueValues, valueWords, true)
+      tally(start, length, steps, keyValues, keyWords, valueValues, valueWords, false)
+    else tally(start, length, steps, keyValues, keyWords, valueValues, valueWords, true)
 
   /** Gathers [[applySelected]]'s prefix. Output arrays stay the index capacity. */
   def materialize(selected: Selected): ColumnBatch =

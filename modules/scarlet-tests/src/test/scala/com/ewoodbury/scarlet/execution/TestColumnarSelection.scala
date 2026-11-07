@@ -228,7 +228,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
       ),
     )
     counted(nullKeys, keySteps) shouldBe 1L
-    Selection.count(nullKeys, 0, nullKeys.length, countedKeys)
+    Selection.count(nullKeys, 0, nullKeys.length, countedKeys.toList)
     keyCalls.get() shouldBe 2
 
     val nullValues = BatchCodec.nullableIntPairs(
@@ -247,7 +247,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     )
     // A stored zero on the null row would pass `>= 0` if the bit were ignored.
     counted(nullValues, valueSteps) shouldBe 2L
-    Selection.count(nullValues, 0, nullValues.length, countedValues)
+    Selection.count(nullValues, 0, nullValues.length, countedValues.toList)
     valueCalls.get() shouldBe 2
 
     val keyOnNullValue = Seq(Selection.Step.Int32(0, (key: Int) => key > 0))
@@ -267,7 +267,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     )
 
     counted(batch, Seq(Selection.Step.IntPair((key, value) => key < value))) shouldBe 2L
-    Selection.count(batch, 0, batch.length, steps)
+    Selection.count(batch, 0, batch.length, steps.toList)
     calls.get() shouldBe 2
   }
 
@@ -300,7 +300,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     // Rows 1 and 2 are present, so the window is dense and starts mid-word.
     counted(batch, 1, 2, steps) shouldBe 1L
     counted(batch, steps) shouldBe 2L
-    Selection.count(batch, 0, batch.length, countedSteps)
+    Selection.count(batch, 0, batch.length, countedSteps.toList)
     // The null key fails the first step, so the value predicate sees three present keys.
     calls.get() shouldBe 3
   }
@@ -308,8 +308,8 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
   it should "count a one-column batch from the only ordinal it reads" in {
     val keys = BatchCodec.ints(Seq(1, 2, 3, 4))
     val steps = Seq(Selection.Step.Int32(0, (key: Int) => key % 2 == 0))
-    Selection.count(keys, 0, keys.length, steps) shouldBe 2L
-    Selection.count(keys, 0, 0, steps) shouldBe 0L
+    Selection.count(keys, 0, keys.length, steps.toList) shouldBe 2L
+    Selection.count(keys, 0, 0, steps.toList) shouldBe 0L
   }
 
   "int join" should "match the pair multiset and the shuffle width" in {
@@ -587,7 +587,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
       length: Int,
       steps: Seq[Selection.Step],
   ): Long =
-    val got = Selection.count(batch, start, length, steps)
+    val got = Selection.count(batch, start, length, steps.toList)
     got shouldBe Selection(batch, start, length, steps).length.toLong
     got
 
