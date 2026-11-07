@@ -36,7 +36,8 @@ SPILL_SUITE_FLOOR := 12
 
 .PHONY: test-spill
 test-spill: ## Run the spill suites and bench in a forked JVM with a 128 MB heap
-	@sbt -J-Xmx1g "set LocalProject(\"scarlet-tests\") / Test / fork := true" "set LocalProject(\"scarlet-tests\") / Test / javaOptions ++= Seq(\"-Xmx128m\", \"-XX:+ExitOnOutOfMemoryError\")" "scarlet-tests/testOnly $(SPILL_SUITES)" "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.SpillBench" > target/test-spill.log 2>&1; \
+	@mkdir -p target; \
+	sbt -J-Xmx1g "set LocalProject(\"scarlet-tests\") / Test / fork := true" "set LocalProject(\"scarlet-tests\") / Test / javaOptions ++= Seq(\"-Xmx128m\", \"-XX:+ExitOnOutOfMemoryError\")" "scarlet-tests/testOnly $(SPILL_SUITES)" "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.SpillBench" > target/test-spill.log 2>&1; \
 	status=$$?; cat target/test-spill.log; \
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
 	if grep -q "No tests to run" target/test-spill.log; then \
