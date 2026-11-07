@@ -88,7 +88,11 @@ private[execution] object FilterChain:
               if compiled.atoms.length > 1 &&
                 PredicatePlan.selectionSteps(compiled).nonEmpty =>
             val steps =
-              PredicatePlan.selectionSteps(encoded(compiled, ordinals)).getOrElse(missing)
+              PredicatePlan
+                .selectionSteps(PredicatePlan.encoded(compiled, ordinals))
+                .getOrElse(
+                  missing,
+                )
             val (source, child) = PredicatePlan.childOf(plan, op)
             val columns = ColumnarInterpreter.interpretAt(
               source,
@@ -135,22 +139,11 @@ private[execution] object FilterChain:
       compiled: Compiled,
       ordinals: Set[Int],
   ): Vector[ColumnBatch] =
-    val steps = PredicatePlan.selectionSteps(encoded(compiled, ordinals)).getOrElse(missing)
+    val steps =
+      PredicatePlan.selectionSteps(PredicatePlan.encoded(compiled, ordinals)).getOrElse(missing)
     ColumnarInterpreter.onEachMorsel(parts) { morsel =>
       Selection(morsel.batch, morsel.start, morsel.length, steps)
     }
-
-  /**
-   * A one-column encode stores the value at index 0. [[PredicatePlan.compile]] records logical
-   * ordinal 1. The root ordinal set is what decided the encode, and it is not on the atom.
-   */
-  private def encoded(compiled: Compiled, ordinals: Set[Int]): Compiled =
-    if (ordinals.size == 1) then
-      Compiled(compiled.atoms.map {
-        case Atom.PairValue(_, keep) => Atom.PairValue(0, keep)
-        case atom => atom
-      })
-    else compiled
 
   private def kindBatches(kind: PhysicalOp.Kind, columns: Columns): Vector[ColumnBatch] =
     kind match

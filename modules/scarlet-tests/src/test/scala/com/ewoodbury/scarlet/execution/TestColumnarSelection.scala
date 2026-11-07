@@ -1,11 +1,13 @@
 package com.ewoodbury.scarlet.execution
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.{DictionaryStringPredicate, DistCollection}
-import com.ewoodbury.scarlet.columnar.{BatchCodec, ColumnMetrics, CountingSink, NoOpSink}
+import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -164,6 +166,150 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     pairs.filterValues[Int, Int](_ > 5).collect() shouldBe Seq(1 -> 10, 2 -> 20)
     pairs.filter { case (_, value) => value > 5 }.collect() shouldBe Seq(1 -> 10, 2 -> 20)
     assertNarrow(pairs.filterKeys[Int, Int](_ > 0), 2)
+  }
+
+  "pair filter count" should "count two filters, one filter, and a row filter" in {
+    val pairs = DistCollection(Seq(1 -> 10, 2 -> 20, 3 -> 5, 4 -> 1), 2)
+    val both = pairs.filterKeys[Int, Int](_ % 2 == 0).filterValues[Int, Int](_ > 5)
+    val keys = pairs.filterKeys[Int, Int](_ % 2 == 0)
+    val rows = pairs.filter { case (key, value) => key > value }
+
+    both.count() shouldBe 1L
+    keys.count() shouldBe 2L
+    rows.count() shouldBe 1L
+    ColumnarPlanner.tryCount(both.plan) shouldBe Some(rowLong(both.count()))
+    ColumnarPlanner.tryCount(keys.plan) shouldBe Some(rowLong(keys.count()))
+    ColumnarPlanner.tryCount(rows.plan) shouldBe Some(rowLong(rows.count()))
+    ColumnarPlanner.lower(both.plan).map(_.shape) shouldBe Some("FilterValue(FilterKey(Scan))")
+    ColumnarPlanner.lower(keys.plan).map(_.shape) shouldBe Some("FilterKey(Scan)")
+    ColumnarPlanner.lower(rows.plan).map(_.shape) shouldBe Some("FilterRow(Scan)")
+  }
+
+  it should "count an empty partition as zero and keep the other partition" in {
+    val source = Plan.Source(
+      Seq(
+        Partition(Seq.empty[(Int, Int)]),
+        Partition(Seq(2 -> 10, 1 -> 3)),
+        Partition(Seq.empty[(Int, Int)]),
+      ),
+    )
+    val filtered = Plan.FilterKeysOp(source, (key: Int) => key > 1)
+    DistCollection(filtered).count() shouldBe 1L
+    ColumnarPlanner.tryCount(filtered) shouldBe Some(1L)
+    ColumnarPlanner.tryCount(filtered) shouldBe Some(rowLong(DistCollection(filtered).count()))
+  }
+
+  it should "rewrite a one-column value ordinal to index 0" in {
+    val filtered = DistCollection(Seq(1 -> 10, 2 -> 3), 1).filterValues[Int, Int](_ > 5)
+    val op = ColumnarPlanner.lower(filtered.plan).getOrElse(fail("value filter did not lower"))
+    val compiled = PredicatePlan.compile(filtered.plan, op).getOrElse(fail("stack did not compile"))
+    val wide = PredicatePlan.selectionSteps(compiled).getOrElse(fail("no wide steps"))
+    val narrow = PredicatePlan
+      .selectionSteps(PredicatePlan.encoded(compiled, Set(1)))
+      .getOrElse(fail("no narrow steps"))
+
+    stepOrdinal(wide) shouldBe 1
+    stepOrdinal(narrow) shouldBe 0
+  }
+
+  it should "skip a null key and a null value without calling the predicate" in {
+    val nullKeys = BatchCodec.nullableIntPairs(
+      Seq((None, Some(1)), (Some(2), Some(3)), (Some(-1), Some(4)), (None, Some(5))),
+    )
+    val keySteps = Seq(Selection.Step.Int32(0, (key: Int) => key > 0))
+    val keyCalls = new AtomicInteger
+    val countedKeys = Seq(
+      Selection.Step.Int32(
+        0,
+        (key: Int) => {
+          keyCalls.incrementAndGet()
+          key > 0
+        },
+      ),
+    )
+    counted(nullKeys, keySteps) shouldBe 1L
+    Selection.count(nullKeys, 0, nullKeys.length, countedKeys)
+    keyCalls.get() shouldBe 2
+
+    val nullValues = BatchCodec.nullableIntPairs(
+      Seq((Some(1), None), (Some(2), Some(0)), (Some(3), Some(4))),
+    )
+    val valueSteps = Seq(Selection.Step.Int32(1, (value: Int) => value >= 0))
+    val valueCalls = new AtomicInteger
+    val countedValues = Seq(
+      Selection.Step.Int32(
+        1,
+        (value: Int) => {
+          valueCalls.incrementAndGet()
+          value >= 0
+        },
+      ),
+    )
+    // A stored zero on the null row would pass `>= 0` if the bit were ignored.
+    counted(nullValues, valueSteps) shouldBe 2L
+    Selection.count(nullValues, 0, nullValues.length, countedValues)
+    valueCalls.get() shouldBe 2
+
+    val keyOnNullValue = Seq(Selection.Step.Int32(0, (key: Int) => key > 0))
+    counted(nullValues, keyOnNullValue) shouldBe 3L
+  }
+
+  it should "require both ordinals for a pair-row step" in {
+    val batch = BatchCodec.nullableIntPairs(
+      Seq((None, Some(1)), (Some(4), None), (Some(2), Some(3)), (Some(1), Some(8))),
+    )
+    val calls = new AtomicInteger
+    val steps = Seq(
+      Selection.Step.IntPair((key, value) => {
+        calls.incrementAndGet()
+        key < value
+      }),
+    )
+
+    counted(batch, Seq(Selection.Step.IntPair((key, value) => key < value))) shouldBe 2L
+    Selection.count(batch, 0, batch.length, steps)
+    calls.get() shouldBe 2
+  }
+
+  it should "count a dense window and a mixed range of the same batch" in {
+    val batch = BatchCodec.nullableIntPairs(
+      Seq(
+        (Some(2), Some(5)),
+        (Some(4), Some(1)),
+        (Some(6), Some(8)),
+        (None, Some(9)),
+        (Some(3), Some(7)),
+      ),
+    )
+    val steps = Seq(
+      Selection.Step.Int32(0, (key: Int) => key % 2 == 0),
+      Selection.Step.Int32(1, (value: Int) => value > 4),
+    )
+    val calls = new AtomicInteger
+    val countedSteps = Seq(
+      Selection.Step.Int32(0, (key: Int) => key % 2 == 0),
+      Selection.Step.Int32(
+        1,
+        (value: Int) => {
+          calls.incrementAndGet()
+          value > 4
+        },
+      ),
+    )
+
+    // Rows 1 and 2 are present, so the window is dense and starts mid-word.
+    counted(batch, 1, 2, steps) shouldBe 1L
+    counted(batch, steps) shouldBe 2L
+    Selection.count(batch, 0, batch.length, countedSteps)
+    // The null key fails the first step, so the value predicate sees three present keys.
+    calls.get() shouldBe 3
+  }
+
+  it should "count a one-column batch from the only ordinal it reads" in {
+    val keys = BatchCodec.ints(Seq(1, 2, 3, 4))
+    val steps = Seq(Selection.Step.Int32(0, (key: Int) => key % 2 == 0))
+    Selection.count(keys, 0, keys.length, steps) shouldBe 2L
+    Selection.count(keys, 0, 0, steps) shouldBe 0L
   }
 
   "int join" should "match the pair multiset and the shuffle width" in {
@@ -431,6 +577,33 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     filtered.collect() shouldBe Seq(2, 4)
     infoOf(filtered) shouldBe Option.empty[PartitioningInfo]
   }
+
+  private def counted(batch: ColumnBatch, steps: Seq[Selection.Step]): Long =
+    counted(batch, 0, batch.length, steps)
+
+  private def counted(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      steps: Seq[Selection.Step],
+  ): Long =
+    val got = Selection.count(batch, start, length, steps)
+    got shouldBe Selection(batch, start, length, steps).length.toLong
+    got
+
+  private def stepOrdinal(steps: Vector[Selection.Step]): Int = steps match
+    case Vector(Selection.Step.Int32(ordinal, _)) => ordinal
+    case other => fail(s"expected one int step, got $other")
+
+  private def rowLong(body: => Long): Long =
+    val saved = ScarletConf.get
+    try
+      ScarletRuntime.get.shuffle.clear()
+      ScarletConf.set(saved.copy(columnarExecution = false))
+      body
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
 
   private def columnar[A](body: => A): A =
     ScarletRuntime.get.shuffle.clear()
