@@ -60,7 +60,9 @@ class TestRandomizedNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
         groupedInts(columnar(pairs.groupByKey)) shouldBe groupedInts(
           row(pairs.groupByKey.collect()),
         )
-        pairs.count() shouldBe rowCount(pairs.count())
+        pairs.count() shouldBe rowLong(pairs.count())
+        pairs.values.sum shouldBe rowLong(pairs.values.sum)
+        pairs.keys.sum shouldBe rowLong(pairs.keys.sum)
       }
 
       withClue(s"seed $seed rows $rows partitions $partitions long pairs: ") {
@@ -94,7 +96,7 @@ class TestRandomizedNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
       .getOrElse(fail(s"stayed on the row path: ${collection.plan}"))
     ran.flatMap(_.data).toList
 
-  private def rowCount(body: => Long): Long =
+  private def rowLong(body: => Long): Long =
     val saved = ScarletConf.get
     try
       ScarletConf.set(saved.copy(columnarExecution = false))

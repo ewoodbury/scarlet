@@ -128,6 +128,44 @@ class TestFoldParity extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       projected.filterKeys[Int, Int](_ % 2 == 1).filterKeys[Int, Int](_ > 0).keys,
       "Key(FilterKey(FilterKey(Scan)))",
     )
+    agreeInt(
+      "value filter then keys",
+      projected.filterValues[Int, Int](_ > 0).keys,
+      "Key(FilterValue(Scan))",
+    )
+    agreeInt(
+      "key filter then values",
+      projected.filterKeys[Int, Int](_ % 2 == 1).values,
+      "Value(FilterKey(Scan))",
+    )
+    agreeInt(
+      "row filter then values",
+      projected.filter { case (key, value) => key < value }.values,
+      "Value(FilterRow(Scan))",
+    )
+  }
+
+  it should "match the gathered columnar sum when a component is null" in {
+    // The first row is a present pair so classification accepts the source. Later nulls stay
+    // absent. The row action would unbox them, so the oracle is the gathered columnar sum.
+    val rows = Seq(
+      erased(Some(2), Some(5)),
+      erased(Some(1), None),
+      erased(None, Some(4)),
+      erased(Some(-1), Some(8)),
+      erased(Some(3), None),
+    )
+    val source = DistCollection(rows, 1)
+    val byKey = source.filterKeys[Int, Int](_ > 0)
+    val byValue = source.filterValues[Int, Int](_ > 4)
+    val byRow = source.filter { case (key, value) => key > 0 && value > 0 }
+
+    agreeColumnarSum("null value under a key filter", byKey.values)
+    agreeColumnarSum("null key under a key filter", byKey.keys)
+    agreeColumnarSum("null key under a value filter", byValue.keys)
+    agreeColumnarSum("null value under a value filter", byValue.values)
+    agreeColumnarSum("null component under a row filter", byRow.values)
+    agreeColumnarSum("null key under a row filter", byRow.keys)
   }
 
   it should "skip the key predicate when the other ordinal is null" in {
@@ -236,6 +274,26 @@ class TestFoldParity extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       ColumnarPlanner.tryGroupedSum(collection.plan) shouldBe Some(expected)
       calls.get() shouldBe expectedCalls
     }
+
+  private def agreeColumnarSum(label: String, collection: DistCollection[Int]): Unit =
+    withClue(s"$label: ") {
+      ColumnarPlanner.trySumInt(collection.plan) shouldBe Some(gatheredSum(collection.plan))
+    }
+
+  /**
+   * Today's pair-column sum: interpret the filter, then [[ColumnReduce.sumInt32At]]. Absence is
+   * kept so a null slot is still a null slot. The default encode unboxes it.
+   */
+  private def gatheredSum(plan: Plan[Int]): Long =
+    val projected = ColumnarPlanner.lower(plan).getOrElse(fail("expected a columnar plan"))
+    val (source, child, ordinal) = (plan, projected) match
+      case (Plan.KeysOp(source), PhysicalOp.Column(child, 0)) => (source, child, 0)
+      case (Plan.ValuesOp(source), PhysicalOp.Column(child, 1)) => (source, child, 1)
+      case _ => fail(s"expected a pair projection, got $projected")
+    val batches = ColumnarInterpreter.pairsOf(
+      ColumnarInterpreter.interpret(source, child, None, preserveAbsence = true),
+    )
+    batches.foldLeft(0L)((total, batch) => total + ColumnReduce.sumInt32At(batch, ordinal))
 
   private def agreeGrouped(label: String, collection: DistCollection[(Int, Int)]): Unit =
     withClue(s"$label: ") {
