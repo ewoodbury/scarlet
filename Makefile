@@ -22,9 +22,11 @@ test-one: ## Run a single suite: make test-one T=com.ewoodbury.scarlet.core.Test
 # and passes at 128 MB, so a path that retains its input instead of spilling fails here.
 SPILL_SUITES := com.ewoodbury.scarlet.columnar.Test*Spill \
 	com.ewoodbury.scarlet.columnar.TestSpillSum \
+	com.ewoodbury.scarlet.columnar.TestSpillStore \
 	com.ewoodbury.scarlet.columnar.TestSortMergeRuns \
 	com.ewoodbury.scarlet.execution.TestRankSplitRuns \
 	com.ewoodbury.scarlet.execution.TestRankSplitLongRuns \
+	com.ewoodbury.scarlet.execution.TestStringSortSpill \
 	com.ewoodbury.scarlet.execution.TestSelectionSort
 
 .PHONY: test-spill
