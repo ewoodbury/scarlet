@@ -18,8 +18,10 @@ test-one: ## Run a single suite: make test-one T=com.ewoodbury.scarlet.core.Test
 
 # The spill suites and the spill bench run in one forked JVM capped at 128 MB. The
 # suites force spill with byte budgets; the bench asserts the file and merge counters.
-# The cap is below what a whole-input materialisation needs: SpillBench OOMs at 64 MB
-# and passes at 128 MB, so a path that retains its input instead of spilling fails here.
+# The cap sits between what the paths need and what a whole-input materialisation
+# needs: SpillBench OOMs at 64 MB and passes at 128 MB. That margin also covers the
+# bench's own digest, so the cap bounds the engine plus its accounting, not the engine
+# alone.
 SPILL_SUITES := com.ewoodbury.scarlet.columnar.Test*Spill \
 	com.ewoodbury.scarlet.columnar.TestSpillSum \
 	com.ewoodbury.scarlet.columnar.TestSpillStore \
@@ -31,7 +33,12 @@ SPILL_SUITES := com.ewoodbury.scarlet.columnar.Test*Spill \
 
 .PHONY: test-spill
 test-spill: ## Run the spill suites and bench in a forked JVM with a 128 MB heap
-	sbt -J-Xmx1g "set LocalProject(\"scarlet-tests\") / Test / fork := true" "set LocalProject(\"scarlet-tests\") / Test / javaOptions ++= Seq(\"-Xmx128m\", \"-XX:+ExitOnOutOfMemoryError\")" "scarlet-tests/testOnly $(SPILL_SUITES)" "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.SpillBench"
+	@sbt -J-Xmx1g "set LocalProject(\"scarlet-tests\") / Test / fork := true" "set LocalProject(\"scarlet-tests\") / Test / javaOptions ++= Seq(\"-Xmx128m\", \"-XX:+ExitOnOutOfMemoryError\")" "scarlet-tests/testOnly $(SPILL_SUITES)" "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.SpillBench" > target/test-spill.log 2>&1; \
+	status=$$?; cat target/test-spill.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -q "No tests were executed" target/test-spill.log; then \
+		echo "test-spill: the suite patterns matched no tests" >&2; exit 1; \
+	fi
 
 .PHONY: help
 help: ## Display this help

@@ -44,9 +44,9 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * turned on with nothing written. It runs at width 1. The 64 KiB row is the forced-spill case and
  * runs at widths 1 and 4.
  *
- * `runMain` executes in the sbt JVM. `Test / fork` is left false, so absolute times carry sbt and
- * JIT noise. The CI spill job forks it in a 128 MB JVM to check that the spill paths stay inside a
- * bounded heap; those times are not comparable with a local run.
+ * `runMain` executes in the sbt JVM by default, so absolute times carry sbt and JIT noise. The CI
+ * spill job overrides `Test / fork` and runs this in a 128 MB JVM to check that the spill paths
+ * stay inside a bounded heap; CI times are therefore not comparable with a local run.
  *
  * {{{
  * sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.SpillBench"
