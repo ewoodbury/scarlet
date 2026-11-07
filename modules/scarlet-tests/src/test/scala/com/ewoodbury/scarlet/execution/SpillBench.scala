@@ -45,7 +45,8 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * runs at widths 1 and 4.
  *
  * `runMain` executes in the sbt JVM. `Test / fork` is left false, so absolute times carry sbt and
- * JIT noise. Comparisons within one run are the signal. Width 4 shares that JVM with width 1.
+ * JIT noise. The CI spill job forks it in a 128 MB JVM to check that the spill paths stay inside a
+ * bounded heap; those times are not comparable with a local run.
  *
  * {{{
  * sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.SpillBench"
