@@ -44,8 +44,9 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * turned on with nothing written. It runs at width 1. The 64 KiB row is the forced-spill case and
  * runs at widths 1 and 4.
  *
- * `runMain` executes in the sbt JVM. `Test / fork` is left false, so absolute times carry sbt and
- * JIT noise. Comparisons within one run are the signal. Width 4 shares that JVM with width 1.
+ * `runMain` executes in the sbt JVM by default, so absolute times carry sbt and JIT noise. The CI
+ * spill job overrides `Test / fork` and runs this in a 128 MB JVM to check that the spill paths
+ * stay inside a bounded heap; CI times are therefore not comparable with a local run.
  *
  * {{{
  * sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.SpillBench"
@@ -764,8 +765,8 @@ object SpillBench:
       "percentile=nearest-rank ceil(p/100*n) no-interpolation n=" + measure +
       " p50_rank=" + p50Rank + " p95_rank=" + p95Rank + " max_rank=" + measure + "\n" +
       "p95 is rank " + p95Rank + " of " + measure + ", so it is the largest sample.\n" +
-      "runMain executes in the sbt JVM with Test / fork left false. Absolute numbers carry " +
-      "sbt and JIT noise. Comparisons within this run are the signal.\n" +
+      "runMain executes in the sbt JVM unless Test / fork is set, so absolute numbers carry " +
+      "JVM and JIT noise. Comparisons within this run are the signal.\n" +
       "Widths 1 and 4 share one JVM. Off runs before the default budget, then stress. " +
       "The default budget is width 1.\n" +
       "grouped-sum checksum is the folded total. sort-merge checksum mixes (key, left, right) " +

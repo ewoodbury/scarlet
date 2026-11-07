@@ -30,3 +30,7 @@ jobs:
 
       - name: Performance smoke check
         run: sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.PerfCheck"
+
+      - name: Bounded-heap spill check
+        run: make test-spill
+        timeout-minutes: 20
