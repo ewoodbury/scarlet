@@ -209,17 +209,61 @@ object ColumnarPlanner:
   /**
    * Row count of a columnar plan. `None` means the row path. This does not decode.
    * [[TrailingProject.count]] folds an int, long, or dictionary-literal string chain without
-   * writing it. Any other accepted plan reads finished batch lengths. A string shape that is not
-   * the literal chain is that second strategy. The catch is the row-path fallback.
-   * [[ColumnarFallback]] is its named form.
+   * writing it. A filter stack over an int-pair scan counts in [[Selection.count]] and does not
+   * build a survivor index or a gathered batch. Any other accepted plan reads finished batch
+   * lengths. A string shape that is not the literal chain is that second strategy. The catch is
+   * the row-path fallback. [[ColumnarFallback]] is its named form.
    */
   def tryCount(plan: Plan[_]): Option[Long] =
     accepted(plan) match
       case None => None
       case Some(op) =>
-        try TrailingProject.count(plan, op).orElse(finishedCount(plan, op))
+        try
+          TrailingProject
+            .count(plan, op)
+            .orElse(Option.when(countsFilteredPairs(plan, op))(countFilteredPairs(plan, op)))
+            .orElse(finishedCount(plan, op))
         // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
         catch case _: ClassCastException => None
+
+  /**
+   * True when `plan` is a pair-slot filter stack whose source is an int-pair scan.
+   * [[PredicatePlan.selectionSteps]] is defined for key, value, and row atoms, including a stack
+   * of one. An empty stack, a long or string pair, a triple, and a stack reached through a map are
+   * false, and [[finishedCount]] runs them.
+   */
+  private def countsFilteredPairs(plan: Plan[_], op: PhysicalOp): Boolean =
+    PredicatePlan.childOf(plan, op) match
+      case (_, PhysicalOp.Scan(PhysicalOp.Kind.Pairs, _)) =>
+        PredicatePlan.compile(plan, op).flatMap(PredicatePlan.selectionSteps) match
+          case Some(steps) => steps.forall(pairCountStep)
+          case None => false
+      case _ => false
+
+  private def pairCountStep(step: Selection.Step): Boolean = step match
+    case Selection.Step.Int32(_, _) | Selection.Step.IntPair(_) => true
+    case Selection.Step.Int64(_, _) | Selection.Step.Float64(_, _) | Selection.Step.Bool(_, _) |
+        Selection.Step.Utf8(_, _) | Selection.Step.IntTriple(_, _) =>
+      false
+
+  /** Counts the admitted stack in place. The source scan is encoded once and not filtered. */
+  private def countFilteredPairs(plan: Plan[_], op: PhysicalOp): Long =
+    val compiled = PredicatePlan.compile(plan, op).getOrElse(missingPairCount)
+    val ordinals = ColumnUse.ordinals(plan, op)
+    val steps = PredicatePlan
+      .selectionSteps(PredicatePlan.encoded(compiled, ordinals))
+      .getOrElse(missingPairCount)
+      .toList
+    val batches = PredicatePlan.childOf(plan, op) match
+      case (_, PhysicalOp.Scan(PhysicalOp.Kind.Pairs, partitions)) =>
+        SourceEncode.encodePairs(partitions, ordinals)
+      case _ => missingPairCount
+    foldMorsels(batches) { morsel =>
+      Selection.count(morsel.batch, morsel.start, morsel.length, steps)
+    }
+
+  private def missingPairCount: Nothing =
+    throw new IllegalStateException("pair filter count lost its scan")
 
   private def finishedCount(plan: Plan[_], op: PhysicalOp): Option[Long] =
     op match

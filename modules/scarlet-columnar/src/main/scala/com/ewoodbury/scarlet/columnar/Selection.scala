@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import scala.annotation.tailrec
+
 /**
  * One pass over a stack of filters on a multi-column batch.
  *
@@ -27,6 +29,10 @@ package com.ewoodbury.scarlet.columnar
  * output bit clear. [[Validity.prefixValid]] is not used: a survivor may be absent, and a dense
  * present prefix is what the gather writes when every survivor is present. The output arrays are
  * sized to the index capacity, which is the morsel width. The batch length is the survivor count.
+ *
+ * [[count]] walks the same int-slot and int-pair steps and returns the survivor total. It does not
+ * allocate the index or gather a batch. When every ordinal those steps read is dense on the range,
+ * the walk skips the per-row bit test. An ordinal no step reads is not tested.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[scarlet] object Selection:
@@ -63,9 +69,275 @@ private[scarlet] object Selection:
     }
     Selected(batch, index, count)
 
+  /**
+   * Counts rows in `[start, start + length)` that pass every step. Steps run in order and a
+   * failure stops the row. A null int slot fails its step and does not call the predicate. An
+   * [[Step.IntPair]] row calls its predicate only when both ordinals are present. An empty range
+   * counts zero and does not call a predicate.
+   */
+  def count(batch: ColumnBatch, start: Int, length: Int, steps: List[Step]): Long =
+    Ranges.check(start, length, batch.length)
+    require(steps.nonEmpty, "a filter stack needs a predicate")
+    requireCountSteps(steps)
+    val mask = ordinalMask(steps)
+    val key = columnIfRead(batch, mask, bit = 1, ordinal = 0)
+    val value = columnIfRead(batch, mask, bit = 2, ordinal = 1)
+    if ((mask & 1) != 0) then Ranges.check(start, length, key.length)
+    if ((mask & 2) != 0) then Ranges.check(start, length, value.length)
+    if ((mask & 3) == 3) then
+      require(key.length == value.length, "key and value columns differ in length")
+    val keyValues = key.values
+    val keyWords = key.validity.words
+    val valueValues = value.values
+    val valueWords = value.validity.words
+    if (denseRange(batch, start, length, mask)) then
+      tally(start, length, steps, keyValues, keyWords, valueValues, valueWords, false)
+    else tally(start, length, steps, keyValues, keyWords, valueValues, valueWords, true)
+
   /** Gathers [[applySelected]]'s prefix. Output arrays stay the index capacity. */
   def materialize(selected: Selected): ColumnBatch =
     publish(selected.batch, selected.rows, selected.count, selected.rows.length)
+
+  /** Stand-in for an ordinal the steps do not read. The row loop never indexes it. */
+  private val unusedInt32: Int32Column =
+    Int32Column.of(Array.empty[Int], Validity.allValid(0), 0)
+
+  @tailrec
+  private def requireCountSteps(stack: List[Step]): Unit =
+    stack match
+      case Nil => ()
+      case Step.Int32(column, _) :: rest =>
+        require(column == 0 || column == 1, s"count ordinal $column is not a pair column")
+        requireCountSteps(rest)
+      case Step.IntPair(_) :: rest =>
+        requireCountSteps(rest)
+      case _ :: rest =>
+        require(false, "count steps are int slots or int pairs")
+        requireCountSteps(rest)
+
+  @tailrec
+  private def ordinalMask(stack: List[Step], mask: Int = 0): Int =
+    stack match
+      case Nil => mask
+      case Step.Int32(column, _) :: rest => ordinalMask(rest, mask | (1 << column))
+      case Step.IntPair(_) :: rest => ordinalMask(rest, mask | 3)
+      case _ :: rest => ordinalMask(rest, mask)
+
+  private def columnIfRead(
+      batch: ColumnBatch,
+      mask: Int,
+      bit: Int,
+      ordinal: Int,
+  ): Int32Column =
+    if ((mask & bit) != 0) then int32At(batch, ordinal) else unusedInt32
+
+  /** One [[Validity.rangePresent]] per ordinal named by `mask`. Unset bits are not read. */
+  private def denseRange(batch: ColumnBatch, start: Int, length: Int, mask: Int): Boolean =
+    var pending = mask
+    var ordinal = 0
+    var dense = true
+    while (dense && pending != 0) {
+      if ((pending & 1) != 0) then
+        dense = Validity.rangePresent(int32At(batch, ordinal).validity, start, length)
+      pending >>>= 1
+      ordinal += 1
+    }
+    dense
+
+  private def tally(
+      start: Int,
+      length: Int,
+      stack: List[Step],
+      keyValues: Array[Int],
+      keyWords: Array[Long],
+      valueValues: Array[Int],
+      valueWords: Array[Long],
+      checkBits: Boolean,
+  ): Long =
+    stack match
+      case Step.Int32(left, leftKeep) :: Step.Int32(right, rightKeep) :: Nil =>
+        if (checkBits) then
+          countTwoInt32Checked(
+            start,
+            length,
+            left,
+            leftKeep,
+            right,
+            rightKeep,
+            keyValues,
+            keyWords,
+            valueValues,
+            valueWords,
+          )
+        else
+          countTwoInt32Dense(
+            start,
+            length,
+            left,
+            leftKeep,
+            right,
+            rightKeep,
+            keyValues,
+            valueValues,
+          )
+      case _ =>
+        if (checkBits) then
+          countEachChecked(start, length, stack, keyValues, keyWords, valueValues, valueWords)
+        else countEachDense(start, length, stack, keyValues, valueValues)
+
+  private def countTwoInt32Dense(
+      start: Int,
+      length: Int,
+      leftOrdinal: Int,
+      leftKeep: ColumnKernel.Int32Predicate,
+      rightOrdinal: Int,
+      rightKeep: ColumnKernel.Int32Predicate,
+      keyValues: Array[Int],
+      valueValues: Array[Int],
+  ): Long =
+    val leftValues = if (leftOrdinal == 0) keyValues else valueValues
+    val rightValues = if (rightOrdinal == 0) keyValues else valueValues
+    val end = start + length
+    var row = start
+    var total = 0L
+    while (row < end) {
+      if (leftKeep(leftValues(row)) && rightKeep(rightValues(row))) then total += 1L
+      row += 1
+    }
+    total
+
+  private def countTwoInt32Checked(
+      start: Int,
+      length: Int,
+      leftOrdinal: Int,
+      leftKeep: ColumnKernel.Int32Predicate,
+      rightOrdinal: Int,
+      rightKeep: ColumnKernel.Int32Predicate,
+      keyValues: Array[Int],
+      keyWords: Array[Long],
+      valueValues: Array[Int],
+      valueWords: Array[Long],
+  ): Long =
+    val leftValues = if (leftOrdinal == 0) keyValues else valueValues
+    val leftWords = if (leftOrdinal == 0) keyWords else valueWords
+    val rightValues = if (rightOrdinal == 0) keyValues else valueValues
+    val rightWords = if (rightOrdinal == 0) keyWords else valueWords
+    val end = start + length
+    var row = start
+    var total = 0L
+    while (row < end) {
+      if (
+          Validity.isSet(leftWords, row) && leftKeep(leftValues(row)) &&
+          Validity.isSet(rightWords, row) && rightKeep(rightValues(row))
+        )
+      then total += 1L
+      row += 1
+    }
+    total
+
+  private def countEachDense(
+      start: Int,
+      length: Int,
+      stack: List[Step],
+      keyValues: Array[Int],
+      valueValues: Array[Int],
+  ): Long =
+    val end = start + length
+    var row = start
+    var total = 0L
+    while (row < end) {
+      if (keepsAllDense(stack, row, keyValues, valueValues)) then total += 1L
+      row += 1
+    }
+    total
+
+  private def countEachChecked(
+      start: Int,
+      length: Int,
+      stack: List[Step],
+      keyValues: Array[Int],
+      keyWords: Array[Long],
+      valueValues: Array[Int],
+      valueWords: Array[Long],
+  ): Long =
+    val end = start + length
+    var row = start
+    var total = 0L
+    while (row < end) {
+      if (keepsAllChecked(stack, row, keyValues, keyWords, valueValues, valueWords)) then
+        total += 1L
+      row += 1
+    }
+    total
+
+  @tailrec
+  private def keepsAllDense(
+      stack: List[Step],
+      row: Int,
+      keyValues: Array[Int],
+      valueValues: Array[Int],
+  ): Boolean =
+    stack match
+      case Nil => true
+      case step :: rest =>
+        if (keepsDense(step, row, keyValues, valueValues)) then
+          keepsAllDense(rest, row, keyValues, valueValues)
+        else false
+
+  @tailrec
+  private def keepsAllChecked(
+      stack: List[Step],
+      row: Int,
+      keyValues: Array[Int],
+      keyWords: Array[Long],
+      valueValues: Array[Int],
+      valueWords: Array[Long],
+  ): Boolean =
+    stack match
+      case Nil => true
+      case step :: rest =>
+        if (keepsChecked(step, row, keyValues, keyWords, valueValues, valueWords)) then
+          keepsAllChecked(rest, row, keyValues, keyWords, valueValues, valueWords)
+        else false
+
+  private def keepsDense(
+      step: Step,
+      row: Int,
+      keyValues: Array[Int],
+      valueValues: Array[Int],
+  ): Boolean = step match
+    case Step.Int32(ordinal, predicate) =>
+      val values = if (ordinal == 0) keyValues else valueValues
+      predicate(values(row))
+    case Step.IntPair(predicate) =>
+      predicate(keyValues(row), valueValues(row))
+    case Step.Int64(_, _) | Step.Float64(_, _) | Step.Bool(_, _) | Step.Utf8(_, _) |
+        Step.IntTriple(_, _) =>
+      rejectedCountStep
+
+  private def keepsChecked(
+      step: Step,
+      row: Int,
+      keyValues: Array[Int],
+      keyWords: Array[Long],
+      valueValues: Array[Int],
+      valueWords: Array[Long],
+  ): Boolean = step match
+    case Step.Int32(ordinal, predicate) =>
+      val values = if (ordinal == 0) keyValues else valueValues
+      val words = if (ordinal == 0) keyWords else valueWords
+      Validity.isSet(words, row) && predicate(values(row))
+    case Step.IntPair(predicate) =>
+      Validity.isSet(keyWords, row) &&
+      Validity.isSet(valueWords, row) &&
+      predicate(keyValues(row), valueValues(row))
+    case Step.Int64(_, _) | Step.Float64(_, _) | Step.Bool(_, _) | Step.Utf8(_, _) |
+        Step.IntTriple(_, _) =>
+      rejectedCountStep
+
+  private def rejectedCountStep: Boolean =
+    require(false, "count steps are int slots or int pairs")
+    false
 
   private def seed(
       batch: ColumnBatch,

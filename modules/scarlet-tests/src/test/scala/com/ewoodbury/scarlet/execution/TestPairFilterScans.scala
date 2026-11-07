@@ -42,7 +42,8 @@ class TestPairFilterScans extends AnyFlatSpec with Matchers with BeforeAndAfterE
     counted.visits shouldBe collected.visits
     // Encode, one output per morsel, and one regroup. A copied slice adds one batch per cut.
     collected.batches shouldBe 1L + cuts.length.toLong + 1L
-    counted.batches shouldBe collected.batches
+    // Count reads the encoded source in place and does not publish a gathered batch per morsel.
+    counted.batches shouldBe 1L
   }
 
   it should "visit one zero-length morsel when the partition is empty" in {

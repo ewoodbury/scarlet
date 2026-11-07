@@ -138,6 +138,19 @@ private[execution] object PredicatePlan:
     else None
 
   /**
+   * A one-column encode stores the demanded side at index 0. [[compile]] records logical ordinal 1
+   * on [[Atom.PairValue]]. The root ordinal set decided the encode, and it is not on the atom. Any
+   * other set keeps the compiled ordinals.
+   */
+  def encoded(compiled: Compiled, ordinals: Set[Int]): Compiled =
+    if (ordinals.size == 1) then
+      Compiled(compiled.atoms.map {
+        case Atom.PairValue(_, keep) => Atom.PairValue(0, keep)
+        case atom => atom
+      })
+    else compiled
+
+  /**
    * Pair keep steps in source order. `None` unless every atom is a pair keep, so the vector is
    * only [[PairStep.KeepKey]], [[PairStep.KeepValue]], and [[PairStep.KeepRow]]. The predicate was
    * cast when the atom was built. This does not cast it again and does not run it. Interpreting
