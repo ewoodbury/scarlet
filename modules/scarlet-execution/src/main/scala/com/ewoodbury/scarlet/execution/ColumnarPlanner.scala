@@ -534,12 +534,47 @@ object ColumnarPlanner:
     case PhysicalOp.Kind.Longs => true
     case _ => false
 
-  /** Read one int column of a pair plan. Does not allocate a projection batch. */
+  /**
+   * Sum one int column of a pair plan. `ordinal` is 0 for keys and 1 for values. A filter stack
+   * over an int-pair scan adds in [[Selection.sumInt32]] and does not build a survivor index or a
+   * gathered batch. The stack is the one [[countsFilteredPairs]] admits, and only when the encoded
+   * columns include that ordinal. Any other shape still interprets and sums the projected column.
+   */
   private def sumPairColumn(source: Plan[_], child: PhysicalOp, ordinal: Int): Long =
-    foldSliced(ColumnarInterpreter.pairsOf(ColumnarInterpreter.interpret(source, child))) {
-      batch =>
-        ColumnReduce.sumInt32At(batch, ordinal)
+    if (sumsFilteredPairs(source, child, ordinal)) then sumFilteredPairs(source, child, ordinal)
+    else
+      foldSliced(ColumnarInterpreter.pairsOf(ColumnarInterpreter.interpret(source, child))) {
+        batch =>
+          ColumnReduce.sumInt32At(batch, ordinal)
+      }
+
+  /**
+   * True when [[countsFilteredPairs]] admits `plan` and `ordinal` is the projected pair column.
+   * Keys are ordinal 0 and values are ordinal 1.
+   */
+  private def sumsFilteredPairs(plan: Plan[_], op: PhysicalOp, ordinal: Int): Boolean =
+    (ordinal == 0 || ordinal == 1) &&
+      countsFilteredPairs(plan, op) &&
+      ColumnUse.ordinals(plan, op).contains(ordinal)
+
+  /**
+   * Sums the admitted stack in place. The source scan is encoded once, both columns, and not
+   * filtered. A null component stays absent, so a null measure adds nothing and a null filter slot
+   * still fails the row. Steps keep the logical ordinals of that two-column batch.
+   */
+  private def sumFilteredPairs(plan: Plan[_], op: PhysicalOp, ordinal: Int): Long =
+    val compiled = PredicatePlan.compile(plan, op).getOrElse(missingPairSum)
+    val steps = PredicatePlan.selectionSteps(compiled).getOrElse(missingPairSum).toList
+    val batches = PredicatePlan.childOf(plan, op) match
+      case (_, PhysicalOp.Scan(PhysicalOp.Kind.Pairs, partitions)) =>
+        SourceEncode.encodeGroupedPairs(partitions)
+      case _ => missingPairSum
+    foldMorsels(batches) { morsel =>
+      Selection.sumInt32(morsel.batch, morsel.start, morsel.length, steps, ordinal)
     }
+
+  private def missingPairSum: Nothing =
+    throw new IllegalStateException("pair filter sum lost its scan")
 
   /**
    * Fold `fn` over morsels of the batches `op` produces. Each batch is cut with [[Morsels.of]] and

@@ -312,6 +312,169 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     Selection.count(keys, 0, 0, steps.toList) shouldBe 0L
   }
 
+  "pair filter sum" should "sum keys and values for two filters, one filter, and a row filter" in {
+    val pairs = DistCollection(Seq(1 -> 10, 2 -> 20, 3 -> 5, 4 -> 1), 2)
+    val both = pairs.filterKeys[Int, Int](_ % 2 == 0).filterValues[Int, Int](_ > 5)
+    val keys = pairs.filterKeys[Int, Int](_ % 2 == 0)
+    val values = pairs.filterValues[Int, Int](_ > 5)
+    val rows = pairs.filter { case (key, value) => key > value }
+
+    both.values.sum shouldBe rowLong(both.values.sum)
+    both.keys.sum shouldBe rowLong(both.keys.sum)
+    keys.keys.sum shouldBe rowLong(keys.keys.sum)
+    keys.values.sum shouldBe rowLong(keys.values.sum)
+    values.values.sum shouldBe rowLong(values.values.sum)
+    values.keys.sum shouldBe rowLong(values.keys.sum)
+    rows.values.sum shouldBe rowLong(rows.values.sum)
+    rows.keys.sum shouldBe rowLong(rows.keys.sum)
+    ColumnarPlanner.trySumInt(both.values.plan) shouldBe Some(rowLong(both.values.sum))
+    ColumnarPlanner.trySumInt(both.keys.plan) shouldBe Some(rowLong(both.keys.sum))
+    ColumnarPlanner.lower(both.values.plan).map(_.shape) shouldBe Some(
+      "Value(FilterValue(FilterKey(Scan)))",
+    )
+    ColumnarPlanner.lower(keys.plan).map(_.shape) shouldBe Some("FilterKey(Scan)")
+  }
+
+  it should "sum an empty partition as zero and keep the other partition" in {
+    val source = Plan.Source(
+      Seq(
+        Partition(Seq.empty[(Int, Int)]),
+        Partition(Seq(2 -> 10, 1 -> 3)),
+        Partition(Seq.empty[(Int, Int)]),
+      ),
+    )
+    val filtered = Plan.FilterKeysOp(source, (key: Int) => key > 1)
+    val values = Plan.ValuesOp(filtered)
+    val keys = Plan.KeysOp(filtered)
+
+    DistCollection(values).sum shouldBe 10L
+    DistCollection(keys).sum shouldBe 2L
+    ColumnarPlanner.trySumInt(values) shouldBe Some(10L)
+    ColumnarPlanner.trySumInt(keys) shouldBe Some(2L)
+    ColumnarPlanner.trySumInt(values) shouldBe Some(rowLong(DistCollection(values).sum))
+    ColumnarPlanner.trySumInt(keys) shouldBe Some(rowLong(DistCollection(keys).sum))
+  }
+
+  it should "skip a null measure and still fail a null filter slot" in {
+    val nullKeys = BatchCodec.nullableIntPairs(
+      Seq((None, Some(1)), (Some(2), Some(3)), (Some(-1), Some(4)), (None, Some(5))),
+    )
+    val keySteps = Seq(Selection.Step.Int32(0, (key: Int) => key > 0))
+    val keyCalls = new AtomicInteger
+    val countedKeys = Seq(
+      Selection.Step.Int32(
+        0,
+        (key: Int) => {
+          keyCalls.incrementAndGet()
+          key > 0
+        },
+      ),
+    )
+    // The null keys fail the filter. The negative key fails the predicate. Only (2, 3) remains.
+    summed(nullKeys, keySteps, 1) shouldBe 3L
+    summed(nullKeys, keySteps, 0) shouldBe 2L
+    Selection.sumInt32(nullKeys, 0, nullKeys.length, countedKeys.toList, 1)
+    keyCalls.get() shouldBe 2
+
+    val nullValues = BatchCodec.nullableIntPairs(
+      Seq((Some(1), None), (Some(2), Some(0)), (Some(3), Some(4))),
+    )
+    val valueSteps = Seq(Selection.Step.Int32(1, (value: Int) => value >= 0))
+    val valueCalls = new AtomicInteger
+    val countedValues = Seq(
+      Selection.Step.Int32(
+        1,
+        (value: Int) => {
+          valueCalls.incrementAndGet()
+          value >= 0
+        },
+      ),
+    )
+    // The null value fails the value filter. The stored zero still passes `>= 0`.
+    summed(nullValues, valueSteps, 1) shouldBe 4L
+    summed(nullValues, valueSteps, 0) shouldBe 5L
+    Selection.sumInt32(nullValues, 0, nullValues.length, countedValues.toList, 1)
+    valueCalls.get() shouldBe 2
+
+    val keyOnNullValue = Seq(Selection.Step.Int32(0, (key: Int) => key > 0))
+    // Every key passes. The null value is not a filter slot, so the row survives and the sum skips it.
+    summed(nullValues, keyOnNullValue, 1) shouldBe 4L
+    summed(nullValues, keyOnNullValue, 0) shouldBe 6L
+
+    val valueOnNullKey = Seq(Selection.Step.Int32(1, (value: Int) => value > 0))
+    // Every value passes. Null keys survive the value filter and the key sum skips them.
+    summed(nullKeys, valueOnNullKey, 0) shouldBe 1L
+    summed(nullKeys, valueOnNullKey, 1) shouldBe 13L
+  }
+
+  it should "sum only a pair-row whose two ordinals are present" in {
+    val batch = BatchCodec.nullableIntPairs(
+      Seq((None, Some(1)), (Some(4), None), (Some(2), Some(3)), (Some(1), Some(8))),
+    )
+    val calls = new AtomicInteger
+    val steps = Seq(
+      Selection.Step.IntPair((key, value) => {
+        calls.incrementAndGet()
+        key < value
+      }),
+    )
+
+    summed(batch, Seq(Selection.Step.IntPair((key, value) => key < value)), 1) shouldBe 11L
+    summed(batch, Seq(Selection.Step.IntPair((key, value) => key < value)), 0) shouldBe 3L
+    Selection.sumInt32(batch, 0, batch.length, steps.toList, 1)
+    calls.get() shouldBe 2
+  }
+
+  it should "sum a dense window and a mixed range of the same batch" in {
+    val batch = BatchCodec.nullableIntPairs(
+      Seq(
+        (Some(2), Some(5)),
+        (Some(4), Some(1)),
+        (Some(6), Some(8)),
+        (None, Some(9)),
+        (Some(3), Some(7)),
+      ),
+    )
+    val steps = Seq(
+      Selection.Step.Int32(0, (key: Int) => key % 2 == 0),
+      Selection.Step.Int32(1, (value: Int) => value > 4),
+    )
+    val calls = new AtomicInteger
+    val countedSteps = Seq(
+      Selection.Step.Int32(0, (key: Int) => key % 2 == 0),
+      Selection.Step.Int32(
+        1,
+        (value: Int) => {
+          calls.incrementAndGet()
+          value > 4
+        },
+      ),
+    )
+
+    // Rows 1 and 2 are present, so the window is dense and starts mid-word.
+    summed(batch, 1, 2, steps, 1) shouldBe 8L
+    summed(batch, 1, 2, steps, 0) shouldBe 6L
+    summed(batch, steps, 1) shouldBe 13L
+    summed(batch, steps, 0) shouldBe 8L
+    Selection.sumInt32(batch, 0, batch.length, countedSteps.toList, 1)
+    // The null key fails the first step, so the value predicate sees three present keys.
+    calls.get() shouldBe 3
+  }
+
+  it should "sum a one-column batch from the only ordinal it reads" in {
+    val keys = BatchCodec.ints(Seq(1, 2, 3, 4))
+    val steps = Seq(Selection.Step.Int32(0, (key: Int) => key % 2 == 0))
+    Selection.sumInt32(keys, 0, keys.length, steps.toList, 0) shouldBe 6L
+    Selection.sumInt32(keys, 0, 0, steps.toList, 0) shouldBe 0L
+    summed(keys, steps, 0) shouldBe 6L
+  }
+
+  it should "widen each int before adding" in {
+    val batch = BatchCodec.intPairs(Seq(1 -> Int.MaxValue, 2 -> Int.MaxValue, 3 -> 1))
+    val steps = Seq(Selection.Step.Int32(0, (key: Int) => key < 3))
+    summed(batch, steps, 1) shouldBe Int.MaxValue.toLong * 2L
+  }
+
   "int join" should "match the pair multiset and the shuffle width" in {
     ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 2, threadPoolSize = 4))
     val build = DistCollection(Seq(1 -> 10, 1 -> 11, 2 -> 20, 4 -> 40), 2)
@@ -589,6 +752,20 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
   ): Long =
     val got = Selection.count(batch, start, length, steps.toList)
     got shouldBe Selection(batch, start, length, steps).length.toLong
+    got
+
+  private def summed(batch: ColumnBatch, steps: Seq[Selection.Step], measure: Int): Long =
+    summed(batch, 0, batch.length, steps, measure)
+
+  private def summed(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      steps: Seq[Selection.Step],
+      measure: Int,
+  ): Long =
+    val got = Selection.sumInt32(batch, start, length, steps.toList, measure)
+    got shouldBe ColumnReduce.sumInt32At(Selection(batch, start, length, steps), measure)
     got
 
   private def stepOrdinal(steps: Vector[Selection.Step]): Int = steps match

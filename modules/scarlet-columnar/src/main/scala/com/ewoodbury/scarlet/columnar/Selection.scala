@@ -30,9 +30,11 @@ import scala.annotation.tailrec
  * present prefix is what the gather writes when every survivor is present. The output arrays are
  * sized to the index capacity, which is the morsel width. The batch length is the survivor count.
  *
- * [[count]] walks the same int-slot and int-pair steps and returns the survivor total. It does not
- * allocate the index or gather a batch. When every ordinal those steps read is dense on the range,
- * the walk skips the per-row bit test. An ordinal no step reads is not tested.
+ * [[count]] walks the same int-slot and int-pair steps and returns the survivor total.
+ * [[sumInt32]] walks those steps and adds one ordinal. Neither allocates the index or gathers a
+ * batch. When every ordinal those steps read is dense on the range, the walk skips the per-row bit
+ * test. An ordinal no step reads is not tested. [[sumInt32]] still skips a null measure slot when
+ * that ordinal is not one of those steps, or when its own range has a hole.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[scarlet] object Selection:
@@ -93,6 +95,56 @@ private[scarlet] object Selection:
     if (denseRange(batch, start, length, mask)) then
       tally(start, length, steps, keyValues, keyWords, valueValues, valueWords, false)
     else tally(start, length, steps, keyValues, keyWords, valueValues, valueWords, true)
+
+  /**
+   * Sums `measureOrdinal` for rows in `[start, start + length)` that pass every step. Steps run in
+   * order and a failure adds nothing. A null int slot fails its step and does not call the
+   * predicate. An [[Step.IntPair]] row calls its predicate only when both ordinals are present. A
+   * null measure slot adds nothing and does not itself fail the row. A filter step on that same
+   * ordinal already rejected it. The total is a `Long` and each `Int` is widened before the add.
+   * An empty range sums zero and does not call a predicate. The walk does not allocate.
+   */
+  def sumInt32(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      steps: List[Step],
+      measureOrdinal: Int,
+  ): Long =
+    Ranges.check(start, length, batch.length)
+    require(steps.nonEmpty, "a filter stack needs a predicate")
+    require(
+      measureOrdinal == 0 || measureOrdinal == 1,
+      s"sum ordinal $measureOrdinal is not a pair column",
+    )
+    requireCountSteps(steps)
+    val mask = ordinalMask(steps)
+    val measureBit = 1 << measureOrdinal
+    val readMask = mask | measureBit
+    val key = columnIfRead(batch, readMask, bit = 1, ordinal = 0)
+    val value = columnIfRead(batch, readMask, bit = 2, ordinal = 1)
+    if ((readMask & 1) != 0) then Ranges.check(start, length, key.length)
+    if ((readMask & 2) != 0) then Ranges.check(start, length, value.length)
+    if ((readMask & 3) == 3) then
+      require(key.length == value.length, "key and value columns differ in length")
+    val stepsDense = denseRange(batch, start, length, mask)
+    val measure = if (measureOrdinal == 0) key else value
+    // A step on the measure ordinal already drops a null. Otherwise the measure bitmap decides.
+    val skipMeasureNull =
+      (mask & measureBit) != 0 || Validity.rangePresent(measure.validity, start, length)
+    addTally(
+      start,
+      length,
+      steps,
+      key.values,
+      key.validity.words,
+      value.values,
+      value.validity.words,
+      !stepsDense,
+      measure.values,
+      measure.validity.words,
+      skipMeasureNull,
+    )
 
   /** Gathers [[applySelected]]'s prefix. Output arrays stay the index capacity. */
   def materialize(selected: Selected): ColumnBatch =
@@ -268,6 +320,159 @@ private[scarlet] object Selection:
         total += 1L
       row += 1
     }
+    total
+
+  private def addTally(
+      start: Int,
+      length: Int,
+      stack: List[Step],
+      keyValues: Array[Int],
+      keyWords: Array[Long],
+      valueValues: Array[Int],
+      valueWords: Array[Long],
+      checkBits: Boolean,
+      measureValues: Array[Int],
+      measureWords: Array[Long],
+      skipMeasureNull: Boolean,
+  ): Long =
+    stack match
+      case Step.Int32(left, leftKeep) :: Step.Int32(right, rightKeep) :: Nil =>
+        sumTwo(
+          start,
+          length,
+          left,
+          leftKeep,
+          right,
+          rightKeep,
+          keyValues,
+          keyWords,
+          valueValues,
+          valueWords,
+          checkBits,
+          measureValues,
+          measureWords,
+          skipMeasureNull,
+        )
+      case _ =>
+        sumEach(
+          start,
+          length,
+          stack,
+          keyValues,
+          keyWords,
+          valueValues,
+          valueWords,
+          checkBits,
+          measureValues,
+          measureWords,
+          skipMeasureNull,
+        )
+
+  private def sumTwo(
+      start: Int,
+      length: Int,
+      leftOrdinal: Int,
+      leftKeep: ColumnKernel.Int32Predicate,
+      rightOrdinal: Int,
+      rightKeep: ColumnKernel.Int32Predicate,
+      keyValues: Array[Int],
+      keyWords: Array[Long],
+      valueValues: Array[Int],
+      valueWords: Array[Long],
+      checkBits: Boolean,
+      measureValues: Array[Int],
+      measureWords: Array[Long],
+      skipMeasureNull: Boolean,
+  ): Long =
+    val leftValues = if (leftOrdinal == 0) keyValues else valueValues
+    val rightValues = if (rightOrdinal == 0) keyValues else valueValues
+    val leftWords = if (leftOrdinal == 0) keyWords else valueWords
+    val rightWords = if (rightOrdinal == 0) keyWords else valueWords
+    val end = start + length
+    var row = start
+    var total = 0L
+    if (!checkBits && skipMeasureNull) then
+      while (row < end) {
+        if (leftKeep(leftValues(row)) && rightKeep(rightValues(row))) then
+          total += measureValues(row).toLong
+        row += 1
+      }
+    else if (!checkBits) then
+      while (row < end) {
+        if (
+            leftKeep(leftValues(row)) && rightKeep(rightValues(row)) &&
+            Validity.isSet(measureWords, row)
+          )
+        then total += measureValues(row).toLong
+        row += 1
+      }
+    else if (skipMeasureNull) then
+      while (row < end) {
+        if (
+            Validity.isSet(leftWords, row) && leftKeep(leftValues(row)) &&
+            Validity.isSet(rightWords, row) && rightKeep(rightValues(row))
+          )
+        then total += measureValues(row).toLong
+        row += 1
+      }
+    else
+      while (row < end) {
+        if (
+            Validity.isSet(leftWords, row) && leftKeep(leftValues(row)) &&
+            Validity.isSet(rightWords, row) && rightKeep(rightValues(row)) &&
+            Validity.isSet(measureWords, row)
+          )
+        then total += measureValues(row).toLong
+        row += 1
+      }
+    total
+
+  private def sumEach(
+      start: Int,
+      length: Int,
+      stack: List[Step],
+      keyValues: Array[Int],
+      keyWords: Array[Long],
+      valueValues: Array[Int],
+      valueWords: Array[Long],
+      checkBits: Boolean,
+      measureValues: Array[Int],
+      measureWords: Array[Long],
+      skipMeasureNull: Boolean,
+  ): Long =
+    val end = start + length
+    var row = start
+    var total = 0L
+    if (!checkBits && skipMeasureNull) then
+      while (row < end) {
+        if (keepsAllDense(stack, row, keyValues, valueValues)) then
+          total += measureValues(row).toLong
+        row += 1
+      }
+    else if (!checkBits) then
+      while (row < end) {
+        if (
+            keepsAllDense(stack, row, keyValues, valueValues) &&
+            Validity.isSet(measureWords, row)
+          )
+        then total += measureValues(row).toLong
+        row += 1
+      }
+    else if (skipMeasureNull) then
+      while (row < end) {
+        if (keepsAllChecked(stack, row, keyValues, keyWords, valueValues, valueWords)) then
+          total += measureValues(row).toLong
+        row += 1
+      }
+    else
+      while (row < end) {
+        if (
+            keepsAllChecked(stack, row, keyValues, keyWords, valueValues, valueWords) &&
+            Validity.isSet(measureWords, row)
+          )
+        then total += measureValues(row).toLong
+        row += 1
+      }
     total
 
   @tailrec
