@@ -16,6 +16,19 @@ test: ## Run tests
 test-one: ## Run a single suite: make test-one T=com.ewoodbury.scarlet.core.TestLocalActions
 	sbt "scarlet-tests/testOnly $(T)"
 
+# The spill suites run in a forked JVM with a small heap. A path that silently
+# re-materialises its input fails here instead of passing on a large default heap.
+SPILL_SUITES := com.ewoodbury.scarlet.columnar.Test*Spill \
+	com.ewoodbury.scarlet.columnar.TestSpillSum \
+	com.ewoodbury.scarlet.columnar.TestSortMergeRuns \
+	com.ewoodbury.scarlet.execution.TestRankSplitRuns \
+	com.ewoodbury.scarlet.execution.TestRankSplitLongRuns \
+	com.ewoodbury.scarlet.execution.TestSelectionSort
+
+.PHONY: test-spill
+test-spill: ## Run the spill suites in a forked JVM with a 384 MB heap
+	sbt -J-Xmx1g "set Test / fork := true" "set Test / javaOptions += \"-Xmx384m\"" "scarlet-tests/testOnly $(SPILL_SUITES)"
+
 .PHONY: help
 help: ## Display this help
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
