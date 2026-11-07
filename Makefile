@@ -44,7 +44,7 @@ test-spill: ## Run the spill suites and bench in a forked JVM with a 128 MB heap
 		echo "test-spill: the suite patterns matched no tests" >&2; exit 1; \
 	fi; \
 	suites=$$(sed -n 's/.*Suites: completed \([0-9][0-9]*\).*/\1/p' target/test-spill.log | tail -1); \
-	suites=$${suites:-0}; \
+	case "$$suites" in ''|*[!0-9]*) suites=0 ;; esac; \
 	if [ "$$suites" -lt $(SPILL_SUITE_FLOOR) ]; then \
 		echo "test-spill: $$suites suites ran, wanted at least $(SPILL_SUITE_FLOOR)" >&2; exit 1; \
 	fi

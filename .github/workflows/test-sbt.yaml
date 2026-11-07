@@ -33,3 +33,4 @@ jobs:
 
       - name: Bounded-heap spill check
         run: make test-spill
+        timeout-minutes: 20
