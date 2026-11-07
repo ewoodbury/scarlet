@@ -16,11 +16,11 @@ test: ## Run tests
 test-one: ## Run a single suite: make test-one T=com.ewoodbury.scarlet.core.TestLocalActions
 	sbt "scarlet-tests/testOnly $(T)"
 
-# The spill suites and the spill bench run in one forked JVM capped at 128 MB. The
-# suites force spill with byte budgets and the bench asserts the file and merge
-# counters, so a path that stops spilling fails on a counter. The heap cap bounds this
-# process (in-memory Off mode and the bench digest included) but is not itself the
-# spill oracle.
+# The spill suites and the spill bench each run in a forked JVM capped at 128 MB; the
+# launcher sbt process gets 1 GB so compilation does not compete. The suites force spill
+# with byte budgets and the bench asserts the file and merge counters, so a path that
+# stops spilling fails on a counter. The heap cap bounds each forked process (in-memory
+# Off mode and the bench digest included) but is not itself the spill oracle.
 SPILL_SUITES := com.ewoodbury.scarlet.columnar.Test*Spill \
 	com.ewoodbury.scarlet.columnar.TestSpillSum \
 	com.ewoodbury.scarlet.columnar.TestSpillStore \
