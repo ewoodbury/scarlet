@@ -541,12 +541,12 @@ object ColumnarPlanner:
    * columns include that ordinal. Any other shape still interprets and sums the projected column.
    */
   private def sumPairColumn(source: Plan[_], child: PhysicalOp, ordinal: Int): Long =
-    if (sumsFilteredPairs(source, child, ordinal)) then sumFilteredPairs(source, child, ordinal)
-    else
+    sumFilteredPairs(source, child, ordinal).getOrElse(
       foldSliced(ColumnarInterpreter.pairsOf(ColumnarInterpreter.interpret(source, child))) {
         batch =>
           ColumnReduce.sumInt32At(batch, ordinal)
-      }
+      },
+    )
 
   /**
    * True when [[countsFilteredPairs]] admits `plan` and `ordinal` is the projected pair column.
@@ -560,21 +560,23 @@ object ColumnarPlanner:
   /**
    * Sums the admitted stack in place. The source scan is encoded once, both columns, and not
    * filtered. A null component stays absent, so a null measure adds nothing and a null filter slot
-   * still fails the row. Steps keep the logical ordinals of that two-column batch.
+   * still fails the row. Steps keep the logical ordinals of that two-column batch. A shape that
+   * admission rejects returns `None`, so the caller falls back rather than throwing.
    */
-  private def sumFilteredPairs(plan: Plan[_], op: PhysicalOp, ordinal: Int): Long =
-    val compiled = PredicatePlan.compile(plan, op).getOrElse(missingPairSum)
-    val steps = PredicatePlan.selectionSteps(compiled).getOrElse(missingPairSum).toList
-    val batches = PredicatePlan.childOf(plan, op) match
-      case (_, PhysicalOp.Scan(PhysicalOp.Kind.Pairs, partitions)) =>
-        SourceEncode.encodeGroupedPairs(partitions)
-      case _ => missingPairSum
-    foldMorsels(batches) { morsel =>
-      Selection.sumInt32(morsel.batch, morsel.start, morsel.length, steps, ordinal)
-    }
-
-  private def missingPairSum: Nothing =
-    throw new IllegalStateException("pair filter sum lost its scan")
+  private def sumFilteredPairs(plan: Plan[_], op: PhysicalOp, ordinal: Int): Option[Long] =
+    if (!sumsFilteredPairs(plan, op, ordinal)) then None
+    else
+      for
+        compiled <- PredicatePlan.compile(plan, op)
+        steps <- PredicatePlan.selectionSteps(compiled).map(_.toList)
+        partitions <- PredicatePlan.childOf(plan, op) match
+          case (_, PhysicalOp.Scan(PhysicalOp.Kind.Pairs, scanned)) => Some(scanned)
+          case _ => None
+      yield
+        val batches = SourceEncode.encodeGroupedPairs(partitions)
+        foldMorsels(batches) { morsel =>
+          Selection.sumInt32(morsel.batch, morsel.start, morsel.length, steps, ordinal)
+        }
 
   /**
    * Fold `fn` over morsels of the batches `op` produces. Each batch is cut with [[Morsels.of]] and
