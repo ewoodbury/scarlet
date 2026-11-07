@@ -18,14 +18,14 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Var"))
 object CrossEngineBench:
 
-  private val rows = 1_000_000
+  private val rows = sys.env.get("CROSS_ROWS").map(_.toInt).getOrElse(1_000_000)
   private val groups = 1024
   private val seed = 0x12345678
   private val shuffleSeed = 58L
   private val threads = 4
   private val batchSize = 8192
-  private val warmup = 3
-  private val rounds = 10
+  private val warmup = sys.env.get("CROSS_WARMUP").map(_.toInt).getOrElse(3)
+  private val rounds = sys.env.get("CROSS_ROUNDS").map(_.toInt).getOrElse(10)
 
   def main(args: Array[String]): Unit =
     val savedConf = ScarletConf.get
@@ -60,6 +60,10 @@ object CrossEngineBench:
     val filtered = pairs
       .filterKeys((key: Int) => key % 3 != 0)
       .filterValues((value: Int) => value >= 0)
+    val longFiltered = DistCollection
+      .ofLongPairs(keys.map(_.toLong), values.map(_.toLong), 2)
+      .filterKeys((key: Long) => key % 3 != 0)
+      .filterValues((value: Long) => value >= 0)
     val unique = DistCollection.ofIntPairs(joinKeys, joinValues, 2)
     val sorted = DistCollection
       .ofIntPairs(sortKeys, values, 2)
@@ -77,8 +81,8 @@ object CrossEngineBench:
       measure(
         "filter-reducebykey",
         () =>
-          filtered
-            .reduceByKey[Int, Int](_ + _)
+          longFiltered
+            .reduceByKey[Long, Long](_ + _)
             .collect()
             .map { case (key, value) => key * 31L + value }
             .sum,
