@@ -6,6 +6,7 @@ package com.ewoodbury.scarlet.execution
  * Keys are `row % groups`. The filters drop a key divisible by 3 and a negative value. The hash
  * sums `(key * 31) xor the wrapped value sum` over kept keys. `reduceByKey` wraps at `Int`, so the
  * local sum uses `Int` addition. Key order does not matter.
+ * It also carries the two-filter count.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[execution] object FilterReduceChecksum:
@@ -23,6 +24,17 @@ private[execution] object FilterReduceChecksum:
       index += 1
     }
     fold(sums, seen)
+
+  def expectedCount(keys: Array[Int], values: Array[Int]): Long =
+    var index = 0
+    var total = 0L
+    while (index < keys.length) {
+      val key = keys(index)
+      val value = values(index)
+      if (kept(key, value)) then total += 1L
+      index += 1
+    }
+    total
 
   def collected(rows: Iterable[(Int, Int)], groups: Int): Long =
     val sums = new Array[Int](groups)
