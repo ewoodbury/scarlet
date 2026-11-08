@@ -414,6 +414,7 @@ in-memory columnar result, and the row path.
 
 The table does not measure whole-operator memory. A spilled sort-merge merges at most
 `spillFanIn` runs at a time, and the inputs and the joined result are still materialised.
-Shuffle-hash joins are absent from the table. They do not spill. The inner broadcast build does
+Shuffle-hash joins are absent from the table. The bench does not run them. Int and long build
+buckets do spill, and the string shuffle-hash join does not. The inner broadcast build does
 spill, and this bench does not run it. p95 is the largest of the five samples, so it is not a
 stable tail.
