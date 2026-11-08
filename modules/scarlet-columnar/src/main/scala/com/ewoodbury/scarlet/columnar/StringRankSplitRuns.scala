@@ -37,6 +37,14 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * partition longer than `columnarBatchSize` is stored as several batches in that one file. The
  * merge reads one batch at a time from each file.
  *
+ * [[sortAndSplitSelected]] is that split for a survivor index. The estimate charges `count` rows
+ * at the same per-row price as [[retainedStringBytes]], plus the dictionary bytes the in-memory
+ * selected sort keeps, and does not charge a dropped row. Spill off, or an estimate at or under
+ * the budget, sorts the live prefix in memory and writes nothing. Over the budget, with spill on,
+ * each selection is sorted by that prefix and written as one run. Dropped rows are not gathered
+ * and are not written. An empty selection is not a file. The hot loop stays in this file. It is
+ * not shared with the int path or the long path.
+ *
  * [[SpillStore.splitCount]] is not used. It is the hash fan-out for a grouped sum or a broadcast
  * build. A rank split already has one run per input partition. Hash-splitting a partition would
  * not let that partition be sorted without holding it, and the output boundaries have to stay the
@@ -127,7 +135,7 @@ private[scarlet] object StringRankSplitRuns:
   /**
    * Rank-splits `batches` into `partitions` outputs. Over the budget, spills and closes the store
    * before returning. Otherwise this is [[StringRankSplit.sortAndSplit]] and it writes nothing.
-   * This is the only place that chooses.
+   * Dense batches choose here. A survivor index chooses in [[sortAndSplitSelected]].
    *
    * @param parallelism
    *   matched to [[StringRankSplit.sortAndSplit]]. Unused on the spill path: that path sorts one
@@ -146,6 +154,42 @@ private[scarlet] object StringRankSplitRuns:
     if (rows == 0 || !exceeds(batches, conf)) then
       StringRankSplit.sortAndSplit(batches, partitions, parallelism)
     else spill(batches, partitions, rows, conf)
+
+  /**
+   * [[sortAndSplit]] for a survivor index. Spill off, or an estimate at or under the budget, calls
+   * [[StringRankSplit.sortAndSplitSelected]] and writes nothing. The estimate charges `count` rows
+   * per selection, the same per-row price as [[retainedStringBytes]], plus the source dictionary
+   * the selected sort keeps. A dropped row is not billed. An empty selection adds nothing,
+   * dictionary included. Over the budget, with spill on, each live prefix is sorted and written as
+   * one run. Dropped rows are not gathered and are not written. An empty selection is not a file.
+   */
+  private[scarlet] def sortAndSplitSelected(
+      selected: Vector[Selected],
+      partitions: Int,
+      parallelism: Int,
+      conf: ScarletConf,
+  ): Vector[ColumnBatch] =
+    require(partitions > 0, s"numPartitions must be positive, got $partitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(selected.nonEmpty, "sortAndSplitSelected needs at least one batch")
+    val rows = selectedRows(selected)
+    if (rows == 0 || !exceedsSelected(selected, conf)) then
+      StringRankSplit.sortAndSplitSelected(selected, partitions, parallelism)
+    else spillSelected(selected, partitions, rows, conf)
+
+  private def selectedRows(selected: Vector[Selected]): Int =
+    val total = selected.iterator.map(_.count.toLong).sum
+    require(total <= Int.MaxValue.toLong, s"sortAndSplitSelected input reached $total rows")
+    total.toInt
+
+  /**
+   * Live-prefix charge. Same per-row price as [[retainedStringBytes]]. The dictionary is the one
+   * the in-memory selected sort keeps, which is the source dictionary, including an entry no
+   * survivor uses. `count == 0` is zero, so a dropped row and an empty selection are not billed.
+   */
+  private def exceedsSelected(selected: Vector[Selected], conf: ScarletConf): Boolean =
+    conf.spillEnabled &&
+      selected.iterator.map(one => selectedPartitionBytes(one)).sum > conf.spillBudgetBytes
 
   /** Spill files published since the last [[resetForTest]], including intermediate runs. */
   private[scarlet] def filesWrittenForTest: Long = filesWritten.get
@@ -184,6 +228,30 @@ private[scarlet] object StringRankSplitRuns:
     failAtPass.set(0)
     lastDirectory.set("")
 
+  /**
+   * Spills the live prefix of each selection. One selection is one run. An empty prefix is checked
+   * and not written. The sorted copy holds `count` rows, not the dropped ones.
+   */
+  private def spillSelected(
+      selected: Vector[Selected],
+      partitions: Int,
+      rows: Int,
+      conf: ScarletConf,
+  ): Vector[ColumnBatch] =
+    // Cleared before open. A throw from the store constructor must not report a directory.
+    lastDirectory.set("")
+    val fanIn = conf.spillFanIn
+    require(fanIn >= 2, s"spillFanIn must be >= 2, got $fanIn")
+    val batchSize = conf.columnarBatchSize
+    require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    val directory = SpillStore.directory(conf)
+    SpillStore.withSpill(directory, conf.spillMaxFiles, conf.spillMaxBytes) { store =>
+      lastDirectory.set(store.directory.toString)
+      val runs = writeRunsSelected(store, selected, batchSize)
+      val merged = reduce(store, runs, fanIn, batchSize)
+      scatter(merged, rows, partitions)
+    }
+
   private def spill(
       batches: Vector[ColumnBatch],
       partitions: Int,
@@ -214,6 +282,15 @@ private[scarlet] object StringRankSplitRuns:
     if (rows <= 0) then 0L
     else rows.toLong * (8L + 4L + 4L + 1L) + dictionaryBytes(batch) + HeaderAllowance
 
+  /**
+   * [[partitionBytes]] for a live prefix. `count` rows, not the source length. The dictionary is
+   * the source dictionary [[StringRankSplit]] keeps on the sorted prefix. An empty prefix is zero.
+   */
+  private def selectedPartitionBytes(selected: Selected): Long =
+    val rows = selected.count
+    if (rows <= 0) then 0L
+    else rows.toLong * (8L + 4L + 4L + 1L) + dictionaryBytes(selected.batch) + HeaderAllowance
+
   /** UTF-8 payload of every dictionary entry. A missing key column is rejected. */
   private def dictionaryBytes(batch: ColumnBatch): Long =
     val keys = ColumnKernel.asUtf8(ColumnKernel.columnAt(batch, 0), 0)
@@ -242,6 +319,42 @@ private[scarlet] object StringRankSplitRuns:
         count += 1
     }
     Vector.tabulate(count)(slot => stored(slot))
+
+  /**
+   * Sorts one live prefix at a time and publishes it. An empty selection is not a file. Dropped
+   * rows stay in the source batch. The next selection is not sorted while this copy is live.
+   */
+  private def writeRunsSelected(
+      store: SpillStore,
+      selected: Vector[Selected],
+      batchSize: Int,
+  ): Vector[SpillFile] =
+    val stored = new Array[SpillFile](selected.length)
+    var count = 0
+    val pending = selected.iterator
+    while (pending.hasNext) {
+      val sorted = sortSelection(pending.next())
+      if (sorted.length > 0) then
+        stored(count) = publishRun(store, sorted, batchSize)
+        count += 1
+    }
+    Vector.tabulate(count)(slot => stored(slot))
+
+  /**
+   * Sorts the live prefix. The gathered batch has `count` rows, so a dropped row is not copied.
+   */
+  private def sortSelection(selected: Selected): ColumnBatch =
+    val sorted =
+      StringRankSplit.sortAndSplitSelected(Vector(selected), partitions = 1, parallelism = 1)
+    sorted match
+      case Vector(only) =>
+        require(
+          only.length == selected.count,
+          s"sorted partition has ${only.length} rows and the selection has ${selected.count}",
+        )
+        only
+      case other =>
+        throw new IllegalStateException(s"sorted partition produced ${other.length} batches")
 
   private def sortPartition(batch: ColumnBatch): ColumnBatch =
     val sorted = StringRankSplit.sortAndSplit(Vector(batch), partitions = 1, parallelism = 1)

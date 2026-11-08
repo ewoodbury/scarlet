@@ -698,8 +698,8 @@ private[execution] object ColumnarInterpreter:
       // preserveAbsence keeps a null key and a null value. A null key still orders as zero.
       // A slot-filter stack sorts survivor ids, including one filter, and does not gather first.
       // The `None` path is the only one that interprets that child. RankSplitRuns chooses the
-      // in-memory split or spilled runs. Over the budget it materialises the selection. Take
-      // decodes the prefix.
+      // in-memory split or a spill of the survivor index. Over the budget, with spill on, that
+      // index is written and dropped rows are not. Take decodes the prefix.
       val width = ColumnarPlanner.shuffleWidth
       val workers = ColumnarPlanner.parallelism
       val sorted = FilterChain.selected(
@@ -727,36 +727,64 @@ private[execution] object ColumnarInterpreter:
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
       // Long-pair encode always keeps a null key and a null value. preserveAbsence is passed for
-      // symmetry with the int sort. It does not change the long encode. decodeLongPairs keeps
-      // those nulls on the way out. The physical op stays SortByLongKey. Run and take both reach
-      // this arm. RankSplitLongRuns chooses the in-memory split or spilled runs. Take decodes
-      // only the prefix of the result.
-      val batches =
-        longPairsOf(
-          interpretAt(source, child, selectedPartition = None, preserveAbsence = true, ordinals),
-        )
-      val sorted = RankSplitLongRuns.sortAndSplit(
-        batches,
-        ColumnarPlanner.shuffleWidth,
-        ColumnarPlanner.parallelism,
-        ScarletConf.get,
-      )
+      // symmetry with the int sort. It does not change the long encode. A null key orders as zero
+      // and stays null. A key or value filter sorts survivor ids and does not gather first. A
+      // long-pair row filter has no index, so `None` interprets that child and the dense split
+      // runs. The physical op stays SortByLongKey. RankSplitLongRuns chooses the in-memory split
+      // or a spill of the survivor index. Take decodes the prefix.
+      val width = ColumnarPlanner.shuffleWidth
+      val workers = ColumnarPlanner.parallelism
+      val sorted = FilterChain.selected(
+        source,
+        child,
+        selectedPartition = None,
+        preserveAbsence = true,
+        ordinals,
+      ) match
+        case Some(parts) =>
+          RankSplitLongRuns.sortAndSplitSelected(parts, width, workers, ScarletConf.get)
+        case None =>
+          val batches = longPairsOf(
+            interpretAt(
+              source,
+              child,
+              selectedPartition = None,
+              preserveAbsence = true,
+              ordinals,
+            ),
+          )
+          RankSplitLongRuns.sortAndSplit(batches, width, workers, ScarletConf.get)
       Columns.LongPairs(sorted)
     case (Plan.SortByStringKeyOp(source), PhysicalOp.SortByStringKey(child)) =>
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
-      // String-pair encode keeps a null key. preserveAbsence matches the other sorts. A null
-      // key orders as "" and stays null. StringRankSplitRuns chooses the in-memory split or
-      // spilled runs. Take decodes the prefix of the result.
-      val batches = StringPairWalk.batches(
-        interpretAt(source, child, selectedPartition = None, preserveAbsence = true, ordinals),
-      )
-      val sorted = StringRankSplitRuns.sortAndSplit(
-        batches,
-        ColumnarPlanner.shuffleWidth,
-        ColumnarPlanner.parallelism,
-        ScarletConf.get,
-      )
+      // String-pair encode keeps a null key. preserveAbsence matches the other sorts. A null key
+      // orders as "" and stays null. A key or value filter sorts survivor ids and does not gather
+      // first. A whole-row string filter does not lower, so this arm does not see it. The `None`
+      // path is the scan. StringRankSplitRuns chooses the in-memory split or a spill of the
+      // survivor index. Take decodes the prefix.
+      val width = ColumnarPlanner.shuffleWidth
+      val workers = ColumnarPlanner.parallelism
+      val sorted = FilterChain.selected(
+        source,
+        child,
+        selectedPartition = None,
+        preserveAbsence = true,
+        ordinals,
+      ) match
+        case Some(parts) =>
+          StringRankSplitRuns.sortAndSplitSelected(parts, width, workers, ScarletConf.get)
+        case None =>
+          val batches = StringPairWalk.batches(
+            interpretAt(
+              source,
+              child,
+              selectedPartition = None,
+              preserveAbsence = true,
+              ordinals,
+            ),
+          )
+          StringRankSplitRuns.sortAndSplit(batches, width, workers, ScarletConf.get)
       Columns.StringPairs(sorted)
     case _ =>
       throw new IllegalStateException(

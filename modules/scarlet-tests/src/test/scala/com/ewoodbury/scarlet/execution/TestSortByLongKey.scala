@@ -164,7 +164,7 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     prefix.exists(pair => !present(pair, 1)) shouldBe true
   }
 
-  it should "leave a filter above the sort, and any non-scan child, on the row path" in {
+  it should "leave a filter above the sort, and a non-filter child, on the row path" in {
     val source = DistCollection.ofLongPairs(Array(3L, 1L, 2L, 2L), Array(30L, 10L, 20L, 21L), 2)
     val above = source.sortByLongKey.filter((pair: (Long, Long)) => pair._2 != 20L)
     val below = source.filter((pair: (Long, Long)) => pair._1 > 0L).sortByLongKey
@@ -174,7 +174,9 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.partitioning(above.plan) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.lower(above.plan) shouldBe Option.empty[PhysicalOp]
     collect(above) shouldBe rowCollect(above)
-    ColumnarPlanner.partitioning(below.plan) shouldBe Option.empty[PartitioningInfo]
+    // A long-pair row filter lowers, and it does not build a survivor index.
+    ColumnarPlanner.lower(below.plan).map(_.shape) shouldBe Some("SortByLongKey(FilterRow(Scan))")
+    collect(below) shouldBe rowCollect(below)
     ColumnarPlanner.partitioning(mapped.plan) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.partitioning(rewritten.plan) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.partitioning(source.sortByLongKey.keys.plan) shouldBe
@@ -186,6 +188,24 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.partitioning(source.sortByLongKey.join(source).plan) shouldBe
       Option.empty[PartitioningInfo]
+  }
+
+  it should "lower filterKeys then sortByLongKey and match the row path" in {
+    val source = DistCollection.ofLongPairs(Array(3L, 1L, 2L, 2L), Array(30L, 10L, 20L, 21L), 2)
+    val sorted = source.filterKeys[Long, Long]((key: Long) => key > 1L).sortByLongKey
+    val scan = source.sortByLongKey
+    val above = scan.filterKeys[Long, Long]((key: Long) => key > 1L)
+    val underMap = source
+      .mapValues((value: Long) => value + 1L)
+      .filterKeys[Long, Long]((key: Long) => key > 1L)
+
+    ColumnarPlanner.lower(scan.plan).map(_.shape) shouldBe Some("SortByLongKey(Scan)")
+    ColumnarPlanner.lower(sorted.plan).map(_.shape) shouldBe Some("SortByLongKey(FilterKey(Scan))")
+    collect(sorted) shouldBe rowCollect(sorted)
+    ColumnarPlanner.lower(above.plan) shouldBe Option.empty[PhysicalOp]
+    collect(above) shouldBe rowCollect(above)
+    ColumnarPlanner.lower(underMap.plan).map(_.shape) shouldBe Some("FilterKey(MapValue(Scan))")
+    ColumnarPlanner.lower(underMap.sortByLongKey.plan) shouldBe Option.empty[PhysicalOp]
   }
 
   it should "spill when the budget is exhausted, match the row path, and write nothing on the int path" in {

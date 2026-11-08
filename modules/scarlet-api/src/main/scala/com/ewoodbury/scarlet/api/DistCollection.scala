@@ -248,9 +248,9 @@ final case class DistCollection[A](plan: Plan[A]):
    * one, sorts the survivor index and does not gather first. A map or any other child stays on the
    * row path. A null `Int` key orders as zero and the row is retained. This matches `sortBy(_._1)`
    * and is not a null-safe ordering. A key or value filter drops a null in that column before the
-   * sort, while the row path unboxes the null to `0`. Over the budget, with spill on, a selection
-   * is materialised and spilled as dense runs. At or under the budget, and whenever spill is off,
-   * the in-memory split runs and writes nothing.
+   * sort, while the row path unboxes the null to `0`. Over the budget, with spill on, the survivor
+   * index is spilled and dropped rows are not written. At or under the budget, and whenever spill
+   * is off, the in-memory split runs and writes nothing.
    */
   def sortByIntKey(using ev: A =:= (Int, Int)): DistCollection[(Int, Int)] =
     DistCollection(Plan.SortByIntKeyOp(kvPlan))
@@ -258,12 +258,15 @@ final case class DistCollection[A](plan: Plan[A]):
   /**
    * Sorts `(Long, Long)` pairs ascending by column 0. Builds [[Plan.SortByLongKeyOp]] from the
    * key-value plan. Generic [[sortBy]] stays an opaque [[Plan.SortByOp]] and runs on the row path.
-   * A scan of long pairs lowers to a columnar rank split. Any other child stays on the row path. A
-   * null `Long` key orders as zero and the row is retained. This matches `sortBy(_._1)` and is not
-   * a null-safe ordering. When `spillEnabled` is on and the retained estimate exceeds
-   * `spillBudgetBytes`, each input partition is one sorted run and the runs are merged
-   * `spillFanIn` at a time. One input partition is still sorted in memory. At or under the budget,
-   * and whenever spill is off, the in-memory split runs and writes nothing.
+   * A scan of long pairs, or key and value filters over that scan, lowers to a columnar rank
+   * split. Those filters sort the survivor index. A long-pair row filter lowers and does not build
+   * an index, so that sort uses the dense path. A map, aggregate, or join under the sort stays on
+   * the row path, as does a filter, join, aggregate, or projection above it. A null `Long` key
+   * orders as zero and the row is retained. This matches `sortBy(_._1)` and is not a null-safe
+   * ordering. Over the budget, with spill on, a survivor index is spilled and dropped rows are not
+   * written. A dense input still writes one sorted run per partition and merges `spillFanIn` at a
+   * time. One input partition is still sorted in memory. At or under the budget, and whenever
+   * spill is off, the in-memory split runs and writes nothing.
    */
   def sortByLongKey(using ev: A =:= (Long, Long)): DistCollection[(Long, Long)] =
     DistCollection(Plan.SortByLongKeyOp(kvPlan))
@@ -271,13 +274,16 @@ final case class DistCollection[A](plan: Plan[A]):
   /**
    * Sorts `(String, Int)` pairs ascending by column 0. Builds [[Plan.SortByStringKeyOp]] from the
    * key-value plan. Generic [[sortBy]] stays an opaque [[Plan.SortByOp]] and runs on the row path.
-   * A scan of string pairs lowers to a columnar rank split. Any other child stays on the row path.
-   * A present key orders by `String.compareTo` (UTF-16 code units). A null key orders as `""` and
-   * stays null. Ties keep input order. This matches
-   * `sortBy(pair => if (pair._1 == null) "" else pair._1)`. When `spillEnabled` is on and the
-   * retained estimate exceeds `spillBudgetBytes`, each input partition is one sorted run and the
-   * runs are merged `spillFanIn` at a time. One input partition is still sorted in memory. At or
-   * under the budget, and whenever spill is off, the in-memory split runs and writes nothing.
+   * A scan of string pairs, or key and value filters over that scan, lowers to a columnar rank
+   * split. Those filters sort the survivor index. A whole-row string filter does not lower, so a
+   * sort of one stays on the row path. A map, aggregate, or join under the sort stays on the row
+   * path, as does a filter, join, aggregate, or projection above it. A present key orders by
+   * `String.compareTo` (UTF-16 code units). A null key orders as `""` and stays null. Ties keep
+   * input order. This matches `sortBy(pair => if (pair._1 == null) "" else pair._1)`. Over the
+   * budget, with spill on, a survivor index is spilled and dropped rows are not written. A dense
+   * input still writes one sorted run per partition and merges `spillFanIn` at a time. One input
+   * partition is still sorted in memory. At or under the budget, and whenever spill is off, the
+   * in-memory split runs and writes nothing.
    */
   def sortByStringKey(using ev: A =:= (String, Int)): DistCollection[(String, Int)] =
     DistCollection(Plan.SortByStringKeyOp(kvPlan))

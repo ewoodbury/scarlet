@@ -399,6 +399,104 @@ class TestStringSortSpill extends AnyFlatSpec with Matchers with BeforeAndAfterE
     }
   }
 
+  "sortAndSplitSelected spill" should "match the in-memory split and write the survivor index" in {
+    val batch = stringBatch(
+      Seq(Some("b") -> 1, None -> 2, Some("") -> 3, Some("a") -> 4),
+      valueAt = Set(0, 1, 3),
+    )
+    val dropped = stringBatch(Seq(Some("z") -> 9))
+    // Drop "b" and the second batch. A null key orders as "" and stays null. "" stays present.
+    // The empty-string survivor keeps a null value.
+    val selected = Vector(Selected(batch, Array(1, 2, 3), 3), Selected(dropped, Array(0), 0))
+    val memory = StringRankSplit.sortAndSplitSelected(selected, partitions = 2, parallelism = 1)
+
+    withConf(0L, batchSize = 2, fanIn = 2, shufflePartitions = 2) { dir =>
+      val spilled = StringRankSplitRuns.sortAndSplitSelected(
+        selected,
+        partitions = 2,
+        parallelism = 2,
+        ScarletConf.get,
+      )
+      val flat = spilled.flatMap(one => cells(one))
+
+      identical(spilled, memory)
+      flat.exists { case (None, Some(2)) => true; case _ => false } shouldBe true
+      flat.exists { case (Some(""), None) => true; case _ => false } shouldBe true
+      flat.exists { case (Some("b"), Some(1)) => true; case _ => false } shouldBe false
+      flat.exists { case (Some("z"), Some(9)) => true; case _ => false } shouldBe false
+      StringRankSplitRuns.filesWrittenForTest shouldBe 1L
+      StringRankSplitRuns.mergePassesForTest shouldBe 0L
+      RankSplitRuns.filesWrittenForTest shouldBe 0L
+      RankSplitLongRuns.filesWrittenForTest shouldBe 0L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+
+    withConf(0L, enabled = false, shufflePartitions = 2) { dir =>
+      val stayed = StringRankSplitRuns.sortAndSplitSelected(
+        selected,
+        partitions = 2,
+        parallelism = 1,
+        ScarletConf.get,
+      )
+
+      identical(stayed, memory)
+      StringRankSplitRuns.filesWrittenForTest shouldBe 0L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+  }
+
+  "a selected charge" should "bill survivor rows and the dictionary the sort keeps" in {
+    val batch = BatchCodec.stringIntPairs(Seq("aaaa" -> 1, "b" -> 2))
+    val selected = Vector(Selected(batch, Array(1), 1))
+    val dictionary = utf8(batch).dictionary
+    val full = dictionary.iterator.map(utf8Bytes).sum
+    val live = dictionary.iterator.filter(_ != "aaaa").map(utf8Bytes).sum
+    val perRow = 8L + 4L + 4L + 1L
+    val kept = perRow + full + StringRankSplitRuns.HeaderAllowance
+    val survivorDict = perRow + live + StringRankSplitRuns.HeaderAllowance
+    val memory = StringRankSplit.sortAndSplitSelected(selected, partitions = 1, parallelism = 1)
+
+    dictionary.toSeq should contain("aaaa")
+    full should be > live
+    StringRankSplitRuns.retainedStringBytes(Vector(batch)) should be > kept
+
+    withConf(survivorDict, batchSize = 8, fanIn = 2) { _ =>
+      val spilled = StringRankSplitRuns.sortAndSplitSelected(
+        selected,
+        partitions = 1,
+        parallelism = 1,
+        ScarletConf.get,
+      )
+
+      identical(spilled, memory)
+      StringRankSplitRuns.filesWrittenForTest should be > 0L
+    }
+    withConf(kept, batchSize = 8, fanIn = 2) { dir =>
+      val stayed = StringRankSplitRuns.sortAndSplitSelected(
+        selected,
+        partitions = 1,
+        parallelism = 1,
+        ScarletConf.get,
+      )
+
+      identical(stayed, memory)
+      StringRankSplitRuns.filesWrittenForTest shouldBe 0L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+    withConf(0L, enabled = false) { dir =>
+      val off = StringRankSplitRuns.sortAndSplitSelected(
+        selected,
+        partitions = 1,
+        parallelism = 1,
+        ScarletConf.get,
+      )
+
+      identical(off, memory)
+      StringRankSplitRuns.filesWrittenForTest shouldBe 0L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+  }
+
   private def identical(actual: Vector[ColumnBatch], expected: Vector[ColumnBatch]): Unit =
     actual.length shouldBe expected.length
     actual.zip(expected).foreach { (left, right) =>
