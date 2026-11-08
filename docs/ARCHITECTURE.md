@@ -474,6 +474,48 @@ the parent width. Each non-empty build piece is one spill file. One piece is joi
 A piece still over the budget throws. At or under the budget, and whenever spill is off, that
 bucket stays in memory and writes nothing.
 
+## Closed kernel
+
+The closed kernel is the set of plans that must lower and run columnar on present values. Finishing
+it means those plans stay columnar through null values and inputs that do not fit the in-memory
+budget, and a decline of one of them is a failure. A plan outside the set is not that promise.
+Some of those plans already run columnar. The rest run on the row executor.
+
+In the set today, on present values:
+
+- Int, long, double, and string scans, filters, same-type maps, count, and take.
+- Boolean scans, filters, count, and take. A Boolean map is outside the set.
+- Sum of int, long, and double.
+- Int and long pair row filters, plus key and value filters and same-type mapValues for int, long,
+  and string pairs. A whole-row filter on a string pair stays on the row path.
+- `reduceByKey` for int, long, and string keys.
+- `countByKey` for int keys.
+- Inner shuffle-hash join for int, long, and string keys.
+- `sortByIntKey`, `sortByLongKey`, and `sortByStringKey`.
+- Int outer, broadcast, and sort-merge joins.
+
+Still open inside the set, and therefore not a promise of this commit:
+
+- A stack of one slot filter still builds dense columns. A stack of two or more already keeps a
+  survivor index. Single-column filters stay chained column kernels, because an int survivor index
+  is the wrong selection for one column.
+- `countByKey` over `spillBudgetBytes` throws `ColumnarFallback` and the action reruns on rows. It
+  does not spill. Long and string `countByKey` are not columnar.
+- Long and string inner hash joins do not spill.
+- A null value on an outer join, and on a long inner join, is a `ColumnarFallback`. A null on a
+  selected row of an int hash join is the same decline. A null on a dropped row stays columnar. A
+  string join with a null value does not lower. An inner sort-merge keeps a null value. A clear
+  validity bit on an outer join means the partner is absent, so a null value cannot use that bit.
+- An int sort of two or more slot filters gathers that index before the dense spill writer. A
+  single int filter is already dense. A filtered long or string sort does not lower.
+- `groupByKey`, `distinct`, and `union` already have a columnar path and are not part of the closed
+  kernel. `flatMap`, `mapPartitions`, cogroup, untyped `sortBy`, single-precision `Float`,
+  double-key wide operators, and type-changing maps stay on the row executor.
+
+`TestClosedKernel` pins the present-value happy path that already lowers and runs: element filters
+with count or sum, an int-pair key and value filter, `reduceByKey`, int `countByKey`, inner
+shuffle-hash joins, and the typed key sorts. It does not cover the open items.
+
 ## Known limitations (deferred work)
 
 Roadmap and sequencing are tracked externally; the headline items:
