@@ -19,14 +19,16 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * before the next bucket. Under-budget buckets open no store. The file count of a store is that
  * bucket's split, so `spillMaxFiles` is not summed across buckets.
  *
- * The split is [[HashExchange.partitionAllUtf8]], the exchange [[StringHashJoin]] already uses.
- * The piece is `floorMod(StringHash.hash(text), parts)`. The int quotient helpers do not apply: a
- * string bucket has a dictionary, not an `Int32` key. Null keys are dropped. `""` is a present
- * key. Each non-empty build piece is one spill file. Morsels of a large piece share that file. The
- * probe is sub-partitioned in memory and is not spilled. Each build piece is read back, refused
- * when its estimate is still over the budget, and probed with [[StringHashJoin.joinBucket]]. One
- * build table is open at a time. The piece outputs are concatenated into that bucket's batch. The
- * result is one batch per shuffle bucket, in bucket order.
+ * The split is [[HashExchange.partitionAllUtf8Within]]. The parent exchange already assigned
+ * `floorMod(StringHash.hash(text), parentWidth)`. The piece is
+ * `floorMod(floorDiv(StringHash.hash(text), parentWidth), parts)`, so keys that share a bucket
+ * still separate when their hash quotients differ. A second `floorMod(hash, parts)` does not, when
+ * `parts` divides `parentWidth`. Null keys are dropped. `""` is a present key. Each non-empty
+ * build piece is one spill file. Morsels of a large piece share that file. The probe is
+ * sub-partitioned in memory and is not spilled. Each build piece is read back, refused when its
+ * estimate is still over the budget, and probed with [[StringHashJoin.joinBucket]]. One build
+ * table is open at a time. The piece outputs are concatenated into that bucket's batch. The result
+ * is one batch per shuffle bucket, in bucket order.
  *
  * The two sides keep independent dictionaries. Matching is string equality, which is what the
  * in-memory join already does. The store writes each build piece with the string-pair codec:
@@ -123,7 +125,7 @@ private[scarlet] object StringHashJoinSpill:
       val probeBucket = at(probeBuckets, index)
       if (probeBucket.length == 0) then ColumnBatches.emptyStringJoin
       else if (exceeds(buildBucket, conf)) then
-        spillBucket(buildBucket, probeBucket, parallelism, conf)
+        spillBucket(buildBucket, probeBucket, buildBuckets.length, parallelism, conf)
       else joinOne(buildBucket, probeBucket)
     }
 
@@ -155,6 +157,7 @@ private[scarlet] object StringHashJoinSpill:
   private def spillBucket(
       buildBucket: ColumnBatch,
       probeBucket: ColumnBatch,
+      parentWidth: Int,
       parallelism: Int,
       conf: ScarletConf,
   ): ColumnBatch =
@@ -167,8 +170,8 @@ private[scarlet] object StringHashJoinSpill:
     val directory = SpillStore.directory(conf)
     lastDirectory.set(directory.toString)
     SpillStore.withSpill(directory, conf.spillMaxFiles, conf.spillMaxBytes) { store =>
-      val buildPieces = subPartition(buildBucket, parts, parallelism)
-      val probePieces = subPartition(probeBucket, parts, parallelism)
+      val buildPieces = subPartition(buildBucket, parentWidth, parts, parallelism)
+      val probePieces = subPartition(probeBucket, parentWidth, parts, parallelism)
       require(
         buildPieces.length == parts && probePieces.length == parts,
         s"join spill produced ${buildPieces.length} build pieces and ${probePieces.length} probe pieces",
@@ -186,13 +189,15 @@ private[scarlet] object StringHashJoinSpill:
 
   private def subPartition(
       bucket: ColumnBatch,
+      parentWidth: Int,
       parts: Int,
       parallelism: Int,
   ): Vector[ColumnBatch] =
-    HashExchange.partitionAllUtf8(
+    HashExchange.partitionAllUtf8Within(
       Vector(bucket),
       keyOrdinal = 0,
-      numPartitions = parts,
+      parentWidth = parentWidth,
+      parts = parts,
       parallelism = parallelism,
     )
 

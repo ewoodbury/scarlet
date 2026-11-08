@@ -110,6 +110,46 @@ class TestStringHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAf
     }
   }
 
+  "a default-width bucket" should "split on the hash quotient instead of the parent residue" in {
+    val leftKey = "k3"
+    val rightKey = "k7"
+    val parent = 4
+    val parts = 2
+    Math.floorMod(leftKey.hashCode, parent) shouldBe Math.floorMod(rightKey.hashCode, parent)
+    val leftPiece = Math.floorMod(Math.floorDiv(leftKey.hashCode, parent), parts)
+    val rightPiece = Math.floorMod(Math.floorDiv(rightKey.hashCode, parent), parts)
+    leftPiece should not be rightPiece
+    // The parent residue is the same, so a second floorMod(hash, parts) would keep both keys.
+    Math.floorMod(leftKey.hashCode, parts) shouldBe Math.floorMod(rightKey.hashCode, parts)
+
+    val build = pairs(rowsOf(leftKey, half, identity) ++ rowsOf(rightKey, half, row => 1000 + row))
+    val probe = pairs(Seq(leftKey -> 1, rightKey -> 2))
+    val memory = join(build, probe, parent)
+    val buckets = HashExchange.partitionAllUtf8(build, keyOrdinal = 0, parent, parallelism = 1)
+    val hot = buckets.maxBy(_.length)
+    hot.length shouldBe half * 2
+    val budget = StringHashJoinSpill.retainedBytes(
+      half,
+      StringHashJoinSpill.dictionaryEntries(hot),
+      StringHashJoinSpill.dictionaryBytes(hot),
+    )
+    estimate(hot) should be > budget
+
+    withConf(budget) { dir =>
+      SpillStore.splitCount(hot.length, estimate(hot), ScarletConf.get) shouldBe parts
+      val spilled = join(build, probe, parent)
+      val matches = ordered(pairsOf(spilled))
+
+      spilled.length shouldBe parent
+      matches shouldBe ordered(pairsOf(memory))
+      matches.count(_._1 == leftKey) shouldBe half
+      matches.count(_._1 == rightKey) shouldBe half
+      StringHashJoinSpill.filesWrittenForTest shouldBe 2L
+      StringHashJoinSpill.openTablesForTest shouldBe 1
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+  }
+
   "spill disabled" should "ignore a budget the build exceeds and write no files" in {
     val build = pairs(rowsOf("", half, identity) ++ rowsOf(accent, half, row => 1000 + row))
     val probe = pairs(Seq("" -> 10, accent -> 20))

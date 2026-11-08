@@ -488,8 +488,9 @@ One piece is joined at a time. A piece still over the budget throws. At or under
 whenever spill is off, that bucket stays in memory and writes nothing. The probe is not spilled.
 Broadcast, sort-merge, and outer long joins do not spill.
 
-A string shuffle-hash build bucket over `spillBudgetBytes` is sub-partitioned by
-`floorMod(String.hashCode, parts)`, the same exchange the in-memory join uses. The retained-byte
+A string shuffle-hash build bucket over `spillBudgetBytes` is sub-partitioned by the quotient of
+`String.hashCode` and the parent width, the same second split an int bucket uses. A second
+residue of that hash does not separate keys once `parts` divides the parent width. The retained-byte
 estimate includes the dictionary, not only the code arrays. Each non-empty build piece is one
 spill file. One piece is joined at a time, and the probe is not spilled. A piece still over the
 budget throws. The two sides keep independent dictionaries and match by string equality. At or
