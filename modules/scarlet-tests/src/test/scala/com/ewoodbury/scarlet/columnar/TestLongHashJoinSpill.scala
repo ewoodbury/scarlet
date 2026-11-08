@@ -245,7 +245,8 @@ class TestLongHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAfte
       val collected = joined.collect().toList
       collected should contain theSameElementsAs rowOf(joined)
       collected should contain ((0L, pair(absent, longRef(7L))))
-      LongHashJoinSpill.filesWrittenForTest shouldBe 2L
+      // tryRun and collect each spill that parent into two pieces.
+      LongHashJoinSpill.filesWrittenForTest shouldBe 4L
       LongHashJoinSpill.openTablesForTest shouldBe 1
       Path.of(LongHashJoinSpill.lastDirectoryForTest) shouldBe dir
       SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
