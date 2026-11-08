@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.HashCount
+import com.ewoodbury.scarlet.columnar.{ColumnarFallback, HashCount}
 import com.ewoodbury.scarlet.core.Plan
 
 import ColumnarInterpreter.{Columns, interpretAt, pairsOf}
@@ -37,12 +37,15 @@ private[execution] object CountByKeyArms:
         ) match
           case Some(parts) => HashCount.byKeySelected(parts, width, workers, batchSize)
           case None =>
-            HashCount.byKey(
-              pairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)),
-              width,
-              workers,
-              batchSize,
-            )
+            // A boxed pair source whose first row witnesses `Kind.Pairs` can still hold a null
+            // component later. The pair encode unboxes it and throws before the kernel runs, so
+            // turn that into the documented fallback rather than a failed action.
+            val batches =
+              try pairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals))
+              catch
+                case _: NullPointerException =>
+                  throw new ColumnarFallback("countByKey source has a null pair component")
+            HashCount.byKey(batches, width, workers, batchSize)
         Columns.Pairs(counted)
       case other =>
         throw new IllegalStateException(s"countByKey column is $other, expected int pairs")

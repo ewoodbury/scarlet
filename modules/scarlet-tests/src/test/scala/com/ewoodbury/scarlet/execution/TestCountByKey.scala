@@ -93,6 +93,11 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     countsOf(row(counted.collect())) shouldBe Map(1 -> 2, 2 -> 1)
   }
 
+  it should "fall back when a boxed pair source holds a null value after the first row" in {
+    lateNullCounts() shouldBe Map(1 -> 2, 2 -> 1)
+    lateNullRowCounts() shouldBe Map(1 -> 2, 2 -> 1)
+  }
+
   it should "lower two filters and match the row path" in {
     val source = DistCollection.ofIntPairs(Array(1, 2, 3, 1, 3), Array(1, -1, 4, 5, 0), 4)
     val counted = source
@@ -238,7 +243,24 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       rows,
     )
 
-  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
+  private def lateNullSource(): DistCollection[(Any, Any)] =
+    DistCollection(
+      Plan.Source(Seq(Partition(Seq[(Any, Any)]((1, 2), (1, null), (2, 3))))),
+    )
+
+  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.AsInstanceOf"))
+  private def lateNullCounts(): Map[Int, Int] =
+    val counted = lateNullSource().countByKey
+    require(ColumnarPlanner.lower(counted.plan).nonEmpty, "late-null source did not lower")
+    counted.collect().map { case (key, value) => (key.asInstanceOf[Int], value) }.toMap
+
+  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.AsInstanceOf"))
+  private def lateNullRowCounts(): Map[Int, Int] =
+    lateNullSource().countByKey.collect().map { case (key, value) =>
+      (key.asInstanceOf[Int], value)
+    }.toMap
+
   private def nullKey(value: Int): (String, Int) = (null: String) -> value
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
