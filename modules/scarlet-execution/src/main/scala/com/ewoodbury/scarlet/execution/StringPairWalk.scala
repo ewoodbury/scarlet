@@ -1,15 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{
-  BatchCodec,
-  ColumnBatch,
-  ColumnKernel,
-  ColumnPipeline,
-  ColumnarFallback,
-  Int32Column,
-  Selected,
-  Selection,
-}
+import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan}
 
 import ColumnarInterpreter.Columns
