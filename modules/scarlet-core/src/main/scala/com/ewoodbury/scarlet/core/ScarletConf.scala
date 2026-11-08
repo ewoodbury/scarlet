@@ -50,10 +50,10 @@ final case class ScarletConf(
      * bucket, a sort-merge partition, an int-pair sort, a long-pair sort, or a string-pair sort
      * whose estimate exceeds `spillBudgetBytes` is spilled. Off by default, so each stays in
      * memory. Outer hash and broadcast joins do not read this flag; an outer sort-merge does. A
-     * spilled int, long, or string `reduceByKey` bucket may change first-seen output order; compare
-     * it as a map. An int `countByKey` with this flag off still throws `ClosedKernelRefusal` before
-     * a table. With the flag on, an over-budget post-exchange bucket spills. A count table that
-     * still does not fit throws `ClosedKernelRefusal`.
+     * spilled int, long, or string `reduceByKey` bucket may change first-seen output order;
+     * compare it as a map. An int `countByKey` with this flag off still throws
+     * `ClosedKernelRefusal` before a table. With the flag on, an over-budget post-exchange bucket
+     * spills. A count table that still does not fit throws `ClosedKernelRefusal`.
      */
     spillEnabled: Boolean = false,
     /**
@@ -74,8 +74,8 @@ final case class ScarletConf(
      * and folded one morsel at a time. A long `reduceByKey` bucket and a string `reduceByKey`
      * bucket over it are sub-partitioned and folded the same way. A spilled string bucket may
      * change first-seen output order. An int `countByKey` bucket over it spills when spill is on:
-     * the post-exchange bucket is sub-partitioned and folded one morsel at a time. Spill off throws
-     * `ClosedKernelRefusal` before a table. A count table that still does not fit throws
+     * the post-exchange bucket is sub-partitioned and folded one morsel at a time. Spill off
+     * throws `ClosedKernelRefusal` before a table. A count table that still does not fit throws
      * `ClosedKernelRefusal`.
      */
     spillBudgetBytes: Long = 64L * 1024L * 1024L,
