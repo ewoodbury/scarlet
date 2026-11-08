@@ -8,10 +8,11 @@ import ColumnarInterpreter.Columns
 /**
  * Int, long, and string `groupByKey`.
  *
- * A key, value, or int-pair row filter scatters survivor ids, including a stack of one. A
- * whole-row string stack is not lowered. Long pairs have no selection variant, so a whole-row
- * filter and a key or value filter both reach the dense exchange. The `None` path is the only one
- * that interprets a child that did not publish a [[com.ewoodbury.scarlet.columnar.Selected]].
+ * A key, value, or row filter on an int pair or a string pair scatters survivor ids, including a
+ * stack of one. A whole-row string filter does the same. Long pairs have no selection variant, so
+ * a whole-row filter and a key or value filter both reach the dense exchange. The `None` path is
+ * the only one that interprets a child that did not publish a
+ * [[com.ewoodbury.scarlet.columnar.Selected]].
  */
 private[execution] object GroupByArms:
 

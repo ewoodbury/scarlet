@@ -87,7 +87,7 @@ object ColumnarPlanner:
    * element pipeline, propagates.
    *
    * A pair, long-pair, triple, or string-pair stack whose selection steps are defined decodes
-   * [[FilterChain.selected]], including a stack of one slot filter, and does not gather. That call
+   * [[FilterChain.selected]], including a stack of one, and does not gather. That call
    * interprets the source under the stack, so this does not interpret the source again. Every
    * other plan decodes [[ColumnarInterpreter.interpret]]. The result cast is the same erasure
    * boundary as [[tryRun]]: the decoded partitions have the plan's element type.
@@ -144,8 +144,8 @@ object ColumnarPlanner:
    * batch of a partition contributes before the next partition is read. Each returned chunk is
    * appended once, in order.
    *
-   * A partition-preserving pair, long-pair, triple, or string-pair filter stack, including one
-   * slot filter, decodes a prefix of [[FilterChain.selected]]. The decoder sees
+   * A partition-preserving pair, long-pair, triple, or string-pair filter stack, including a stack
+   * of one, decodes a prefix of [[FilterChain.selected]]. The decoder sees
    * `min(remaining, count)` rows, so the rest of the index is not read and the stack is not
    * gathered. Any other plan uses [[ColumnarInterpreter.decodePrefixFor]].
    */
@@ -249,7 +249,8 @@ object ColumnarPlanner:
   private def pairCountStep(step: Selection.Step): Boolean = step match
     case Selection.Step.Int32(_, _) | Selection.Step.IntPair(_) => true
     case Selection.Step.Int64(_, _) | Selection.Step.Float64(_, _) | Selection.Step.Bool(_, _) |
-        Selection.Step.Utf8(_, _) | Selection.Step.IntTriple(_, _) =>
+        Selection.Step.Utf8(_, _) | Selection.Step.IntTriple(_, _) |
+        Selection.Step.LongPair(_) | Selection.Step.StringPair(_) =>
       false
 
   /** Counts the admitted stack in place. The source scan is encoded once and not filtered. */
@@ -741,10 +742,20 @@ object ColumnarPlanner:
       steps.foldLeft(Option(child)) { (current, step) =>
         current.flatMap(op => lowerElementStep(op, step))
       }
-    case PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.LongTriples |
-        PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
-        PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
+    case PhysicalOp.Kind.StringPairs =>
+      steps.foldLeft(Option(child)) { (current, step) =>
+        current.flatMap(op => lowerStringRow(op, step))
+      }
+    case PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
+        PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
+        PhysicalOp.Kind.GroupedLongs =>
       None
+
+  /** A whole-row string filter. A project still refuses the chain. */
+  private def lowerStringRow(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
+    step match
+      case ElementStep.Filter(_) => Some(PhysicalOp.Filter(child, PhysicalOp.Slot.Row))
+      case ElementStep.Project(_) => None
 
   private def lowerElementStep(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
     step match

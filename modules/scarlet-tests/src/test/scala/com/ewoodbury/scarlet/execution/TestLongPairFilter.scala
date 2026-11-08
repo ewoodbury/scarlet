@@ -146,20 +146,84 @@ class TestLongPairFilter extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     longComponent(pairAt(onceRows, 1), 0) shouldBe 2L
     absentRef(component(pairAt(onceRows, 1), 1)) shouldBe true
 
+    val calls = new AtomicInteger
     val rows = nullable
-      .filter((_: (Long, Long)) => true)
-      .filter((_: (Long, Long)) => true)
+      .filter { (_: (Long, Long)) =>
+        calls.incrementAndGet()
+        true
+      }
+      .filter { (_: (Long, Long)) =>
+        calls.incrementAndGet()
+        true
+      }
     val rowOp = ColumnarPlanner.lower(rows.plan).getOrElse(fail("row filters did not lower"))
-    PredicatePlan.compile(rows.plan, rowOp).flatMap(PredicatePlan.selectionSteps) shouldBe None
-    FilterChain.selected(rows.plan, rowOp, None, false, Set(0, 1)) shouldBe None
+    val rowSteps = PredicatePlan
+      .selectionSteps(
+        PredicatePlan.compile(rows.plan, rowOp).getOrElse(fail("row filters did not compile")),
+      )
+      .getOrElse(fail("row filters have no steps"))
+
+    rowSteps match
+      case Vector(Selection.Step.LongPair(_), Selection.Step.LongPair(_)) => ()
+      case other => fail(s"expected two long-pair row steps, got $other")
+    FilterChain.selected(rows.plan, rowOp, None, false, Set(0, 1)) shouldBe defined
+    calls.set(0)
+    val kept = columnar(rows)
+    // The null key and the null value stay dropped. The present (0, 1) stays present.
+    kept.length shouldBe 1
+    longComponent(pairAt(kept, 0), 0) shouldBe 0L
+    longComponent(pairAt(kept, 0), 1) shouldBe 1L
+    calls.get() shouldBe 2
+    rows.count() shouldBe 1L
   }
 
   "a whole-row filter" should "lower to FilterRow(Scan)" in {
     val source = DistCollection.ofLongPairs(Array(-1L, 2L, 0L), Array(5L, -6L, 7L), 1)
     val filtered = source.filter((pair: (Long, Long)) => pair._1 >= 0L)
+    val op = ColumnarPlanner.lower(filtered.plan).getOrElse(fail("row filter did not lower"))
+    val compiled =
+      PredicatePlan.compile(filtered.plan, op).getOrElse(fail("row filter did not compile"))
+    val steps =
+      PredicatePlan.selectionSteps(compiled).getOrElse(fail("row filter has no steps"))
 
+    steps match
+      case Vector(Selection.Step.LongPair(_)) => ()
+      case other => fail(s"expected one long-pair row step, got $other")
+    PredicatePlan.encoded(compiled, Set(0)).atoms match
+      case Vector(PredicatePlan.Atom.LongPairRow(_)) => ()
+      case other => fail(s"a whole-row step must stay a row step, got $other")
+    FilterChain.selected(filtered.plan, op, None, false, Set(0, 1)) shouldBe defined
     columnar(filtered) shouldBe row(filtered.collect().toList)
+    filtered.count() shouldBe row(filtered.count())
     assertColumnar(filtered, "FilterRow(Scan)")
+  }
+
+  "a long row filter and a long key filter" should "share one step vector" in {
+    val source = DistCollection.ofLongPairs(Array(-1L, 2L, 0L, 4L), Array(5L, -6L, 7L, 1L), 1)
+    val filtered = source
+      .filter((pair: (Long, Long)) => pair._2 > 0L)
+      .filterKeys[Long, Long](_ >= 0L)
+      .filterValues[Long, Long](_ < 10L)
+    val op = ColumnarPlanner.lower(filtered.plan).getOrElse(fail("mixed filters did not lower"))
+    val steps = PredicatePlan
+      .selectionSteps(
+        PredicatePlan.compile(filtered.plan, op).getOrElse(fail("mixed filters did not compile")),
+      )
+      .getOrElse(fail("mixed filters have no steps"))
+
+    steps match
+      case Vector(
+            Selection.Step.LongPair(_),
+            Selection.Step.Int64(keyOrdinal, _),
+            Selection.Step.Int64(valueOrdinal, _),
+          ) =>
+        keyOrdinal shouldBe 0
+        valueOrdinal shouldBe 1
+      case other => fail(s"expected one long-pair step vector, got $other")
+    FilterChain.selected(filtered.plan, op, None, false, Set(0, 1)) shouldBe defined
+    columnar(filtered) shouldBe row(filtered.collect().toList)
+    filtered.count() shouldBe row(filtered.count())
+    assertColumnar(filtered, "FilterValue(FilterKey(FilterRow(Scan)))")
   }
 
   "filterValues above mapValues" should "lower to FilterValue(MapValue(Scan))" in {

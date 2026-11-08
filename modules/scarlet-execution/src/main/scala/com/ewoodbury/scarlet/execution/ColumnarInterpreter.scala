@@ -369,12 +369,14 @@ private[execution] object ColumnarInterpreter:
           throw new IllegalStateException(
             s"physical tree does not match ${plan.getClass.getSimpleName}",
           )
-    // Two or more int pair or triple filters compact once. A long-pair row filter chains one
-    // kernel per filter. A single-column stack chains kernels. A lone filter stays on the
-    // existing kernels.
+    // A string-pair filter is not [[FilterChain.accepts]]. A key or value stack stays in
+    // [[StringPairWalk]]. A whole-row string stack is one selection pass there. A long-pair row
+    // filter still chains one kernel per filter on this path. Collect reads
+    // [[FilterChain.selected]].
     // `accepts` walks the logical plan, so it runs only for a filter node.
-    case (_, PhysicalOp.Filter(child, _)) if child.kind eq PhysicalOp.Kind.StringPairs =>
-      StringPairWalk.filter(plan, child, selectedPartition, preserveAbsence, ordinals)
+    case (logical, physical @ PhysicalOp.Filter(child, _))
+        if child.kind eq PhysicalOp.Kind.StringPairs =>
+      StringPairWalk.filter(logical, physical, selectedPartition, preserveAbsence, ordinals)
     case (logical, physical)
         if physical.isInstanceOf[PhysicalOp.Filter] && FilterChain.accepts(logical, physical) =>
       FilterChain.run(logical, physical, selectedPartition, preserveAbsence, ordinals)

@@ -520,7 +520,8 @@ In the set today, on present values:
 - Boolean scans, filters, count, and take. A Boolean map is outside the set.
 - Sum of int, long, and double.
 - Int and long pair row filters, plus key and value filters and same-type mapValues for int, long,
-  and string pairs. A whole-row filter on a string pair stays on the row path.
+  and string pairs. A whole-row filter on a string pair keeps a survivor index, the same as an
+  int-pair row filter.
 - `reduceByKey` for int, long, and string keys.
 - `countByKey` for int keys.
 - Inner shuffle-hash join for int, long, and string keys.
@@ -530,9 +531,9 @@ In the set today, on present values:
 Still open inside the set, and therefore not a promise of this commit:
 
 - A stack of one or more slot filters on an int, long, or string pair keeps a survivor index. An
-  int-pair row filter does the same. A long-pair row filter and a whole-row string filter do not.
-  Single-column filters stay chained column kernels, because an int survivor index is the wrong
-  selection for one column.
+  int-pair row filter, a long-pair row filter, and a whole-row string filter do the same, including
+  a stack of one. Single-column filters stay chained column kernels, because an int survivor index
+  is the wrong selection for one column.
 - Int `countByKey` over `spillBudgetBytes`: with spill off, over budget throws `ClosedKernelRefusal`
   and the action fails; with spill on, an over-budget post-exchange bucket spills; a table that
   still does not fit throws `ClosedKernelRefusal`. Long and string `countByKey` are not columnar.

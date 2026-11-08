@@ -1,6 +1,12 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{BatchCodec, ColumnBatch, ColumnKernel, Int32Column}
+import com.ewoodbury.scarlet.columnar.{
+  BatchCodec,
+  ColumnBatch,
+  ColumnKernel,
+  Int32Column,
+  Selection,
+}
 import com.ewoodbury.scarlet.core.{Partition, Plan}
 
 import ColumnarInterpreter.Columns
@@ -16,7 +22,8 @@ import ColumnarInterpreter.Columns
  * [[encoded]] may publish a one-column batch when demand narrowed the read to the key or the
  * value. A [[PhysicalOp.Column]] or the filter path consumes that shape; a column wraps the batch
  * as [[Columns.Strings]] or [[Columns.Ints]]. [[BatchCodec.decodeStringPairs]] requires both
- * columns and is never called on a narrowed batch.
+ * columns and is never called on a narrowed batch. A whole-row stack is one [[Selection]] pass
+ * over both columns. A key or value stack stays on the dense kernels below.
  *
  * Named erasure boundary. The physical slot chose the predicate, and lowering checked that
  * `mapValues` declares `Int => Int`.
@@ -63,6 +70,23 @@ private[execution] object StringPairWalk:
 
   def filter(
       plan: Plan[_],
+      op: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): Columns =
+    op match
+      case PhysicalOp.Filter(child, _) =>
+        PredicatePlan.compile(plan, op) match
+          case Some(compiled) if compiled.atoms.exists(isStringRow) =>
+            selectRows(plan, op, compiled, selectedPartition, preserveAbsence, ordinals)
+          case _ =>
+            filterSlot(plan, child, selectedPartition, preserveAbsence, ordinals)
+      case _ =>
+        throw new IllegalStateException("string pair filter expected a key or a value")
+
+  private def filterSlot(
+      plan: Plan[_],
       child: PhysicalOp,
       selectedPartition: Option[Int],
       preserveAbsence: Boolean,
@@ -79,6 +103,45 @@ private[execution] object StringPairWalk:
       applyFilter(plan, morsel.batch, morsel.start, morsel.length)
     }
     Columns.StringPairs(filtered)
+
+  /** One pass over the source under a stack that contains a whole-row atom. */
+  private def selectRows(
+      plan: Plan[_],
+      op: PhysicalOp,
+      compiled: PredicatePlan.Compiled,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): Columns =
+    val steps = PredicatePlan
+      .selectionSteps(PredicatePlan.encoded(compiled, ordinals))
+      .getOrElse(missingRows)
+    val (source, child) = PredicatePlan.childOf(plan, op)
+    val input = ColumnarInterpreter.interpretAt(
+      source,
+      child,
+      selectedPartition,
+      preserveAbsence,
+      ordinals,
+    )
+    val filtered = ColumnarInterpreter.onEachMorsel(batches(input)) { morsel =>
+      Selection(morsel.batch, morsel.start, morsel.length, steps)
+    }
+    Columns.StringPairs(filtered)
+
+  private def isStringRow(atom: PredicatePlan.Atom): Boolean = atom match
+    case PredicatePlan.Atom.StringRow(_) => true
+    case PredicatePlan.Atom.Int32(_, _) | PredicatePlan.Atom.Int64(_, _) |
+        PredicatePlan.Atom.Float64(_, _) | PredicatePlan.Atom.Bool(_, _) |
+        PredicatePlan.Atom.Utf8(_, _) | PredicatePlan.Atom.Utf8Literals(_, _) |
+        PredicatePlan.Atom.PairRow(_) | PredicatePlan.Atom.TripleRow(_) |
+        PredicatePlan.Atom.LongPairRow(_) | PredicatePlan.Atom.LongPairKey(_) |
+        PredicatePlan.Atom.LongPairValue(_, _) | PredicatePlan.Atom.PairKey(_) |
+        PredicatePlan.Atom.PairValue(_, _) =>
+      false
+
+  private def missingRows: Nothing =
+    throw new IllegalStateException("string pair row filter lost its selection")
 
   private def keysOnly(rows: Iterable[(String, Int)]): ColumnBatch =
     BatchCodec.strings(rows.map(pair => pair._1))
