@@ -222,6 +222,20 @@ object Plan {
   case class GroupByKeyOp[K, V](source: Plan[(K, V)]) extends Plan[(K, Iterable[V])]
 
   /**
+   * Counts rows per key. A null key is dropped. A null value still counts; the operator does not
+   * read it. The result is one `(key, count)` pair per distinct key. The count is an `Int` and
+   * wraps on overflow, the same two's-complement wrap `HashReduce` uses.
+   *
+   * @param source
+   *   The preceding plan node (producing elements of type (K, V)).
+   * @tparam K
+   *   The key type.
+   * @tparam V
+   *   The value type. It is not read.
+   */
+  case class CountByKeyOp[K, V](source: Plan[(K, V)]) extends Plan[(K, Int)]
+
+  /**
    * Represents a reduceByKey transformation that requires shuffling data by key.
    * @param source
    *   The preceding plan node (producing elements of type (K, V)).

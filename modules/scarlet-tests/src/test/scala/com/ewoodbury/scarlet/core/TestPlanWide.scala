@@ -23,6 +23,7 @@ class TestPlanWide extends AnyFlatSpec with Matchers {
   "PlanWide.isWide" should "identify all direct wide operations" in {
     // Key-based shuffle operations
     PlanWide.isWide(Plan.GroupByKeyOp(kvSource)) shouldBe true
+    PlanWide.isWide(Plan.CountByKeyOp(kvSource)) shouldBe true
     PlanWide.isWide(Plan.ReduceByKeyOp(kvSource, (a: String, b: String) => a + b)) shouldBe true
     PlanWide.isWide(Plan.PartitionByOp(kvSource, 4)) shouldBe true
     
@@ -154,6 +155,7 @@ class TestPlanWide extends AnyFlatSpec with Matchers {
   it should "identify all direct wide operation types" in {
     // Test each wide operation type individually
     PlanWide.isDirectlyWide(Plan.GroupByKeyOp(kvSource)) shouldBe true
+    PlanWide.isDirectlyWide(Plan.CountByKeyOp(kvSource)) shouldBe true
     PlanWide.isDirectlyWide(Plan.ReduceByKeyOp(kvSource, (a: String, b: String) => a + b)) shouldBe true
     PlanWide.isDirectlyWide(Plan.SortByOp(source, identity, Ordering.Int)) shouldBe true
     PlanWide.isDirectlyWide(Plan.SortByIntKeyOp(intPairs)) shouldBe true
@@ -199,6 +201,7 @@ class TestPlanWide extends AnyFlatSpec with Matchers {
     // For any directly wide operation, isWide should also return true
     val wideOperations = Seq(
       Plan.GroupByKeyOp(kvSource),
+      Plan.CountByKeyOp(kvSource),
       Plan.ReduceByKeyOp(kvSource, (a: String, b: String) => a + b),
       Plan.SortByOp(source, identity, Ordering.Int),
       Plan.SortByIntKeyOp(intPairs),

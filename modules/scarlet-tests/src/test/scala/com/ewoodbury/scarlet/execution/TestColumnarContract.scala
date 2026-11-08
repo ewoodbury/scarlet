@@ -30,14 +30,14 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 202 accepted fixtures. Long filterKeys and filterValues are new. 200 + 2 = 202.
-    accepted.size shouldBe 202
-    // 35 exclusions. 202 + 35 = 237. Those two filters were not excluded.
+    // 203 accepted fixtures. Int countByKey is new. 202 + 1 = 203.
+    accepted.size shouldBe 203
+    // 35 exclusions. 203 + 35 = 238. countByKey was not excluded.
     // Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by
     // execution tests, not contract fixtures, because the contract does not track the int
     // refusals either.
     excluded.size shouldBe 35
-    (accepted.size + excluded.size) shouldBe 237
+    (accepted.size + excluded.size) shouldBe 238
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -286,7 +286,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
   private enum PlanNode:
     case MapPartitions, Repartition, Coalesce, PartitionBy, Source, Map, Filter, FlatMap, Distinct
     case Union, Keys, Values, MapValues, FilterKeys, FilterValues, FlatMapValues, GroupByKey
-    case ReduceByKey, SortBy, Join, CoGroup
+    case CountByKey, ReduceByKey, SortBy, Join, CoGroup
 
   private val intSource: Plan[Int] = Plan.Source(
     Seq(Partition(Seq(1, 2)), Partition(Seq(3, 4))),
@@ -522,6 +522,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         Plan.GroupByKeyOp(pairSource),
         hashedInfo(Layout.GroupedInt(ScarletConf.get.columnarBatchSize)),
         Some("GroupByKey(Exchange(Scan))"),
+      ),
+      AcceptedCase(
+        "countByKey int",
+        Plan.CountByKeyOp(pairSource),
+        hashedInfo(layout),
+        Some("CountByKey(Exchange(Scan))"),
       ),
       AcceptedCase(
         "groupByKey with string keys",
@@ -918,7 +924,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case PhysicalOp.Column(child, _) => preservesPartitions(child)
     case PhysicalOp.MapValue(child) => preservesPartitions(child)
     case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.LongHashAggregate(_) |
-        PhysicalOp.StringHashAggregate(_) | PhysicalOp.GroupByKey(_) | PhysicalOp.HashJoin(_, _) |
+        PhysicalOp.StringHashAggregate(_) | PhysicalOp.GroupByKey(_) | PhysicalOp.CountByKey(_) |
+        PhysicalOp.HashJoin(_, _) |
         PhysicalOp.LongHashJoin(_, _) | PhysicalOp.StringHashJoin(_, _) |
         PhysicalOp.SortMergeJoin(_, _) | PhysicalOp.SortMergeLeftOuter(_, _) |
         PhysicalOp.SortMergeRightOuter(_, _) | PhysicalOp.SortMergeFullOuter(_, _) |
@@ -1063,6 +1070,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case Plan.FilterValuesOp(_, _) => PlanNode.FilterValues
     case Plan.FlatMapValuesOp(_, _) => PlanNode.FlatMapValues
     case Plan.GroupByKeyOp(_) => PlanNode.GroupByKey
+    case Plan.CountByKeyOp(_) => PlanNode.CountByKey
     case Plan.ReduceByKeyOp(_, _) => PlanNode.ReduceByKey
     case Plan.SortByOp(_, _, _) => PlanNode.SortBy
     // Typed key nodes deliberately share the generic PlanNode.SortBy label.

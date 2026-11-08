@@ -446,6 +446,11 @@ private[execution] object ColumnarInterpreter:
       require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
       GroupByArms.columns(source, child, selectedPartition, preserveAbsence, ordinals)
     case (
+          Plan.CountByKeyOp(source),
+          PhysicalOp.CountByKey(PhysicalOp.Exchange(child)),
+        ) =>
+      CountByKeyArms.columns(source, child, selectedPartition, preserveAbsence, ordinals)
+    case (
           Plan.JoinOp(left, right, strategy),
           PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
         ) if JoinLowering.acceptsShuffleHash(strategy) =>

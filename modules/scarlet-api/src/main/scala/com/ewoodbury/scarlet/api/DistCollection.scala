@@ -213,6 +213,15 @@ final case class DistCollection[A](plan: Plan[A]):
     DistCollection(Plan.GroupByKeyOp(kvPlan))
 
   /**
+   * Transformation: Counts rows per key, requiring a shuffle. A null key is dropped and does not
+   * form a row. A null value is counted; the operator does not read it. Returns one `(key, count)`
+   * pair per distinct key. The count is an `Int` and wraps on overflow, the same two's-complement
+   * wrap `HashReduce` uses. Does not trigger computation.
+   */
+  def countByKey[K, V](using ev: A =:= (K, V)): DistCollection[(K, Int)] =
+    DistCollection(Plan.CountByKeyOp(kvPlan))
+
+  /**
    * Transformation: Reduces values by key using the provided function, requiring a shuffle
    * operation. Returns a new DistCollection representing the reduced data. Does not trigger
    * computation.

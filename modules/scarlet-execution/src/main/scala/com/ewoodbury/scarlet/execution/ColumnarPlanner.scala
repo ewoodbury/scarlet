@@ -691,6 +691,8 @@ object ColumnarPlanner:
       lowerChild(source).flatMap(ReduceByKeyLowering.apply)
     case Plan.GroupByKeyOp(source) =>
       lowerChild(source).flatMap(GroupByKeyLowering.apply)
+    case Plan.CountByKeyOp(source) =>
+      lowerChild(source).flatMap(CountByKeyLowering.apply)
     case plan if JoinLowering.isJoin(plan) => JoinLowering.lower(plan, lowerChild)
     case Plan.SortByIntKeyOp(source) =>
       SortLowering.lowerInt(source, lowerPlan)
@@ -1017,6 +1019,8 @@ object ColumnarPlanner:
       hashed(PhysicalOp.Kind.StringPairs)
     case group: PhysicalOp.GroupByKey =>
       hashed(group.kind)
+    case _: PhysicalOp.CountByKey =>
+      hashed(PhysicalOp.Kind.Pairs)
     case _: PhysicalOp.LongHashJoin =>
       hashed(PhysicalOp.Kind.LongPairs)
     case _: PhysicalOp.StringHashJoin =>

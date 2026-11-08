@@ -130,6 +130,8 @@ final class StageExecutor[F[_]: Sync](
         executeSortByOperation(op, inputPartitions)
       case Some(_: GroupByKeyWideOp) =>
         executeGroupByKeyOperation(inputPartitions)
+      case Some(_: CountByKeyWideOp) =>
+        executeCountByKeyOperation(inputPartitions)
       case Some(op: ReduceByKeyWideOp[_]) =>
         executeReduceByKeyOperation(op, inputPartitions)
       case Some(_: CoGroupWideOp) =>
@@ -258,6 +260,17 @@ final class StageExecutor[F[_]: Sync](
   ): F[Seq[Partition[_]]] = {
     val typedPartitions = inputPartitions.asInstanceOf[Seq[Partition[(Any, Any)]]]
     executePerPartition(typedPartitions, Stage.groupByKeyLocal[Any, Any])
+  }
+
+  /**
+   * Per-partition countByKey. Input partitions are already key-hashed, so this is the same
+   * operator as the shuffle-bypass path. The value is not read.
+   */
+  private def executeCountByKeyOperation(
+      inputPartitions: Seq[Partition[_]],
+  ): F[Seq[Partition[_]]] = {
+    val typedPartitions = inputPartitions.asInstanceOf[Seq[Partition[(Any, Any)]]]
+    executePerPartition(typedPartitions, Stage.countByKeyLocal[Any, Any])
   }
 
   /**

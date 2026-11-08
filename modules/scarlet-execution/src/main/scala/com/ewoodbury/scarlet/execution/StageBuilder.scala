@@ -263,6 +263,8 @@ object StageBuilder:
           .asInstanceOf[Stage[Any, Any]]
       case _: GroupByKeyLocalOp[_, _] =>
         Stage.groupByKeyLocal[Any, Any].asInstanceOf[Stage[Any, Any]]
+      case _: CountByKeyLocalOp[_, _] =>
+        Stage.countByKeyLocal[Any, Any].asInstanceOf[Stage[Any, Any]]
       case ReduceByKeyLocalOp(reduceFunc) =>
         Stage
           .reduceByKeyLocal[Any, Any](reduceFunc.asInstanceOf[(Any, Any) => Any])
@@ -296,7 +298,8 @@ object StageBuilder:
    *   - Key-value operations: KeysOp, ValuesOp, MapValuesOp, FilterKeysOp, FilterValuesOp,
    *     FlatMapValuesOp
    *   - Partition operations: MapPartitionsOp
-   *   - Local/bypass operations: GroupByKeyLocalOp, ReduceByKeyLocalOp, PartitionByLocalOp
+   *   - Local/bypass operations: GroupByKeyLocalOp, CountByKeyLocalOp, ReduceByKeyLocalOp,
+   *     PartitionByLocalOp
    *
    * This method is optimized for creating individual stages and is more efficient than
    * materialize() when dealing with single operations, as it avoids unnecessary ChainedStage
@@ -339,8 +342,8 @@ object StageBuilder:
    *      - UnionOp: Creates a new stage that reads from both input stages
    *      - Preserves no partitioning metadata due to input consolidation
    *   4. **Wide Transformations (Shuffle Operations)**:
-   *      - GroupByKeyOp, ReduceByKeyOp: Supports shuffle bypass optimization when already
-   *        partitioned correctly
+   *      - GroupByKeyOp, CountByKeyOp, ReduceByKeyOp: Supports shuffle bypass optimization when
+   *        already partitioned correctly
    *      - SortByOp, SortByIntKeyOp, SortByLongKeyOp, SortByStringKeyOp, PartitionByOp,
    *        RepartitionOp, CoalesceOp: Always creates shuffle boundaries
    *      - JoinOp, LeftOuterJoinOp, RightOuterJoinOp, FullOuterJoinOp, CoGroupOp: Multi-input wide
@@ -348,7 +351,7 @@ object StageBuilder:
    *      - Uses WideOp metadata structures for shuffle execution planning
    *
    * **Optimization Strategies**:
-   *   - Shuffle Bypass: For operations like groupByKey/reduceByKey, checks if upstream
+   *   - Shuffle Bypass: For operations like groupByKey/countByKey/reduceByKey, checks if upstream
    *     partitioning matches requirements and bypasses shuffle when possible
    *   - Operation Chaining: Accumulates multiple narrow operations into single stages to reduce
    *     overhead
@@ -572,6 +575,40 @@ object StageBuilder:
             dependencies,
           )
           (shuffleId, Some(groupByKey))
+        }
+
+      case countByKey: Plan.CountByKeyOp[_, _] =>
+        val (sourceStageId, _) =
+          buildStagesFromPlan(ctx, countByKey.source, builderMap, dependencies)
+        val src = builderMap(sourceStageId)
+        val defaultN = ScarletConf.get.defaultShufflePartitions
+
+        if (Operation.canBypassShuffle(countByKey, src.outputPartitioning, ScarletConf.get)) {
+          // Add the local count to the existing stage. The upstream hash is already the group key.
+          val resultId = appendOperation(
+            ctx,
+            sourceStageId,
+            CountByKeyLocalOp[Any, Any]().asInstanceOf[Operation[Any, Any]],
+            builderMap,
+            dependencies,
+          )
+          (resultId, Some(countByKey))
+        } else {
+          // No separate wide-op kind. GroupByKey metadata is the key hash, and the stage runs a
+          // count rather than GroupByKeyWideOp, which returns (K, Iterable[V]).
+          val shuffleId = createShuffleStageUnified(
+            ctx,
+            Seq(sourceStageId),
+            CountByKeyWideOp(
+              SimpleWideOpMeta(
+                kind = WideOpKind.GroupByKey,
+                numPartitions = defaultN,
+              ),
+            ),
+            builderMap,
+            dependencies,
+          )
+          (shuffleId, Some(countByKey))
         }
 
       case reduceByKey: Plan.ReduceByKeyOp[_, _] =>
@@ -977,6 +1014,7 @@ object StageBuilder:
     // Get metadata from the WideOp
     val meta = wideOp match {
       case GroupByKeyWideOp(m) => m
+      case CountByKeyWideOp(m) => m
       case ReduceByKeyWideOp(m) => m
       case SortByWideOp(m) => m
       case PartitionByWideOp(m) => m
@@ -1084,7 +1122,7 @@ object StageBuilder:
 
       case _: FilterOp[_] | _: MapValuesOp[_, _, _] | _: FilterKeysOp[_, _] |
           _: FilterValuesOp[_, _] | _: FlatMapValuesOp[_, _, _] | _: DistinctOp[_] |
-          _: GroupByKeyLocalOp[_, _] | _: ReduceByKeyLocalOp[_, _] =>
+          _: GroupByKeyLocalOp[_, _] | _: CountByKeyLocalOp[_, _] | _: ReduceByKeyLocalOp[_, _] =>
         prev
     }
 

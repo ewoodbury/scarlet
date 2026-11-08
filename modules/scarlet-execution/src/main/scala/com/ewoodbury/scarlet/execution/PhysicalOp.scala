@@ -12,8 +12,8 @@ import com.ewoodbury.scarlet.core.Partition
  * the child kind. [[PhysicalOp.Column]] narrows an int or long pair to one column and shares its
  * arrays. [[PhysicalOp.MapValue]] rewrites an int or long value and keeps the pair.
  * [[PhysicalOp.Exchange]] sits under [[PhysicalOp.HashAggregate]],
- * [[PhysicalOp.LongHashAggregate]], [[PhysicalOp.StringHashAggregate]], and
- * [[PhysicalOp.GroupByKey]], and on each side of [[PhysicalOp.HashJoin]],
+ * [[PhysicalOp.LongHashAggregate]], [[PhysicalOp.StringHashAggregate]], [[PhysicalOp.GroupByKey]],
+ * and [[PhysicalOp.CountByKey]], and on each side of [[PhysicalOp.HashJoin]],
  * [[PhysicalOp.LongHashJoin]], [[PhysicalOp.StringHashJoin]], [[PhysicalOp.SortMergeJoin]],
  * [[PhysicalOp.SortMergeLeftOuter]], [[PhysicalOp.SortMergeRightOuter]],
  * [[PhysicalOp.SortMergeFullOuter]], [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]],
@@ -220,6 +220,16 @@ enum PhysicalOp:
   case GroupByKey(child: PhysicalOp)
 
   /**
+   * `countByKey`. The child is an [[PhysicalOp.Exchange]]. The kernel shuffles. A null key is
+   * dropped. The value column is not read, so a null value still counts. One `(key, count)` row is
+   * published per distinct key, including an empty bucket. Output kind is always
+   * [[PhysicalOp.Kind.Pairs]]. The count is an `Int` and wraps. There is no spill copy. An input
+   * that does not fit the budget throws [[com.ewoodbury.scarlet.columnar.ColumnarFallback]] before
+   * the table is allocated, and the action reruns on rows.
+   */
+  case CountByKey(child: PhysicalOp)
+
+  /**
    * Global sort of an int-pair scan. Each source partition is sorted by effective key, then the
    * sorted runs are rank-merged into `defaultShufflePartitions`. A null key orders as zero and
    * stays null. A null value stays null. Ties keep input order. Output kind is
@@ -294,6 +304,7 @@ enum PhysicalOp:
           throw new IllegalStateException(
             s"groupByKey column is $other, expected int, long, or string pairs",
           )
+    case CountByKey(_) => PhysicalOp.Kind.Pairs
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
     case LongHashJoin(_, _) => PhysicalOp.Kind.LongTriples
     case StringHashJoin(_, _) => PhysicalOp.Kind.StringTriples
@@ -361,6 +372,7 @@ enum PhysicalOp:
     case LongHashAggregate(child) => s"LongHashAggregate(${child.shape})"
     case StringHashAggregate(child) => s"StringHashAggregate(${child.shape})"
     case GroupByKey(child) => s"GroupByKey(${child.shape})"
+    case CountByKey(child) => s"CountByKey(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
     case LongHashJoin(left, right) => s"LongHashJoin(${left.shape}, ${right.shape})"
     case StringHashJoin(left, right) => s"StringHashJoin(${left.shape}, ${right.shape})"

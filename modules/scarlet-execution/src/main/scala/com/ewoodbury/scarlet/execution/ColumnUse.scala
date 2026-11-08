@@ -57,6 +57,8 @@ private[execution] object ColumnUse:
       walk(source, child, parent union Set(0, 1))
     case (Plan.GroupByKeyOp(source), PhysicalOp.GroupByKey(child)) =>
       walk(source, child, parent union Set(0, 1))
+    case (Plan.CountByKeyOp(source), PhysicalOp.CountByKey(child)) =>
+      walk(source, child, parent union Set(0, 1))
     case (Plan.SortByIntKeyOp(source), PhysicalOp.SortByIntKey(child)) =>
       walk(source, child, parent union Set(0, 1))
     case (Plan.SortByLongKeyOp(source), PhysicalOp.SortByLongKey(child)) =>
@@ -121,6 +123,7 @@ private[execution] object ColumnUse:
     case Plan.CoalesceOp(source, _) => Some(source)
     case Plan.PartitionByOp(source, _) => Some(source)
     case Plan.GroupByKeyOp(source) => Some(source)
+    case Plan.CountByKeyOp(source) => Some(source)
     case Plan.ReduceByKeyOp(source, _) => Some(source)
     case Plan.SortByOp(source, _, _) => Some(source)
     case Plan.SortByIntKeyOp(source) => Some(source)

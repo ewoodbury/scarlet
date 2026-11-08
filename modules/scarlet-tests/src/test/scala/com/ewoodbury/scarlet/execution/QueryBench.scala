@@ -17,8 +17,9 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
  * Times one query per supported columnar type, plus grouped-key patterns, a two-filter count,
- * two-filter int and string `groupByKey` and `reduceByKey`, int and string inner joins, and int
- * sort, plus unfiltered int-pair and long-pair sorts. Not a test, and not part of `make test`.
+ * two-filter int `countByKey`, two-filter int and string `groupByKey` and `reduceByKey`, int and
+ * string inner joins, and int sort, plus unfiltered int-pair and long-pair sorts. Not a test, and
+ * not part of `make test`.
  *
  * Each query is built once. The timed region is the action. The scalar checksum is compared
  * after the timer stops, against a local loop and one row-path execution. A mismatch fails the
@@ -167,6 +168,12 @@ object QueryBench:
       .filterKeys((key: Int) => key % 3 != 0)
       .filterValues((value: Int) => value >= 0)
       .groupByKey
+    val keptCounts = FilterCountChecksum.expected(groupKeys, generated, groups)
+    val filteredCounts = DistCollection
+      .ofIntPairs(groupKeys, generated, sourcePartitions)
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+      .countByKey
     val filteredCount = DistCollection
       .ofIntPairs(groupKeys, generated, sourcePartitions)
       .filterKeys((key: Int) => key % 3 != 0)
@@ -195,7 +202,7 @@ object QueryBench:
         "SortByIntKey(Scan)",
         expectSortedInts(sortKeys, generated),
         intSort.plan,
-        checksumIntPairs(intSort.collect()),
+        PairChecksum.intPairs(intSort.collect()),
       ),
       whole(
         "long-sort-key",
@@ -203,7 +210,7 @@ object QueryBench:
         "SortByLongKey(Scan)",
         expectSortedLongs(longSortKeys, longSortValues),
         longSort.plan,
-        checksumLongPairs(longSort.collect()),
+        PairChecksum.longPairs(longSort.collect()),
       ),
       grouped("grouped-repeat", repeating, repeatFold.hash),
       grouped("grouped-shuffled", shuffled, shuffledFold.hash),
@@ -216,6 +223,14 @@ object QueryBench:
         keptGroups,
         filteredGroups.plan,
         FilterGroupChecksum.collected(filteredGroups.collect(), groups),
+      ),
+      whole(
+        "filter-countbykey",
+        elementRows,
+        "CountByKey(Exchange(FilterValue(FilterKey(Scan))))",
+        keptCounts,
+        filteredCounts.plan,
+        FilterCountChecksum.collected(filteredCounts.collect(), groups),
       ),
       whole(
         "filter-count",
@@ -924,44 +939,13 @@ object QueryBench:
   private def expectSortedInts(keys: Array[Int], values: Array[Int]): Long =
     val order = Array.tabulate(keys.length)(identity)
     scala.util.Sorting.stableSort(order, (left: Int, right: Int) => keys(left) < keys(right))
-    checksumOrdered(order, row => keys(row).toLong, row => values(row).toLong)
+    PairChecksum.ordered(order, row => keys(row).toLong, row => values(row).toLong)
 
   /** Local stable sort, then a rolling mix of key then value. Runs outside the timer. */
   private def expectSortedLongs(keys: Array[Long], values: Array[Long]): Long =
     val order = Array.tabulate(keys.length)(identity)
     scala.util.Sorting.stableSort(order, (left: Int, right: Int) => keys(left) < keys(right))
-    checksumOrdered(order, row => keys(row), row => values(row))
-
-  private def checksumOrdered(order: Array[Int], keyAt: Int => Long, valueAt: Int => Long): Long =
-    var index = 0
-    var hash = 0L
-    while (index < order.length) {
-      val row = order(index)
-      hash = hash * 31L + keyAt(row)
-      hash = hash * 31L + valueAt(row)
-      index += 1
-    }
-    hash
-
-  private def checksumIntPairs(rows: Iterable[(Int, Int)]): Long =
-    val iterator = rows.iterator
-    var hash = 0L
-    while (iterator.hasNext) {
-      val pair = iterator.next()
-      hash = hash * 31L + pair._1.toLong
-      hash = hash * 31L + pair._2.toLong
-    }
-    hash
-
-  private def checksumLongPairs(rows: Iterable[(Long, Long)]): Long =
-    val iterator = rows.iterator
-    var hash = 0L
-    while (iterator.hasNext) {
-      val pair = iterator.next()
-      hash = hash * 31L + pair._1
-      hash = hash * 31L + pair._2
-    }
-    hash
+    PairChecksum.ordered(order, row => keys(row), row => values(row))
 
   private def expectBools(): Long =
     var index = 0
@@ -1009,13 +993,14 @@ object QueryBench:
       "the measured rounds, at each width.\n" +
       "Sort queries checksum the collected key then value, mixed by 31, in output order. The " +
       "expected value is a local stable sort of the kept pairs, computed before timing.\n" +
-      "filter-count, filter-groupbykey, filter-string-groupbykey, filter-reducebykey, " +
-      "filter-string-reducebykey, filter-join, filter-string-join, and filter-sort are two " +
-      "filters, at 1e6 rows, two source partitions, and batch 8192. String keys are " +
-      "`(row % 1024).toString`. The int join filters the build side and probes an unfiltered " +
-      "unique key. filter-string-join filters the build side and probes one row per string " +
-      "key, with that integer as the right value. groupByKey checksums (key * 31) xor the " +
-      "value sum xor the value count. String cases use key.hashCode. reduceByKey checksums " +
+      "filter-count, filter-groupbykey, filter-countbykey, filter-string-groupbykey, " +
+      "filter-reducebykey, filter-string-reducebykey, filter-join, filter-string-join, and " +
+      "filter-sort are two filters, at 1e6 rows, two source partitions, and batch 8192. String " +
+      "keys are `(row % 1024).toString`. The int join filters the build side and probes an " +
+      "unfiltered unique key. filter-string-join filters the build side and probes one row per " +
+      "string key, with that integer as the right value. groupByKey checksums (key * 31) xor " +
+      "the value sum xor the value count. countByKey checksums (key * 31) xor the kept-row " +
+      "count over the same kept rows. String cases use key.hashCode. reduceByKey checksums " +
       "(key * 31) xor the wrapped int sum. The join checksums (key * 31) xor the left value " +
       "xor the right value. The string join uses key.hashCode in place of the key. " +
       "filter-sort uses the sort checksum. filter-count checksums the kept row count. " +
