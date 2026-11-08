@@ -10,12 +10,12 @@ import java.util.Arrays
  * side and probes the right. It writes `(key, left, right)`. Within a probe row the build chain is
  * newest-first. That walk is a kernel detail, not a public contract.
  *
- * A null key is not inserted and is not probed, so a stored `0` does not match key `0`. Every
- * value cell must be present. The interpreter refuses a null value, so the plan stays on the row
- * path. This kernel does not read the spill budget. [[LongHashJoinSpill]] spills an over-budget
- * shuffle bucket and probes each piece with [[innerInt64]]. A piece that is still over the budget
- * throws there, before this kernel allocates. The probe writes matches directly. Output columns
- * keep the grown capacity and `length` is the match count.
+ * A null key is not inserted and is not probed, so a stored `0` does not match key `0`. A clear
+ * value bit is copied. A clear validity bit is a null value, not an absence bit, and the matched
+ * row is kept. This kernel does not read the spill budget. [[LongHashJoinSpill]] spills an
+ * over-budget shuffle bucket and probes each piece with [[innerInt64]]. A piece that is still over
+ * the budget throws there, before this kernel allocates. The probe writes matches directly. Output
+ * columns keep the grown capacity and `length` is the match count.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object LongHashJoin:

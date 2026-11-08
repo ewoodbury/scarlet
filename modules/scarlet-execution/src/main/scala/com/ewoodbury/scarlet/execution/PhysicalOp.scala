@@ -77,8 +77,8 @@ enum PhysicalOp:
   /**
    * Shuffle-hash inner join of `(Long, Long)` pairs. `left` and `right` are exchanges with the
    * same partition count. The kernel builds the left bucket and probes the right. A null key is
-   * dropped on both sides by the exchange and is not inserted. Every value cell must be present.
-   * The interpreter refuses a null value, so the plan stays on the row path. Output columns are
+   * dropped on both sides by the exchange and is not inserted. A clear validity bit is a null
+   * value and is copied with the matched row. It is not an absence bit. Output columns are
    * `(key, left, right)`. When `spillEnabled` is on and a build bucket's retained estimate is
    * above `spillBudgetBytes`, that bucket is sub-partitioned by the quotient of `Long.hashCode`
    * and the parent width. Each non-empty build piece is one spill file. One piece is probed at a
