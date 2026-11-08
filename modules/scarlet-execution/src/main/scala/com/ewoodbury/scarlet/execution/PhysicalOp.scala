@@ -92,14 +92,14 @@ enum PhysicalOp:
    * Shuffle-hash inner join of `(String, Int)` pairs. `left` and `right` are exchanges with the
    * same partition count. The kernel builds the left bucket and probes the right. The two sides
    * keep independent dictionaries, so the table matches strings, not dictionary codes. A null key
-   * is dropped on both sides by the exchange. `""` is a present key. A live null value is a
-   * `ColumnarFallback`, so the action runs on the row path. A key or value filter on either side,
-   * including a stack of one, scatters survivor ids and does not slice them. Output columns are
-   * `(key, left, right)`, and the key is the probe row. Spill is off unless `spillEnabled` is set.
-   * A build bucket whose retained estimate, including its dictionary, is above `spillBudgetBytes`
-   * is sub-partitioned and joined one piece at a time. A bucket at or under the budget, and every
-   * bucket while spill is off, stays in memory. Broadcast, sort-merge, and outer joins do not use
-   * this node. Output kind is [[PhysicalOp.Kind.StringTriples]].
+   * is dropped on both sides by the exchange. `""` is a present key. A clear validity bit is a
+   * null value and is copied with the matched row. It is not an absence bit. A key or value filter
+   * on either side, including a stack of one, scatters survivor ids and does not slice them.
+   * Output columns are `(key, left, right)`, and the key is the probe row. Spill is off unless
+   * `spillEnabled` is set. A build bucket whose retained estimate, including its dictionary, is
+   * above `spillBudgetBytes` is sub-partitioned and joined one piece at a time. A bucket at or
+   * under the budget, and every bucket while spill is off, stays in memory. Broadcast, sort-merge,
+   * and outer joins do not use this node. Output kind is [[PhysicalOp.Kind.StringTriples]].
    */
   case StringHashJoin(left: PhysicalOp, right: PhysicalOp)
 

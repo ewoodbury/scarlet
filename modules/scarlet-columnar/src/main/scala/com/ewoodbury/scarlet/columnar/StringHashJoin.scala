@@ -18,16 +18,16 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * detail, not a public contract.
  *
  * A null key is dropped by the exchange before the table, and a clear key bit is not inserted and
- * not probed. `""` is a present key. Every live value cell must be present. Spare capacity past
- * `length` is ignored, which is what a filter publishes. A null value outside a selection is not
- * live. The interpreter declines a live null value before this kernel. A clear live value bit that
- * still reaches here throws `IllegalStateException`. Spill is off unless
- * [[ScarletConf.spillEnabled]] is set. A build bucket whose [[StringHashJoinSpill.retainedBytes]]
- * estimate is above [[ScarletConf.spillBudgetBytes]] is finished by [[StringHashJoinSpill]]. That
- * estimate includes the dictionary. A bucket at or under the budget, and every bucket while spill
- * is off, is joined here and writes nothing. Output columns are `(key, left, right)`. The key is
- * the probe row's dictionary and code. One batch per partition. An empty side, or a partition with
- * no matches, publishes [[ColumnBatches.emptyStringJoin]].
+ * not probed. `""` is a present key. A clear value bit is copied. A clear validity bit is a null
+ * value, not an absence bit, and the matched row is kept. Spare capacity past `length` is ignored,
+ * which is what a filter publishes. A null value outside a selection is not live. Spill is off
+ * unless [[ScarletConf.spillEnabled]] is set. A build bucket whose
+ * [[StringHashJoinSpill.retainedBytes]] estimate is above [[ScarletConf.spillBudgetBytes]] is
+ * finished by [[StringHashJoinSpill]]. That estimate includes the dictionary. A bucket at or under
+ * the budget, and every bucket while spill is off, is joined here and writes nothing. Output
+ * columns are `(key, left, right)`. The key is the probe row's dictionary and code. One batch per
+ * partition. An empty side, or a partition with no matches, publishes
+ * [[ColumnBatches.emptyStringJoin]].
  */
 @SuppressWarnings(
   Array(
@@ -73,8 +73,8 @@ object StringHashJoin:
    * Inner shuffle-hash join. `build` is the left input and `probe` is the right.
    * [[StringJoinInput.Dense]] is partitioned with [[HashExchange.partitionAllUtf8]].
    * [[StringJoinInput.Selected]] is partitioned with [[HashExchange.partitionAllSelectedUtf8]] and
-   * is not sliced. A null key is dropped. `""` is a present key. Output columns are
-   * `(key, left, right)`.
+   * is not sliced. A null key is dropped. `""` is a present key. A clear value bit is copied and
+   * the matched row is kept. It is not an absence bit. Output columns are `(key, left, right)`.
    *
    * Spill is off unless [[ScarletConf.spillEnabled]] is set. A build bucket whose
    * [[StringHashJoinSpill.retainedBytes]] estimate is above [[ScarletConf.spillBudgetBytes]] is
@@ -116,7 +116,7 @@ object StringHashJoin:
   /**
    * One already-exchanged bucket pair. Does not partition and does not spill.
    * [[StringHashJoinSpill]] probes with this. A null key is not inserted and not probed. `""` is a
-   * present key. A clear live value bit throws.
+   * present key. A clear value bit is copied with the matched row. It is not an absence bit.
    */
   private[scarlet] def joinBucket(build: ColumnBatch, probe: ColumnBatch): ColumnBatch =
     joinPartition(build, probe)
@@ -151,16 +151,10 @@ object StringHashJoin:
         probeKeys.length == probeValues.length,
         "probe key and value columns differ in length",
       )
-      requireValues(buildValues, "build")
-      requireValues(probeValues, "probe")
       new BuildTable(buildKeys, buildValues).write(probeKeys, probeValues)
 
   private def utf8At(batch: ColumnBatch, ordinal: Int): DictUtf8Column =
     ColumnKernel.asUtf8(ColumnKernel.columnAt(batch, ordinal), ordinal)
-
-  private def requireValues(values: Int32Column, side: String): Unit =
-    if (!Validity.livePresent(values.validity, values.length)) then
-      throw new IllegalStateException(s"$side value column is not fully present")
 
   private final class BuildTable(buildKeys: DictUtf8Column, buildValues: Int32Column):
     private val rows: Int = buildKeys.length
@@ -182,8 +176,12 @@ object StringHashJoin:
       var outCodes = new Array[Int](outCapacity)
       var outBuild = new Array[Int](outCapacity)
       var outProbe = new Array[Int](outCapacity)
+      var buildWords = Validity.allocate(outCapacity)
+      var probeWords = Validity.allocate(outCapacity)
       val buildValueValues = buildValues.values
+      val buildValueWords = buildValues.validity.words
       val probeValueValues = probeValues.values
+      val probeValueWords = probeValues.validity.words
       val probeCodes = probeKeys.codes
       val probeDictionary = probeKeys.dictionary
       val probeKeyWords = probeKeys.validity.words
@@ -199,9 +197,15 @@ object StringHashJoin:
                 outCodes = Arrays.copyOf(outCodes, outCapacity)
                 outBuild = Arrays.copyOf(outBuild, outCapacity)
                 outProbe = Arrays.copyOf(outProbe, outCapacity)
+                buildWords = growWords(buildWords, outCapacity)
+                probeWords = growWords(probeWords, outCapacity)
               outCodes(filled) = probeCodes(row)
-              outBuild(filled) = buildValueValues(buildRow)
-              outProbe(filled) = probeValueValues(row)
+              if (Validity.isSet(buildValueWords, buildRow)) then
+                outBuild(filled) = buildValueValues(buildRow)
+                Validity.setBit(buildWords, filled)
+              if (Validity.isSet(probeValueWords, row)) then
+                outProbe(filled) = probeValueValues(row)
+                Validity.setBit(probeWords, filled)
               filled += 1
               buildRow = next(buildRow)
             }
@@ -214,6 +218,8 @@ object StringHashJoin:
           outCodes,
           outBuild,
           outProbe,
+          buildWords,
+          probeWords,
           outCapacity,
           filled,
         )
@@ -252,6 +258,8 @@ object StringHashJoin:
       codes: Array[Int],
       buildValues: Array[Int],
       probeValues: Array[Int],
+      buildWords: Array[Long],
+      probeWords: Array[Long],
       capacity: Int,
       rows: Int,
   ): ColumnBatch =
@@ -259,8 +267,8 @@ object StringHashJoin:
       Vector(LogicalType.Utf8Dict, LogicalType.Int32, LogicalType.Int32),
       Vector(
         DictUtf8Column.of(dictionary, codes, Validity.prefixValid(capacity, rows), rows),
-        Int32Column.of(buildValues, Validity.prefixValid(capacity, rows), rows),
-        Int32Column.of(probeValues, Validity.prefixValid(capacity, rows), rows),
+        Int32Column.of(buildValues, Validity.fromWords(buildWords, capacity), rows),
+        Int32Column.of(probeValues, Validity.fromWords(probeWords, capacity), rows),
       ),
       rows,
     )
@@ -269,3 +277,7 @@ object StringHashJoin:
     if (capacity >= ColumnHash.MaxCapacity) then
       throw new IllegalStateException(s"join output reached $capacity rows")
     capacity << 1
+
+  private def growWords(words: Array[Long], rowCapacity: Int): Array[Long] =
+    val needed = (rowCapacity + 63) >>> 6
+    if (words.length == needed) words else Arrays.copyOf(words, needed)

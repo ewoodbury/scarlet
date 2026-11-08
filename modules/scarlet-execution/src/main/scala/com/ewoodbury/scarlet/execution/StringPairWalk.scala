@@ -35,7 +35,7 @@ private[execution] object StringPairWalk:
         partitions.map(partition => BatchCodec.stringIntPairs(rowsOf(partition))).toVector
     Columns.StringPairs(batches)
 
-  /** A live null int cannot be joined, reduced, or grouped. The row path runs instead. */
+  /** A live null int cannot be reduced or grouped. The row path runs instead. */
   def refuseNullValues(batches: Vector[ColumnBatch]): Unit =
     if (!ColumnPipeline.valuesFullyPresent(batches)) then
       throw new ColumnarFallback("string pair value is null")
