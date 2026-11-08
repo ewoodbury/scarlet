@@ -45,8 +45,8 @@ object HashCount:
   /**
    * [[int32]] over `rows(from until until)`. A null key in that prefix is skipped. Slots at
    * `count` and beyond are not read. An empty range publishes an empty pair batch. A non-empty
-   * range whose row estimate is over the budget throws [[ClosedKernelRefusal]] before the table
-   * is allocated.
+   * range whose row estimate is over the budget throws [[ClosedKernelRefusal]] before the table is
+   * allocated.
    */
   def int32Selected(selected: Selected, from: Int, until: Int): ColumnBatch =
     require(from >= 0, s"selection start must be >= 0, got $from")

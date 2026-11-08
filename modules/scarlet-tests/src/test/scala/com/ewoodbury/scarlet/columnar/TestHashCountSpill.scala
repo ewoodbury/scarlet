@@ -43,7 +43,7 @@ class TestHashCountSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEa
       refused.budget shouldBe budget
       HashCountSpill.filesWrittenForTest shouldBe 0L
       HashCountSpill.lastDirectoryForTest shouldBe ""
-      SpillStore.listForTest(dir) shouldBe Vector.empty
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
     }
   }
 
@@ -63,7 +63,7 @@ class TestHashCountSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEa
 
       HashCountSpill.filesWrittenForTest shouldBe 0L
       HashCountSpill.lastDirectoryForTest shouldBe ""
-      SpillStore.listForTest(dir) shouldBe Vector.empty
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
     }
   }
 
@@ -71,7 +71,7 @@ class TestHashCountSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     List(false, true).foreach { enabled =>
       withConf(enabled, budget = 0L) { dir =>
         val dense = HashCount.byKey(
-          Vector.empty,
+          Vector.empty[Path],
           numPartitions = 4,
           parallelism = 1,
           batchSize = 8,
@@ -79,11 +79,11 @@ class TestHashCountSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEa
         dense.length shouldBe 4
         dense.map(_.length) shouldBe Seq(0, 0, 0, 0)
         val selected =
-          HashCount.byKeySelected(Vector.empty, numPartitions = 4, parallelism = 1, batchSize = 8)
+          HashCount.byKeySelected(Vector.empty[Path], numPartitions = 4, parallelism = 1, batchSize = 8)
         selected.length shouldBe 4
         selected.map(_.length) shouldBe Seq(0, 0, 0, 0)
         HashCountSpill.filesWrittenForTest shouldBe 0L
-        SpillStore.listForTest(dir) shouldBe Vector.empty
+        SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
       }
     }
   }
@@ -95,7 +95,7 @@ class TestHashCountSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     val memory = withConf(enabled = true, budget = wide) { dir =>
       val counted = counts(count(input))
       HashCountSpill.filesWrittenForTest shouldBe 0L
-      SpillStore.listForTest(dir) shouldBe Vector.empty
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
       counted
     }
     memory shouldBe expected
@@ -105,7 +105,7 @@ class TestHashCountSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEa
       spilled shouldBe memory
       HashCountSpill.filesWrittenForTest should be > 0L
       Path.of(HashCountSpill.lastDirectoryForTest) shouldBe dir
-      SpillStore.listForTest(dir) shouldBe Vector.empty
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
     }
   }
 
@@ -117,7 +117,7 @@ class TestHashCountSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEa
       refused.budget shouldBe tightBudget
       HashCountSpill.filesWrittenForTest shouldBe 0L
       HashCountSpill.lastDirectoryForTest shouldBe ""
-      SpillStore.listForTest(dir) shouldBe Vector.empty
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
     }
   }
 
@@ -127,7 +127,7 @@ class TestHashCountSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEa
       dir =>
         val counted = counts(count(input))
         HashCountSpill.filesWrittenForTest shouldBe 0L
-        SpillStore.listForTest(dir) shouldBe Vector.empty
+        SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
         counted
     }
     memory shouldBe (0 until spillingRows).map(key => key -> 1).toMap
@@ -139,7 +139,7 @@ class TestHashCountSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEa
       refused.budget shouldBe tightBudget
       HashCountSpill.filesWrittenForTest should be > 0L
       Path.of(HashCountSpill.lastDirectoryForTest) shouldBe dir
-      SpillStore.listForTest(dir) shouldBe Vector.empty
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
     }
   }
 
@@ -150,7 +150,7 @@ class TestHashCountSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEa
       withConf(enabled = true, budget = HashCount.inputRowBytes(survivorRows.toLong)) { dir =>
         val counted = counts(countSelected(input))
         HashCountSpill.filesWrittenForTest shouldBe 0L
-        SpillStore.listForTest(dir) shouldBe Vector.empty
+        SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
         counted
       }
     memory shouldBe expected
@@ -161,7 +161,7 @@ class TestHashCountSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEa
       spilled shouldBe memory
       HashCountSpill.filesWrittenForTest should be > 0L
       Path.of(HashCountSpill.lastDirectoryForTest) shouldBe dir
-      SpillStore.listForTest(dir) shouldBe Vector.empty
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
     }
 
     withConf(enabled = false, budget = tightBudget) { dir =>
@@ -170,7 +170,7 @@ class TestHashCountSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEa
       refused.bytes shouldBe HashCount.inputRowBytes(survivorRows.toLong)
       refused.budget shouldBe tightBudget
       HashCountSpill.filesWrittenForTest shouldBe 0L
-      SpillStore.listForTest(dir) shouldBe Vector.empty
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
     }
   }
 
