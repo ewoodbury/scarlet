@@ -166,6 +166,14 @@ object ColumnBatches:
       0,
     )
 
+  /** Zero-row `(Int64, Int32)` counts. A fresh batch on every call. */
+  private[columnar] def emptyLongCounts: ColumnBatch =
+    new ColumnBatch(
+      Vector(LogicalType.Int64, LogicalType.Int32),
+      Vector(emptyInt64, emptyInt32),
+      0,
+    )
+
   /** Zero-row `(Utf8Dict, Int32)` pairs. A fresh batch on every call. */
   private[columnar] def emptyStringPairs: ColumnBatch =
     new ColumnBatch(

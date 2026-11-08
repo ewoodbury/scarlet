@@ -114,17 +114,68 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     found shouldBe Map(1 -> 2)
   }
 
-  it should "stay on the row path for string and long keys" in {
+  it should "stay on the row path for string keys" in {
     val strings = DistCollection(
       Plan.Source(Seq(Partition(Seq("a" -> 1, "b" -> 2)), Partition(Seq("a" -> 3)))),
     )
     ColumnarPlanner.lower(strings.countByKey.plan) shouldBe None
     countsOf(strings.countByKey.collect()) shouldBe Map("a" -> 2, "b" -> 1)
     countsOf(row(strings.countByKey.collect())) shouldBe Map("a" -> 2, "b" -> 1)
+  }
 
-    val longs = DistCollection.ofLongPairs(Array(1L, 1L, 2L), Array(9L, 8L, 7L), 2)
-    ColumnarPlanner.lower(longs.countByKey.plan) shouldBe None
-    countsOf(longs.countByKey.collect()) shouldBe Map(1L -> 2, 2L -> 1)
+  it should "lower long keys and keep hash collisions distinct" in {
+    val wide = 1L << 32
+    java.lang.Long.hashCode(1L) shouldBe java.lang.Long.hashCode(wide)
+    assertLong(
+      DistCollection.ofLongPairs(Array(1L, 1L, 2L, wide), Array(9L, 8L, 7L, 1L), 2),
+      Map(1L -> 2, 2L -> 1, wide -> 1),
+    )
+  }
+
+  it should "count a null long value and drop a null long key" in {
+    val source = DistCollection(
+      Seq(
+        longPair(longRef(1L), longRef(2L)),
+        longPair(longRef(1L), absent),
+        longPair(absent, longRef(3L)),
+        longPair(longRef(4L), longRef(5L)),
+      ),
+      2,
+    )
+    assertLong(source, Map(1L -> 2, 4L -> 1))
+  }
+
+  it should "lower a long-pair filter stack and match the row path" in {
+    val source = DistCollection.ofLongPairs(
+      Array(1L, -2L, 3L, 1L, 4L),
+      Array(1L, 8L, -4L, 5L, 0L),
+      4,
+    )
+    val counted = source
+      .filterKeys((key: Long) => key > 0L)
+      .filterValues((value: Long) => value >= 0L)
+      .countByKey
+    val lowered = ColumnarPlanner.lower(counted.plan)
+    lowered.map(_.shape) shouldBe Some("CountByKey(Exchange(FilterValue(FilterKey(Scan))))")
+    lowered.map(_.kind) shouldBe Some(PhysicalOp.Kind.LongCounts)
+    val found = counted.collect().toList
+    found should contain theSameElementsAs row(counted.collect().toList)
+    countsOf(found) shouldBe Map(1L -> 2, 4L -> 1)
+  }
+
+  it should "lower an empty long-pair source" in {
+    assertLong(
+      DistCollection.ofLongPairs(Array.empty[Long], Array.empty[Long], 1),
+      Map.empty,
+    )
+    val wide = DistCollection.ofLongPairs(Array.empty[Long], Array.empty[Long], 4).countByKey
+    val lowered = ColumnarPlanner.lower(wide.plan)
+    lowered.map(_.shape) shouldBe Some("CountByKey(Exchange(Scan))")
+    lowered.map(_.kind) shouldBe Some(PhysicalOp.Kind.LongCounts)
+    val parts = ExecutionService.get.executePartitions(wide.plan)
+    parts.size shouldBe ScarletConf.get.defaultShufflePartitions
+    parts.foreach(_.data shouldBe empty)
+    countsOf(wide.collect()) shouldBe Map.empty[Long, Int]
   }
 
   it should "hash-shuffle, and bypass that shuffle when the keys are already hashed" in {
@@ -247,6 +298,19 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     found shouldBe expected
     counted.count() shouldBe expected.size.toLong
 
+  private def assertLong(source: DistCollection[(Long, Long)], expected: Map[Long, Int]): Unit =
+    val counted = source.countByKey
+    val lowered = ColumnarPlanner.lower(counted.plan)
+    lowered.map(_.shape) shouldBe Some("CountByKey(Exchange(Scan))")
+    lowered.map(_.kind) shouldBe Some(PhysicalOp.Kind.LongCounts)
+    ColumnarPlanner.partitioning(counted.plan).map(_.layout) shouldBe Some(
+      Layout.Columnar(ScarletConf.get.columnarBatchSize),
+    )
+    val found = counted.collect().toList
+    found should contain theSameElementsAs row(counted.collect().toList)
+    countsOf(found) shouldBe expected
+    countsOf(found) shouldBe countsOf(row(counted.collect()))
+
   private def assertColumnar(plan: Plan[_], shape: String): Unit =
     ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(shape)
     ColumnarPlanner.partitioning(plan).map(_.layout) shouldBe Some(
@@ -315,6 +379,15 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     lateNullSource().countByKey.collect().map { case (key, value) =>
       (key.asInstanceOf[Int], value)
     }.toMap
+
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
+  private def longPair(key: java.lang.Long, value: java.lang.Long): (Long, Long) =
+    Tuple2(key, value).asInstanceOf[(Long, Long)]
+
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def absent: java.lang.Long = null
+
+  private def longRef(value: Long): java.lang.Long = java.lang.Long.valueOf(value)
 
   private def nullKey(value: Int): (String, Int) = (null: String) -> value
 

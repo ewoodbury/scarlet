@@ -35,8 +35,8 @@ private[execution] object FunctionWitness:
     case PhysicalOp.Kind.Strings =>
       declaredSignature(function, "apply", classOf[String], classOf[String], allowBridge = true)
     case PhysicalOp.Kind.Bools | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
-        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs |
-        PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
+        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
+        PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
       false
 

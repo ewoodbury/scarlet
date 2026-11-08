@@ -13,6 +13,7 @@ private[execution] object ColumnsConcat:
     case (Columns.Floats(a), Columns.Floats(b)) => Columns.Floats(a ++ b)
     case (Columns.Pairs(a), Columns.Pairs(b)) => Columns.Pairs(a ++ b)
     case (Columns.LongPairs(a), Columns.LongPairs(b)) => Columns.LongPairs(a ++ b)
+    case (Columns.LongCounts(a), Columns.LongCounts(b)) => Columns.LongCounts(a ++ b)
     case (Columns.Triples(a), Columns.Triples(b)) => Columns.Triples(a ++ b)
     case (Columns.LongTriples(a), Columns.LongTriples(b)) => Columns.LongTriples(a ++ b)
     case (Columns.Strings(a), Columns.Strings(b)) => Columns.Strings(a ++ b)

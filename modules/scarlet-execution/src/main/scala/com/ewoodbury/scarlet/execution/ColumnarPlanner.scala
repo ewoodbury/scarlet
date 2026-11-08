@@ -746,7 +746,7 @@ object ColumnarPlanner:
       steps.foldLeft(Option(child)) { (current, step) =>
         current.flatMap(op => lowerStringRow(op, step))
       }
-    case PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
+    case PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
         PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
         PhysicalOp.Kind.GroupedLongs =>
       None
@@ -1034,8 +1034,8 @@ object ColumnarPlanner:
       hashed(PhysicalOp.Kind.StringPairs)
     case group: PhysicalOp.GroupByKey =>
       hashed(group.kind)
-    case _: PhysicalOp.CountByKey =>
-      hashed(PhysicalOp.Kind.Pairs)
+    case count: PhysicalOp.CountByKey =>
+      hashed(count.kind)
     case _: PhysicalOp.LongHashJoin =>
       hashed(PhysicalOp.Kind.LongPairs)
     case _: PhysicalOp.StringHashJoin =>
@@ -1094,7 +1094,7 @@ object ColumnarPlanner:
       Layout.GroupedLong(ScarletConf.get.columnarBatchSize)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Bools | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
-        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples =>
+        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples =>
       Layout.Columnar(ScarletConf.get.columnarBatchSize)
 
   private[execution] def batchSize: Int =

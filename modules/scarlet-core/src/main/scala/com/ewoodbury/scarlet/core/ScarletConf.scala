@@ -45,27 +45,28 @@ final case class ScarletConf(
     columnarBatchSize: Int = 8192,
     /**
      * When true, a grouped-sum bucket, an int `reduceByKey` bucket, a long `reduceByKey` bucket, a
-     * string `reduceByKey` bucket, an int `countByKey` bucket, an inner broadcast build, an int
-     * shuffle-hash build bucket, a long shuffle-hash build bucket, a string shuffle-hash build
-     * bucket, a sort-merge partition, an int-pair sort, a long-pair sort, or a string-pair sort
-     * whose estimate exceeds `spillBudgetBytes` is spilled. Off by default, so each stays in
+     * string `reduceByKey` bucket, an int or long `countByKey` bucket, an inner broadcast build,
+     * an int shuffle-hash build bucket, a long shuffle-hash build bucket, a string shuffle-hash
+     * build bucket, a sort-merge partition, an int-pair sort, a long-pair sort, or a string-pair
+     * sort whose estimate exceeds `spillBudgetBytes` is spilled. Off by default, so each stays in
      * memory. Outer hash and broadcast joins do not read this flag; an outer sort-merge does. A
      * spilled int, long, or string `reduceByKey` bucket may change first-seen output order;
-     * compare it as a map. An int `countByKey` with this flag off still throws
-     * `ClosedKernelRefusal` before a table. With the flag on, an over-budget post-exchange bucket
-     * spills. A count table that still does not fit throws `ClosedKernelRefusal`.
+     * compare it as a map. An int or long `countByKey` with this flag off still throws
+     * `ClosedKernelRefusal` before a table. The long estimate charges 8-byte keys. With the flag
+     * on, an over-budget post-exchange bucket spills. A count table that still does not fit throws
+     * `ClosedKernelRefusal`.
      */
     spillEnabled: Boolean = false,
     /**
      * Byte budget for one grouped-sum bucket, one int `reduceByKey` bucket, one long `reduceByKey`
-     * bucket, one string `reduceByKey` bucket, one int `countByKey` bucket, one inner-join build
-     * table, one int shuffle-hash build bucket, one long shuffle-hash build bucket, one string
-     * shuffle-hash build bucket, the sorted sides of one sort-merge partition, and the sorted
-     * input of one int-pair, long-pair, or string-pair sort. The default is 64 MiB. A broadcast
-     * build over this budget is partitioned with the probe. One partition that is still over it
-     * throws. An int or long shuffle-hash build bucket over it is sub-partitioned and probed one
-     * piece at a time. A string shuffle-hash build bucket over it is sub-partitioned by the
-     * quotient of its hash and the parent width. The estimate includes the dictionary. A piece
+     * bucket, one string `reduceByKey` bucket, one int or long `countByKey` bucket, one inner-join
+     * build table, one int shuffle-hash build bucket, one long shuffle-hash build bucket, one
+     * string shuffle-hash build bucket, the sorted sides of one sort-merge partition, and the
+     * sorted input of one int-pair, long-pair, or string-pair sort. The default is 64 MiB. A
+     * broadcast build over this budget is partitioned with the probe. One partition that is still
+     * over it throws. An int or long shuffle-hash build bucket over it is sub-partitioned and
+     * probed one piece at a time. A string shuffle-hash build bucket over it is sub-partitioned by
+     * the quotient of its hash and the parent width. The estimate includes the dictionary. A piece
      * that is still over it throws. A sort-merge partition over it is written as sorted runs and
      * merged `spillFanIn` at a time. One equal-key group that is still over it throws. An int-pair
      * sort over it writes one sorted run per input partition and merges `spillFanIn` runs at a
@@ -73,10 +74,10 @@ final case class ScarletConf(
      * partition is still sorted in memory. An int `reduceByKey` bucket over it is sub-partitioned
      * and folded one morsel at a time. A long `reduceByKey` bucket and a string `reduceByKey`
      * bucket over it are sub-partitioned and folded the same way. A spilled string bucket may
-     * change first-seen output order. An int `countByKey` bucket over it spills when spill is on:
-     * the post-exchange bucket is sub-partitioned and folded one morsel at a time. Spill off
-     * throws `ClosedKernelRefusal` before a table. A count table that still does not fit throws
-     * `ClosedKernelRefusal`.
+     * change first-seen output order. An int or long `countByKey` bucket over it spills when spill
+     * is on: the post-exchange bucket is sub-partitioned and folded one morsel at a time. The long
+     * estimate charges 8-byte keys. Spill off throws `ClosedKernelRefusal` before a table. A count
+     * table that still does not fit throws `ClosedKernelRefusal`.
      */
     spillBudgetBytes: Long = 64L * 1024L * 1024L,
     /**

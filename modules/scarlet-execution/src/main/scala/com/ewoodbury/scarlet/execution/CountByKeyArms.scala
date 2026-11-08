@@ -1,17 +1,18 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{ColumnarFallback, HashCount}
+import com.ewoodbury.scarlet.columnar.{ColumnarFallback, HashCount, LongHashCount}
 import com.ewoodbury.scarlet.core.Plan
 
-import ColumnarInterpreter.{Columns, interpretAt, pairsOf}
+import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
 
 /**
- * Int `countByKey`.
+ * Int and long `countByKey`.
  *
- * An int-pair stack whose selection steps are defined partial-counts survivor ids, including one
- * row, key, or value filter. The exchange sees dense `(key, count)` partials. A map, a scan, and a
+ * A pair stack whose selection steps are defined partial-counts survivor ids, including one row,
+ * key, or value filter. The exchange sees dense `(key, count)` partials. A map, a scan, and a
  * non-pair child stay on the dense count. The `None` path is the only one that interprets that
- * child. The value column is not read.
+ * child. The value column is not read. A long count publishes [[Columns.LongCounts]]. The stored
+ * count is an `Int`. A string key stays on the row path and does not reach this arm.
  */
 private[execution] object CountByKeyArms:
 
@@ -55,5 +56,21 @@ private[execution] object CountByKeyArms:
                   throw new ColumnarFallback("countByKey source has a null pair component")
             HashCount.byKey(batches, width, workers, batchSize)
         Columns.Pairs(counted)
+      case PhysicalOp.Kind.LongPairs =>
+        val counted = FilterChain.selected(
+          source,
+          child,
+          selectedPartition,
+          preserveAbsence,
+          ordinals,
+        ) match
+          case Some(parts) => LongHashCount.byKeySelected(parts, width, workers, batchSize)
+          case None =>
+            val batches =
+              longPairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals))
+            LongHashCount.byKey(batches, width, workers, batchSize)
+        Columns.LongCounts(counted)
       case other =>
-        throw new IllegalStateException(s"countByKey column is $other, expected int pairs")
+        throw new IllegalStateException(
+          s"countByKey column is $other, expected int or long pairs",
+        )
