@@ -168,6 +168,44 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     assertNarrow(pairs.filterKeys[Int, Int](_ > 0), 2)
   }
 
+  "one filterKeys" should "index int, long, and string pairs and match the row reduce" in {
+    val ints = DistCollection.ofIntPairs(Array(1, 2, 2, 3, 4), Array(10, 4, 6, 1, 8), 1)
+    val intFiltered = ints.filterKeys[Int, Int](key => key % 2 == 0)
+    // Survivors are (2, 4), (2, 6), and (4, 8).
+    columnar {
+      ColumnarPlanner.lower(intFiltered.plan).map(_.shape) shouldBe Some("FilterKey(Scan)")
+      indexOf(intFiltered.plan).map(_.count) shouldBe Vector(3)
+    }
+    val intReduced = intFiltered.reduceByKey[Int, Int](_ + _)
+    val intFound = columnar(intReduced.collect().toMap)
+    intFound shouldBe Map(2 -> 10, 4 -> 8)
+    intFound shouldBe row(intReduced.collect().toMap)
+
+    val longs = DistCollection.ofLongPairs(Array(1L, 2L, -5L, 8L), Array(10L, 4L, 9L, 1L), 1)
+    val longFiltered = longs.filterKeys[Long, Long](key => key > 0L)
+    // Survivors are (1, 10), (2, 4), and (8, 1). The negative key is dropped.
+    columnar {
+      ColumnarPlanner.lower(longFiltered.plan).map(_.shape) shouldBe Some("FilterKey(Scan)")
+      indexOf(longFiltered.plan).map(_.count) shouldBe Vector(3)
+    }
+    val longReduced = longFiltered.reduceByKey[Long, Long](_ + _)
+    val longFound = columnar(longReduced.collect().toMap)
+    longFound shouldBe Map(1L -> 10L, 2L -> 4L, 8L -> 1L)
+    longFound shouldBe row(longReduced.collect().toMap)
+
+    val strings = DistCollection(Seq("red" -> 1, "" -> 2, "no" -> 9, "red" -> 4), 1)
+    val stringFiltered = strings.filterKeys((key: String) => key != "no")
+    // Survivors are ("red", 1), ("", 2), and ("red", 4). "no" is the dropped row.
+    columnar {
+      ColumnarPlanner.lower(stringFiltered.plan).map(_.shape) shouldBe Some("FilterKey(Scan)")
+      indexOf(stringFiltered.plan).map(_.count) shouldBe Vector(3)
+    }
+    val stringReduced = stringFiltered.reduceByKey[String, Int](_ + _)
+    val stringFound = columnar(stringReduced.collect().toMap)
+    stringFound shouldBe Map("red" -> 5, "" -> 2)
+    stringFound shouldBe row(stringReduced.collect().toMap)
+  }
+
   "pair filter count" should "count two filters, one filter, and a row filter" in {
     val pairs = DistCollection(Seq(1 -> 10, 2 -> 20, 3 -> 5, 4 -> 1), 2)
     val both = pairs.filterKeys[Int, Int](_ % 2 == 0).filterValues[Int, Int](_ > 5)
@@ -781,6 +819,10 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     finally
       ScarletConf.set(saved)
       ScarletRuntime.get.shuffle.clear()
+
+  private def indexOf(plan: Plan[_]): Vector[Selected] =
+    val op = ColumnarPlanner.lower(plan).getOrElse(fail("filter did not lower"))
+    FilterChain.selected(plan, op, None, false, Set(0, 1)).getOrElse(fail("no survivor index"))
 
   private def columnar[A](body: => A): A =
     ScarletRuntime.get.shuffle.clear()

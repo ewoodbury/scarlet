@@ -42,9 +42,9 @@ object ColumnarPlanner:
    * Broadcast, sort-merge, and every outer join on long keys stay on the row path. A
    * `(String, Int)` inner join lowers only for an absent hint or a shuffle-hash hint, to
    * [[PhysicalOp.StringHashJoin]]. A null key is dropped. A null value stays on the row path
-   * because the source is not [[PhysicalOp.Kind.StringPairs]]. A stack of two or more key or value
-   * filters on either side scatters that side's survivor index and does not compact. Broadcast,
-   * sort-merge, and every outer join on string keys stay on the row path. The layout is
+   * because the source is not [[PhysicalOp.Kind.StringPairs]]. A key or value filter on either
+   * side, including a stack of one, scatters that side's survivor index and does not compact.
+   * Broadcast, sort-merge, and every outer join on string keys stay on the row path. The layout is
    * [[Layout.StringTriple]]. An explicit sort-merge hint on int pairs lowers to
    * [[PhysicalOp.SortMergeJoin]]. A left, right, or full outer sort-merge hint on int pairs lowers
    * to the matching node. Any other sort-merge returns `None`. A left outer join on int pairs
@@ -82,11 +82,11 @@ object ColumnarPlanner:
    * [[ColumnarFallback]] is its named form. Any other failure, including a boolean column in the
    * element pipeline, propagates.
    *
-   * A pair, long-pair, triple, or string-pair stack of two or more filters decodes
-   * [[FilterChain.selected]] and does not gather. That call interprets the source under the stack,
-   * so this does not interpret the source again. Every other plan decodes
-   * [[ColumnarInterpreter.interpret]]. The result cast is the same erasure boundary as [[tryRun]]:
-   * the decoded partitions have the plan's element type.
+   * A pair, long-pair, triple, or string-pair stack whose selection steps are defined decodes
+   * [[FilterChain.selected]], including a stack of one slot filter, and does not gather. That call
+   * interprets the source under the stack, so this does not interpret the source again. Every
+   * other plan decodes [[ColumnarInterpreter.interpret]]. The result cast is the same erasure
+   * boundary as [[tryRun]]: the decoded partitions have the plan's element type.
    */
   private[execution] def runLowered[A](plan: Plan[A], op: PhysicalOp): Option[Seq[Partition[A]]] =
     try
@@ -140,10 +140,10 @@ object ColumnarPlanner:
    * batch of a partition contributes before the next partition is read. Each returned chunk is
    * appended once, in order.
    *
-   * A partition-preserving pair, long-pair, triple, or string-pair filter stack decodes a prefix
-   * of [[FilterChain.selected]]. The decoder sees `min(remaining, count)` rows, so the rest of the
-   * index is not read and the stack is not gathered. Any other plan uses
-   * [[ColumnarInterpreter.decodePrefixFor]].
+   * A partition-preserving pair, long-pair, triple, or string-pair filter stack, including one
+   * slot filter, decodes a prefix of [[FilterChain.selected]]. The decoder sees
+   * `min(remaining, count)` rows, so the rest of the index is not read and the stack is not
+   * gathered. Any other plan uses [[ColumnarInterpreter.decodePrefixFor]].
    */
   private def prefixOf(plan: Plan[_], op: PhysicalOp, count: Int, n: Int): Seq[Any] =
     val ordinals = ColumnUse.ordinals(plan, op)

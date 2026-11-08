@@ -15,7 +15,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * Int inner shuffle-hash join over a filter selection.
  *
- * A two-filter stack on either side keeps the survivor index. The exchange scatters those rows
+ * A filter stack on either side, including one filter, keeps the survivor index. The exchange scatters those rows
  * and does not slice them. A null value on a dropped row stays on this path. A null value on a
  * selected row, or on a dense side beside a selection, declines. A null key is still dropped.
  */

@@ -103,14 +103,14 @@ class TestSelectionPushdown extends AnyFlatSpec with Matchers with BeforeAndAfte
     queried.groupedSum shouldBe row(queried.groupedSum)
   }
 
-  "a sort after a key filter" should "demand both columns and take the dense path" in {
+  "a sort after a key filter" should "demand both columns and sort the survivor index" in {
     val source = pairs()
     val filtered = source.filterKeys((key: Int) => key > 0)
     val sortPlan = Plan.SortByIntKeyOp(filtered.plan)
     arm()
     val sortOp = ColumnarPlanner.lower(sortPlan).getOrElse(fail("expected a sort"))
 
-    // One filter compacts, then sorts. The demand walk still keeps both ordinals.
+    // One filter sorts the survivor index. The demand walk still keeps both ordinals.
     sortOp.shape shouldBe "SortByIntKey(FilterKey(Scan))"
     ColumnUse.ordinals(sortPlan, sortOp) shouldBe Set(0, 1)
     encodedPairs(source, ColumnUse.ordinals(sortPlan, sortOp)).map(_.columns.length) shouldBe

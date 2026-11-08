@@ -189,7 +189,7 @@ class TestSortByIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.partitioning(above.plan) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.lower(above.plan) shouldBe Option.empty[PhysicalOp]
     collect(above) shouldBe rowCollect(above)
-    // One row filter compacts, then takes the dense rank split.
+    // One row filter sorts the survivor index.
     ColumnarPlanner.lower(below.plan).map(_.shape) shouldBe Some("SortByIntKey(FilterRow(Scan))")
     collect(below) shouldBe rowCollect(below)
     ColumnarPlanner.partitioning(mapped.plan) shouldBe Option.empty[PartitioningInfo]

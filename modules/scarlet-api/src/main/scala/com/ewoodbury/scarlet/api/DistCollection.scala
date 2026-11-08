@@ -244,13 +244,13 @@ final case class DistCollection[A](plan: Plan[A]):
   /**
    * Sorts `(Int, Int)` pairs ascending by column 0. Builds [[Plan.SortByIntKeyOp]] from the
    * key-value plan. Generic [[sortBy]] stays an opaque [[Plan.SortByOp]] and runs on the row path.
-   * A scan of int pairs lowers to a columnar rank split. Two or more int-pair filters sort the
-   * survivor index and do not gather first. A single filter compacts, then sorts. A map or any
-   * other child stays on the row path. A null `Int` key orders as zero and the row is retained.
-   * This matches `sortBy(_._1)` and is not a null-safe ordering. A key or value filter drops a
-   * null in that column before the sort, while the row path unboxes the null to `0`. Over the
-   * budget, with spill on, a selection is materialised and spilled as dense runs. At or under the
-   * budget, and whenever spill is off, the in-memory split runs and writes nothing.
+   * A scan of int pairs lowers to a columnar rank split. An int-pair filter, including a stack of
+   * one, sorts the survivor index and does not gather first. A map or any other child stays on the
+   * row path. A null `Int` key orders as zero and the row is retained. This matches `sortBy(_._1)`
+   * and is not a null-safe ordering. A key or value filter drops a null in that column before the
+   * sort, while the row path unboxes the null to `0`. Over the budget, with spill on, a selection
+   * is materialised and spilled as dense runs. At or under the budget, and whenever spill is off,
+   * the in-memory split runs and writes nothing.
    */
   def sortByIntKey(using ev: A =:= (Int, Int)): DistCollection[(Int, Int)] =
     DistCollection(Plan.SortByIntKeyOp(kvPlan))

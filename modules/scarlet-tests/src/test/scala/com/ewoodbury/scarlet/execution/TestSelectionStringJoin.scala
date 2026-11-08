@@ -15,7 +15,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * String inner shuffle-hash join over a filter selection.
  *
- * A two-filter stack on either side keeps the survivor index. The exchange scatters those rows
+ * A filter stack on either side, including one filter, keeps the survivor index. The exchange scatters those rows
  * and does not slice them. A null key on a selected row is dropped. `""` matches. A null value
  * stays on the row path. The two sides keep independent dictionaries.
  */
@@ -285,7 +285,7 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
     found should contain theSameElementsAs row(joined.collect().toSeq)
   }
 
-  it should "leave a single filter on the dense exchange" in {
+  it should "join one filter through the survivor index" in {
     val calls = new AtomicInteger
     val build = buildPairs.filterValues { (value: Int) =>
       calls.incrementAndGet()
@@ -293,12 +293,12 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
     }
     val joined = build.join(probePairs)
 
-    selectionOf(build.plan) shouldBe None
     shape(joined) shouldBe "StringHashJoin(Exchange(FilterValue(Scan)), Exchange(Scan))"
     val found = joined.collect().toSeq
     val columnarCalls = calls.get()
     found should contain theSameElementsAs row(joined.collect().toSeq)
     columnarCalls shouldBe buildLeft.length + buildRight.length
+    selectionOf(build.plan) shouldBe defined
   }
 
   it should "keep broadcast, sort-merge, and outer joins on the row path" in {

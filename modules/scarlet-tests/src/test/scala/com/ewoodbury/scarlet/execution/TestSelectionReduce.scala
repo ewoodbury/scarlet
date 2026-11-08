@@ -14,7 +14,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * Int `reduceByKey` over a filter selection.
  *
- * A two-filter stack keeps the survivor index and the scan drops those rows. The exchange still
+ * A filter stack, including one filter, keeps the survivor index and the scan drops those rows. The exchange still
  * sees one dense partial per input batch. A null value is dropped, including on a selected row. A
  * null on a row outside the live prefix is not read.
  */

@@ -489,8 +489,8 @@ private[execution] object ColumnarInterpreter:
           PhysicalOp.StringHashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
         ) if JoinLowering.acceptsShuffleHash(strategy) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
-      // A two-filter stack on either side keeps the survivor index. Both dense sides stay on
-      // the batch exchange.
+      // A key or value stack on either side keeps the survivor index, including one filter. Both
+      // dense sides stay on the batch exchange.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       Columns.StringTriples(
         StringJoinArms.inner(
@@ -694,9 +694,10 @@ private[execution] object ColumnarInterpreter:
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
       // preserveAbsence keeps a null key and a null value. A null key still orders as zero.
-      // A two-filter stack sorts survivor ids and does not gather first. The `None` path is the
-      // only one that interprets that child. RankSplitRuns chooses the in-memory split or spilled
-      // runs. Over the budget it materialises the selection. Take decodes the prefix.
+      // A slot-filter stack sorts survivor ids, including one filter, and does not gather first.
+      // The `None` path is the only one that interprets that child. RankSplitRuns chooses the
+      // in-memory split or spilled runs. Over the budget it materialises the selection. Take
+      // decodes the prefix.
       val width = ColumnarPlanner.shuffleWidth
       val workers = ColumnarPlanner.parallelism
       val sorted = FilterChain.selected(

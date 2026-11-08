@@ -14,7 +14,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * String `reduceByKey` over a filter selection.
  *
- * A two-filter stack keeps the survivor index and the scan drops those rows. The exchange still
+ * A filter stack, including one filter, keeps the survivor index and the scan drops those rows. The exchange still
  * sees one dense partial per input batch. A null key is dropped. `""` is kept. A null value on a
  * dropped row is not read. A null value on a selected row follows [[StringHashReduce.reduce]]: a
  * clear value bit is not a null this kernel understands, so the stored int is combined.
@@ -135,11 +135,11 @@ class TestSelectionStringReduce extends AnyFlatSpec with Matchers with BeforeAnd
     reduced.collect().toMap shouldBe row(reduced.collect().toMap)
   }
 
-  it should "leave a single filter on the dense reduce" in {
+  it should "reduce one filter through the survivor index" in {
     val once = source.filterValues((value: Int) => value > 0)
     val reduced = once.reduceByKey[String, Int](_ + _)
 
-    selectedOf(reduced.plan) shouldBe None
+    selectedOf(reduced.plan) shouldBe defined
     reduced.collect().toMap shouldBe row(reduced.collect().toMap)
     reduced.collect().toMap shouldBe Map("" -> 3, "red" -> 10, "blue" -> 7, "no" -> 11)
   }
