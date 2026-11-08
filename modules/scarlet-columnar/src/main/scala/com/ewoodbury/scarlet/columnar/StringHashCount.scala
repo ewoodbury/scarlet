@@ -7,9 +7,9 @@ import com.ewoodbury.scarlet.core.ScarletConf
 /**
  * Counts `(String, _)` rows by dictionary code.
  *
- * A null key is a clear validity bit and is not inserted. `""` is a present key. A dictionary
- * code of `0` is not a null. The value column is never read, so a null int still counts. Each
- * present key contributes one. The stored count is an `Int` and wraps on overflow, the same
+ * A null key is a clear validity bit and is not inserted. `""` is a present key. A dictionary code
+ * of `0` is not a null. The value column is never read, so a null int still counts. Each present
+ * key contributes one. The stored count is an `Int` and wraps on overflow, the same
  * two's-complement wrap [[HashCount]] uses when it adds. The count is not widened to `Long`.
  *
  * One batch has one dictionary, so a code compared in the table is one string.
@@ -41,8 +41,8 @@ object StringHashCount:
 
   /**
    * Count one batch. A null key is skipped. Column 1 is not read. An empty batch publishes an
-   * empty string-pair batch and does not allocate a table. A non-empty batch whose row estimate
-   * is over the budget throws [[ClosedKernelRefusal]] before the table is allocated.
+   * empty string-pair batch and does not allocate a table. A non-empty batch whose row estimate is
+   * over the budget throws [[ClosedKernelRefusal]] before the table is allocated.
    */
   private[scarlet] def utf8(batch: ColumnBatch): ColumnBatch =
     requireKey(batch)
@@ -53,11 +53,11 @@ object StringHashCount:
       countKeys(keys)
 
   /**
-   * [[utf8]] over `rows(from until until)`. A null key in that prefix is skipped. Slots at
-   * `count` and beyond are not read. An empty range publishes an empty string-pair batch. A
-   * non-empty range whose row estimate is over the budget throws [[ClosedKernelRefusal]] before
-   * the table is allocated. The dictionary charged is the batch dictionary, including an entry
-   * the range does not use.
+   * [[utf8]] over `rows(from until until)`. A null key in that prefix is skipped. Slots at `count`
+   * and beyond are not read. An empty range publishes an empty string-pair batch. A non-empty
+   * range whose row estimate is over the budget throws [[ClosedKernelRefusal]] before the table is
+   * allocated. The dictionary charged is the batch dictionary, including an entry the range does
+   * not use.
    */
   private[scarlet] def utf8Selected(selected: Selected, from: Int, until: Int): ColumnBatch =
     require(from >= 0, s"selection start must be >= 0, got $from")

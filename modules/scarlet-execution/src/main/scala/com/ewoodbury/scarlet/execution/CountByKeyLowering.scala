@@ -12,8 +12,8 @@ package com.ewoodbury.scarlet.execution
  * [[PhysicalOp.Kind.StringPairs]] lower. Every other kind, including
  * [[PhysicalOp.Kind.LongCounts]], stays on the row path. With spill off, an input that does not
  * fit the budget throws [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] and the action
- * fails instead of rerunning on rows. With spill on, an over-budget post-exchange bucket spills.
- * A count table that still does not fit throws
+ * fails instead of rerunning on rows. With spill on, an over-budget post-exchange bucket spills. A
+ * count table that still does not fit throws
  * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]].
  */
 private[execution] object CountByKeyLowering:

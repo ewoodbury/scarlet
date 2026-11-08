@@ -118,10 +118,10 @@ private[scarlet] object StringHashCountSpill:
         throw new IllegalStateException(s"spill file holds ${other.length} batches")
 
   /**
-   * Sums the running `(key, count)` partial with the morsel just counted.
-   * [[ColumnBatches.concat]] remaps unlike dictionaries before [[StringHashCount.addCounts]]
-   * compares codes. That kernel refuses when the rows about to be inserted do not fit, before it
-   * allocates the table. The store deletes its files on the way out.
+   * Sums the running `(key, count)` partial with the morsel just counted. [[ColumnBatches.concat]]
+   * remaps unlike dictionaries before [[StringHashCount.addCounts]] compares codes. That kernel
+   * refuses when the rows about to be inserted do not fit, before it allocates the table. The
+   * store deletes its files on the way out.
    */
   private def fold(running: ColumnBatch, partial: ColumnBatch): ColumnBatch =
     StringHashCount.addCounts(ColumnBatches.concat(Vector(running, partial)))

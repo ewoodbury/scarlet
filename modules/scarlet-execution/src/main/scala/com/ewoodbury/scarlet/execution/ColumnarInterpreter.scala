@@ -26,8 +26,8 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * is that fallback too. With spill off, an over-budget int, long, or string `countByKey` throws
  * `ClosedKernelRefusal`, which does not extend `ClassCastException`, so the action fails instead
  * of rerunning on rows. With spill on, an over-budget post-exchange bucket spills. A count table
- * that still does not fit throws `ClosedKernelRefusal`. The long estimate charges 8-byte keys.
- * The string estimate charges dictionary bytes. The running partial is `O(distinct keys)`.
+ * that still does not fit throws `ClosedKernelRefusal`. The long estimate charges 8-byte keys. The
+ * string estimate charges dictionary bytes. The running partial is `O(distinct keys)`.
  */
 @SuppressWarnings(
   Array(

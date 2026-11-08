@@ -1,11 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{
-  ColumnarFallback,
-  HashCount,
-  LongHashCount,
-  StringHashCount,
-}
+import com.ewoodbury.scarlet.columnar.{ColumnarFallback, HashCount, LongHashCount, StringHashCount}
 import com.ewoodbury.scarlet.core.Plan
 
 import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}

@@ -53,9 +53,8 @@ final case class ScarletConf(
      * sort-merge does. A spilled int, long, or string `reduceByKey` bucket may change first-seen
      * output order; compare it as a map. An int, long, or string `countByKey` with this flag off
      * still throws `ClosedKernelRefusal` before a table. The long estimate charges 8-byte keys.
-     * The string estimate charges dictionary bytes. With the flag on, an over-budget
-     * post-exchange bucket spills. A count table that still does not fit throws
-     * `ClosedKernelRefusal`.
+     * The string estimate charges dictionary bytes. With the flag on, an over-budget post-exchange
+     * bucket spills. A count table that still does not fit throws `ClosedKernelRefusal`.
      */
     spillEnabled: Boolean = false,
     /**
