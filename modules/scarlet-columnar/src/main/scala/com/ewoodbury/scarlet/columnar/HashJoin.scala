@@ -233,6 +233,11 @@ object HashJoin:
       Validity.prefixValid(capacity, rows).words,
     )
 
+  /**
+   * `firstAbsence` follows the first value array and `secondAbsence` the second. That order is the
+   * array order, which an outer probe passes as `(probe, build)`. The inner path passes neither,
+   * and this does not allocate a bitmap for it.
+   */
   private def publish(
       keys: Array[Int],
       buildValues: Array[Int],
@@ -242,16 +247,31 @@ object HashJoin:
       capacity: Int,
       rows: Int,
       keyWords: Array[Long],
+      firstAbsence: Option[Array[Long]] = None,
+      secondAbsence: Option[Array[Long]] = None,
   ): ColumnBatch =
     new ColumnBatch(
       Vector(LogicalType.Int32, LogicalType.Int32, LogicalType.Int32),
       Vector(
         Int32Column.of(keys, Validity.fromWords(keyWords, capacity), rows),
-        Int32Column.of(buildValues, Validity.fromWords(buildWords, capacity), rows),
-        Int32Column.of(probeValues, Validity.fromWords(probeWords, capacity), rows),
+        valueColumn(buildValues, buildWords, firstAbsence, capacity, rows),
+        valueColumn(probeValues, probeWords, secondAbsence, capacity, rows),
       ),
       rows,
     )
+
+  private def valueColumn(
+      values: Array[Int],
+      words: Array[Long],
+      absence: Option[Array[Long]],
+      capacity: Int,
+      rows: Int,
+  ): Int32Column =
+    val validity = Validity.fromWords(words, capacity)
+    absence match
+      case Some(bits) if Validity.anySet(bits, rows) =>
+        Int32Column.withAbsence(values, validity, Validity.fromWords(bits, capacity), rows)
+      case _ => Int32Column.of(values, validity, rows)
 
   private def doubled(capacity: Int): Int =
     if (capacity >= ColumnHash.MaxCapacity) then
@@ -266,7 +286,7 @@ object HashJoin:
    * Build table shared by every probe. `probe` writes `(key, probe value, build value)`. An empty
    * build returns an empty batch when `preserveProbe` is false. `preserveProbe` keeps the probe
    * side: each probe-side row with no partner is emitted, including a null probe key, and the
-   * build value's validity is clear. That clear bit is absence. A null value is not absence. A
+   * build value's absence bit is set. Its validity bit stays clear. A null value is not absence. A
    * null build key is not inserted, so it does not match probe key 0. The chain walk is
    * newest-first, which is a kernel detail.
    */
@@ -309,9 +329,9 @@ object HashJoin:
     def probe(side: JoinSide): ColumnBatch = probe(side, preserveProbe = false)
 
     /**
-     * `preserveProbe` appends each probe-side row with no partner. The build value column's
-     * validity is clear on that row. That clear bit is absence. A null probe key does not match
-     * and is kept only when `preserveProbe` is set. A null value is not absence.
+     * `preserveProbe` appends each probe-side row with no partner. The build value's absence bit
+     * is set on that row, and its validity bit stays clear. A null probe key does not match and is
+     * kept only when `preserveProbe` is set. A null value is not absence.
      */
     def probe(side: JoinSide, preserveProbe: Boolean): ColumnBatch =
       val probeKeys = ColumnHash.int32At(side.batch, side.key)
@@ -336,6 +356,8 @@ object HashJoin:
       var keyWords = Validity.allocate(outCapacity)
       var probeWords = Validity.allocate(outCapacity)
       var buildWords = Validity.allocate(outCapacity)
+      var buildAbsence =
+        if (preserveProbe) then Some(Validity.allocate(outCapacity)) else None
       val probeValueValues = probeValues.values
       val probeValueWords = probeValues.validity.words
       val probeKeyValues = probeKeys.values
@@ -350,6 +372,7 @@ object HashJoin:
         keyWords = growWords(keyWords, outCapacity)
         probeWords = growWords(probeWords, outCapacity)
         buildWords = growWords(buildWords, outCapacity)
+        buildAbsence = buildAbsence.map(bits => growWords(bits, outCapacity))
 
       def append(
           key: Int,
@@ -379,6 +402,7 @@ object HashJoin:
           0,
           false,
         )
+        buildAbsence.foreach(bits => Validity.setBit(bits, filled - 1))
 
       var row = 0
       while (row < probeRows) {
@@ -416,6 +440,19 @@ object HashJoin:
       if (filled == 0) then ColumnBatches.emptyIntJoin
       // publish takes its value arrays as (first, second). Passing probe first writes
       // (key, probe, build), which the broadcast path turns into (key, left, right).
+      // The missing build value is that second column. An inner probe passes no absence words.
+      else if (preserveProbe) then
+        publish(
+          outKeys,
+          outProbe,
+          outBuild,
+          probeWords,
+          buildWords,
+          outCapacity,
+          filled,
+          keyWords,
+          secondAbsence = buildAbsence,
+        )
       else
         publish(
           outKeys,
@@ -481,6 +518,7 @@ object HashJoin:
       var keyWords = Validity.allocate(outCapacity)
       var probeWords = Validity.allocate(outCapacity)
       var buildWords = Validity.allocate(outCapacity)
+      var buildAbsence = Validity.allocate(outCapacity)
       val probeValueValues = probeValues.values
       val probeValueWords = probeValues.validity.words
       val probeKeyValues = probeKeys.values
@@ -495,6 +533,7 @@ object HashJoin:
         keyWords = growWords(keyWords, outCapacity)
         probeWords = growWords(probeWords, outCapacity)
         buildWords = growWords(buildWords, outCapacity)
+        buildAbsence = growWords(buildAbsence, outCapacity)
 
       def append(
           key: Int,
@@ -524,6 +563,7 @@ object HashJoin:
           0,
           false,
         )
+        Validity.setBit(buildAbsence, filled - 1)
 
       var row = 0
       while (row < probeRows) {
@@ -568,6 +608,7 @@ object HashJoin:
           outCapacity,
           filled,
           keyWords,
+          secondAbsence = Some(buildAbsence),
         )
 
     private def writeUnmatched(matched: Array[Long], clear: Int): ColumnBatch =
@@ -577,6 +618,7 @@ object HashJoin:
       val keyWords = Validity.allocate(clear)
       val probeWords = Validity.allocate(clear)
       val buildWords = Validity.allocate(clear)
+      val probeAbsence = Validity.allocate(clear)
       var filled = 0
       var row = 0
       while (row < rows) {
@@ -586,6 +628,8 @@ object HashJoin:
           if (Validity.isSet(buildValueWords, row)) then
             outBuild(filled) = buildValues(row)
             Validity.setBit(buildWords, filled)
+          // The probe value is the missing side. The build value stays present.
+          Validity.setBit(probeAbsence, filled)
           filled += 1
         row += 1
       }
@@ -598,6 +642,7 @@ object HashJoin:
         clear,
         filled,
         keyWords,
+        firstAbsence = Some(probeAbsence),
       )
 
   private object Int32Build:
@@ -671,8 +716,9 @@ object HashJoin:
       (present, Some(carried))
 
   /**
-   * One `(key, absent probe, build value)` row per null-key build row. The key bit and the probe
-   * bit stay clear. The build value bit is copied. These rows are not inserted.
+   * One `(key, absent probe, build value)` row per null-key build row. The key bit stays clear.
+   * The probe value's absence bit is set and its validity bit stays clear. The build value bit is
+   * copied. These rows are not inserted.
    */
   private[scarlet] def emitNullBuildKeys(batch: ColumnBatch): ColumnBatch =
     val keys = ColumnHash.int32At(batch, 0)
@@ -687,10 +733,12 @@ object HashJoin:
       val keyWords = Validity.allocate(count)
       val probeWords = Validity.allocate(count)
       val buildWords = Validity.allocate(count)
+      val probeAbsence = Validity.allocate(count)
       var row = 0
       while (row < count) {
         if (Validity.isSet(keys.validity.words, row)) then Validity.setBit(keyWords, row)
         if (Validity.isSet(values.validity.words, row)) then Validity.setBit(buildWords, row)
+        Validity.setBit(probeAbsence, row)
         row += 1
       }
       publish(
@@ -702,6 +750,7 @@ object HashJoin:
         count,
         count,
         keyWords,
+        firstAbsence = Some(probeAbsence),
       )
 
   /**

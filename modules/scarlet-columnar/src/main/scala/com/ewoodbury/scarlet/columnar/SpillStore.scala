@@ -402,6 +402,8 @@ private object SpillCodec:
 
   private def writeColumn(channel: FileChannel, crc: CRC32, column: Column): Long = column match
     case int32: Int32Column =>
+      if (int32.absence.isDefined) then
+        throw new IllegalArgumentException("an absent column cannot be spilled")
       writeValidity(channel, crc, int32.validity, int32.length) +
         writeInts(channel, crc, int32.values, int32.length)
     case int64: Int64Column =>

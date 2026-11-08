@@ -34,12 +34,23 @@ object Column:
       s"validity capacity ${validity.capacity} does not match value capacity $valueCapacity",
     )
 
+/**
+ * An `Int32` column. `absence` is an outer-join mark: this side has no partner. `None` means no
+ * row is absent. A set absence bit is not a null value. The validity bit still says whether an int
+ * is stored.
+ */
 final class Int32Column private (
     val values: Array[Int],
     val validity: Validity,
     val length: Int,
+    private[columnar] val absence: Option[Validity],
 ) extends Column:
   def logicalType: LogicalType = LogicalType.Int32
+
+  /** True when row `row` has no join partner. Bounds match [[isValid]]. */
+  def isAbsent(row: Int): Boolean =
+    require(row >= 0 && row < length, s"row $row outside column length $length")
+    absence.exists(_.isValid(row))
 
 object Int32Column:
 
@@ -58,10 +69,37 @@ object Int32Column:
     }
     of(buffer, Validity.pack(present.length, row => present(row)), present.length)
 
-  /** Retains `values`. Capacity may exceed `length`. */
+  /** Retains `values`. Capacity may exceed `length`. No row is absent. */
   def of(values: Array[Int], validity: Validity, length: Int): Int32Column =
+    of(values, validity, None, length)
+
+  /**
+   * Retains `values`. `absence` follows the same capacity rule as `validity`. When no bit in
+   * `0 until length` is set, the column stores no bitmap, so a fully matched column stays on the
+   * path that has no absence word.
+   */
+  private[columnar] def withAbsence(
+      values: Array[Int],
+      validity: Validity,
+      absence: Validity,
+      length: Int,
+  ): Int32Column =
     Column.check(length, values.length, validity)
-    new Int32Column(values, validity, length)
+    require(
+      absence.capacity == values.length,
+      s"absence capacity ${absence.capacity} does not match value capacity ${values.length}",
+    )
+    val stored = if (Validity.anySet(absence.words, length)) then Some(absence) else None
+    of(values, validity, stored, length)
+
+  private def of(
+      values: Array[Int],
+      validity: Validity,
+      absence: Option[Validity],
+      length: Int,
+  ): Int32Column =
+    Column.check(length, values.length, validity)
+    new Int32Column(values, validity, length, absence)
 
 final class Int64Column private (
     val values: Array[Long],

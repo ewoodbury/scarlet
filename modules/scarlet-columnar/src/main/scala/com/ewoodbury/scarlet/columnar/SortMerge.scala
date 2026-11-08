@@ -19,12 +19,12 @@ package com.ewoodbury.scarlet.columnar
  * partition keeps its index, which is what makes the two sides line up. Each pair is one batch.
  *
  * Outer joins use a separate walk. A null key is not sorted, so it cannot match key `0`. A
- * preserved null key is emitted with a clear bit on the key column. The other value's clear bit is
- * absence. A clear value bit means absence, so both value columns must be fully present.
- * [[leftOuter]], [[rightOuter]], and [[fullOuter]] fail when a value is null, rather than
- * publishing that null as absence. [[rightOuter]] is [[leftOuter]] on swapped inputs, with the
- * value columns swapped back. [[fullOuter]] emits a group that exists on only one side, and emits
- * both sides when one of them is empty.
+ * preserved null key is emitted with a clear bit on the key column. The other value's absence bit
+ * is set, and its validity bit stays clear. A null value is not absence, so both value columns
+ * must be fully present. [[leftOuter]], [[rightOuter]], and [[fullOuter]] fail when a value is
+ * null, rather than publishing that null as absence. [[rightOuter]] is [[leftOuter]] on swapped
+ * inputs, with the value columns swapped back. [[fullOuter]] emits a group that exists on only one
+ * side, and emits both sides when one of them is empty.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object SortMerge:
@@ -56,8 +56,9 @@ object SortMerge:
 
   /**
    * Left outer join of one co-located partition. A null key does not match. Each left row whose
-   * key is missing on the right is emitted once, including a null key, and the right value's bit
-   * is clear. A right null key is dropped. A clear key bit is a null key. The payload is not read.
+   * key is missing on the right is emitted once, including a null key, and the right value's
+   * absence bit is set. A right null key is dropped. A clear key bit is a null key. The payload is
+   * not read.
    */
   def leftOuter(left: ColumnBatch, right: ColumnBatch): ColumnBatch =
     outer(left, right, preserveRight = false)
@@ -289,7 +290,7 @@ object SortMerge:
       right: ColumnBatch,
       preserveRight: Boolean,
   ): ColumnBatch =
-    // A clear value bit is absence. A null value must not be published as that bit.
+    // Absence is a missing partner, not a null value. A null value must not reach this walk.
     require(
       valuesPresent(left) && valuesPresent(right),
       "an outer join needs fully present value columns",
@@ -363,6 +364,8 @@ object SortMerge:
     val keyWords = Validity.allocate(rows)
     val leftWords = Validity.allocate(rows)
     val rightWords = Validity.allocate(rows)
+    val leftAbsence = Validity.allocate(rows)
+    val rightAbsence = Validity.allocate(rows)
     var leftAt = 0
     var rightAt = 0
     var filled = 0
@@ -378,18 +381,22 @@ object SortMerge:
       keys(filled) = left.keys(leftRow)
       Validity.setBit(keyWords, filled)
       copyPresent(left.values, left.valueWords, leftRow, leftValues, leftWords, filled)
+      Validity.setBit(rightAbsence, filled)
       filled += 1
 
     def emitRightOnly(rightRow: Int): Unit =
       keys(filled) = right.keys(rightRow)
       Validity.setBit(keyWords, filled)
       copyPresent(right.values, right.valueWords, rightRow, rightValues, rightWords, filled)
+      Validity.setBit(leftAbsence, filled)
       filled += 1
 
     def emitNull(nulls: NullKeys, index: Int, onLeft: Boolean): Unit =
       val destValues = if (onLeft) then leftValues else rightValues
       val destWords = if (onLeft) then leftWords else rightWords
+      val otherAbsence = if (onLeft) then rightAbsence else leftAbsence
       copyPresent(nulls.values, nulls.valueWords, index, destValues, destWords, filled)
+      Validity.setBit(otherAbsence, filled)
       filled += 1
 
     while (leftAt < left.length && rightAt < right.length) {
@@ -461,11 +468,22 @@ object SortMerge:
       joinSchema,
       Vector(
         Int32Column.of(keys, Validity.fromWords(keyWords, rows), rows),
-        Int32Column.of(leftValues, Validity.fromWords(leftWords, rows), rows),
-        Int32Column.of(rightValues, Validity.fromWords(rightWords, rows), rows),
+        outerValue(leftValues, leftWords, leftAbsence, rows),
+        outerValue(rightValues, rightWords, rightAbsence, rows),
       ),
       rows,
     )
+
+  private def outerValue(
+      values: Array[Int],
+      words: Array[Long],
+      absence: Array[Long],
+      rows: Int,
+  ): Int32Column =
+    val validity = Validity.fromWords(words, rows)
+    if (Validity.anySet(absence, rows)) then
+      Int32Column.withAbsence(values, validity, Validity.fromWords(absence, rows), rows)
+    else Int32Column.of(values, validity, rows)
 
   private def copyPresent(
       values: Array[Int],

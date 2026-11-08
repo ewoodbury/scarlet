@@ -650,7 +650,10 @@ private[scarlet] object SortMergeRuns:
       )
       (presentBatch, nullBatch)
 
-  /** One outer row per null-key pair. The key bit stays clear. The other value is absent. */
+  /**
+   * One outer row per null-key pair. The key bit stays clear. The other value's absence bit is set
+   * and its validity bit stays clear.
+   */
   private def nullSideRows(nullPairs: ColumnBatch, onLeft: Boolean): ColumnBatch =
     if (nullPairs.length == 0) then ColumnBatches.emptyIntJoin
     else
@@ -662,6 +665,7 @@ private[scarlet] object SortMergeRuns:
       val keyWords = Validity.allocate(count)
       val leftWords = Validity.allocate(count)
       val rightWords = Validity.allocate(count)
+      val absentWords = Validity.allocate(count)
       val valueWords = values.validity.words
       var row = 0
       while (row < count) {
@@ -672,14 +676,24 @@ private[scarlet] object SortMergeRuns:
           else
             rightValues(row) = values.values(row)
             Validity.setBit(rightWords, row)
+        Validity.setBit(absentWords, row)
         row += 1
       }
+      val leftValidity = Validity.fromWords(leftWords, count)
+      val rightValidity = Validity.fromWords(rightWords, count)
+      val absent = Validity.fromWords(absentWords, count)
+      val leftColumn =
+        if (onLeft) then Int32Column.of(leftValues, leftValidity, count)
+        else Int32Column.withAbsence(leftValues, leftValidity, absent, count)
+      val rightColumn =
+        if (onLeft) then Int32Column.withAbsence(rightValues, rightValidity, absent, count)
+        else Int32Column.of(rightValues, rightValidity, count)
       new ColumnBatch(
         joinSchema,
         Vector(
           Int32Column.of(keys, Validity.fromWords(keyWords, count), count),
-          Int32Column.of(leftValues, Validity.fromWords(leftWords, count), count),
-          Int32Column.of(rightValues, Validity.fromWords(rightWords, count), count),
+          leftColumn,
+          rightColumn,
         ),
         count,
       )
@@ -832,6 +846,8 @@ private[scarlet] object SortMergeRuns:
     private var rightValues: Array[Int] = new Array[Int](8)
     private var leftWords: Array[Long] = Validity.allocate(8)
     private var rightWords: Array[Long] = Validity.allocate(8)
+    private var leftAbsence: Array[Long] = Validity.allocate(8)
+    private var rightAbsence: Array[Long] = Validity.allocate(8)
     private var count: Int = 0
 
     def cross(key: Int, left: GroupRows, right: GroupRows): Unit =
@@ -859,7 +875,10 @@ private[scarlet] object SortMergeRuns:
         leftRow += 1
       }
 
-    /** One preserved row per group row. The other value's bit stays clear. The key is present. */
+    /**
+     * One preserved row per group row. The other value's absence bit is set and its validity bit
+     * stays clear. The key is present. A cross does not mark absence.
+     */
     def preserve(key: Int, rows: GroupRows, onLeft: Boolean): Unit =
       val next = count.toLong + rows.length.toLong
       if (next > Int.MaxValue.toLong) then
@@ -874,8 +893,10 @@ private[scarlet] object SortMergeRuns:
             Validity.setBit(leftWords, count)
           else leftValues(count) = 0
           rightValues(count) = 0
+          Validity.setBit(rightAbsence, count)
         else
           leftValues(count) = 0
+          Validity.setBit(leftAbsence, count)
           if (rows.presentAt(row)) then
             rightValues(count) = rows.valueAt(row)
             Validity.setBit(rightWords, count)
@@ -891,15 +912,22 @@ private[scarlet] object SortMergeRuns:
           joinSchema,
           Vector(
             Int32Column.of(Arrays.copyOf(keys, count), Validity.allValid(count), count),
-            Int32Column.of(Arrays.copyOf(leftValues, count), validityOf(leftWords, count), count),
-            Int32Column.of(
-              Arrays.copyOf(rightValues, count),
-              validityOf(rightWords, count),
-              count,
-            ),
+            outputColumn(leftValues, leftWords, leftAbsence),
+            outputColumn(rightValues, rightWords, rightAbsence),
           ),
           count,
         )
+
+    private def outputColumn(
+        values: Array[Int],
+        words: Array[Long],
+        absence: Array[Long],
+    ): Int32Column =
+      val copied = Arrays.copyOf(values, count)
+      val validity = validityOf(words, count)
+      if (Validity.anySet(absence, count)) then
+        Int32Column.withAbsence(copied, validity, validityOf(absence, count), count)
+      else Int32Column.of(copied, validity, count)
 
     private def ensure(needed: Int): Unit =
       val cap = keys.length
@@ -914,6 +942,8 @@ private[scarlet] object SortMergeRuns:
         rightValues = Arrays.copyOf(rightValues, next)
         leftWords = growWords(leftWords, count, next)
         rightWords = growWords(rightWords, count, next)
+        leftAbsence = growWords(leftAbsence, count, next)
+        rightAbsence = growWords(rightAbsence, count, next)
 
     private def growWords(words: Array[Long], live: Int, capacity: Int): Array[Long] =
       val copied = Validity.allocate(capacity)

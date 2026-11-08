@@ -141,7 +141,7 @@ class TestFullOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     ColumnarPlanner.partitioning(plan).map(_.distribution) shouldBe Some(Distribution.Unknown(5))
   }
 
-  it should "record absence in either value column" in {
+  it should "record an absence bit on either value" in {
     val probe = BatchCodec.nullableIntPairs(
       Seq((Some(1), Some(10)), (Some(2), Some(11)), (None, Some(7))),
     )
@@ -155,16 +155,45 @@ class TestFullOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
       ScarletConf.get.broadcastBuildBudgetBytes,
     )
     val rows = parts.flatMap(validityRows)
-    rows.find(_.key.contains(1)).getOrElse(fail("missing matched row")) shouldBe
-      ValidityRow(Some(1), leftValid = true, rightValid = true)
-    rows.find(_.key.contains(2)).getOrElse(fail("missing left-only row")) shouldBe
-      ValidityRow(Some(2), leftValid = true, rightValid = false)
-    rows.find(_.key.contains(4)).getOrElse(fail("missing right-only row")) shouldBe
-      ValidityRow(Some(4), leftValid = false, rightValid = true)
-    rows.find(row => row.key.isEmpty && row.leftValid).getOrElse(fail("missing null probe key")) shouldBe
-      ValidityRow(None, leftValid = true, rightValid = false)
-    rows.find(row => row.key.isEmpty && !row.leftValid).getOrElse(fail("missing null build key")) shouldBe
-      ValidityRow(None, leftValid = false, rightValid = true)
+    rows.find(_.key.contains(1)).getOrElse(fail("missing matched row")) shouldBe ValidityRow(
+      Some(1),
+      leftValid = true,
+      rightValid = true,
+      leftAbsent = false,
+      rightAbsent = false,
+    )
+    rows.find(_.key.contains(2)).getOrElse(fail("missing left-only row")) shouldBe ValidityRow(
+      Some(2),
+      leftValid = true,
+      rightValid = false,
+      leftAbsent = false,
+      rightAbsent = true,
+    )
+    rows.find(_.key.contains(4)).getOrElse(fail("missing right-only row")) shouldBe ValidityRow(
+      Some(4),
+      leftValid = false,
+      rightValid = true,
+      leftAbsent = true,
+      rightAbsent = false,
+    )
+    rows.find(row => row.key.isEmpty && row.leftValid).getOrElse(
+      fail("missing null probe key"),
+    ) shouldBe ValidityRow(
+      None,
+      leftValid = true,
+      rightValid = false,
+      leftAbsent = false,
+      rightAbsent = true,
+    )
+    rows.find(row => row.key.isEmpty && !row.leftValid).getOrElse(
+      fail("missing null build key"),
+    ) shouldBe ValidityRow(
+      None,
+      leftValid = false,
+      rightValid = true,
+      leftAbsent = true,
+      rightAbsent = false,
+    )
     rows.exists(row => !row.leftValid && !row.rightValid) shouldBe false
     assertBothOptional(parts)
   }
@@ -181,9 +210,27 @@ class TestFullOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     )
     val rows = parts.flatMap(validityRows)
     rows should contain theSameElementsAs Seq(
-      ValidityRow(Some(1), leftValid = false, rightValid = true),
-      ValidityRow(Some(4), leftValid = false, rightValid = true),
-      ValidityRow(None, leftValid = false, rightValid = true),
+      ValidityRow(
+        Some(1),
+        leftValid = false,
+        rightValid = true,
+        leftAbsent = true,
+        rightAbsent = false,
+      ),
+      ValidityRow(
+        Some(4),
+        leftValid = false,
+        rightValid = true,
+        leftAbsent = true,
+        rightAbsent = false,
+      ),
+      ValidityRow(
+        None,
+        leftValid = false,
+        rightValid = true,
+        leftAbsent = true,
+        rightAbsent = false,
+      ),
     )
     parts.flatMap(batch => canonical(BatchCodec.decodeOuter(batch, AbsentSide.Both))) should
       contain theSameElementsAs Seq(
@@ -369,8 +416,11 @@ class TestFullOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
         home(1) shouldBe Seq(Math.floorMod(1, 4))
         home(5) shouldBe Seq(Math.floorMod(5, 4))
         located.find(_._2.key.contains(0)).map(_._2.leftValid) shouldBe Some(true)
+        located.find(_._2.key.contains(0)).map(_._2.leftAbsent) shouldBe Some(false)
         located.find(_._2.key.contains(1)).map(_._2.leftValid) shouldBe Some(false)
+        located.find(_._2.key.contains(1)).map(_._2.leftAbsent) shouldBe Some(true)
         located.find(_._2.key.contains(1)).map(_._2.rightValid) shouldBe Some(true)
+        located.find(_._2.key.contains(1)).map(_._2.rightAbsent) shouldBe Some(false)
       }
     }
   }
@@ -805,15 +855,28 @@ class TestFullOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
       case ColumnarInterpreter.Columns.Outer(parts, absent) => (parts, absent)
       case other => fail(s"expected an outer batch, got $other")
 
-  private case class ValidityRow(key: Option[Int], leftValid: Boolean, rightValid: Boolean)
+  private case class ValidityRow(
+      key: Option[Int],
+      leftValid: Boolean,
+      rightValid: Boolean,
+      leftAbsent: Boolean,
+      rightAbsent: Boolean,
+  )
 
   private def validityRows(batch: ColumnBatch): Seq[ValidityRow] =
     val keys = BatchColumns.int32(batch, 0)
     val left = BatchColumns.int32(batch, 1)
     val right = BatchColumns.int32(batch, 2)
     (0 until batch.length).map { row =>
+      keys.isAbsent(row) shouldBe false
       val key = if (keys.isValid(row)) Some(keys.values(row)) else None
-      ValidityRow(key, left.isValid(row), right.isValid(row))
+      ValidityRow(
+        key,
+        left.isValid(row),
+        right.isValid(row),
+        left.isAbsent(row),
+        right.isAbsent(row),
+      )
     }
 
   @SuppressWarnings(Array("org.wartremover.warts.Any"))

@@ -93,6 +93,27 @@ object Validity:
       }
       dense
 
+  /**
+   * True when any row in `[0, live)` is set. `live == 0` is false. Bits at index `live` and beyond
+   * are ignored, so spare capacity past the live prefix does not count.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private[columnar] def anySet(words: Array[Long], live: Int): Boolean =
+    if (live == 0) then false
+    else
+      val fullWords = liveWords(live)
+      var index = 0
+      var found = false
+      while (index < fullWords && !found) {
+        if (words(index) != 0L) then found = true
+        index += 1
+      }
+      if (found) then true
+      else
+        val tail = tailBits(live)
+        if (tail == 0) then false
+        else (words(fullWords) & tailMask(tail)) != 0L
+
   /** Row is in range and `words` covers it. Kernels use this on the hot path. */
   private[columnar] inline def isSet(words: Array[Long], row: Int): Boolean =
     ((words(wordIndex(row)) >>> bitOffset(row)) & 1L) != 0L

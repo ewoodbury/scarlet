@@ -125,7 +125,8 @@ private[execution] object PipelineJoinArms:
         "a null value on a left outer join stays on the row path",
       )
     // The kernel writes (key, probe value, build value). The probe side is the left input, so
-    // the batch is already (key, left, right). A clear build-value bit is absence.
+    // the batch is already (key, left, right). The build value's absence bit is set and its
+    // validity bit stays clear.
     val joined = ColumnPipeline.broadcastLeftOuterJoin(
       probe,
       build,
@@ -160,7 +161,8 @@ private[execution] object PipelineJoinArms:
         "a null value on a left outer join stays on the row path",
       )
     // The kernel writes (key, probe value, build value). The probe side is the left input, so
-    // the batch is already (key, left, right). A clear build-value bit is absence.
+    // the batch is already (key, left, right). The build value's absence bit is set and its
+    // validity bit stays clear.
     val joined = ColumnPipeline.hashLeftOuterJoin(
       probe,
       build,
@@ -375,8 +377,8 @@ private[execution] object PipelineJoinArms:
   /**
    * Run the left-outer kernel with `probe` as the right input and `build` as the left input, then
    * restore `(key, left, right)`. The kernel writes `(key, probe value, build value)`, so the
-   * value columns arrive as `(right, left)`. The cleared build-value bit moves with the left
-   * column. That bit is absence. A null value is not absence, and this path cannot represent one.
+   * value columns arrive as `(right, left)`. The build value's absence bit moves with the left
+   * column. A null value is not absence, and this path cannot represent one.
    */
   private def rightOuter(
       probe: Vector[ColumnBatch],
@@ -392,8 +394,8 @@ private[execution] object PipelineJoinArms:
 
   /**
    * Run a full outer join. The kernel writes `(key, probe value, build value)`. The probe is the
-   * left input, so the batch is already `(key, left, right)`. A clear bit on either value column
-   * is absence. A null value is not absence, and this path cannot represent one.
+   * left input, so the batch is already `(key, left, right)`. Either value's absence bit marks a
+   * missing partner. A null value is not absence, and this path cannot represent one.
    */
   private def fullOuter(
       probe: Vector[ColumnBatch],
