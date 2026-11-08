@@ -21,6 +21,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  */
 class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
+  private final case class Label(name: String, n: Int)
+
   private val original = ScarletConf.get
   private val accent = "é"
   private val decomposed = "e\u0301"
@@ -187,6 +189,25 @@ class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
     ColumnarPlanner.tryRun(mapped.plan) shouldBe None
     ColumnarPlanner.tryTake(byKey.plan, 1) shouldBe None
     columnar(kept) shouldBe rowOf(kept)
+  }
+
+  it should "project the values a value filter kept, including after it drops a null int" in {
+    val present = pairs(Seq("red" -> 1, "green" -> -2, "gold" -> 4))
+    val presentValues = present.filterValues((value: Int) => value > 0).values
+    val withNull = pairs(Seq("red" -> 1, erasedNullValue("blue"), "green" -> -2, "gold" -> 4))
+    val dropped = withNull.filterValues((value: Int) => value > 0).values
+
+    demand(presentValues) shouldBe Set(1)
+    columnar(presentValues) shouldBe rowOf(presentValues)
+    demand(dropped) shouldBe Set(1)
+    ColumnarPlanner.lower(dropped.plan).map(_.shape) shouldBe Some("Value(FilterValue(Scan))")
+    columnar(dropped) shouldBe Seq(1, 4)
+  }
+
+  it should "leave a two-field case class on the row path" in {
+    val labels = DistCollection(Seq(Label("red", 1), Label("blue", 2)), 1)
+
+    ColumnarPlanner.lower(labels.plan) shouldBe None
   }
 
   it should "lower reduceByKey, groupByKey, and an inner join, and keep distinct and a string mapValues on the row path" in {

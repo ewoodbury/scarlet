@@ -11,8 +11,8 @@ import ColumnarInterpreter.Columns
  * A batch is a UTF-8 dictionary key and an int value. A null key is a clear bit on the key and
  * stays in the batch. A null int is a clear value bit and is not stored as zero. `mapValues`
  * rewrites column 1 and copies both bits, so a null int stays null and the new value does not
- * inherit a clear key bit. A value projection of a null int declines, including one after a filter
- * or `mapValues` that kept the null.
+ * inherit a clear key bit. A value projection of a kept null int declines. A value filter drops a
+ * clear bit first, so that projection stays columnar when every survivor is present.
  *
  * [[encoded]] may publish a one-column batch when demand narrowed the read to the key or the
  * value. A [[PhysicalOp.Column]] or the filter path consumes that shape; a column wraps the batch
@@ -156,16 +156,9 @@ private[execution] object StringPairWalk:
     BatchCodec.strings(rows.map(pair => pair._1))
 
   private def valuesOnly(rows: Iterable[(String, Int)]): ColumnBatch =
-    BatchCodec.ints(rows.map(presentInt))
-
-  /**
-   * A present int. A null int declines: [[BatchCodec.ints]] would unbox it to zero.
-   */
-  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
-  private def presentInt(pair: (String, Int)): Int =
-    pair.productElement(1) match
-      case value: Int => value
-      case _ => throw new ColumnarFallback("string pair value is null")
+    // A null int stays a clear bit. [[BatchCodec.ints]] would store it as zero. The projection
+    // declines later if that bit is still live.
+    BatchCodec.stringIntValues(rows)
 
   @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
   private def rowsOf(partition: Partition[_]): Iterable[(String, Int)] =

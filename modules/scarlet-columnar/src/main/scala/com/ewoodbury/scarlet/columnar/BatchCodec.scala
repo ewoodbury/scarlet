@@ -157,6 +157,27 @@ object BatchCodec:
     )
 
   /**
+   * The value column of a `(String, Int)` scan. A null int is a clear bit, not zero. A fully
+   * present column stays all-valid. The column does not retain the input.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Var",
+    ),
+  )
+  def stringIntValues(values: Iterable[(String, Int)]): ColumnBatch =
+    val count = values.size
+    val ints = new Array[Int](count)
+    val rows = values.iterator
+    var row = 0
+    var absent = Option.empty[Array[Boolean]]
+    while (row < count) {
+      absent = writeStringInt(rows.next(), ints, absent, count, row)
+      row += 1
+    }
+    batch(Int32Column.of(ints, componentValidity(absent, count), count))
+
+  /**
    * Writes a present int value. A null cell marks the row absent.
    *
    * Named erasure boundary. The cell is the erased field of a `(String, Int)`. `productElement`

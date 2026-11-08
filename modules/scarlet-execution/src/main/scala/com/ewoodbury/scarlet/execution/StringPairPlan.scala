@@ -47,8 +47,9 @@ private[execution] object StringPairPlan:
   private def stringIntPair(value: Any): Boolean =
     nullKey(value) || presentKey(value)
 
+  /** A tuple, including one whose int is null. Another two-field product is not this pair. */
   private def pair(value: Any): Option[Product] = value match
-    case product: Product if product.productArity == 2 => Some(product)
+    case tuple: Tuple2[?, ?] => Some(tuple)
     case _ => None
 
   private def absent(cell: Any): Boolean = cell match
