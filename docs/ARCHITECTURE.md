@@ -98,7 +98,7 @@ null. A null string key orders as `""` and stays null. Shape strings are exact.
 | Int `countByKey` on `(Int, V)`. The exchange drops a null key. The value column is never read, so a null value still counts. The stored count is an `Int` and wraps on overflow, like `reduceByKey`. Output layout is `Pairs`. An int-pair filter stack partial-counts a survivor index, including one row, key, or value filter. A map, a scan, and a non-pair child count dense batches. There is no spill path: an input-row estimate over `spillBudgetBytes` before any table exists throws `ClosedKernelRefusal` and the action fails, and that check ignores `spillEnabled`. A string or long key stays on the row path | `Pairs` | `CountByKey(Exchange(Scan))` |
 | String `distinct`. One copy of each string, including one null and one empty string. Equal strings share a hash bucket. Order is unspecified | `Utf8Dict` | `Dedupe(Exchange(Scan))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
-| Automatic or explicit shuffle-hash long join. Both sides are exchanged on `Long.hashCode`. A null key is dropped. A null value stays on the row path. There is no spill and no build budget. Broadcast, sort-merge, and outer joins on long keys stay on the row path | `Columnar` | `LongHashJoin(Exchange(Scan), Exchange(Scan))` |
+| Automatic or explicit shuffle-hash long join. Both sides are exchanged on `Long.hashCode`. A null key is dropped. A null value stays on the row path. A build bucket over `spillBudgetBytes`, when `spillEnabled` is on, is sub-partitioned by the quotient of `Long.hashCode` and the parent width. Each non-empty build piece is one spill file. One piece is joined at a time. A piece still over the budget throws. At or under the budget, and whenever spill is off, the bucket stays in memory and writes nothing. Broadcast, sort-merge, and outer joins on long keys stay on the row path | `Columnar` | `LongHashJoin(Exchange(Scan), Exchange(Scan))` |
 | Automatic or explicit shuffle-hash string join. Both sides are exchanged on `String.hashCode`. A null key is dropped. `""` matches `""`. A null value stays on the row path. The two sides keep independent dictionaries and match by string equality. `"é"` and `"e\u0301"` do not match. A key or value filter on either side, including a stack of one, scatters the survivor index and does not compact. There is no spill and no build budget. Broadcast, sort-merge, and outer joins stay on the row path. Output columns are `(key, left, right)` and the key is the probe row | `StringTriple` | `StringHashJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge int join. Both sides are hash-partitioned, sorted inside each partition, and merged. Null keys are dropped before the sort | `Columnar` | `SortMergeJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge left outer int join. Both sides are hash-partitioned. The left exchange carries a null key to partition 0. The right exchange drops a null key. A null key does not match. A preserved null key publishes a clear key bit. Absence is the right value's clear bit. A null value stays on the row path | `Columnar` | `SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))` |
@@ -251,8 +251,12 @@ Sort-merge on a non-int key is refused. That plan makes
 shuffle-hash stay the columnar hash join above. A `(Long, Long)` inner join with an absent hint
 or an explicit shuffle-hash hint lowers to `LongHashJoin(Exchange, Exchange)`. Both sides are
 exchanged on `Long.hashCode`. A null key is dropped on both sides. Output columns are
-`(key, left, right)`. There is no spill and no build budget. A broadcast hint, a sort-merge hint,
-and every outer join on long keys stay on the row path. Those plans are covered by execution
+`(key, left, right)`. A build bucket over `spillBudgetBytes`, when `spillEnabled` is on, is
+sub-partitioned by the quotient of `Long.hashCode` and the parent width. Each non-empty build
+piece is one spill file. One piece is joined at a time. A piece still over the budget throws. At
+or under the budget, and whenever spill is off, the bucket stays in memory and writes nothing. A
+broadcast hint, a sort-merge hint, and every outer join on long keys stay on the row path. Those
+plans are covered by execution
 tests, not contract fixtures, because the contract does not track the int refusals either.
 A `(String, Int)` inner join with an absent hint or an explicit shuffle-hash hint lowers to
 `StringHashJoin(Exchange, Exchange)`. Both sides are exchanged on `String.hashCode`. A null key
@@ -437,7 +441,8 @@ The rules that hold for every kind:
 
 ## Spill
 
-Grouped sum, an inner broadcast join's build, an int shuffle-hash build bucket, sort-merge joins,
+Grouped sum, an inner broadcast join's build, an int shuffle-hash build bucket, a long shuffle-hash
+build bucket, sort-merge joins,
 an int-pair `sortByIntKey`, a long-pair `sortByLongKey`, a string-pair `sortByStringKey`, and an
 over-budget int, long, or string `reduceByKey` bucket spill when `spillEnabled` is on.
 `spillBudgetBytes` is the in-memory trigger. The flag defaults off. `spillMaxFiles` and
@@ -461,7 +466,7 @@ A long-pair `sortByLongKey` keeps the physical op `SortByLongKey`. It spills the
 sorted run per input partition, merged `spillFanIn` at a time, then scattered by the same rank
 boundaries. The long-pair codec is the one the store already writes. One input partition is still
 sorted in memory. At or under the budget, and whenever spill is off, the in-memory split runs and
-writes nothing. The long-key inner join still has no spill and no build budget.
+writes nothing.
 
 A string-pair `sortByStringKey` keeps the physical op `SortByStringKey`. It spills the same way:
 one sorted run per input partition, merged `spillFanIn` at a time, then scattered by the same rank
@@ -474,6 +479,12 @@ An int shuffle-hash build bucket over `spillBudgetBytes` is sub-partitioned by t
 the parent width. Each non-empty build piece is one spill file. One piece is joined at a time.
 A piece still over the budget throws. At or under the budget, and whenever spill is off, that
 bucket stays in memory and writes nothing.
+
+A long shuffle-hash build bucket over `spillBudgetBytes` is sub-partitioned by the quotient of
+`Long.hashCode` and the parent width. Each non-empty build piece is one spill file of long pairs.
+One piece is joined at a time. A piece still over the budget throws. At or under the budget, and
+whenever spill is off, that bucket stays in memory and writes nothing. The probe is not spilled.
+Broadcast, sort-merge, and outer long joins do not spill.
 
 ## Closed kernel
 
@@ -503,7 +514,8 @@ Still open inside the set, and therefore not a promise of this commit:
   selection for one column.
 - `countByKey` over `spillBudgetBytes` throws `ClosedKernelRefusal` and the action fails. It does
   not spill. Long and string `countByKey` are not columnar.
-- Long and string inner hash joins do not spill.
+- The long inner hash join spills an over-budget build bucket when `spillEnabled` is on. A piece
+  still over the budget throws. The string inner hash join does not spill.
 - A null value on an outer join, and on a long inner join, is a `ColumnarFallback`. A null on a
   selected row of an int hash join is the same decline. A null on a dropped row stays columnar. A
   string join with a null value does not lower. An inner sort-merge keeps a null value. A clear
@@ -528,10 +540,9 @@ Roadmap and sequencing are tracked externally; the headline items:
 - Fusion has no cost model or general predicate pushdown. `collect` decodes every output row into a
   `Seq`.
 - The sort-merge operator still materialises its inputs and its result.
-- The int shuffle-hash build bucket spills. The long and string shuffle-hash joins, including `longInnerJoin`, do not spill and have no build budget.
+- The int and long shuffle-hash build buckets spill. A piece still over the budget throws. The string shuffle-hash join does not spill and has no build budget.
 - `countByKey` has no spill path. Over the byte budget the action fails instead of rerunning on
   rows or spilling a count table.
-- The string-key join does not spill. An input that does not fit stays in memory.
 - Int, long, and string `reduceByKey` buckets spill, but the running partial is `O(distinct keys)`,
   so the bound is one bucket plus its partial, not the query. A reduce with more distinct keys than
   fit stays resident no matter how much of the input spills.

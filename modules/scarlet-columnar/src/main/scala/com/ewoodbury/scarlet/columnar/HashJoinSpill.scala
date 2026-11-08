@@ -28,9 +28,10 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * bucket, in bucket order.
  *
  * [[JoinSpill]] is the broadcast path. It publishes `(key, probe, build)` from one store. This
- * path publishes `(key, build, probe)` and does not call [[JoinSpill.finish]]. Long and string
- * shuffle-hash joins do not spill. The bucket and its sub-partitioned copy stay resident. The
- * store is deleted before the call returns, on success and on throw.
+ * path publishes `(key, build, probe)` and does not call [[JoinSpill.finish]]. The long path is
+ * [[LongHashJoinSpill]]. String shuffle-hash joins do not spill. The bucket and its
+ * sub-partitioned copy stay resident. The store is deleted before the call returns, on success and
+ * on throw.
  */
 private[scarlet] object HashJoinSpill:
 

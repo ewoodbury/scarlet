@@ -32,7 +32,7 @@ SPILL_SUITES := com.ewoodbury.scarlet.columnar.Test*Spill \
 
 # `testOnly` exits 0 on a name it cannot find, so a renamed or dropped suite would
 # shrink the run silently. Raise this floor when a spill suite is added.
-SPILL_SUITE_FLOOR := 12
+SPILL_SUITE_FLOOR := 13
 
 .PHONY: test-spill
 test-spill: ## Run the spill suites and bench in a forked JVM with a 128 MB heap
