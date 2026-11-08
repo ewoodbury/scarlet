@@ -17,8 +17,9 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * returns another value, is still a fallback, and that function may already have run.
  * [[ColumnarFallback]] is the named form of a deliberate decline, including a null value on a
  * left, right, or full outer join: the value columns are already encoded, and the kernel is not
- * chosen. A null value on a long inner join is that fallback too. A selected null on an int inner
- * join, and a null on the dense side of a mixed int hash join, stay a clear validity bit. That bit
+ * chosen. A null value on a long inner hash join stays columnar. A clear validity bit is a null
+ * value, not an absence bit. A selected null on an int inner join, and a null on the dense side
+ * of a mixed int hash join, stay a clear validity bit. That bit
  * is not absence. A null on a dropped row is not a decline. A live null value on a string join,
  * string `reduceByKey`, or string `groupByKey` is that fallback too. A string-pair filter keeps
  * the null int. A value projection that kept a null int is that fallback too. With spill off, an
@@ -185,6 +186,9 @@ private[execution] object ColumnarInterpreter:
    * [[PhysicalOp.SortMergeJoin]]. A map or that join may keep a null component. A filter or other
    * triple op uses [[BatchCodec.decodeIntTriples]], which rejects a clear bit. A whole-row filter
    * drops those rows before decode. Outer joins are [[Columns.Outer]] and do not use this decoder.
+   * Long triples are only a long inner join and use
+   * [[BatchCodec.decodeLongTriplesPreservingAbsence]]. A clear validity bit is a null value, not
+   * an absence bit. A fully present batch still decodes to the same longs.
    */
   private[execution] def decodeFor(columns: Columns, op: PhysicalOp): Seq[Partition[_]] =
     decodeWith(columns, intPairDecoder(op), longDecoder(op), tripleDecoder(op))
@@ -277,7 +281,7 @@ private[execution] object ColumnarInterpreter:
           prefixRows(parts, limit, decodeTriples)
         case Columns.LongTriples(parts) =>
           // Joins are not partition-preserving, so `take` does not reach this arm.
-          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeLongTriples(batch, rows))
+          prefixRows(parts, limit, BatchCodec.decodeLongTriplesPreservingAbsence)
         case Columns.Outer(parts, absent) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeOuter(batch, absent, rows))
         case Columns.Strings(parts) =>
@@ -1004,7 +1008,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.LongTriples(parts) =>
       // Named erasure boundary for the long join. The decoded rows are `(Long, (Long, Long))`.
       // [[ColumnarPlanner.runLowered]] casts the partition sequence to the plan's element type.
-      parts.map(batch => Partition(BatchCodec.decodeLongTriples(batch)))
+      parts.map(batch => Partition(BatchCodec.decodeLongTriplesPreservingAbsence(batch)))
     case Columns.Outer(parts, absent) =>
       parts.map(batch => Partition(BatchCodec.decodeOuter(batch, absent)))
     case Columns.Strings(parts) =>

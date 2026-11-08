@@ -671,6 +671,36 @@ object BatchCodec:
         )
 
   /**
+   * Reads a long-triple batch and keeps a clear bit as a null `Long`. A fully present batch still
+   * decodes to the stored longs. [[decodeLongTriples]] rejects a clear bit. A clear validity bit
+   * is a null value, not an absence bit.
+   */
+  private[scarlet] def decodeLongTriplesPreservingAbsence(
+      batch: ColumnBatch,
+  ): Seq[(Long, (Long, Long))] =
+    decodeLongTriplesPreservingAbsence(batch, batch.length)
+
+  private[scarlet] def decodeLongTriplesPreservingAbsence(
+      batch: ColumnBatch,
+      maxRows: Int,
+  ): Seq[(Long, (Long, Long))] =
+    batch.columns match
+      case Seq(keys: Int64Column, left: Int64Column, right: Int64Column) =>
+        require(
+          keys.length == batch.length && left.length == batch.length && right.length == batch.length,
+          "join columns disagree on length",
+        )
+        val rows = decodedLength(batch, maxRows)
+        ColumnMetrics.decoded(rows)
+        Seq.tabulate(rows) { row =>
+          erasedLongTriple(longRef(keys, row), longRef(left, row), longRef(right, row))
+        }
+      case _ =>
+        throw new IllegalArgumentException(
+          s"join output is not three Int64 columns: ${batch.schema}",
+        )
+
+  /**
    * String-key join rows are `(key, left, right)`. The key is the dictionary string for that row's
    * code. A null stays an error: a clear key bit has no string, and a clear value bit would decode
    * as the stored zero. A full decode checks live bits by word; a prefix decode checks only the
@@ -1033,6 +1063,18 @@ object BatchCodec:
   @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
   private def erasedLongPair(key: java.lang.Long, value: java.lang.Long): (Long, Long) =
     Tuple2(key, value).asInstanceOf[(Long, Long)]
+
+  /**
+   * Named erasure boundary. The decoded triple has to carry a null component so a matched null
+   * value stays null. Building it from `java.lang.Long` keeps the null from becoming `0`.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
+  private def erasedLongTriple(
+      key: java.lang.Long,
+      left: java.lang.Long,
+      right: java.lang.Long,
+  ): (Long, (Long, Long)) =
+    Tuple2(key, Tuple2(left, right)).asInstanceOf[(Long, (Long, Long))]
 
   private def componentValidity(absent: Option[Array[Boolean]], width: Int): Validity =
     absent match

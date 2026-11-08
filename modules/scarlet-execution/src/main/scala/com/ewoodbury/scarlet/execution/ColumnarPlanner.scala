@@ -38,7 +38,7 @@ object ColumnarPlanner:
    * element chain whose project does not declare the column's type. An int join lowers when its
    * hint is absent, shuffle-hash, or broadcast. A `(Long, Long)` inner join lowers only for an
    * absent hint or a shuffle-hash hint, to [[PhysicalOp.LongHashJoin]]. A null value on that join
-   * does not change the lowered shape: [[tryRun]] reads the value columns and returns `None`.
+   * stays a clear validity bit and [[tryRun]] keeps the matched row. It is not an absence bit.
    * Broadcast, sort-merge, and every outer join on long keys stay on the row path. A
    * `(String, Int)` inner join lowers only for an absent hint or a shuffle-hash hint, to
    * [[PhysicalOp.StringHashJoin]]. A null key is dropped. A live null value still lowers, and

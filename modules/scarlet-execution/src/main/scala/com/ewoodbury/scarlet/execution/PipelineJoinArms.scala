@@ -30,15 +30,7 @@ private[execution] object PipelineJoinArms:
     val rightBatches = longPairsOf(
       interpretAt(right, rightOp, selectedPartition, preserveAbsence, ordinals),
     )
-    // Validity words are already on the columns. A null value is not a decoded long, so the
-    // kernel is not chosen.
-    val valuesPresent =
-      ColumnPipeline.longValuesFullyPresent(leftBatches) &&
-        ColumnPipeline.longValuesFullyPresent(rightBatches)
-    if (!valuesPresent) then
-      throw new ColumnarFallback(
-        "a null value on a long inner join stays on the row path",
-      )
+    // A clear validity bit is a null value, not an absence bit. The matched row is kept.
     Columns.LongTriples(
       ColumnPipeline.longInnerJoin(
         leftBatches,

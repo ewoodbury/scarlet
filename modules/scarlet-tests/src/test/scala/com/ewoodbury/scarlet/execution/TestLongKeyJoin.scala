@@ -161,7 +161,7 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     longTripleBatches(joined.plan).foreach(assertPresent)
   }
 
-  it should "keep a matched null value on the row path" in {
+  it should "keep a matched null value" in {
     // The first row of each source is a present pair, so classification witnesses (Long, Long).
     // Each null value is a later row and shares its key with the other side.
     val left = DistCollection(
@@ -187,7 +187,7 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
       "LongHashJoin(Exchange(Scan), Exchange(Scan))",
     )
-    ColumnarPlanner.tryRun(joined.plan).isEmpty shouldBe true
+    ColumnarPlanner.tryRun(joined.plan).isDefined shouldBe true
     val expected = Seq(
       (1L, pair(longRef(10L), absent)),
       (2L, pair(absent, longRef(20L))),

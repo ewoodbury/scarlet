@@ -243,8 +243,8 @@ object ColumnPipeline:
    * right. Both sides are sliced and partitioned with one count.
    * [[HashExchange.partitionAllInt64]] drops a null key and leaves an empty bucket at its index.
    * Bucket `i` of the probe is joined with bucket `i` of the build. Output columns are
-   * `(key, left, right)`. Every value cell must be present. The interpreter refuses a null value,
-   * so the plan stays on the row path.
+   * `(key, left, right)`. A clear validity bit is a null value and is copied with the matched row.
+   * It is not an absence bit.
    *
    * Spill is off unless [[ScarletConf.spillEnabled]] is set. A build bucket whose
    * [[LongHashJoin.retainedBuildBytes]] estimate is above [[ScarletConf.spillBudgetBytes]] is
@@ -702,17 +702,6 @@ object ColumnPipeline:
   private[scarlet] def intsFullyPresent(batches: Vector[ColumnBatch]): Boolean =
     batches.forall { batch =>
       val values = ColumnHash.int32At(batch, 0)
-      Validity.livePresent(values.validity, values.length)
-    }
-
-  /**
-   * True when every live value cell is present. Long-pair batches store the value at ordinal 1 as
-   * `Int64`. The check reads validity words that are already materialised and does not walk the
-   * rows again.
-   */
-  private[scarlet] def longValuesFullyPresent(batches: Vector[ColumnBatch]): Boolean =
-    batches.forall { batch =>
-      val values = ColumnHash.int64At(batch, 1)
       Validity.livePresent(values.validity, values.length)
     }
 

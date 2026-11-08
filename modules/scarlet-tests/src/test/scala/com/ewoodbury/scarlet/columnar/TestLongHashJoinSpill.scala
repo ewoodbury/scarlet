@@ -218,10 +218,13 @@ class TestLongHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAfte
     }
   }
 
-  "a null value" should "stay on the row path and write no spill file" in {
+  "a null value" should "survive when the build bucket spills" in {
     val present =
       rowsOf(0L, half, _.toLong) ++ rowsOf(4L, half, row => 1000L + row.toLong)
-    val budget = LongHashJoin.retainedBuildBytes(half)
+    // The null shares key 0, so that piece is half + 1 rows. A budget of `half` refuses it.
+    // The parent bucket holds both keys and is over this budget.
+    val pieceRows = half + 1
+    val budget = LongHashJoin.retainedBuildBytes(pieceRows)
     LongHashJoin.retainedBuildBytes(present.length + 1) should be > budget
 
     withConf(budget) { dir =>
@@ -238,12 +241,13 @@ class TestLongHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAfte
       ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
         "LongHashJoin(Exchange(Scan), Exchange(Scan))",
       )
-      ColumnarPlanner.tryRun(joined.plan).isEmpty shouldBe true
+      ColumnarPlanner.tryRun(joined.plan).isDefined shouldBe true
       val collected = joined.collect().toList
       collected should contain theSameElementsAs rowOf(joined)
       collected should contain ((0L, pair(absent, longRef(7L))))
-      LongHashJoinSpill.filesWrittenForTest shouldBe 0L
-      LongHashJoinSpill.lastDirectoryForTest shouldBe ""
+      LongHashJoinSpill.filesWrittenForTest shouldBe 2L
+      LongHashJoinSpill.openTablesForTest shouldBe 1
+      Path.of(LongHashJoinSpill.lastDirectoryForTest) shouldBe dir
       SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
     }
   }
