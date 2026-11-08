@@ -74,6 +74,22 @@ object ColumnBatches:
     else cuts(batch.length, batchSize).map { case (start, length) => copy(batch, start, length) }
 
   /**
+   * Rebuild each dictionary so it holds only codes this batch uses.
+   *
+   * A slice and a hash scatter share the parent dictionary. A spilled piece would otherwise be
+   * charged for strings that belong to other pieces. Other columns are unchanged.
+   */
+  private[scarlet] def compactDictionaries(batch: ColumnBatch): ColumnBatch =
+    val columns = batch.columns.map {
+      case utf8: DictUtf8Column =>
+        val codes = new Array[Int](utf8.length)
+        val words = Validity.allocate(utf8.length)
+        remapUtf8(Vector(utf8), codes, words, utf8.length)
+      case other => other
+    }
+    new ColumnBatch(batch.schema, columns, batch.length)
+
+  /**
    * One copied range of `batch`. Callers that walk [[Morsels]] write one range and drop it before
    * the next, so the slices of a long batch are not all live together.
    */

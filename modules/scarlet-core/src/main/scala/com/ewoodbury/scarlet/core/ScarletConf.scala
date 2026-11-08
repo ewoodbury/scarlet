@@ -46,28 +46,31 @@ final case class ScarletConf(
     /**
      * When true, a grouped-sum bucket, an int `reduceByKey` bucket, a long `reduceByKey` bucket, a
      * string `reduceByKey` bucket, an inner broadcast build, an int shuffle-hash build bucket, a
-     * long shuffle-hash build bucket, a sort-merge partition, an int-pair sort, a long-pair sort,
-     * or a string-pair sort whose estimate exceeds `spillBudgetBytes` is spilled. Off by default,
-     * so each stays in memory. Outer hash and broadcast joins do not read this flag; an outer
-     * sort-merge does. A spilled int, long, or string `reduceByKey` bucket may change first-seen
-     * output order; compare it as a map.
+     * long shuffle-hash build bucket, a string shuffle-hash build bucket, a sort-merge partition,
+     * an int-pair sort, a long-pair sort, or a string-pair sort whose estimate exceeds
+     * `spillBudgetBytes` is spilled. Off by default, so each stays in memory. Outer hash and
+     * broadcast joins do not read this flag; an outer sort-merge does. A spilled int, long, or
+     * string `reduceByKey` bucket may change first-seen output order; compare it as a map.
      */
     spillEnabled: Boolean = false,
     /**
      * Byte budget for one grouped-sum bucket, one int `reduceByKey` bucket, one long `reduceByKey`
      * bucket, one string `reduceByKey` bucket, one inner-join build table, one int shuffle-hash
-     * build bucket, one long shuffle-hash build bucket, the sorted sides of one sort-merge
-     * partition, and the sorted input of one int-pair, long-pair, or string-pair sort. The default
-     * is 64 MiB. A broadcast build over this budget is partitioned with the probe. One partition
-     * that is still over it throws. An int or long shuffle-hash build bucket over it is
-     * sub-partitioned and probed one piece at a time. A piece that is still over it throws. A
-     * sort-merge partition over it is written as sorted runs and merged `spillFanIn` at a time.
-     * One equal-key group that is still over it throws. An int-pair sort over it writes one sorted
-     * run per input partition and merges `spillFanIn` runs at a time. A long-pair sort and a
-     * string-pair sort do the same for their pairs. One input partition is still sorted in memory.
-     * An int `reduceByKey` bucket over it is sub-partitioned and folded one morsel at a time. A
-     * long `reduceByKey` bucket and a string `reduceByKey` bucket over it are sub-partitioned and
-     * folded the same way. A spilled string bucket may change first-seen output order.
+     * build bucket, one long shuffle-hash build bucket, one string shuffle-hash build bucket, the
+     * sorted sides of one sort-merge partition, and the sorted input of one int-pair, long-pair,
+     * or string-pair sort. The default is 64 MiB. A broadcast build over this budget is
+     * partitioned with the probe. One partition that is still over it throws. An int or long
+     * shuffle-hash build bucket over it is sub-partitioned and probed one piece at a time. A
+     * string shuffle-hash build bucket over it is sub-partitioned by the quotient of its hash and
+     * the parent width. The estimate includes the dictionary. A piece that is still over it
+     * throws. A sort-merge partition over it is written as sorted runs and merged `spillFanIn` at
+     * a time. One equal-key group that is still over it throws. An int-pair sort over it writes
+     * one sorted run per input partition and merges `spillFanIn` runs at a time. A long-pair sort
+     * and a string-pair sort do the same for their pairs. One input partition is still sorted in
+     * memory. An int `reduceByKey` bucket over it is sub-partitioned and folded one morsel at a
+     * time. A long `reduceByKey` bucket and a string `reduceByKey` bucket over it are
+     * sub-partitioned and folded the same way. A spilled string bucket may change first-seen
+     * output order.
      */
     spillBudgetBytes: Long = 64L * 1024L * 1024L,
     /**

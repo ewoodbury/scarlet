@@ -14,7 +14,9 @@ import StringHashJoin.StringJoinInput
  * interprets that child. Both dense sides keep the batch [[StringHashJoin.inner]] call.
  *
  * A null key is dropped by the exchange. `""` is a present key. A null value stays on the row
- * path, because classification never selects string pairs for it.
+ * path, because classification never selects string pairs for it. An over-budget build bucket
+ * spills inside [[StringHashJoin.inner]] when spill is enabled. A bucket at or under the budget,
+ * and every bucket while spill is off, stays on that in-memory join.
  */
 private[execution] object StringJoinArms:
 
