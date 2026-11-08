@@ -22,6 +22,6 @@ private[execution] object CountByKeyLowering:
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.Strings |
         PhysicalOp.Kind.Bools | PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples |
-        PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.GroupedInts |
-        PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
+        PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
+        PhysicalOp.Kind.GroupedLongs =>
       None

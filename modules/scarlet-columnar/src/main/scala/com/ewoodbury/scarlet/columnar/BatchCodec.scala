@@ -150,8 +150,8 @@ object BatchCodec:
     batch(Int32Column.of(ints, componentValidity(absent, count), count))
 
   /**
-   * Writes a present int. A null cell is absent. Named erasure boundary: `productElement` does
-   * not unbox a `(String, Int)` cell, so a null stays absent. A non-null cell is a reference.
+   * Writes a present int. A null cell is absent. Named erasure boundary: `productElement` does not
+   * unbox a `(String, Int)` cell, so a null stays absent. A non-null cell is a reference.
    */
   @SuppressWarnings(
     Array(

@@ -746,9 +746,9 @@ object ColumnarPlanner:
       steps.foldLeft(Option(child)) { (current, step) =>
         current.flatMap(op => lowerStringRow(op, step))
       }
-    case PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
-        PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
-        PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
+    case PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
+        PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
+        PhysicalOp.Kind.GroupedLongs =>
       None
 
   /** A whole-row string filter. A project still refuses the chain. */
@@ -1094,8 +1094,7 @@ object ColumnarPlanner:
       Layout.GroupedLong(ScarletConf.get.columnarBatchSize)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Bools | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
-        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts |
-        PhysicalOp.Kind.LongTriples =>
+        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples =>
       Layout.Columnar(ScarletConf.get.columnarBatchSize)
 
   private[execution] def batchSize: Int =
