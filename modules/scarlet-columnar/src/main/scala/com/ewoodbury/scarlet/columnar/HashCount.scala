@@ -154,12 +154,12 @@ object HashCount:
 
   private def requireKey(batch: ColumnBatch): Unit =
     val keyType = batch.schema.headOption.getOrElse {
-      throw new IllegalArgumentException("countByKey expects an Int32 key column")
+      throw new ColumnarFallback("countByKey expects an Int32 key column")
     }
     keyType match
       case LogicalType.Int32 => ()
       case LogicalType.Int64 | LogicalType.Float64 | LogicalType.Bool | LogicalType.Utf8Dict =>
-        throw new IllegalArgumentException(
+        throw new ColumnarFallback(
           s"countByKey expects an Int32 key column, found $keyType",
         )
 
