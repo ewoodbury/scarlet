@@ -543,7 +543,6 @@ Roadmap and sequencing are tracked externally; the headline items:
 - The int and long shuffle-hash build buckets spill. A piece still over the budget throws. The string shuffle-hash join does not spill and has no build budget.
 - `countByKey` has no spill path. Over the byte budget the action fails instead of rerunning on
   rows or spilling a count table.
-- The string-key join does not spill. An input that does not fit stays in memory.
 - Int, long, and string `reduceByKey` buckets spill, but the running partial is `O(distinct keys)`,
   so the bound is one bucket plus its partial, not the query. A reduce with more distinct keys than
   fit stays resident no matter how much of the input spills.
