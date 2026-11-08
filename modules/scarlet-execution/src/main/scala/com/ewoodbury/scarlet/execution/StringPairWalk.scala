@@ -4,7 +4,10 @@ import com.ewoodbury.scarlet.columnar.{
   BatchCodec,
   ColumnBatch,
   ColumnKernel,
+  ColumnPipeline,
+  ColumnarFallback,
   Int32Column,
+  Selected,
   Selection,
 }
 import com.ewoodbury.scarlet.core.{Partition, Plan}
@@ -15,15 +18,15 @@ import ColumnarInterpreter.Columns
  * Encode, project, filter, and `mapValues` for `(String, Int)` batches.
  *
  * A batch is a UTF-8 dictionary key and an int value. A null key is a clear bit on the key and
- * stays in the batch. The value bit stays set, including on that row: a clear value bit is a null
- * `Int`, which this path does not lower. `mapValues` rewrites column 1 and copies the key bit
- * unchanged, so the new value does not inherit a clear key bit.
+ * stays in the batch. A null int is a clear value bit and is not stored as zero. `mapValues`
+ * rewrites column 1 and copies both bits, so a null int stays null and the new value does not
+ * inherit a clear key bit. A value projection of a null int declines.
  *
  * [[encoded]] may publish a one-column batch when demand narrowed the read to the key or the
  * value. A [[PhysicalOp.Column]] or the filter path consumes that shape; a column wraps the batch
- * as [[Columns.Strings]] or [[Columns.Ints]]. [[BatchCodec.decodeStringPairs]] requires both
- * columns and is never called on a narrowed batch. A whole-row stack is one [[Selection]] pass
- * over both columns. A key or value stack stays on the dense kernels below.
+ * as [[Columns.Strings]] or [[Columns.Ints]]. [[BatchCodec.decodeStringPairs]] reads both columns
+ * and is never called on a narrowed batch. A whole-row stack is one [[Selection]] pass over both
+ * columns. A key or value stack stays on the dense kernels below.
  *
  * Named erasure boundary. The physical slot chose the predicate, and lowering checked that
  * `mapValues` declares `Int => Int`.
@@ -39,6 +42,16 @@ private[execution] object StringPairWalk:
       case _ =>
         partitions.map(partition => BatchCodec.stringIntPairs(rowsOf(partition))).toVector
     Columns.StringPairs(batches)
+
+  /** A live null int cannot be joined, reduced, or grouped. The row path runs instead. */
+  def refuseNullValues(batches: Vector[ColumnBatch]): Unit =
+    if (!ColumnPipeline.valuesFullyPresent(batches)) then
+      throw new ColumnarFallback("string pair value is null")
+
+  /** Same decline as [[refuseNullValues]], on `rows(0 until count)` only. */
+  def refuseSelectedNullValues(selected: Vector[Selected]): Unit =
+    if (!ColumnPipeline.valuesFullyPresent(selected)) then
+      throw new ColumnarFallback("string pair value is null")
 
   def batches(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.StringPairs(parts) => parts
@@ -147,11 +160,20 @@ private[execution] object StringPairWalk:
     BatchCodec.strings(rows.map(pair => pair._1))
 
   private def valuesOnly(rows: Iterable[(String, Int)]): ColumnBatch =
-    BatchCodec.ints(rows.map(pair => pair._2))
+    BatchCodec.ints(rows.map(presentInt))
+
+  /**
+   * A present int. A null int declines: [[BatchCodec.ints]] would unbox it to zero.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
+  private def presentInt(pair: (String, Int)): Int =
+    pair.productElement(1) match
+      case value: Int => value
+      case _ => throw new ColumnarFallback("string pair value is null")
 
   @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
   private def rowsOf(partition: Partition[_]): Iterable[(String, Int)] =
-    // Classification already rejected a null value, so unboxing the int is safe.
+    // The encoder reads the value with productElement, so a null int is not unboxed here.
     partition.data.asInstanceOf[Iterable[(String, Int)]]
 
   /**

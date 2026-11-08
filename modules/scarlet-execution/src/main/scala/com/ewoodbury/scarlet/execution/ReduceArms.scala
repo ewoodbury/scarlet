@@ -115,6 +115,7 @@ private[execution] object ReduceArms:
       ordinals,
     ) match
       case Some(parts) =>
+        StringPairWalk.refuseSelectedNullValues(parts)
         Columns.StringPairs(StringHashReduce.byKeySelected(parts, width, workers, batchSize, op))
       case None =>
         val batches = StringPairWalk.batches(
@@ -126,4 +127,5 @@ private[execution] object ReduceArms:
             ordinals,
           ),
         )
+        StringPairWalk.refuseNullValues(batches)
         Columns.StringPairs(StringHashReduce.byKey(batches, width, workers, batchSize, op))

@@ -126,26 +126,68 @@ object BatchCodec:
 
   /**
    * One UTF-8 dictionary column and one int column. A null key is an empty slot. `""` is a present
-   * string, including when its code is `0`. A null value cannot be represented: the value column
-   * is all-valid. The column does not retain the input.
+   * string, including when its code is `0`. A null int is a clear value bit. `productElement` does
+   * not unbox, so that null is not stored as `0`. A fully present value column stays all-valid.
+   * The column does not retain the input.
    */
-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+      "org.wartremover.warts.Var",
+    ),
+  )
   def stringIntPairs(values: Iterable[(String, Int)]): ColumnBatch =
     val count = values.size
     val texts = new Array[String](count)
     val ints = new Array[Int](count)
     val rows = values.iterator
     var row = 0
+    var absent = Option.empty[Array[Boolean]]
     while (row < count) {
       val pair = rows.next()
       texts(row) = pair._1
-      ints(row) = pair._2
+      absent = writeStringInt(pair, ints, absent, count, row)
       row += 1
     }
     stringPairBatch(
       DictUtf8Column.fromIterable(ArraySeq.unsafeWrapArray(texts)),
-      Int32Column.of(ints, Validity.allValid(count), count),
+      Int32Column.of(ints, componentValidity(absent, count), count),
     )
+
+  /**
+   * Writes a present int value. A null cell marks the row absent.
+   *
+   * Named erasure boundary. The cell is the erased field of a `(String, Int)`. `productElement`
+   * does not unbox, so a null stays absent. A non-null cell is a reference, so the class test is
+   * safe.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def writeStringInt(
+      pair: Product,
+      into: Array[Int],
+      absent: Option[Array[Boolean]],
+      width: Int,
+      row: Int,
+  ): Option[Array[Boolean]] =
+    pair.productElement(1) match
+      case null =>
+        val flags = absent.getOrElse(new Array[Boolean](width))
+        flags(row) = true
+        Some(flags)
+      case value: Int =>
+        into(row) = value
+        absent
+      case other =>
+        val found = other.asInstanceOf[AnyRef].getClass.getName
+        throw new IllegalArgumentException(s"string pair value expected an Int, found $found")
 
   /**
    * Copies `keys` and `values`. The column does not retain either array. Unequal lengths are
@@ -352,8 +394,8 @@ object BatchCodec:
 
   /**
    * Reads a string-int batch. A clear key bit is a null string. Code `0` with the bit set is the
-   * dictionary string, often `""`. A clear value bit is an error: the decoded `Int` would
-   * otherwise be the stored zero. A prefix checks only the rows it returns.
+   * dictionary string, often `""`. A clear value bit is a null int, not the stored zero. A prefix
+   * checks only the rows it returns.
    */
   def decodeStringPairs(batch: ColumnBatch): Seq[(String, Int)] =
     decodeStringPairs(batch, batch.length)
@@ -362,15 +404,12 @@ object BatchCodec:
     val (keys, values) = stringPair(batch)
     val rows = decodedLength(batch, maxRows)
     ColumnMetrics.decoded(rows)
-    Seq.tabulate(rows) { row =>
-      require(values.isValid(row), s"null Int32 at row $row")
-      (stringKey(keys, row), values.values(row))
-    }
+    Seq.tabulate(rows)(row => erasedStringInt(stringKey(keys, row), intRef(values, row)))
 
   /**
    * Reads `rows(0 until count)` of a string-int batch. A clear key bit is a null string. A clear
-   * value bit on a selected row is an error, the same rule as the dense decoder. A clear value bit
-   * on any other row is not read. `count` is the live prefix. Slots at `count` and beyond are not
+   * value bit is a null int, the same rule as the dense decoder. A clear bit on a row the index
+   * does not name is not read. `count` is the live prefix. Slots at `count` and beyond are not
    * decoded.
    */
   def decodeStringPairs(batch: ColumnBatch, rows: Array[Int], count: Int): Seq[(String, Int)] =
@@ -379,8 +418,7 @@ object BatchCodec:
     ColumnMetrics.decoded(live)
     Seq.tabulate(live) { slot =>
       val row = rows(slot)
-      require(values.isValid(row), s"null Int32 at row $row")
-      (stringKey(keys, row), values.values(row))
+      erasedStringInt(stringKey(keys, row), intRef(values, row))
     }
 
   def decodeIntPairs(batch: ColumnBatch): Seq[(Int, Int)] = decodeIntPairs(batch, batch.length)
@@ -926,6 +964,14 @@ object BatchCodec:
   @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
   private def erasedIntPair(key: java.lang.Integer, value: java.lang.Integer): (Int, Int) =
     Tuple2(key, value).asInstanceOf[(Int, Int)]
+
+  /**
+   * Named erasure boundary. The decoded pair has to carry a null int so a kept clear value bit
+   * matches the row path. Building it from `java.lang.Integer` keeps the null from becoming `0`.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
+  private def erasedStringInt(key: String, value: java.lang.Integer): (String, Int) =
+    Tuple2(key, value).asInstanceOf[(String, Int)]
 
   /**
    * Named erasure boundary. The decoded triple has to carry a null component so a map that

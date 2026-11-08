@@ -14,7 +14,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * Columnar `keys`, `values`, `mapValues`, `filterKeys`, and `filterValues` on `(String, Int)`.
  *
- * The row path is the oracle. A null key stays in the batch. A null value stays on the row path.
+ * The row path is the oracle. A null key stays in the batch. A null int stays absent. A null int
+ * on `reduceByKey`, `groupByKey`, or an inner join stays on the row path.
  * Distinct and a string `mapValues` stay on the row path. `reduceByKey`, `groupByKey`, and an
  * inner shuffle-hash join lower.
  */
@@ -147,17 +148,21 @@ class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
     source.take(4) shouldBe rowOf(source).take(4)
   }
 
-  it should "lower a leading null key and refuse a null value or all-null keys" in {
+  it should "lower a leading null key and a null int, and refuse all-null keys" in {
     val leading = pairs(Seq(nullKey(1), "red" -> 2))
     val nullValue = pairs(Seq("red" -> 1, erasedNullValue("blue")))
     val bothNull = pairs(Seq(erasedNullPair))
     val onlyNull = pairs(Seq(nullKey(1), nullKey(2)))
     val empty = pairs(Seq.empty)
+    val decoded = columnar(nullValue)
 
     ColumnarPlanner.lower(leading.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.StringPairs)
     columnar(leading) shouldBe Seq(nullKey(1), "red" -> 2)
-    ColumnarPlanner.lower(nullValue.plan) shouldBe None
-    stayedOnRows(nullValue) shouldBe Seq("red" -> 1, erasedNullValue("blue"))
+    ColumnarPlanner.lower(nullValue.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.StringPairs)
+    decoded.length shouldBe 2
+    decoded.head shouldBe ("red" -> 1)
+    keyOf(decoded(1)) shouldBe "blue"
+    absentValue(decoded(1)) shouldBe true
     ColumnarPlanner.lower(bothNull.plan) shouldBe None
     ColumnarPlanner.lower(onlyNull.plan) shouldBe None
     stayedOnRows(onlyNull) shouldBe Seq(nullKey(1), nullKey(2))
@@ -288,6 +293,21 @@ class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
   )
   private def erasedNullValue(key: String): (String, Int) =
     Tuple2[String, Integer](key, null).asInstanceOf[(String, Int)]
+
+  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
+  private def keyOf(row: (String, Int)): String = row.productElement(0) match
+    case value: String => value
+    case other => fail(s"expected a present string, got $other")
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def absentValue(row: (String, Int)): Boolean =
+    row.productElement(1).asInstanceOf[AnyRef] eq null
 
   @SuppressWarnings(
     Array(

@@ -41,9 +41,9 @@ object ColumnarPlanner:
    * does not change the lowered shape: [[tryRun]] reads the value columns and returns `None`.
    * Broadcast, sort-merge, and every outer join on long keys stay on the row path. A
    * `(String, Int)` inner join lowers only for an absent hint or a shuffle-hash hint, to
-   * [[PhysicalOp.StringHashJoin]]. A null key is dropped. A null value stays on the row path
-   * because the source is not [[PhysicalOp.Kind.StringPairs]]. A key or value filter on either
-   * side, including a stack of one, scatters that side's survivor index and does not compact. An
+   * [[PhysicalOp.StringHashJoin]]. A null key is dropped. A live null value still lowers, and
+   * [[tryRun]] returns `None` so the row path runs. A key or value filter on either side,
+   * including a stack of one, scatters that side's survivor index and does not compact. An
    * over-budget build bucket spills when `spillEnabled` is on; the estimate includes the
    * dictionary. At or under the budget, and whenever spill is off, the join stays in memory.
    * Broadcast, sort-merge, and every outer join on string keys stay on the row path. The layout is
@@ -983,8 +983,8 @@ object ColumnarPlanner:
   /**
    * The first present value selects the kind. A leading empty cell can only witness a string. A
    * pair witness is two `Int` cells or two `Long` cells. A `(String, Int)` cell witnesses string
-   * pairs, and a leading null key keeps looking until a present string key. A null value does not.
-   * A leading null component does not witness [[PhysicalOp.Kind.LongPairs]]. Other actions do not
+   * pairs, including a null int. A leading null key keeps looking until a present string key. A
+   * leading null component does not witness [[PhysicalOp.Kind.LongPairs]]. Other actions do not
    * unbox a null. Grouped sum also accepts a null component; see [[groupedPairSource]].
    */
   private def classifyValue(value: Any, rest: Iterator[Any]): Option[PhysicalOp.Kind] =
@@ -994,7 +994,7 @@ object ColumnarPlanner:
       case Some(_: Double) => Some(PhysicalOp.Kind.Floats)
       case Some((_: Int, _: Int)) => Some(PhysicalOp.Kind.Pairs)
       case Some((_: Long, _: Long)) => Some(PhysicalOp.Kind.LongPairs)
-      case Some((_: String, _: Int)) => StringPairPlan.confirm(rest)
+      case Some(value) if StringPairPlan.presentKey(value) => StringPairPlan.confirm(rest)
       case Some(value) if StringPairPlan.nullKey(value) => StringPairPlan.witness(rest)
       case Some(_: Boolean) => Some(PhysicalOp.Kind.Bools)
       case Some(_: String) => Some(PhysicalOp.Kind.Strings)

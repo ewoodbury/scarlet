@@ -20,14 +20,14 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * A null key is dropped by the exchange before the table, and a clear key bit is not inserted and
  * not probed. `""` is a present key. Every live value cell must be present. Spare capacity past
  * `length` is ignored, which is what a filter publishes. A null value outside a selection is not
- * live. The planner refuses a null value, so a clear live value bit is a bug and throws
- * `IllegalStateException`. Spill is off unless [[ScarletConf.spillEnabled]] is set. A build bucket
- * whose [[StringHashJoinSpill.retainedBytes]] estimate is above [[ScarletConf.spillBudgetBytes]]
- * is finished by [[StringHashJoinSpill]]. That estimate includes the dictionary. A bucket at or
- * under the budget, and every bucket while spill is off, is joined here and writes nothing. Output
- * columns are `(key, left, right)`. The key is the probe row's dictionary and code. One batch per
- * partition. An empty side, or a partition with no matches, publishes
- * [[ColumnBatches.emptyStringJoin]].
+ * live. The interpreter declines a live null value before this kernel. A clear live value bit that
+ * still reaches here throws `IllegalStateException`. Spill is off unless
+ * [[ScarletConf.spillEnabled]] is set. A build bucket whose [[StringHashJoinSpill.retainedBytes]]
+ * estimate is above [[ScarletConf.spillBudgetBytes]] is finished by [[StringHashJoinSpill]]. That
+ * estimate includes the dictionary. A bucket at or under the budget, and every bucket while spill
+ * is off, is joined here and writes nothing. Output columns are `(key, left, right)`. The key is
+ * the probe row's dictionary and code. One batch per partition. An empty side, or a partition with
+ * no matches, publishes [[ColumnBatches.emptyStringJoin]].
  */
 @SuppressWarnings(
   Array(

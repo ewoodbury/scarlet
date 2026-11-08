@@ -372,6 +372,8 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
     val filtered = input.filter { (row: (String, Int)) =>
       BatchCodec.isAbsent(row._1) || row._1 == "a" || row._1 == ""
     }
+    val op = ColumnarPlanner.lower(filtered.plan).getOrElse(fail("null int filter did not lower"))
+    op.shape shouldBe "FilterRow(Scan)"
     val got = filtered.collect().toList
 
     sameStringInts(got, row(filtered.collect().toList))

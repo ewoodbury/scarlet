@@ -214,8 +214,11 @@ class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val source = DistCollection(
       Plan.Source(Seq(Partition(Seq("red" -> 1, erasedNullValue("blue"))))),
     )
-    ColumnarPlanner.lower(source.join(DistCollection(Seq("red" -> 2), 1)).plan) shouldBe
-      Option.empty[PhysicalOp]
+    val joined = source.join(DistCollection(Seq("red" -> 2), 1))
+    ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
+      "StringHashJoin(Exchange(Scan), Exchange(Scan))",
+    )
+    ColumnarPlanner.tryRun(joined.plan) shouldBe None
 
     val missing = new ColumnBatch(
       Vector(LogicalType.Utf8Dict, LogicalType.Int32),

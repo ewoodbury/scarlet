@@ -88,7 +88,7 @@ null. A null string key orders as `""` and stays null. Shape strings are exact.
 | Long-pair source, including an empty source | `Columnar` | `Scan` |
 | Long-pair `keys`, `values`, `mapValues`, row `filter`, `filterKeys`, and `filterValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `FilterRow(Scan)`, `FilterKey(Scan)`, `FilterValue(Scan)` |
 | Pair `keys`, `values`, int `mapValues`, mapped key/value columns, filtered int `mapValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `Project(Key(Scan))`, `Project(Value(Scan))`, `FilterValue(MapValue(Scan))` |
-| String-pair source and `keys`, `values`, int `mapValues`, `filterKeys`, `filterValues`. A null key is a value and `""` is distinct | `StringPair`; `Utf8Dict` for `keys`, `Columnar` for `values` | `Scan`, `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `FilterKey(Scan)`, `FilterValue(Scan)` |
+| String-pair source and `keys`, `values`, int `mapValues`, row `filter`, `filterKeys`, and `filterValues`. A null key is a value and `""` is distinct. A null int stays absent | `StringPair`; `Utf8Dict` for `keys`, `Columnar` for `values` | `Scan`, `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `FilterRow(Scan)`, `FilterKey(Scan)`, `FilterValue(Scan)` |
 | Int `reduceByKey`, after a value filter or int `mapValues`, and nested reduction | `Columnar` | `HashAggregate(Exchange(Scan))`, `HashAggregate(Exchange(FilterValue(Scan)))`, `HashAggregate(Exchange(MapValue(Scan)))`, `HashAggregate(Exchange(HashAggregate(Exchange(Scan))))` |
 | Long `reduceByKey` | `Columnar` | `LongHashAggregate(Exchange(Scan))` |
 | String `reduceByKey`. A null key is dropped and `""` is kept. The exchange hashes each dictionary string once | `StringPair` | `StringHashAggregate(Exchange(Scan))` |
@@ -387,8 +387,9 @@ have run. An `IllegalStateException` from a physical/logical mismatch or a broad
 above `broadcastBuildBudgetBytes` is not a fallback, and neither is the `IllegalArgumentException`
 from a partition-selector `require`. A null value on a left, right, or full outer join, and on a
 long inner join, is a `ColumnarFallback`. A null value on a selected row of an int inner join is
-also a `ColumnarFallback`; a null on a dropped row is not. A string join does not use that
-fallback: a null value never lowers, and a clear live value bit still throws. With spill off,
+also a `ColumnarFallback`; a null on a dropped row is not. A live null value on a string join,
+string `reduceByKey`, or string `groupByKey` is that fallback. A string-pair filter keeps the null
+int. With spill off,
 an over-budget int `countByKey` throws `ClosedKernelRefusal` and the action fails. With spill on,
 an over-budget post-exchange bucket spills, and a count table that still does not fit throws
 `ClosedKernelRefusal`. That exception does not extend `ClassCastException`, so a refusal does not
@@ -542,7 +543,9 @@ Still open inside the set, and therefore not a promise of this commit:
   `spillEnabled` is on. A piece still over the budget throws.
 - A null value on an outer join, and on a long inner join, is a `ColumnarFallback`. A null on a
   selected row of an int hash join is the same decline. A null on a dropped row stays columnar. A
-  string join with a null value does not lower. An inner sort-merge keeps a null value. A clear
+  string join, string `reduceByKey`, or string `groupByKey` with a live null value is a
+  `ColumnarFallback`. A string-pair filter keeps that null int. An inner sort-merge keeps a null
+  value. A clear
   validity bit on an outer join means the partner is absent, so a null value cannot use that bit.
 - An int, long, or string sort of one or more slot filters sorts the survivor index. Over the
   budget, with spill on, that index is spilled. A long-pair row filter and a whole-row string
