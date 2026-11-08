@@ -709,8 +709,8 @@ object BatchCodec:
    * Outer-join rows are `(key, left, right)`. `absent` names the value column wrapped in `Option`.
    * [[AbsentSide.Left]] returns `(key, (Option[Int], Int))`. [[AbsentSide.Right]] returns
    * `(key, (Int, Option[Int]))`. [[AbsentSide.Both]] returns `(key, (Option[Int], Option[Int]))`.
-   * A clear bit on an optional column is `None`. A clear bit on the key, or on a column that is
-   * not optional, stays null. A null value is not absence. [[optionalInt]] is the only `Option`
+   * An absence bit on an optional column is `None`. A clear bit on the key, or on a column that
+   * is not optional, stays null. A null value is not absence. [[optionalInt]] is the only `Option`
    * construction. `maxRows` limits the prefix the same way as [[decodeIntTriples]].
    */
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
@@ -745,9 +745,18 @@ object BatchCodec:
           s"outer join output is not three Int32 columns: ${batch.schema}",
         )
 
-  /** A clear bit is absence. A set bit is the stored `Int`. This is the only `Option` site. */
+  /**
+   * An absence bit is `None`, even when the payload is `0`. A set validity bit is the stored
+   * `Int`. A clear bit with no absence mark is a null value, not a missing partner. This is the
+   * only `Option` site.
+   */
   private def optionalInt(column: Int32Column, row: Int): Option[Int] =
-    if (column.isValid(row)) Some(column.values(row)) else None
+    if (column.isAbsent(row)) then None
+    else if (column.isValid(row)) then Some(column.values(row))
+    else
+      throw new IllegalArgumentException(
+        s"null Int32 at row $row on an optional outer column",
+      )
 
   /** A clear bit stays null. A set bit is the stored `Int`. */
   @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))

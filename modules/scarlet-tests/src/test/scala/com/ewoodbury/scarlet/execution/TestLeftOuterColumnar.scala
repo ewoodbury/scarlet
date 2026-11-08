@@ -139,7 +139,7 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     }
   }
 
-  it should "record absence in the right validity bit" in {
+  it should "record an absence bit on the right value" in {
     val probe = BatchCodec.nullableIntPairs(
       Seq(
         (Some(1), Some(10)),
@@ -162,17 +162,18 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     val right = BatchColumns.int32(batch, 2)
 
     val rows = (0 until batch.length).map { row =>
+      keys.isAbsent(row) shouldBe false
       val key = if (keys.isValid(row)) Some(keys.values(row)) else None
-      (key, left.isValid(row), right.isValid(row))
+      (key, left.isValid(row), right.isValid(row), left.isAbsent(row), right.isAbsent(row))
     }
     rows.find(_._1.contains(1)).getOrElse(fail("missing matched row")) shouldBe
-      ((Some(1), true, true))
+      ((Some(1), true, true, false, false))
     rows.find(_._1.contains(2)).getOrElse(fail("missing unmatched probe row")) shouldBe
-      ((Some(2), true, false))
+      ((Some(2), true, false, false, true))
     rows.find(_._1.contains(3)).getOrElse(fail("missing unmatched probe row")) shouldBe
-      ((Some(3), true, false))
+      ((Some(3), true, false, false, true))
     rows.find(_._1.contains(4)).getOrElse(fail("missing matched row")) shouldBe
-      ((Some(4), true, true))
+      ((Some(4), true, true, false, false))
 
     canonical(BatchCodec.decodeOuter(batch, AbsentSide.Right)) should contain theSameElementsAs Seq(
       (Some(1), Some(10), Some(100)),
@@ -334,7 +335,7 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     }
   }
 
-  it should "record absence in the right validity bit after the exchange" in {
+  it should "record an absence bit on the right value after the exchange" in {
     val probe = BatchCodec.nullableIntPairs(
       Seq(
         (Some(1), Some(10)),
@@ -360,18 +361,26 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
       val left = BatchColumns.int32(batch, 1)
       val right = BatchColumns.int32(batch, 2)
       (0 until batch.length).map { row =>
+        keys.isAbsent(row) shouldBe false
         val key = if (keys.isValid(row)) Some(keys.values(row)) else None
-        (part, key, left.isValid(row), right.isValid(row))
+        (
+          part,
+          key,
+          left.isValid(row),
+          right.isValid(row),
+          left.isAbsent(row),
+          right.isAbsent(row),
+        )
       }
     }
     rows.find(_._2.contains(1)).getOrElse(fail("missing matched row")) shouldBe
-      ((Math.floorMod(1, 4), Some(1), true, true))
+      ((Math.floorMod(1, 4), Some(1), true, true, false, false))
     rows.find(_._2.contains(2)).getOrElse(fail("missing unmatched probe row")) shouldBe
-      ((Math.floorMod(2, 4), Some(2), true, false))
+      ((Math.floorMod(2, 4), Some(2), true, false, false, true))
     rows.find(_._2.contains(4)).getOrElse(fail("missing unmatched key 4")) shouldBe
-      ((0, Some(4), true, false))
+      ((0, Some(4), true, false, false, true))
     rows.find(_._2.isEmpty).getOrElse(fail("missing null probe key")) shouldBe
-      ((0, None, true, false))
+      ((0, None, true, false, false, true))
     rows.exists(_._2.contains(8)) shouldBe false
     val unmatched = parts.lift(Math.floorMod(2, 4)).getOrElse(fail("missing partition"))
     canonical(BatchCodec.decodeOuter(unmatched, AbsentSide.Right)) should contain theSameElementsAs Seq(

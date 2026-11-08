@@ -131,11 +131,25 @@ object SortMergeOuterFixture extends Assertions with Matchers:
     val left = BatchColumns.int32(batch, 1)
     val right = BatchColumns.int32(batch, 2)
     (0 until batch.length).map { row =>
-      (bit(keys, row), bit(left, row), bit(right, row))
+      (keyBit(keys, row), valueBit(left, row), valueBit(right, row))
     }
 
-  private def bit(column: Int32Column, row: Int): Option[Int] =
-    if (column.isValid(row)) Some(column.values(row)) else None
+  /** A clear key bit is a null key. The key is not an absent join side. */
+  private def keyBit(column: Int32Column, row: Int): Option[Int] =
+    if (column.isAbsent(row)) then fail(s"key at row $row is marked absent")
+    else if (column.isValid(row)) then Some(column.values(row))
+    else None
+
+  /**
+   * An absence bit is a missing partner, and that cell stores no int. A clear validity bit with
+   * no absence mark is a null value, which an outer join does not publish.
+   */
+  private def valueBit(column: Int32Column, row: Int): Option[Int] =
+    if (column.isAbsent(row)) then
+      if (column.isValid(row)) then fail(s"absent value at row $row stores an int")
+      None
+    else if (column.isValid(row)) then Some(column.values(row))
+    else fail(s"null Int32 at row $row is not an absence mark")
 
   /** `(key, left, right)` with a null key or value as `None`, so a null is not unboxed. */
   @SuppressWarnings(

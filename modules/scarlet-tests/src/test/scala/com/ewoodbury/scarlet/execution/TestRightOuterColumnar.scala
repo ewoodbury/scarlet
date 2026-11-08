@@ -124,7 +124,7 @@ class TestRightOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     }
   }
 
-  it should "record absence in the left validity bit" in {
+  it should "record an absence bit on the left value" in {
     val plan = broadcastPlan(
       Seq(Seq(1 -> 100, 4 -> 7)),
       Seq(Seq(1 -> 10, 2 -> 11, 3 -> 30, 4 -> 13)),
@@ -133,16 +133,19 @@ class TestRightOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     absent shouldBe AbsentSide.Left
     parts.length shouldBe 1
     val batch = parts.headOption.getOrElse(fail("missing probe batch"))
-    val rows = validityRows(batch).map { row => (row.key, row.leftValid, row.rightValid) }
+    val rows = validityRows(batch).map { row =>
+      (row.key, row.leftValid, row.rightValid, row.leftAbsent, row.rightAbsent)
+    }
     rows.find(_._1.contains(1)).getOrElse(fail("missing matched row")) shouldBe
-      ((Some(1), true, true))
+      ((Some(1), true, true, false, false))
     rows.find(_._1.contains(2)).getOrElse(fail("missing unmatched right row")) shouldBe
-      ((Some(2), false, true))
+      ((Some(2), false, true, true, false))
     rows.find(_._1.contains(3)).getOrElse(fail("missing unmatched right row")) shouldBe
-      ((Some(3), false, true))
+      ((Some(3), false, true, true, false))
     rows.find(_._1.contains(4)).getOrElse(fail("missing matched row")) shouldBe
-      ((Some(4), true, true))
+      ((Some(4), true, true, false, false))
     rows.exists(!_._3) shouldBe false
+    rows.exists(_._5) shouldBe false
   }
 
   "shuffle-hash right outer join" should "match the row path across four partitions" in {
@@ -275,7 +278,7 @@ class TestRightOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     }
   }
 
-  it should "record absence in the left validity bit after the exchange" in {
+  it should "record an absence bit on the left value after the exchange" in {
     ScarletConf.set(shuffledConf)
     val plan = shufflePlan(
       Seq(Seq((1, 100), (8, 80)), Seq(pair(None, Some(99)))),
@@ -288,18 +291,21 @@ class TestRightOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     absent shouldBe AbsentSide.Left
     parts.length should be >= 4
     val rows = parts.zipWithIndex.flatMap { (batch, part) =>
-      validityRows(batch).map { row => (part, row.key, row.leftValid, row.rightValid) }
+      validityRows(batch).map { row =>
+        (part, row.key, row.leftValid, row.rightValid, row.leftAbsent, row.rightAbsent)
+      }
     }
     rows.find(_._2.contains(1)).getOrElse(fail("missing matched row")) shouldBe
-      ((Math.floorMod(1, parts.length), Some(1), true, true))
+      ((Math.floorMod(1, parts.length), Some(1), true, true, false, false))
     rows.find(_._2.contains(2)).getOrElse(fail("missing unmatched right row")) shouldBe
-      ((Math.floorMod(2, parts.length), Some(2), false, true))
+      ((Math.floorMod(2, parts.length), Some(2), false, true, true, false))
     rows.find(_._2.contains(4)).getOrElse(fail("missing unmatched key 4")) shouldBe
-      ((0, Some(4), false, true))
+      ((0, Some(4), false, true, true, false))
     rows.find(_._2.isEmpty).getOrElse(fail("missing null right key")) shouldBe
-      ((0, None, false, true))
+      ((0, None, false, true, true, false))
     rows.exists(_._2.contains(8)) shouldBe false
     rows.exists(!_._4) shouldBe false
+    rows.exists(_._6) shouldBe false
     val decoded = parts.flatMap { batch =>
       canonical(BatchCodec.decodeOuter(batch, AbsentSide.Left))
     }
@@ -489,15 +495,28 @@ class TestRightOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
       case ColumnarInterpreter.Columns.Outer(parts, absent) => (parts, absent)
       case other => fail(s"expected an outer batch, got $other")
 
-  private case class ValidityRow(key: Option[Int], leftValid: Boolean, rightValid: Boolean)
+  private case class ValidityRow(
+      key: Option[Int],
+      leftValid: Boolean,
+      rightValid: Boolean,
+      leftAbsent: Boolean,
+      rightAbsent: Boolean,
+  )
 
   private def validityRows(batch: ColumnBatch): Seq[ValidityRow] =
     val keys = BatchColumns.int32(batch, 0)
     val left = BatchColumns.int32(batch, 1)
     val right = BatchColumns.int32(batch, 2)
     (0 until batch.length).map { row =>
+      keys.isAbsent(row) shouldBe false
       val key = if (keys.isValid(row)) Some(keys.values(row)) else None
-      ValidityRow(key, left.isValid(row), right.isValid(row))
+      ValidityRow(
+        key,
+        left.isValid(row),
+        right.isValid(row),
+        left.isAbsent(row),
+        right.isAbsent(row),
+      )
     }
 
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
@@ -561,7 +580,6 @@ class TestRightOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
       case (None, _: Int) => succeed
       case other => fail(s"right outer absence shape: $other")
 
-  @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def outerBatch(
       keys: Array[Int],
       left: Array[Int],
@@ -569,18 +587,7 @@ class TestRightOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
       leftPresent: Array[Boolean],
       rightPresent: Array[Boolean],
   ): ColumnBatch =
-    val width = keys.length
-    def column(values: Array[Int], present: Array[Boolean]): Int32Column =
-      Int32Column.of(values, Validity.pack(width, row => present(row)), width)
-    new ColumnBatch(
-      Vector(LogicalType.Int32, LogicalType.Int32, LogicalType.Int32),
-      Vector(
-        column(keys, Array.fill(width)(true)),
-        column(left, leftPresent),
-        column(right, rightPresent),
-      ),
-      width,
-    )
+    TestOuterDecode.outerBatch(keys, left, right, leftPresent, rightPresent)
 
   private def sortMergeLeftRows: Seq[(Int, Int)] =
     SortMergeOuterFixture.sortMergeLeftRows

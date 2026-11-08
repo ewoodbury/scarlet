@@ -61,7 +61,8 @@ private[scarlet] object Morsels:
  * Slice a batch into morsels and concatenate batches that share a schema.
  *
  * A slice shorter than or equal to `batchSize` is the input batch itself. Concatenation of one
- * batch, or of only empty batches, returns the head batch. Copied ranges keep values and validity.
+ * batch, or of only empty batches, returns the head batch. Copied ranges keep values, validity,
+ * and an Int32 absence bitmap when the copied rows contain one.
  * [[Morsels.of]] uses the same cuts and does not copy. It also owns the zero-row batch constructor
  * for each schema.
  */
@@ -216,7 +217,11 @@ object ColumnBatches:
       case int32: Int32Column =>
         val values = new Array[Int](length)
         System.arraycopy(int32.values, start, values, 0, length)
-        Int32Column.of(values, validityRange(int32.validity, start, length), length)
+        val validity = validityRange(int32.validity, start, length)
+        int32.absence match
+          case Some(bits) =>
+            Int32Column.withAbsence(values, validity, validityRange(bits, start, length), length)
+          case None => Int32Column.of(values, validity, length)
       case int64: Int64Column =>
         val values = new Array[Long](length)
         System.arraycopy(int64.values, start, values, 0, length)
@@ -257,14 +262,23 @@ object ColumnBatches:
   private def appendInt32(columns: Vector[Int32Column], total: Int): Int32Column =
     val values = new Array[Int](total)
     val words = Validity.allocate(total)
+    val absentWords =
+      if (columns.exists(_.absence.isDefined)) then Some(Validity.allocate(total)) else None
     val written = columns.foldLeft(0) { (offset, column) =>
       val length = column.length
       System.arraycopy(column.values, 0, values, offset, length)
       copyBits(column.validity, 0, words, offset, length)
+      absentWords.foreach { destination =>
+        column.absence.foreach(source => copyBits(source, 0, destination, offset, length))
+      }
       offset + length
     }
     require(written == total, s"copied $written rows into $total")
-    Int32Column.of(values, Validity.fromWords(words, total), total)
+    val validity = Validity.fromWords(words, total)
+    absentWords match
+      case Some(bits) =>
+        Int32Column.withAbsence(values, validity, Validity.fromWords(bits, total), total)
+      case None => Int32Column.of(values, validity, total)
 
   private def appendInt64(columns: Vector[Int64Column], total: Int): Int64Column =
     val values = new Array[Long](total)
