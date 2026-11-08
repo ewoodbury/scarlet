@@ -269,7 +269,9 @@ object Plan {
    * Sorts `(Int, Int)` pairs ascending by column 0. This node is planned like [[SortByOp]] with
    * the key taken from column 0 and [[Ordering.Int]]. Generic [[SortByOp]] stays opaque. A scan of
    * int pairs, or a filter chain over one, lowers to a columnar rank split. A filter, including a
-   * stack of one, sorts the survivor index and does not gather first. A map or any other child
+   * stack of one, sorts the survivor index and does not gather first. Over the budget, with spill
+   * on, that index is spilled and dropped rows are not written. At or under the budget, and
+   * whenever spill is off, the in-memory split runs and writes nothing. A map or any other child
    * stays on the row path. A null `Int` key orders as zero and the row is retained. This matches
    * `sortBy(_._1)` and is not a null-safe ordering. A key or value filter drops a null in that
    * column before the sort, while the row path unboxes the null to `0`.
@@ -282,12 +284,15 @@ object Plan {
   /**
    * Sorts `(Long, Long)` pairs ascending by column 0. This node is planned like [[SortByOp]] with
    * the key taken from column 0 and [[Ordering.Long]]. Generic [[SortByOp]] stays opaque. A scan
-   * of long pairs lowers to a columnar rank split. Any other child stays on the row path. A null
-   * `Long` key orders as zero and the row is retained. This matches `sortBy(_._1)` and is not a
-   * null-safe ordering. When `spillEnabled` is on and the retained estimate exceeds
-   * `spillBudgetBytes`, each input partition is one sorted run and the runs are merged
-   * `spillFanIn` at a time. One input partition is still sorted in memory. At or under the budget,
-   * and whenever spill is off, the in-memory split runs and writes nothing.
+   * of long pairs, or key and value filters over that scan, lowers to a columnar rank split. Those
+   * filters sort the survivor index. A long-pair row filter lowers and does not build an index, so
+   * that sort uses the dense path. A map, aggregate, or join under the sort stays on the row path,
+   * as does a filter, join, aggregate, or projection above it. A null `Long` key orders as zero and
+   * the row is retained. This matches `sortBy(_._1)` and is not a null-safe ordering. Over the
+   * budget, with spill on, a survivor index is spilled and dropped rows are not written. A dense
+   * input still writes one sorted run per partition and merges `spillFanIn` at a time. One input
+   * partition is still sorted in memory. At or under the budget, and whenever spill is off, the
+   * in-memory split runs and writes nothing.
    *
    * @param source
    *   The preceding plan node.
@@ -298,11 +303,14 @@ object Plan {
    * Sorts `(String, Int)` pairs ascending by the effective key. A present key orders by
    * `String.compareTo` (UTF-16 code units). A null key orders as `""` and stays null. Ties keep
    * input order. This matches `sortBy(pair => if (pair._1 == null) "" else pair._1)`. Generic
-   * [[SortByOp]] stays opaque. A scan of string pairs lowers to a columnar rank split. Any other
-   * child stays on the row path. When `spillEnabled` is on and the retained estimate exceeds
-   * `spillBudgetBytes`, each input partition is one sorted run and the runs are merged
-   * `spillFanIn` at a time. One input partition is still sorted in memory. At or under the budget,
-   * and whenever spill is off, the in-memory split runs and writes nothing.
+   * [[SortByOp]] stays opaque. A scan of string pairs, or key and value filters over that scan,
+   * lowers to a columnar rank split. Those filters sort the survivor index. A whole-row string
+   * filter does not lower, so a sort of one stays on the row path. A map, aggregate, or join under
+   * the sort stays on the row path, as does a filter, join, aggregate, or projection above it.
+   * Over the budget, with spill on, a survivor index is spilled and dropped rows are not written.
+   * A dense input still writes one sorted run per partition and merges `spillFanIn` at a time. One
+   * input partition is still sorted in memory. At or under the budget, and whenever spill is off,
+   * the in-memory split runs and writes nothing.
    *
    * @param source
    *   The preceding plan node.
