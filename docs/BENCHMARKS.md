@@ -76,6 +76,7 @@ for the run and shut down at the end. This is not a fresh-JVM isolation.
 | `grouped-sparse` | `GroupedSum(Scan)` | 1024 groups spread over `0` until `300000` |
 | `grouped-shifting` | `GroupedSum(Scan)` | that spread, plus 7 on every odd morsel |
 | `filter-groupbykey` | `GroupByKey(Exchange(FilterValue(FilterKey(Scan))))` | two filters, then `groupByKey`, on int pairs keyed by `row % 1024` |
+| `filter-countbykey` | `CountByKey(Exchange(FilterValue(FilterKey(Scan))))` | the same two filters, then `countByKey`: counts per key and never reads or decodes the value column |
 | `filter-reducebykey` | `HashAggregate(Exchange(FilterValue(FilterKey(Scan))))` | the same two filters, then `reduceByKey`, on those int pairs |
 | `filter-join` | `HashJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(Scan))` | filtered build side joined to an unfiltered unique int key |
 | `filter-sort` | `SortByIntKey(FilterValue(FilterKey(Scan)))` | the same two filters, then `sortByIntKey` |
@@ -114,11 +115,18 @@ order before timing and fails the run if that partial is sorted. A repeating or 
 of keys `0` until `1023` has span 1024, which is inside `4 * 8192`, so those queries stay on the
 direct index.
 
-The seven filter queries run two filters (`key % 3 != 0` and `value >= 0`) at 1e6 rows, two
-source partitions, and batch 8192. The int `groupByKey` and `reduceByKey` queries key on
-`row % 1024`; `filter-join` uses the row index as a unique key, and `filter-sort` uses the sort
+The eight filter queries run two filters (`key % 3 != 0` and `value >= 0`) at 1e6 rows, two
+source partitions, and batch 8192. The int `groupByKey`, `countByKey` and `reduceByKey` queries key
+on `row % 1024`; `filter-join` uses the row index as a unique key, and `filter-sort` uses the sort
 permutation. String keys are `(row % 1024).toString`. The baseline tables below do not include
 them.
+
+`filter-countbykey` and `filter-groupbykey` were measured side by side on 2026-11-08, p50 of 40
+rounds. At four threads `countByKey` is 7.050 ms and allocates 23.6 MB, against 10.348 ms and
+47.5 MB for `groupByKey` after its groups are collected. The gap is the value arrays `groupByKey`
+has to build and the decode its result pays; the counts match (`10821571` and `166553187385` on the
+two checksums). At one thread the same pair is 13.025 ms and 18.432 ms. The row path for
+`filter-countbykey` is 112.869 ms at one thread and 76.223 ms at four.
 
 The harness checks the physical shape before timing. It also rejects a sample whose published
 batches disagree with the layout it is about to record.

@@ -95,6 +95,7 @@ null. A null string key orders as `""` and stays null. Shape strings are exact.
 | Int `groupByKey`. The exchange drops a null key and keeps every value. Value order inside a key is input order. Key order inside a partition is first-seen. One batch is published per shuffle partition, including an empty bucket. `count` is the number of groups. There is no partial combine and no spill. `keys`, `values`, `take`, and a map above the group stay on the row path | `GroupedInt` | `GroupByKey(Exchange(Scan))` |
 | String `groupByKey`. The exchange drops a null key and keeps `""`. `"é"` and `"e\u0301"` stay distinct. Value order inside a key is input order. Key order inside a partition is first-seen. One batch is published per shuffle partition, including an empty bucket. `count` is the number of groups. There is no partial combine, no spill, and no sort. `keys`, `values`, `take`, and a map above the group stay on the row path | `GroupedString` | `GroupByKey(Exchange(Scan))` |
 | Long `groupByKey` on `(Long, Long)`. The exchange drops a null key and keeps every value. A null value is refused, including beside a null key. Value order inside a key is input order. Key order inside a partition is first-seen. The stored key is the full `Long`. One batch is published per shuffle partition, including an empty bucket. `count` is the number of groups. There is no partial combine and no spill. `keys`, `values`, `take`, and a map above the group stay on the row path | `GroupedLong` | `GroupByKey(Exchange(Scan))` |
+| Int `countByKey` on `(Int, V)`. The exchange drops a null key. The value column is never read, so a null value still counts. The stored count is an `Int` and wraps on overflow, like `reduceByKey`. Output layout is `Pairs`. A two-filter key or value stack partial-counts a survivor index; every other child counts dense batches. There is no spill path: an input-row estimate over `spillBudgetBytes` before any table exists throws `ColumnarFallback` and the action reruns on rows, and that check ignores `spillEnabled`. A string or long key stays on the row path | `Pairs` | `CountByKey(Exchange(Scan))` |
 | String `distinct`. One copy of each string, including one null and one empty string. Equal strings share a hash bucket. Order is unspecified | `Utf8Dict` | `Dedupe(Exchange(Scan))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
 | Automatic or explicit shuffle-hash long join. Both sides are exchanged on `Long.hashCode`. A null key is dropped. A null value stays on the row path. There is no spill and no build budget. Broadcast, sort-merge, and outer joins on long keys stay on the row path | `Columnar` | `LongHashJoin(Exchange(Scan), Exchange(Scan))` |
@@ -195,7 +196,7 @@ keys stay on the row path. A long sort spills over the budget the same way an in
 String `reduceByKey` is columnar: `StringHashAggregate(Exchange(Scan))` drops a null key, keeps
 `""`, and hashes each dictionary string once. Int `groupByKey` is columnar:
 `GroupByKey(Exchange(Scan))`, layout `GroupedInt`, and `count` is the number of groups. String
-`groupByKey` is columnar the same way, layout `GroupedString`. Long `groupByKey` is columnar the same way, layout `GroupedLong`. Double `groupByKey` stays refused.
+`groupByKey` is columnar the same way, layout `GroupedString`. Long `groupByKey` is columnar the same way, layout `GroupedLong`. Int `countByKey` is columnar as `CountByKey(Exchange(Scan))`, layout `Pairs`: it counts rows per key and never reads the value column, so a null value counts and a null key is dropped. Double `groupByKey` stays refused.
 An inner shuffle-hash string join lowers to `StringHashJoin(Exchange(Scan), Exchange(Scan))`.
 `sortByStringKey` of a string-pair scan is columnar. Over the budget, with spill on, it spills the
 same way an int sort does. A null key orders as `""` and stays null.
@@ -223,7 +224,7 @@ double keys, `mapValues` to string or double, double-pair `keys`, `values`,
 single-precision `Float` sources and maps, all-null strings, an empty int source without
 a witness, and element maps that do not preserve the column type (`boolean` to `boolean`, `int`
 to `long`, `string`, or a pair, `long` to `int` or `string`, and `double` to `int`).
-That is 35 exclusions, and 202 accepted, for 237 covered shapes. String `groupByKey` moved from the excluded list, so 36 - 1 = 35 excluded. Long `groupByKey` is a new accepted fixture, so 199 + 1 = 200 and 234 + 1 = 235. Long `filterKeys` and `filterValues` are new accepted fixtures, so 200 + 2 = 202 and 235 + 2 = 237.
+That is 35 exclusions, and 203 accepted, for 238 covered shapes. String `groupByKey` moved from the excluded list, so 36 - 1 = 35 excluded. Long `groupByKey` is a new accepted fixture, so 199 + 1 = 200 and 234 + 1 = 235. Long `filterKeys` and `filterValues` are new accepted fixtures, so 200 + 2 = 202 and 235 + 2 = 237. Int `countByKey` is a new accepted fixture that adds no exclusion, so 202 + 1 = 203 and 237 + 1 = 238.
 Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by execution
 tests, not contract fixtures, because the contract does not track the int refusals either.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then
@@ -390,7 +391,7 @@ fallback: a null value never lowers, and a clear live value bit still throws.
   per range partition, and concatenation in partition order. There is no driver-side merge.
 - `union` concatenates left then right.
 - `groupBy`-family outputs group by key equality; record order inside groups follows input order.
-- `groupByKey`/`reduceByKey`/`cogroup`/`sortBy` keep one output partition per shuffle partition
+- `groupByKey`/`countByKey`/`reduceByKey`/`cogroup`/`sortBy` keep one output partition per shuffle partition
   and run as one task per partition, matching joins, `repartition`, `coalesce`, and `partitionBy`.
   A given key of a keyed aggregation lives in exactly one output partition.
 
@@ -482,4 +483,6 @@ Roadmap and sequencing are tracked externally; the headline items:
 - The sort-merge operator still materialises its inputs and its result.
 - The int shuffle-hash build bucket spills. The long and string shuffle-hash joins, including `longInnerJoin`, do not spill and have no build budget.
 - Long hash reduce never spills; an input that does not fit stays in memory.
+- `countByKey` has no spill path. Over the byte budget it falls back to rows, so a large input is
+  correct but loses the columnar path rather than spilling a count table.
 - String-key reduce and the string-key join do not spill. An input that does not fit stays in memory.
