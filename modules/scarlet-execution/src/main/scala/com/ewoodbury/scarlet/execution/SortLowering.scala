@@ -11,11 +11,10 @@ import com.ewoodbury.scarlet.core.Plan
  * [[PhysicalOp.SortByStringKey]]. A map, aggregate, or join under any of these sorts stays on the
  * row path. A filter whose child is not that scan does not lower. [[acceptsAsChild]] refuses every
  * sort, so a filter, join, aggregate, or projection above a sort stays on the row path. A slot
- * filter sorts the survivor index. Over the budget, with spill on, that index is spilled. A
- * long-pair row filter and a whole-row string filter do not build an index. A long sort spills
- * through the same budget as an int sort. The physical op stays [[PhysicalOp.SortByLongKey]]. A
- * string sort spills through that same budget. The physical op stays
- * [[PhysicalOp.SortByStringKey]].
+ * filter, including a long-pair row filter and a whole-row string filter, sorts the survivor
+ * index. Over the budget, with spill on, that index is spilled. A long sort spills through the
+ * same budget as an int sort. The physical op stays [[PhysicalOp.SortByLongKey]]. A string sort
+ * spills through that same budget. The physical op stays [[PhysicalOp.SortByStringKey]].
  *
  * The sorts share one ordering tag: range distribution on the row key, ascending by effective key.
  * A null int or long key orders as zero and stays null. A null string key orders as `""` and stays

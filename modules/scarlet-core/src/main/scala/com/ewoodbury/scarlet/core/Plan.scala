@@ -285,14 +285,14 @@ object Plan {
    * Sorts `(Long, Long)` pairs ascending by column 0. This node is planned like [[SortByOp]] with
    * the key taken from column 0 and [[Ordering.Long]]. Generic [[SortByOp]] stays opaque. A scan
    * of long pairs, or key and value filters over that scan, lowers to a columnar rank split. Those
-   * filters sort the survivor index. A long-pair row filter lowers and does not build an index, so
-   * that sort uses the dense path. A map, aggregate, or join under the sort stays on the row path,
-   * as does a filter, join, aggregate, or projection above it. A null `Long` key orders as zero
-   * and the row is retained. This matches `sortBy(_._1)` and is not a null-safe ordering. Over the
-   * budget, with spill on, a survivor index is spilled and dropped rows are not written. A dense
-   * input still writes one sorted run per partition and merges `spillFanIn` at a time. One input
-   * partition is still sorted in memory. At or under the budget, and whenever spill is off, the
-   * in-memory split runs and writes nothing.
+   * filters sort the survivor index. A long-pair row filter does the same, including a stack of
+   * one. A map, aggregate, or join under the sort stays on the row path, as does a filter, join,
+   * aggregate, or projection above it. A null `Long` key orders as zero and the row is retained.
+   * This matches `sortBy(_._1)` and is not a null-safe ordering. Over the budget, with spill on, a
+   * survivor index is spilled and dropped rows are not written. A dense input still writes one
+   * sorted run per partition and merges `spillFanIn` at a time. One input partition is still
+   * sorted in memory. At or under the budget, and whenever spill is off, the in-memory split runs
+   * and writes nothing.
    *
    * @param source
    *   The preceding plan node.
@@ -305,12 +305,12 @@ object Plan {
    * input order. This matches `sortBy(pair => if (pair._1 == null) "" else pair._1)`. Generic
    * [[SortByOp]] stays opaque. A scan of string pairs, or key and value filters over that scan,
    * lowers to a columnar rank split. Those filters sort the survivor index. A whole-row string
-   * filter does not lower, so a sort of one stays on the row path. A map, aggregate, or join under
-   * the sort stays on the row path, as does a filter, join, aggregate, or projection above it.
-   * Over the budget, with spill on, a survivor index is spilled and dropped rows are not written.
-   * A dense input still writes one sorted run per partition and merges `spillFanIn` at a time. One
-   * input partition is still sorted in memory. At or under the budget, and whenever spill is off,
-   * the in-memory split runs and writes nothing.
+   * filter does the same, including a stack of one. A map, aggregate, or join under the sort stays
+   * on the row path, as does a filter, join, aggregate, or projection above it. Over the budget,
+   * with spill on, a survivor index is spilled and dropped rows are not written. A dense input
+   * still writes one sorted run per partition and merges `spillFanIn` at a time. One input
+   * partition is still sorted in memory. At or under the budget, and whenever spill is off, the
+   * in-memory split runs and writes nothing.
    *
    * @param source
    *   The preceding plan node.

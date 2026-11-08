@@ -174,7 +174,7 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.partitioning(above.plan) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.lower(above.plan) shouldBe Option.empty[PhysicalOp]
     collect(above) shouldBe rowCollect(above)
-    // A long-pair row filter lowers, and it does not build a survivor index.
+    // A long-pair row filter lowers and sorts the survivor index.
     ColumnarPlanner.lower(below.plan).map(_.shape) shouldBe Some("SortByLongKey(FilterRow(Scan))")
     collect(below) shouldBe rowCollect(below)
     ColumnarPlanner.partitioning(mapped.plan) shouldBe Option.empty[PartitioningInfo]

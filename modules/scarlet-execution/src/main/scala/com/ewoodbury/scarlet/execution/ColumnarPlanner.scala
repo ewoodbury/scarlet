@@ -61,7 +61,7 @@ object ColumnarPlanner:
    * filters over that scan. A map, aggregate, or join under the sort stays on the row path. Any
    * parent of that sort stays on the row path. A slot filter sorts the survivor index. Over the
    * budget, with spill on, that index is spilled. A long-pair row filter and a whole-row string
-   * filter do not build an index. A long sort spills when `spillEnabled` is on and the retained
+   * filter sort that index too. A long sort spills when `spillEnabled` is on and the retained
    * estimate exceeds `spillBudgetBytes`. The physical op stays `SortByLongKey`. A string sort
    * spills on that same budget. The physical op stays `SortByStringKey`. At or under the budget,
    * and whenever spill is off, the split stays in memory and writes nothing. [[partitioning]] and

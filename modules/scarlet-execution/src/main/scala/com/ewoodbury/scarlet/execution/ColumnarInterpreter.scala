@@ -731,9 +731,8 @@ private[execution] object ColumnarInterpreter:
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
       // Long-pair encode always keeps a null key and a null value. preserveAbsence is passed for
       // symmetry with the int sort. It does not change the long encode. A null key orders as zero
-      // and stays null. A key or value filter sorts survivor ids and does not gather first. A
-      // long-pair row filter has no index, so `None` interprets that child and the dense split
-      // runs. The physical op stays SortByLongKey. RankSplitLongRuns chooses the in-memory split
+      // and stays null. A key, value, or row filter sorts survivor ids and does not gather first.
+      // The physical op stays SortByLongKey. RankSplitLongRuns chooses the in-memory split
       // or a spill of the survivor index. Take decodes the prefix.
       val width = ColumnarPlanner.shuffleWidth
       val workers = ColumnarPlanner.parallelism
@@ -762,9 +761,9 @@ private[execution] object ColumnarInterpreter:
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
       // String-pair encode keeps a null key. preserveAbsence matches the other sorts. A null key
-      // orders as "" and stays null. A key or value filter sorts survivor ids and does not gather
-      // first. A whole-row string filter does not lower, so this arm does not see it. The `None`
-      // path is the scan. StringRankSplitRuns chooses the in-memory split or a spill of the
+      // orders as "" and stays null. A key, value, or row filter sorts survivor ids and does not
+      // gather first. The `None` path is the scan. StringRankSplitRuns chooses the in-memory split
+      // or a spill of the
       // survivor index. Take decodes the prefix.
       val width = ColumnarPlanner.shuffleWidth
       val workers = ColumnarPlanner.parallelism
