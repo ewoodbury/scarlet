@@ -22,6 +22,9 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * partial-reduces the index, then exchanges and spills the dense partials the same way [[byKey]]
  * does. The exchange does not see the source rows. Spill charges the dense partial, not the
  * survivor count.
+ *
+ * Both paths read the key at ordinal 0 and the value at ordinal 1, and the exchange partitions on
+ * that layout. A change to the pair layout has to change both together.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object LongHashReduce:
