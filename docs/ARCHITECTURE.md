@@ -382,7 +382,9 @@ above `broadcastBuildBudgetBytes` is not a fallback, and neither is the `Illegal
 from a partition-selector `require`. A null value on a left, right, or full outer join, and on a
 long inner join, is a `ColumnarFallback`. A null value on a selected row of an int inner join is
 also a `ColumnarFallback`; a null on a dropped row is not. A string join does not use that
-fallback: a null value never lowers, and a clear live value bit still throws.
+fallback: a null value never lowers, and a clear live value bit still throws. An over-budget
+int `countByKey` throws `ClosedKernelRefusal`. That exception does not extend
+`ClassCastException`, so the action fails instead of rerunning on rows.
 
 ## Ordering guarantees
 

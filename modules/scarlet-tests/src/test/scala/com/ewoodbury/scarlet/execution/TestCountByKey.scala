@@ -198,6 +198,28 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     }
   }
 
+  it should "refuse an over-budget survivor index before the table exists" in {
+    val batch = intPairs(Array(1, 2, 1, 4), Array(0, 0, 0, 0))
+    val selected = Selected(batch, Array(0, 2), 2)
+    List(false, true).foreach { enabled =>
+      ScarletConf.set(ScarletConf.get.copy(spillEnabled = enabled, spillBudgetBytes = 1L))
+      val refused =
+        the[ClosedKernelRefusal] thrownBy HashCount.byKeySelected(Vector(selected), 2, 1, 8)
+      refused.rows shouldBe 2L
+      refused.budget shouldBe 1L
+      refused.bytes should be > refused.budget
+    }
+  }
+
+  it should "collect an empty countByKey when the budget is zero" in {
+    ScarletConf.set(
+      ScarletConf.get.copy(columnarExecution = true, spillBudgetBytes = 0L, spillEnabled = false),
+    )
+    ScarletRuntime.get.shuffle.clear()
+    val source = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 1)
+    countsOf(source.countByKey.collect()) shouldBe Map.empty[Int, Int]
+  }
+
   it should "fail the action when the columnar budget refuses" in {
     val source = DistCollection.ofIntPairs(Array(1, 1, 2), Array(4, 5, 6), 2)
     List(false, true).foreach { enabled =>
