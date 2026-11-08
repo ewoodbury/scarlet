@@ -19,7 +19,9 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * left, right, or full outer join: the value columns are already encoded, and the kernel is not
  * chosen. A null value on a long inner join is that fallback too. A null value on a selected row
  * of an int inner join is that fallback too. A null on a dropped row is not. A string join does
- * not use that fallback: a null value never lowers, and a clear live value bit still throws.
+ * not use that fallback: a null value never lowers, and a clear live value bit still throws. An
+ * over-budget int `countByKey` throws `ClosedKernelRefusal`, which does not extend
+ * `ClassCastException`, so the action fails instead of rerunning on rows.
  */
 @SuppressWarnings(
   Array(

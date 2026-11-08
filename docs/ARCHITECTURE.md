@@ -95,7 +95,7 @@ null. A null string key orders as `""` and stays null. Shape strings are exact.
 | Int `groupByKey`. The exchange drops a null key and keeps every value. Value order inside a key is input order. Key order inside a partition is first-seen. One batch is published per shuffle partition, including an empty bucket. `count` is the number of groups. There is no partial combine and no spill. `keys`, `values`, `take`, and a map above the group stay on the row path | `GroupedInt` | `GroupByKey(Exchange(Scan))` |
 | String `groupByKey`. The exchange drops a null key and keeps `""`. `"é"` and `"e\u0301"` stay distinct. Value order inside a key is input order. Key order inside a partition is first-seen. One batch is published per shuffle partition, including an empty bucket. `count` is the number of groups. There is no partial combine, no spill, and no sort. `keys`, `values`, `take`, and a map above the group stay on the row path | `GroupedString` | `GroupByKey(Exchange(Scan))` |
 | Long `groupByKey` on `(Long, Long)`. The exchange drops a null key and keeps every value. A null value is refused, including beside a null key. Value order inside a key is input order. Key order inside a partition is first-seen. The stored key is the full `Long`. One batch is published per shuffle partition, including an empty bucket. `count` is the number of groups. There is no partial combine and no spill. `keys`, `values`, `take`, and a map above the group stay on the row path | `GroupedLong` | `GroupByKey(Exchange(Scan))` |
-| Int `countByKey` on `(Int, V)`. The exchange drops a null key. The value column is never read, so a null value still counts. The stored count is an `Int` and wraps on overflow, like `reduceByKey`. Output layout is `Pairs`. A two-filter key or value stack partial-counts a survivor index; every other child counts dense batches. There is no spill path: an input-row estimate over `spillBudgetBytes` before any table exists throws `ColumnarFallback` and the action reruns on rows, and that check ignores `spillEnabled`. A string or long key stays on the row path | `Pairs` | `CountByKey(Exchange(Scan))` |
+| Int `countByKey` on `(Int, V)`. The exchange drops a null key. The value column is never read, so a null value still counts. The stored count is an `Int` and wraps on overflow, like `reduceByKey`. Output layout is `Pairs`. A two-filter key or value stack partial-counts a survivor index; every other child counts dense batches. There is no spill path: an input-row estimate over `spillBudgetBytes` before any table exists throws `ClosedKernelRefusal` and the action fails, and that check ignores `spillEnabled`. A string or long key stays on the row path | `Pairs` | `CountByKey(Exchange(Scan))` |
 | String `distinct`. One copy of each string, including one null and one empty string. Equal strings share a hash bucket. Order is unspecified | `Utf8Dict` | `Dedupe(Exchange(Scan))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
 | Automatic or explicit shuffle-hash long join. Both sides are exchanged on `Long.hashCode`. A null key is dropped. A null value stays on the row path. There is no spill and no build budget. Broadcast, sort-merge, and outer joins on long keys stay on the row path | `Columnar` | `LongHashJoin(Exchange(Scan), Exchange(Scan))` |
@@ -382,7 +382,9 @@ above `broadcastBuildBudgetBytes` is not a fallback, and neither is the `Illegal
 from a partition-selector `require`. A null value on a left, right, or full outer join, and on a
 long inner join, is a `ColumnarFallback`. A null value on a selected row of an int inner join is
 also a `ColumnarFallback`; a null on a dropped row is not. A string join does not use that
-fallback: a null value never lowers, and a clear live value bit still throws.
+fallback: a null value never lowers, and a clear live value bit still throws. An over-budget
+int `countByKey` throws `ClosedKernelRefusal`. That exception does not extend
+`ClassCastException`, so the action fails instead of rerunning on rows.
 
 ## Ordering guarantees
 
@@ -499,8 +501,8 @@ Still open inside the set, and therefore not a promise of this commit:
 - A stack of one slot filter still builds dense columns. A stack of two or more already keeps a
   survivor index. Single-column filters stay chained column kernels, because an int survivor index
   is the wrong selection for one column.
-- `countByKey` over `spillBudgetBytes` throws `ColumnarFallback` and the action reruns on rows. It
-  does not spill. Long and string `countByKey` are not columnar.
+- `countByKey` over `spillBudgetBytes` throws `ClosedKernelRefusal` and the action fails. It does
+  not spill. Long and string `countByKey` are not columnar.
 - Long and string inner hash joins do not spill.
 - A null value on an outer join, and on a long inner join, is a `ColumnarFallback`. A null on a
   selected row of an int hash join is the same decline. A null on a dropped row stays columnar. A
@@ -526,8 +528,8 @@ Roadmap and sequencing are tracked externally; the headline items:
   `Seq`.
 - The sort-merge operator still materialises its inputs and its result.
 - The int shuffle-hash build bucket spills. The long and string shuffle-hash joins, including `longInnerJoin`, do not spill and have no build budget.
-- `countByKey` has no spill path. Over the byte budget it falls back to rows, so a large input is
-  correct but loses the columnar path rather than spilling a count table.
+- `countByKey` has no spill path. Over the byte budget the action fails instead of rerunning on
+  rows or spilling a count table.
 - The string-key join does not spill. An input that does not fit stays in memory.
 - Int, long, and string `reduceByKey` buckets spill, but the running partial is `O(distinct keys)`,
   so the bound is one bucket plus its partial, not the query. A reduce with more distinct keys than

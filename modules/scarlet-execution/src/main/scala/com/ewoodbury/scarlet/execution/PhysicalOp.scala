@@ -224,8 +224,8 @@ enum PhysicalOp:
    * dropped. The value column is not read, so a null value still counts. One `(key, count)` row is
    * published per distinct key, including an empty bucket. Output kind is always
    * [[PhysicalOp.Kind.Pairs]]. The count is an `Int` and wraps. There is no spill copy. An input
-   * that does not fit the budget throws [[com.ewoodbury.scarlet.columnar.ColumnarFallback]] before
-   * the table is allocated, and the action reruns on rows.
+   * that does not fit the budget throws [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]]
+   * before the table is allocated, and the action fails instead of rerunning on rows.
    */
   case CountByKey(child: PhysicalOp)
 
