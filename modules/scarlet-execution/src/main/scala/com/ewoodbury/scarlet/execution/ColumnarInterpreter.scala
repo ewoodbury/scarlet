@@ -23,11 +23,11 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * row is not a decline. A null value on a string inner hash join stays columnar. String
  * `reduceByKey` and string `groupByKey` with a live null value are that fallback. Outer joins
  * still decline. A string-pair filter keeps the null int. A value projection that kept a null int
- * is that fallback too. With spill off, an over-budget int or long `countByKey` throws
+ * is that fallback too. With spill off, an over-budget int, long, or string `countByKey` throws
  * `ClosedKernelRefusal`, which does not extend `ClassCastException`, so the action fails instead
  * of rerunning on rows. With spill on, an over-budget post-exchange bucket spills. A count table
  * that still does not fit throws `ClosedKernelRefusal`. The long estimate charges 8-byte keys.
- * String `countByKey` is not columnar.
+ * The string estimate charges dictionary bytes. The running partial is `O(distinct keys)`.
  */
 @SuppressWarnings(
   Array(

@@ -1,18 +1,24 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{ColumnarFallback, HashCount, LongHashCount}
+import com.ewoodbury.scarlet.columnar.{
+  ColumnarFallback,
+  HashCount,
+  LongHashCount,
+  StringHashCount,
+}
 import com.ewoodbury.scarlet.core.Plan
 
 import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
 
 /**
- * Int and long `countByKey`.
+ * Int, long, and string `countByKey`.
  *
  * A pair stack whose selection steps are defined partial-counts survivor ids, including one row,
  * key, or value filter. The exchange sees dense `(key, count)` partials. A map, a scan, and a
  * non-pair child stay on the dense count. The `None` path is the only one that interprets that
- * child. The value column is not read. A long count publishes [[Columns.LongCounts]]. The stored
- * count is an `Int`. A string key stays on the row path and does not reach this arm.
+ * child. The value column is not read. A long count publishes [[Columns.LongCounts]]. A string
+ * count publishes [[Columns.StringPairs]]. The stored count is an `Int`. A null string key is
+ * dropped and `""` is kept.
  */
 private[execution] object CountByKeyArms:
 
@@ -70,7 +76,24 @@ private[execution] object CountByKeyArms:
               longPairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals))
             LongHashCount.byKey(batches, width, workers, batchSize)
         Columns.LongCounts(counted)
+      case PhysicalOp.Kind.StringPairs =>
+        // A null int is not unboxed: string-pair encode reads productElement. This arm does not
+        // turn that into a fallback. The value column is dropped before the count.
+        val counted = FilterChain.selected(
+          source,
+          child,
+          selectedPartition,
+          preserveAbsence,
+          ordinals,
+        ) match
+          case Some(parts) => StringHashCount.byKeySelected(parts, width, workers, batchSize)
+          case None =>
+            val batches = StringPairWalk.batches(
+              interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),
+            )
+            StringHashCount.byKey(batches, width, workers, batchSize)
+        Columns.StringPairs(counted)
       case other =>
         throw new IllegalStateException(
-          s"countByKey column is $other, expected int or long pairs",
+          s"countByKey column is $other, expected int, long, or string pairs",
         )

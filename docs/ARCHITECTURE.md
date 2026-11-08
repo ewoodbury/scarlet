@@ -65,7 +65,7 @@ asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors
 
 ### Columnar completion contract
 
-The following 204 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. The excluded list has 35 shapes, for 239 covered in total. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
+The following 205 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. The excluded list has 35 shapes, for 240 covered in total. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
 `Unknown(2)` denotes the two source partitions in the small contract fixtures. Aggregate and join
 outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. `sortByIntKey`, `sortByLongKey`, and
 `sortByStringKey` use `Range(defaultShufflePartitions, Seq(0))` and `Sorted(Seq(0), Seq(true))`.
@@ -95,8 +95,9 @@ null. A null string key orders as `""` and stays null. Shape strings are exact.
 | Int `groupByKey`. The exchange drops a null key and keeps every value. Value order inside a key is input order. Key order inside a partition is first-seen. One batch is published per shuffle partition, including an empty bucket. `count` is the number of groups. There is no partial combine and no spill. `keys`, `values`, `take`, and a map above the group stay on the row path | `GroupedInt` | `GroupByKey(Exchange(Scan))` |
 | String `groupByKey`. The exchange drops a null key and keeps `""`. `"é"` and `"e\u0301"` stay distinct. Value order inside a key is input order. Key order inside a partition is first-seen. One batch is published per shuffle partition, including an empty bucket. `count` is the number of groups. There is no partial combine, no spill, and no sort. `keys`, `values`, `take`, and a map above the group stay on the row path | `GroupedString` | `GroupByKey(Exchange(Scan))` |
 | Long `groupByKey` on `(Long, Long)`. The exchange drops a null key and keeps every value. A null value is refused, including beside a null key. Value order inside a key is input order. Key order inside a partition is first-seen. The stored key is the full `Long`. One batch is published per shuffle partition, including an empty bucket. `count` is the number of groups. There is no partial combine and no spill. `keys`, `values`, `take`, and a map above the group stay on the row path | `GroupedLong` | `GroupByKey(Exchange(Scan))` |
-| Int `countByKey` on `(Int, V)`. The exchange drops a null key. The value column is never read, so a null value still counts. The stored count is an `Int` and wraps on overflow, like `reduceByKey`. Output layout is `Pairs`. An int-pair filter stack partial-counts a survivor index, including one row, key, or value filter. A map, a scan, and a non-pair child count dense batches. With spill off, an input-row estimate over `spillBudgetBytes` throws `ClosedKernelRefusal` before any table and the action fails. With spill on, an over-budget post-exchange bucket spills. A count table that still does not fit throws `ClosedKernelRefusal`. The running partial is `O(distinct keys)`. A string key stays on the row path | `Pairs` | `CountByKey(Exchange(Scan))` |
-| Long `countByKey` on `(Long, Long)`. The exchange drops a null key. The value column is never read, so a null value still counts. The stored count is an `Int` and wraps on overflow. Output kind is `LongCounts` and the schema is `[Int64, Int32]`. A long-pair filter stack partial-counts a survivor index. The estimate charges 8-byte keys. With spill off, an input-row estimate over `spillBudgetBytes` throws `ClosedKernelRefusal` before any table and the action fails. With spill on, an over-budget post-exchange bucket spills. A count table that still does not fit throws `ClosedKernelRefusal`. The running partial is `O(distinct keys)`. A string key stays on the row path | `Columnar` | `CountByKey(Exchange(Scan))` |
+| Int `countByKey` on `(Int, V)`. The exchange drops a null key. The value column is never read, so a null value still counts. The stored count is an `Int` and wraps on overflow, like `reduceByKey`. Output layout is `Pairs`. An int-pair filter stack partial-counts a survivor index, including one row, key, or value filter. A map, a scan, and a non-pair child count dense batches. With spill off, an input-row estimate over `spillBudgetBytes` throws `ClosedKernelRefusal` before any table and the action fails. With spill on, an over-budget post-exchange bucket spills. A count table that still does not fit throws `ClosedKernelRefusal`. The running partial is `O(distinct keys)` | `Pairs` | `CountByKey(Exchange(Scan))` |
+| Long `countByKey` on `(Long, Long)`. The exchange drops a null key. The value column is never read, so a null value still counts. The stored count is an `Int` and wraps on overflow. Output kind is `LongCounts` and the schema is `[Int64, Int32]`. A long-pair filter stack partial-counts a survivor index. The estimate charges 8-byte keys. With spill off, an input-row estimate over `spillBudgetBytes` throws `ClosedKernelRefusal` before any table and the action fails. With spill on, an over-budget post-exchange bucket spills. A count table that still does not fit throws `ClosedKernelRefusal`. The running partial is `O(distinct keys)` | `Columnar` | `CountByKey(Exchange(Scan))` |
+| String `countByKey` on `(String, Int)`. The exchange drops a null key and keeps `""`. A dictionary code of `0` is not a null. The value column is never read, so a null int still counts. The stored count is an `Int` and wraps on overflow. Output kind is `StringPairs` and the layout is `StringPair`. A string-pair filter stack partial-counts a survivor index. The estimate charges dictionary bytes. With spill off, an input-row estimate over `spillBudgetBytes` throws `ClosedKernelRefusal` before any table and the action fails. With spill on, one over-budget post-exchange bucket spills. A count table that still does not fit throws `ClosedKernelRefusal`. The running partial is `O(distinct keys)` | `StringPair` | `CountByKey(Exchange(Scan))` |
 | String `distinct`. One copy of each string, including one null and one empty string. Equal strings share a hash bucket. Order is unspecified | `Utf8Dict` | `Dedupe(Exchange(Scan))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
 | Automatic or explicit shuffle-hash long join. Both sides are exchanged on `Long.hashCode`. A null key is dropped. A null value stays columnar. A build bucket over `spillBudgetBytes`, when `spillEnabled` is on, is sub-partitioned by the quotient of `Long.hashCode` and the parent width. Each non-empty build piece is one spill file. One piece is joined at a time. A piece still over the budget throws. At or under the budget, and whenever spill is off, the bucket stays in memory and writes nothing. Broadcast, sort-merge, and outer joins on long keys stay on the row path | `Columnar` | `LongHashJoin(Exchange(Scan), Exchange(Scan))` |
@@ -197,7 +198,7 @@ keys stay on the row path. A long sort spills over the budget the same way an in
 String `reduceByKey` is columnar: `StringHashAggregate(Exchange(Scan))` drops a null key, keeps
 `""`, and hashes each dictionary string once. Int `groupByKey` is columnar:
 `GroupByKey(Exchange(Scan))`, layout `GroupedInt`, and `count` is the number of groups. String
-`groupByKey` is columnar the same way, layout `GroupedString`. Long `groupByKey` is columnar the same way, layout `GroupedLong`. Int `countByKey` is columnar as `CountByKey(Exchange(Scan))`, layout `Pairs`: it counts rows per key and never reads the value column, so a null value counts and a null key is dropped. Long `countByKey` is columnar as `CountByKey(Exchange(Scan))`, layout `Columnar`, output kind `LongCounts`, schema `[Int64, Int32]`: the count is an `Int` and wraps, and the estimate charges 8-byte keys. A string key stays on the row path. Double `groupByKey` stays refused.
+`groupByKey` is columnar the same way, layout `GroupedString`. Long `groupByKey` is columnar the same way, layout `GroupedLong`. Int `countByKey` is columnar as `CountByKey(Exchange(Scan))`, layout `Pairs`: it counts rows per key and never reads the value column, so a null value counts and a null key is dropped. Long `countByKey` is columnar as `CountByKey(Exchange(Scan))`, layout `Columnar`, output kind `LongCounts`, schema `[Int64, Int32]`: the count is an `Int` and wraps, and the estimate charges 8-byte keys. String `countByKey` is columnar as `CountByKey(Exchange(Scan))`, layout `StringPair`, output kind `StringPairs`: a null key is dropped, `""` is kept, a code of `0` is not a null, the value column is never read so a null int counts, and the count is an `Int` and wraps. The string estimate charges dictionary bytes. With spill off, an input that does not fit throws `ClosedKernelRefusal` before a table. With spill on, one over-budget post-exchange bucket spills. The running partial is `O(distinct keys)`. Double `groupByKey` stays refused.
 An inner shuffle-hash string join lowers to `StringHashJoin(Exchange(Scan), Exchange(Scan))`.
 `sortByStringKey` of a string-pair scan is columnar. Over the budget, with spill on, it spills the
 same way an int sort does. A null key orders as `""` and stays null.
@@ -225,7 +226,7 @@ double keys, `mapValues` to string or double, double-pair `keys`, `values`,
 single-precision `Float` sources and maps, all-null strings, an empty int source without
 a witness, and element maps that do not preserve the column type (`boolean` to `boolean`, `int`
 to `long`, `string`, or a pair, `long` to `int` or `string`, and `double` to `int`).
-That is 35 exclusions, and 204 accepted, for 239 covered shapes. String `groupByKey` moved from the excluded list, so 36 - 1 = 35 excluded. Long `groupByKey` is a new accepted fixture, so 199 + 1 = 200 and 234 + 1 = 235. Long `filterKeys` and `filterValues` are new accepted fixtures, so 200 + 2 = 202 and 235 + 2 = 237. Int `countByKey` is a new accepted fixture that adds no exclusion, so 202 + 1 = 203 and 237 + 1 = 238. Long `countByKey` is a new accepted fixture that adds no exclusion, so 203 + 1 = 204 and 238 + 1 = 239.
+That is 35 exclusions, and 205 accepted, for 240 covered shapes. String `groupByKey` moved from the excluded list, so 36 - 1 = 35 excluded. Long `groupByKey` is a new accepted fixture, so 199 + 1 = 200 and 234 + 1 = 235. Long `filterKeys` and `filterValues` are new accepted fixtures, so 200 + 2 = 202 and 235 + 2 = 237. Int `countByKey` is a new accepted fixture that adds no exclusion, so 202 + 1 = 203 and 237 + 1 = 238. Long `countByKey` is a new accepted fixture that adds no exclusion, so 203 + 1 = 204 and 238 + 1 = 239. String `countByKey` is a new accepted fixture that adds no exclusion, so 204 + 1 = 205 and 239 + 1 = 240.
 Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by execution
 tests, not contract fixtures, because the contract does not track the int refusals either.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then
@@ -398,8 +399,11 @@ fails. With spill on, an over-budget post-exchange bucket spills, and a count ta
 does not fit throws `ClosedKernelRefusal`. With spill off, an over-budget long `countByKey`
 throws `ClosedKernelRefusal` before a table and the action fails. The estimate charges 8-byte
 keys. With spill on, an over-budget post-exchange bucket spills, and a count table that still
-does not fit throws `ClosedKernelRefusal`. A string key stays on the row path. That exception
-does not extend `ClassCastException`, so a refusal does not rerun on rows.
+does not fit throws `ClosedKernelRefusal`. With spill off, an over-budget string `countByKey`
+throws `ClosedKernelRefusal` before a table and the action fails. The string estimate charges
+dictionary bytes. With spill on, one over-budget post-exchange bucket spills, and a count table
+that still does not fit throws `ClosedKernelRefusal`. The running partial is `O(distinct keys)`.
+That exception does not extend `ClassCastException`, so a refusal does not rerun on rows.
 
 ## Ordering guarantees
 
@@ -458,16 +462,16 @@ The rules that hold for every kind:
 Grouped sum, an inner broadcast join's build, an int shuffle-hash build bucket, a long shuffle-hash
 build bucket, a string shuffle-hash build bucket, sort-merge joins, an int-pair `sortByIntKey`, a
 long-pair `sortByLongKey`, a string-pair `sortByStringKey`, an over-budget int, long, or string
-`reduceByKey` bucket, and an over-budget int or long `countByKey` bucket spill when `spillEnabled` is on.
+`reduceByKey` bucket, and an over-budget int, long, or string `countByKey` bucket spill when `spillEnabled` is on.
 `spillBudgetBytes` is the in-memory trigger. The flag defaults off. `spillMaxFiles` and
 `spillMaxBytes` cap one spill store.
 
 A reduce spills per bucket, and the running partial is `O(distinct keys)`, so the bound is one
-bucket plus its partial, not the query. An int or long `countByKey` spills one post-exchange
-bucket at a time when `spillEnabled` is on. The running partial is `O(distinct keys)`. Spill off
-throws `ClosedKernelRefusal` before a table. A count table that still does not fit throws
-`ClosedKernelRefusal`. The long estimate charges 8-byte keys. String `countByKey` is not columnar,
-and `groupByKey` does not spill.
+bucket plus its partial, not the query. An int, long, or string `countByKey` spills one
+post-exchange bucket at a time when `spillEnabled` is on. The running partial is `O(distinct
+keys)`. Spill off throws `ClosedKernelRefusal` before a table. A count table that still does not
+fit throws `ClosedKernelRefusal`. The long estimate charges 8-byte keys. The string estimate
+charges dictionary bytes. `groupByKey` does not spill.
 
 At or under `spillBudgetBytes`, and whenever `spillEnabled` is off, a sort-merge partition stays
 in memory. Over the budget, with spill on, each side is written as sorted runs and merged
@@ -532,7 +536,7 @@ In the set today, on present values:
   and string pairs. A whole-row filter on a string pair keeps a survivor index, the same as an
   int-pair row filter.
 - `reduceByKey` for int, long, and string keys.
-- `countByKey` for int and long keys.
+- `countByKey` for int, long, and string keys.
 - Inner shuffle-hash join for int, long, and string keys.
 - `sortByIntKey`, `sortByLongKey`, and `sortByStringKey`.
 - Int outer, broadcast, and sort-merge joins.
@@ -543,10 +547,11 @@ Still open inside the set, and therefore not a promise of this commit:
   int-pair row filter, a long-pair row filter, and a whole-row string filter do the same, including
   a stack of one. Single-column filters stay chained column kernels, because an int survivor index
   is the wrong selection for one column.
-- Int and long `countByKey` over `spillBudgetBytes`: with spill off, over budget throws
+- Int, long, and string `countByKey` over `spillBudgetBytes`: with spill off, over budget throws
   `ClosedKernelRefusal` and the action fails; with spill on, an over-budget post-exchange bucket
   spills; a table that still does not fit throws `ClosedKernelRefusal`. The long estimate charges
-  8-byte keys. String `countByKey` is not columnar.
+  8-byte keys. The string estimate charges dictionary bytes. The running partial is `O(distinct
+  keys)`.
 - The long inner hash join spills an over-budget build bucket when `spillEnabled` is on. A piece
   still over the budget throws. The string inner hash join spills an over-budget build bucket when
   `spillEnabled` is on. A piece still over the budget throws.
@@ -565,7 +570,7 @@ Still open inside the set, and therefore not a promise of this commit:
   double-key wide operators, and type-changing maps stay on the row executor.
 
 `TestClosedKernel` pins the present-value happy path that already lowers and runs: element filters
-with count or sum, an int-pair key and value filter, `reduceByKey`, int and long `countByKey`, inner
+with count or sum, an int-pair key and value filter, `reduceByKey`, int, long, and string `countByKey`, inner
 shuffle-hash joins, and the typed key sorts. It does not cover the open items.
 
 ## Known limitations (deferred work)
@@ -578,11 +583,11 @@ Roadmap and sequencing are tracked externally; the headline items:
   `Seq`.
 - The sort-merge operator still materialises its inputs and its result.
 - The int, long, and string shuffle-hash build buckets spill. A piece still over the budget throws rather than joining in memory.
-- Int and long `countByKey` spill an over-budget post-exchange bucket when `spillEnabled` is on.
-  Spill off throws `ClosedKernelRefusal` before a table and the action fails instead of rerunning
-  on rows. A count table that still does not fit throws `ClosedKernelRefusal`. The running partial
-  is `O(distinct keys)`. The long estimate charges 8-byte keys. String `countByKey` is not
-  columnar. `groupByKey` does not spill.
+- Int, long, and string `countByKey` spill an over-budget post-exchange bucket when `spillEnabled`
+  is on. Spill off throws `ClosedKernelRefusal` before a table and the action fails instead of
+  rerunning on rows. A count table that still does not fit throws `ClosedKernelRefusal`. The
+  running partial is `O(distinct keys)`. The long estimate charges 8-byte keys. The string
+  estimate charges dictionary bytes. `groupByKey` does not spill.
 - Int, long, and string `reduceByKey` buckets spill, but the running partial is `O(distinct keys)`,
   so the bound is one bucket plus its partial, not the query. A reduce with more distinct keys than
   fit stays resident no matter how much of the input spills.
