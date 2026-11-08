@@ -474,6 +474,44 @@ the parent width. Each non-empty build piece is one spill file. One piece is joi
 A piece still over the budget throws. At or under the budget, and whenever spill is off, that
 bucket stays in memory and writes nothing.
 
+## Closed kernel
+
+The closed kernel is the set of plans that must lower and run columnar on present values. Finishing
+it means those plans stay columnar through null values and inputs that do not fit the in-memory
+budget, and a decline of one of them is a failure. Plans outside the set run on the row executor,
+and that is the finished design.
+
+In the set today, on present values:
+
+- Int, long, double, string, and boolean scans, filters, same-type maps, count, and take. A
+  Boolean map is outside the set.
+- Sum of int, long, and double.
+- Int, long, and string pair filters, keys, values, and same-type mapValues.
+- `reduceByKey` for int, long, and string keys.
+- `countByKey` for int keys.
+- Inner shuffle-hash join for int, long, and string keys.
+- `sortByIntKey`, `sortByLongKey`, and `sortByStringKey`.
+- Int outer, broadcast, and sort-merge joins.
+
+Still open inside the set, and therefore not a promise of this commit:
+
+- A stack of one slot filter still builds dense columns. A stack of two or more already keeps a
+  survivor index. Single-column filters stay fused pipelines, because an int survivor index is the
+  wrong selection for one column.
+- `countByKey` over `spillBudgetBytes` throws `ColumnarFallback` and the action reruns on rows. It
+  does not spill. Long and string `countByKey` are not columnar.
+- Long and string inner hash joins do not spill.
+- A null value on an inner or outer join stays on the row path. A clear validity bit on an outer
+  join means the partner is absent, so a null value cannot use that bit.
+- A filtered sort over budget gathers survivors before the dense spill writer.
+- `groupByKey` is columnar and stores every value. It is not part of the closed kernel. `flatMap`,
+  `mapPartitions`, cogroup, untyped `sortBy`, Float, double-key wide operators, and type-changing
+  maps stay on the row executor.
+
+`TestClosedKernel` pins the present-value happy path that already lowers and runs: element filters
+with count or sum, an int-pair key and value filter, `reduceByKey`, int `countByKey`, inner
+shuffle-hash joins, and the typed key sorts. It does not cover the open items.
+
 ## Known limitations (deferred work)
 
 Roadmap and sequencing are tracked externally; the headline items:
