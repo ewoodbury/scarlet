@@ -334,7 +334,7 @@ object CrossEngineBench:
    */
   private def nullableInts(rows: Int, keys: Array[Int]): IndexedSeq[(Int, Int)] =
     val values = lcgValues(rows)
-    Seq.tabulate(rows) { index =>
+    IndexedSeq.tabulate(rows) { index =>
       if (index > 0 && index % nullStride == 0) then intPair(boxedInt(keys(index)), absentInt)
       else keys(index) -> values(index)
     }
@@ -342,7 +342,7 @@ object CrossEngineBench:
   private def nullableLongs(rows: Int): IndexedSeq[(Long, Long)] =
     val keys = longKeys(rows)
     val values = lcgLongs(rows)
-    Seq.tabulate(rows) { index =>
+    IndexedSeq.tabulate(rows) { index =>
       if (index > 0 && index % nullStride == 0) then longPair(boxedLong(keys(index)), absentLong)
       else keys(index) -> values(index)
     }
