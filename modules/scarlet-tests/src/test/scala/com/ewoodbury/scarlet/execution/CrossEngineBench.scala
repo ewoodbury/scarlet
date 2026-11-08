@@ -17,10 +17,11 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * The row path is not run here.
  *
  * Owned int arrays use [[BatchCodec.intPairs]]. Owned long arrays use
- * [[BatchCodec.copiedLongPairs]], the scan's array encode. [[BatchCodec.longPairs]] is the boxed
- * scan encoder and would copy every pair, so it is used only for a null long value.
- * [[BatchCodec.intPairsPreservingAbsence]] is the absence-preserving scan encoder for a null int
- * value. [[BatchCodec.nullableIntPairs]] takes `Option` pairs and is not that path.
+ * [[BatchCodec.copiedLongPairs]], the scan's array encode. A null long value is timed with
+ * [[BatchCodec.longPairs]], the boxed scan encoder. A null int value is timed with
+ * [[BatchCodec.intPairsPreservingAbsence]], the grouped-sum encoder. A normal scan still uses
+ * [[BatchCodec.intPairs]], which unboxes. [[BatchCodec.nullableIntPairs]] takes `Option` pairs
+ * and is not that path.
  *
  * Spill is enabled for this process only. The `spillEnabled` default stays false, and the spill
  * budget stays the 64 MiB default.
@@ -328,13 +329,13 @@ object CrossEngineBench:
     order
 
   /**
-   * Value is null when `index` is a multiple of 4096, including row 0. The key stays present. A
-   * leading null value does not classify as a pair.
+   * Value is null when `index` is a positive multiple of 4096. Row 0 stays a present pair so the
+   * source classifies. The key stays present.
    */
   private def nullableInts(rows: Int, keys: Array[Int]): IndexedSeq[(Int, Int)] =
     val values = lcgValues(rows)
     Seq.tabulate(rows) { index =>
-      if (index % nullStride == 0) then intPair(boxedInt(keys(index)), absentInt)
+      if (index > 0 && index % nullStride == 0) then intPair(boxedInt(keys(index)), absentInt)
       else keys(index) -> values(index)
     }
 
@@ -342,7 +343,7 @@ object CrossEngineBench:
     val keys = longKeys(rows)
     val values = lcgLongs(rows)
     Seq.tabulate(rows) { index =>
-      if (index % nullStride == 0) then longPair(boxedLong(keys(index)), absentLong)
+      if (index > 0 && index % nullStride == 0) then longPair(boxedLong(keys(index)), absentLong)
       else keys(index) -> values(index)
     }
 
