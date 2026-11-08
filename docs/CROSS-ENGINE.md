@@ -61,11 +61,70 @@ Spark, same settings, warmup 2, measured 5:
 - filter + join: 235 ms
 - filter + sort: 9,200 ms
 
-The Scarlet 10M run did not complete under the harness's heap; the sort and the duplicated long
-filter collection together exceeded the budget. That is a harness limit, not an engine failure,
-but it means the 10M table is Spark-only. The 10e6 Scarlet column is not in this change. The Spark
-sort is the interesting number: it grows from 681 ms at 1M to 9.2 s at 10M, which is the shuffle
-and spill path showing up.
+The Scarlet 10M run did not complete under the old harness's heap; the sort and the duplicated long
+filter collection together exceeded the budget. That is a harness limit, not an engine failure.
+The Spark sort is the interesting number there: it grows from 681 ms at 1M to 9.2 s at 10M, which
+is the shuffle and spill path showing up. A later Scarlet run with one query per process did
+finish. Its numbers are in the next section. They do not replace the 1M table above.
+
+## Scarlet spilled harness, 2026-11-08
+
+`main` at `5977dfd`. Same machine, 4 threads, batch 8192, two source partitions. Warmup 3, measured
+10, p50. Spill was on for this harness only, with the 64 MiB budget. Each query had its own
+process and a 4 GB heap. Two processes ran at once, so a neighbor was on the machine, except
+`groupByKey` at 10M rows, which ran alone. `encode_ms` is the encode before warmup. It is not part
+of the p50. The p50 still includes the scan encode. All 48 runs published at least one column
+batch and exited 0. `groupByKey` does not spill; at 10M rows it still fit.
+
+`encode_ms` is outside the p50 column. A null value is a null value, at index 1 mod 4096, so the
+key filter keeps it. One filter is the key filter only.
+
+With one filter, the count, `groupByKey`, and join checksums matched the run with no nulls. The
+sum, `reduceByKey`, and sort checksums did not. With two filters, every checksum changed.
+
+### 1M rows, no nulls
+
+| Query | 1 filter p50 | 1 filter encode | 2 filters p50 | 2 filters encode |
+| --- | ---: | ---: | ---: | ---: |
+| filter + count | 3.14 ms | 7.45 ms | 7.79 ms | 7.83 ms |
+| filter + sum | 4.38 ms | 9.35 ms | 6.28 ms | 10.13 ms |
+| filter + groupByKey | 24.92 ms | 21.79 ms | 18.48 ms | 18.64 ms |
+| filter + reduceByKey | 30.08 ms | 10.08 ms | 26.63 ms | 9.35 ms |
+| filter + join | 43.09 ms | 19.63 ms | 38.11 ms | 7.77 ms |
+| filter + sort | 86.55 ms | 8.50 ms | 50.97 ms | 11.70 ms |
+
+### 1M rows, null values
+
+| Query | 1 filter p50 | 1 filter encode | 2 filters p50 | 2 filters encode |
+| --- | ---: | ---: | ---: | ---: |
+| filter + count | 10.03 ms | 74.71 ms | 7.97 ms | 34.21 ms |
+| filter + sum | 14.54 ms | 36.54 ms | 9.36 ms | 52.20 ms |
+| filter + groupByKey | 23.85 ms | 40.67 ms | 17.05 ms | 53.41 ms |
+| filter + reduceByKey | 60.68 ms | 37.37 ms | 26.61 ms | 41.46 ms |
+| filter + join | 71.51 ms | 42.34 ms | 29.62 ms | 78.77 ms |
+| filter + sort | 99.18 ms | 52.86 ms | 68.41 ms | 55.36 ms |
+
+### 10M rows, no nulls
+
+| Query | 1 filter p50 | 1 filter encode | 2 filters p50 | 2 filters encode |
+| --- | ---: | ---: | ---: | ---: |
+| filter + count | 36.91 ms | 14.92 ms | 24.53 ms | 27.20 ms |
+| filter + sum | 27.58 ms | 71.74 ms | 24.29 ms | 15.20 ms |
+| filter + groupByKey | 71.92 ms | 11.98 ms | 63.21 ms | 17.36 ms |
+| filter + reduceByKey | 266.11 ms | 39.23 ms | 137.12 ms | 25.99 ms |
+| filter + join | 623.41 ms | 25.82 ms | 261.01 ms | 21.61 ms |
+| filter + sort | 2,067.88 ms | 18.87 ms | 591.19 ms | 23.05 ms |
+
+### 10M rows, null values
+
+| Query | 1 filter p50 | 1 filter encode | 2 filters p50 | 2 filters encode |
+| --- | ---: | ---: | ---: | ---: |
+| filter + count | 80.07 ms | 109.24 ms | 56.45 ms | 126.26 ms |
+| filter + sum | 232.41 ms | 245.92 ms | 149.52 ms | 224.12 ms |
+| filter + groupByKey | 108.48 ms | 229.51 ms | 86.43 ms | 123.56 ms |
+| filter + reduceByKey | 301.94 ms | 424.39 ms | 113.85 ms | 318.59 ms |
+| filter + join | 2,570.14 ms | 310.82 ms | 621.08 ms | 224.36 ms |
+| filter + sort | 2,155.56 ms | 413.04 ms | 765.98 ms | 274.90 ms |
 
 ## Caveats
 
