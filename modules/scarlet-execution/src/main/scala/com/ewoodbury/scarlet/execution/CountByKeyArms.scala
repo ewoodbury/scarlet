@@ -8,9 +8,9 @@ import ColumnarInterpreter.{Columns, interpretAt, pairsOf}
 /**
  * Int `countByKey`.
  *
- * A two-filter key or value stack partial-counts survivor ids. The exchange sees dense `(key,
- * count)` partials. A single filter, and every other child, stays on the dense count. The `None`
- * path is the only one that interprets that child. The value column is not read.
+ * A key or value stack partial-counts survivor ids, including a stack of one. The exchange sees
+ * dense `(key, count)` partials. Every other child stays on the dense count. The `None` path is
+ * the only one that interprets that child. The value column is not read.
  */
 private[execution] object CountByKeyArms:
 

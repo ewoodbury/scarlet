@@ -110,7 +110,7 @@ class TestSelectionPushdown extends AnyFlatSpec with Matchers with BeforeAndAfte
     arm()
     val sortOp = ColumnarPlanner.lower(sortPlan).getOrElse(fail("expected a sort"))
 
-    // One filter compacts, then sorts. The demand walk still keeps both ordinals.
+    // One filter sorts the survivor index. The demand walk still keeps both ordinals.
     sortOp.shape shouldBe "SortByIntKey(FilterKey(Scan))"
     ColumnUse.ordinals(sortPlan, sortOp) shouldBe Set(0, 1)
     encodedPairs(source, ColumnUse.ordinals(sortPlan, sortOp)).map(_.columns.length) shouldBe

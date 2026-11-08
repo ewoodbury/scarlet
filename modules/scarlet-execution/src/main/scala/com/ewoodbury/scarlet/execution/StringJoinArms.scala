@@ -8,10 +8,10 @@ import StringHashJoin.StringJoinInput
 /**
  * String inner shuffle-hash join.
  *
- * A two-filter stack on either side scatters survivor ids. The exchange reads those rows and does
- * not slice them. Every other child stays on the dense exchange. [[FilterChain.selected]]
- * interprets a stack once. The `None` path is the only one that interprets that child. Both dense
- * sides keep the batch [[StringHashJoin.inner]] call.
+ * A key or value stack on either side scatters survivor ids, including a stack of one. The
+ * exchange reads those rows and does not slice them. Every other child stays on the dense
+ * exchange. [[FilterChain.selected]] interprets a stack once. The `None` path is the only one that
+ * interprets that child. Both dense sides keep the batch [[StringHashJoin.inner]] call.
  *
  * A null key is dropped by the exchange. `""` is a present key. A null value stays on the row
  * path, because classification never selects string pairs for it.

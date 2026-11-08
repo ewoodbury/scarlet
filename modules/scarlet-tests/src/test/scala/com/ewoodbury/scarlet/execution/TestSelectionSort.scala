@@ -15,9 +15,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * Int `sortByIntKey` over a filter selection.
  *
- * A two-filter stack keeps the survivor index. The rank split sorts those rows and still publishes
- * a compacted sorted batch. A null key orders as zero and stays null. Ties keep input order. A
- * single filter, and a scan, still compact or sort on the dense path. Over a tiny spill budget the
+ * A filter stack keeps the survivor index, including one slot filter. The rank split sorts those
+ * rows and still publishes a compacted sorted batch. A null key orders as zero and stays null.
+ * Ties keep input order. A scan still sorts on the dense path. Over a tiny spill budget the
  * selection is materialised and the dense spill writer runs.
  */
 class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
@@ -251,7 +251,7 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     }
   }
 
-  "a single filter" should "compact and take the dense path" in {
+  "a single filter" should "sort the survivor index and skip the compact" in {
     val source = pairs
     val filtered = source.filterKeys((key: Int) => key > 0)
     val sorted = filtered.sortByIntKey
@@ -260,7 +260,7 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val found = collect(sorted)
     found shouldBe Seq(1 -> 10, 2 -> 30, 3 -> 40, 4 -> 50, 5 -> 60, 6 -> 70)
     found shouldBe row(sorted.collect().toSeq)
-    assertSameBatches(sorted, filtered, source)
+    assertFewerBatches(sorted, filtered, source)
   }
 
   "a scan" should "take the dense path, and a map under the sort should stay on the row path" in {
@@ -426,16 +426,6 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val (compactPublishes, dense, selectedCount) = batchGap(sorted, filtered, source)
     compactPublishes should be > 0L
     (dense - selectedCount) shouldBe compactPublishes
-
-  /** A single filter still compacts, so the selection collect publishes the dense total. */
-  private def assertSameBatches(
-      sorted: DistCollection[(Int, Int)],
-      filtered: DistCollection[(Int, Int)],
-      source: DistCollection[(Int, Int)],
-  ): Unit =
-    val (compactPublishes, dense, selectedCount) = batchGap(sorted, filtered, source)
-    compactPublishes should be > 0L
-    selectedCount shouldBe dense
 
   /**
    * `dense` compacts the filter, then rank-splits. `selectedCount` is the sort collect. The two

@@ -138,7 +138,7 @@ class TestLongPairFilter extends AnyFlatSpec with Matchers with BeforeAndAfterEa
 
     val once = nullable.filterKeys[Long, Long]((key: Long) => key >= 0L)
     val onceOp = ColumnarPlanner.lower(once.plan).getOrElse(fail("one key filter did not lower"))
-    FilterChain.selected(once.plan, onceOp, None, false, Set(0, 1)) shouldBe None
+    FilterChain.selected(once.plan, onceOp, None, false, Set(0, 1)) shouldBe defined
 
     val rows = nullable
       .filter((_: (Long, Long)) => true)

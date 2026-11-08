@@ -12,10 +12,10 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
- * A string-pair stack of two or more `filterKeys` / `filterValues` publishes one survivor index.
- * Collect, take, and `groupByKey` read that index. A single filter stays on [[StringPairWalk]].
- * Counts are [[ColumnMetrics.batchCount]]: the gap against a direct interpret is the compact the
- * selection path does not publish.
+ * A string-pair stack of `filterKeys` / `filterValues`, including one filter, publishes one
+ * survivor index. Collect, take, and `groupByKey` read that index. A map and a scan stay on
+ * [[StringPairWalk]]. Counts are [[ColumnMetrics.batchCount]]: the gap against a direct interpret
+ * is the compact the selection path does not publish.
  */
 class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -233,7 +233,7 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
     groupedStrings(GroupByKey.stringsSelected(selected, 4, 1)) shouldBe expected
   }
 
-  it should "leave a single filter and a non-filter plan on the dense path" in {
+  it should "index one slot filter and leave a map and a scan on the dense path" in {
     val single = source.filterKeys((key: String) => keeps(key))
     val mapped = source.mapValues((value: Int) => value + 1)
     val bare = source.groupByKey
@@ -243,10 +243,11 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
     shape(single.plan) shouldBe "FilterKey(Scan)"
     shape(mapped.plan) shouldBe "MapValue(Scan)"
     shape(bare.plan) shouldBe "GroupByKey(Exchange(Scan))"
-    FilterChain.selected(single.plan, lowered(single.plan), None, false, Set(0, 1)) shouldBe None
+    shape(once.plan) shouldBe "FilterValue(Scan)"
+    FilterChain.selected(single.plan, lowered(single.plan), None, false, Set(0, 1)) shouldBe defined
     FilterChain.selected(mapped.plan, lowered(mapped.plan), None, false, Set(0, 1)) shouldBe None
     FilterChain.selected(source.plan, lowered(source.plan), None, false, Set(0, 1)) shouldBe None
-    FilterChain.selected(once.plan, lowered(once.plan), None, false, Set(0, 1)) shouldBe None
+    FilterChain.selected(once.plan, lowered(once.plan), None, false, Set(0, 1)) shouldBe defined
 
     val encode = published {
       ColumnarInterpreter.interpret(source.plan, lowered(source.plan))
@@ -255,8 +256,9 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
     val singleDense = published {
       ColumnarInterpreter.interpret(single.plan, lowered(single.plan))
     }
-    singleBatches shouldBe singleDense
-    singleDense should be > encode
+    val singleCompact = singleDense - encode
+    singleCompact should be > 0L
+    (singleDense - singleBatches) shouldBe singleCompact
     single.collect().toList shouldBe row(single.collect().toList)
 
     val mappedBatches = footprint(mapped.collect().toList)._2
@@ -274,11 +276,15 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
     (bareDense - bareBatches) shouldBe 0L
 
     val onceBatches = published(groupedOnce.collect())
-    val onceDense = published {
+    val (afterFilter, onceDense) = ColumnMetrics.withSink(new CountingSink) {
       val columns = ColumnarInterpreter.interpret(once.plan, lowered(once.plan))
-      GroupByKey.strings(StringPairWalk.batches(columns), width, workers)
+      val mid = ColumnMetrics.batchCount
+      val _ = GroupByKey.strings(StringPairWalk.batches(columns), width, workers)
+      (mid, ColumnMetrics.batchCount)
     }
-    onceBatches shouldBe onceDense
+    val onceCompact = afterFilter - encode
+    onceCompact should be > 0L
+    (onceDense - onceBatches) shouldBe onceCompact
     groupedStrings(groupedOnce.collect()) shouldBe groupedStrings(row(groupedOnce.collect()))
   }
 

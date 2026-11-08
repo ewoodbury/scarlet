@@ -15,8 +15,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Plan-level proof of where a stack of unfused filters compacts. Counts are
  * [[ColumnMetrics.batchCount]], not wall time. Collect and take of a two-filter int-pair or
  * int-triple stack decode the survivor index and do not publish the compact. Interpreting that
- * stack still compacts. A single-column chain publishes one batch per filter. A lone filter is
- * left to the existing kernels, whose formulas live in the morsel and pair suites.
+ * stack still compacts. A single-column chain publishes one batch per filter. One pair slot
+ * filter decodes a survivor index. Its interpret still chains the existing kernel.
  */
 class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -415,13 +415,15 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
       val op = ColumnarPlanner.lower(single.plan).getOrElse(fail("expected a pair filter"))
       val _ = ColumnarInterpreter.interpret(single.plan, op)
     }
-    singleBatches shouldBe singleInterpret
-    singleInterpret should be > encode
+    val singleCompact = singleInterpret - encode
+    singleCompact should be > 0L
+    (singleInterpret - singleBatches) shouldBe singleCompact
+    single.collect().toList shouldBe row(single.collect().toList)
     val (singlePrefix, singlePrefixBatches, _, singleDecoded) = footprint(single.take(1))
     singlePrefix shouldBe List((2, 20))
     singleDecoded shouldBe 1L
-    // Encode plus the kernel publish. A selection decode would publish the encode only.
-    singlePrefixBatches shouldBe 2L
+    // Selection decodes the first partition and does not publish the kernel.
+    singlePrefixBatches shouldBe 1L
 
     // A bare scan collect returns its partitions and does not enter the planner. `keys` does.
     val projected = source.keys

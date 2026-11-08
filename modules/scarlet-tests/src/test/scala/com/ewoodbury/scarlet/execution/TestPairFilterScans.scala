@@ -10,9 +10,11 @@ import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
- * Pair and triple filters scan morsels of the shared batch. A partition longer than the batch
- * size is several visits and one published output per visit. Copying each slice would publish
- * one extra batch per visit, and the batch count below rejects that.
+ * Collect of one pair or triple slot filter decodes a survivor index. It visits each morsel and
+ * does not publish a filtered batch. Count of a pair scan still walks the encoded source in
+ * place. Interpreting the filter, and counting a triple filter, still chain one kernel: one
+ * output per morsel and one regroup when a partition is split. Copying each slice would publish
+ * one extra batch per visit, and that batch count rejects it.
  */
 class TestPairFilterScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -40,10 +42,14 @@ class TestPairFilterScans extends AnyFlatSpec with Matchers with BeforeAndAfterE
     counted.result shouldBe 5L
     collected.visits shouldBe cuts.length.toLong
     counted.visits shouldBe collected.visits
-    // Encode, one output per morsel, and one regroup. A copied slice adds one batch per cut.
-    collected.batches shouldBe 1L + cuts.length.toLong + 1L
+    // The index is decoded in place. Encode is the only published batch.
+    collected.batches shouldBe 1L
     // Count reads the encoded source in place and does not publish a gathered batch per morsel.
     counted.batches shouldBe 1L
+    // interpret still chains one kernel: one output per morsel, then one regroup.
+    val dense = interpreted(pairs)
+    dense.visits shouldBe cuts.length.toLong
+    dense.batches shouldBe 1L + cuts.length.toLong + 1L
   }
 
   it should "visit one zero-length morsel when the partition is empty" in {
@@ -54,7 +60,10 @@ class TestPairFilterScans extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
     collected.result shouldBe Seq.empty[(Int, Int)]
     collected.visits shouldBe 1L
-    collected.batches shouldBe 2L
+    collected.batches shouldBe 1L
+    val dense = interpreted(pairs)
+    dense.visits shouldBe 1L
+    dense.batches shouldBe 2L
   }
 
   it should "keep partition order when morsels split a pair filter" in {
@@ -81,7 +90,10 @@ class TestPairFilterScans extends AnyFlatSpec with Matchers with BeforeAndAfterE
       14 -> 140,
     )
     collected.visits shouldBe visits.toLong
-    collected.batches shouldBe 2L + visits.toLong + 2L
+    collected.batches shouldBe 2L
+    val dense = interpreted(pairs)
+    dense.visits shouldBe visits.toLong
+    dense.batches shouldBe 2L + visits.toLong + 2L
   }
 
   "a triple filter" should "visit each morsel of the join output and publish no slice batch" in {
@@ -103,10 +115,10 @@ class TestPairFilterScans extends AnyFlatSpec with Matchers with BeforeAndAfterE
     counted.result shouldBe expected.length.toLong
     collected.visits - baseline.visits shouldBe cuts.length.toLong
     counted.visits - baseline.visits shouldBe cuts.length.toLong
-    // The join output is one batch. The filter adds one output per morsel and one regroup.
-    // A copied slice of that batch would add one more batch per cut.
+    // Collect decodes the index and does not publish the filter. Count still chains the kernel:
+    // one output per morsel and one regroup. A copied slice would add one batch per cut.
+    collected.batches - baseline.batches shouldBe 0L
     val filterBatches = cuts.length.toLong + 1L
-    collected.batches - baseline.batches shouldBe filterBatches
     counted.batches - baseline.batches shouldBe filterBatches
   }
 
@@ -127,9 +139,8 @@ class TestPairFilterScans extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
     collected.result shouldBe rowResult
     collected.visits - baseline.visits shouldBe filterVisits.toLong
-    // One output per morsel, plus a regroup of the 5-row partition. The 4-row partition is one
-    // morsel, so it is not concatenated. Slicing the 5-row batch would add two copied batches.
-    collected.batches - baseline.batches shouldBe filterVisits.toLong + 1L
+    // The index adds visits and no filtered batch. Slicing would publish copied batches.
+    collected.batches - baseline.batches shouldBe 0L
   }
 
   private def arm(threads: Int, partitions: Int = 4): Unit =
@@ -144,6 +155,12 @@ class TestPairFilterScans extends AnyFlatSpec with Matchers with BeforeAndAfterE
     )
 
   private final case class Footprint[A](result: A, batches: Long, visits: Long)
+
+  private def interpreted(collection: DistCollection[_]): Footprint[Unit] =
+    measure {
+      val op = ColumnarPlanner.lower(collection.plan).getOrElse(fail("expected a columnar plan"))
+      val _ = ColumnarInterpreter.interpret(collection.plan, op)
+    }
 
   private def measure[A](body: => A): Footprint[A] =
     ScarletRuntime.get.shuffle.clear()

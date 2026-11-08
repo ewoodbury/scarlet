@@ -135,11 +135,11 @@ class TestSelectionStringReduce extends AnyFlatSpec with Matchers with BeforeAnd
     reduced.collect().toMap shouldBe row(reduced.collect().toMap)
   }
 
-  it should "leave a single filter on the dense reduce" in {
+  it should "reduce one filter through the survivor index" in {
     val once = source.filterValues((value: Int) => value > 0)
     val reduced = once.reduceByKey[String, Int](_ + _)
 
-    selectedOf(reduced.plan) shouldBe None
+    selectedOf(reduced.plan) shouldBe defined
     reduced.collect().toMap shouldBe row(reduced.collect().toMap)
     reduced.collect().toMap shouldBe Map("" -> 3, "red" -> 10, "blue" -> 7, "no" -> 11)
   }

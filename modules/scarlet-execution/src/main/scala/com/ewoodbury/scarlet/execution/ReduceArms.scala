@@ -8,8 +8,8 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
 /**
  * `reduceByKey` for int pairs, long pairs, and string pairs.
  *
- * A two-filter key or value stack on an int, long, or string child partial-reduces survivor ids.
- * The exchange sees dense partials. A single filter, a whole-row string filter, a long row filter,
+ * A key or value stack on an int, long, or string child partial-reduces survivor ids, including a
+ * stack of one. The exchange sees dense partials. A whole-row string filter, a long row filter,
  * and every other child stay on the dense reduce. The `None` path is the only one that interprets
  * that child.
  */
@@ -28,8 +28,8 @@ private[execution] object ReduceArms:
     // Named erasure boundary. Grouped pair reduction declares `(Int, Int) => Int`.
     @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
     val op = reduceFunc.asInstanceOf[(Int, Int) => Int]
-    // A two-filter int-pair stack scans survivor ids. The `None` path is the only one that
-    // interprets that child.
+    // A slot-filter stack scans survivor ids, including one filter. The `None` path is the only
+    // one that interprets that child.
     val binOp: HashReduce.IntBinOp = (left: Int, right: Int) => op(left, right)
     val width = ColumnarPlanner.shuffleWidth
     val workers = ColumnarPlanner.parallelism
@@ -66,8 +66,8 @@ private[execution] object ReduceArms:
     // Named erasure boundary. Grouped long-pair reduction declares `(Long, Long) => Long`.
     @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
     val op = reduceFunc.asInstanceOf[(Long, Long) => Long]
-    // A two-filter long-pair stack scans survivor ids. The `None` path is the only one that
-    // interprets that child.
+    // A long key or value stack scans survivor ids, including one filter. The `None` path is the
+    // only one that interprets that child.
     val binOp: LongHashReduce.LongBinOp = (left: Long, right: Long) => op(left, right)
     val width = ColumnarPlanner.shuffleWidth
     val workers = ColumnarPlanner.parallelism
