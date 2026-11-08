@@ -12,7 +12,9 @@ import java.util.Arrays
  *
  * A null key is not inserted and is not probed, so a stored `0` does not match key `0`. Every
  * value cell must be present. The interpreter refuses a null value, so the plan stays on the row
- * path. There is no spill and no build budget. The probe writes matches directly. Output columns
+ * path. This kernel does not read the spill budget. [[LongHashJoinSpill]] spills an over-budget
+ * shuffle bucket and probes each piece with [[innerInt64]]. A piece that is still over the budget
+ * throws there, before this kernel allocates. The probe writes matches directly. Output columns
  * keep the grown capacity and `length` is the match count.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
@@ -27,6 +29,22 @@ object LongHashJoin:
     require(probeKeys.length == probeValues.length, "probe key and value columns differ in length")
     if (buildKeys.length == 0 || probeKeys.length == 0) then ColumnBatches.emptyLongJoin
     else indexed(buildKeys, buildValues).write(probeKeys, probeValues)
+
+  /**
+   * Retained bytes of the open build table for `rows` live build rows. Each row keeps an 8-byte
+   * key, an 8-byte value, and one byte for the validity bitmaps. Each slot keeps an 8-byte key and
+   * a 4-byte head; a slot is free when its head is -1. Each row also keeps a 4-byte chain link.
+   * The validity charge is whole bytes, which rounds those bitsets up, and a fixed allowance
+   * covers the array headers and alignment. This is the build table only. [[innerInt64]] does not
+   * compare it. [[LongHashJoinSpill]] does, before a piece is probed.
+   */
+  private[scarlet] def retainedBuildBytes(rows: Int): Long =
+    val slots = ColumnHash.tableSize(rows).toLong
+    val rowBytes = 8L + 8L + 1L
+    val slotBytes = 8L + 4L
+    val chainBytes = 4L
+    val headers = 256L
+    rows.toLong * rowBytes + slots * slotBytes + rows.toLong * chainBytes + headers
 
   private def indexed(buildKeys: Int64Column, buildValues: Int64Column): BuildTable =
     val table = new BuildTable(buildKeys, buildValues)

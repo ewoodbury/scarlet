@@ -14,9 +14,10 @@ package com.ewoodbury.scarlet.columnar
  * either way. Null values stay null and move with the row. Order inside a bucket is input order.
  * An empty bucket is an empty batch of the same schema. An int bucket can be split again by
  * [[partitionInt32Within]] with `floorMod(floorDiv(key, parentWidth), parts)`, so keys that share
- * a bucket can still separate. String buckets keep the source dictionary; [[ColumnBatches.concat]]
- * remaps unlike dictionaries when those buckets are combined, so code equality in the combined
- * bucket is string equality.
+ * a bucket can still separate. A long bucket can be split again by [[partitionInt64Within]] with
+ * `floorMod(floorDiv(Long.hashCode(key), parentWidth), parts)`. String buckets keep the source
+ * dictionary; [[ColumnBatches.concat]] remaps unlike dictionaries when those buckets are combined,
+ * so code equality in the combined bucket is string equality.
  *
  * [[partitionAllSelected]] scatters an int-pair [[Selected]]. It reads `values(rows(i))` for
  * `i < count` and does not share the source, including when `numPartitions` is 1. A null key is
@@ -154,6 +155,55 @@ object HashExchange:
       }
 
   /**
+   * Split one parent long bucket into `parts` pieces.
+   *
+   * The parent exchange already assigned `floorMod(Long.hashCode(key), parentWidth)`. The piece is
+   * `floorMod(floorDiv(Long.hashCode(key), parentWidth), parts)`, so two keys in that bucket
+   * separate when their hash quotients differ. `floorDiv` rounds toward negative infinity, which
+   * keeps a negative hash with the same quotient on both sides. A second
+   * `floorMod(Long.hashCode(key), parts)` does not: when `parts` divides `parentWidth`, every key
+   * in the bucket has the same residue. Null keys are dropped unless `carryNullKeys` is set. A
+   * carried null key goes to partition 0. [[partitionInt64]] is unchanged.
+   */
+  private[scarlet] def partitionInt64Within(
+      batch: ColumnBatch,
+      keyOrdinal: Int,
+      parentWidth: Int,
+      parts: Int,
+      carryNullKeys: Boolean = false,
+  ): Vector[ColumnBatch] =
+    require(parentWidth > 0, s"parentWidth must be positive, got $parentWidth")
+    require(parts > 0, s"parts must be positive, got $parts")
+    val keys = ColumnHash.int64At(batch, keyOrdinal)
+    val rows = batch.length
+    // One piece already holds every row. Sharing the batch is safe when null keys are kept,
+    // and when there is no null key to drop. The quotient is irrelevant at one piece.
+    if (parts == 1 && (carryNullKeys || ColumnHash.fullyPresent(keys))) then Vector(batch)
+    else
+      val dest = new Array[Int](rows)
+      val counts = new Array[Int](parts)
+      val keyValues = keys.values
+      val keyWords = keys.validity.words
+      var row = 0
+      while (row < rows) {
+        if (Validity.isSet(keyWords, row)) then
+          val hash = java.lang.Long.hashCode(keyValues(row))
+          val part = Math.floorMod(Math.floorDiv(hash, parentWidth), parts)
+          dest(row) = part
+          counts(part) += 1
+        else if (carryNullKeys) then
+          dest(row) = nullKeyPartition
+          counts(nullKeyPartition) += 1
+        else dest(row) = -1
+        row += 1
+      }
+      val scattered = batch.columns.map(column => scatter(column, dest, counts)).toVector
+      Vector.tabulate(parts) { part =>
+        val columns = scattered.map(column => bucketAt(column, part))
+        new ColumnBatch(batch.schema, columns, counts(part))
+      }
+
+  /**
    * Partition every batch, then concatenate bucket `i` across batches. Bucket order follows
    * `batches`.
    */
@@ -249,6 +299,26 @@ object HashExchange:
       partitionInt64(batch, keyOrdinal, numPartitions, carryNullKeys)
     }
     Vector.tabulate(numPartitions) { part =>
+      ColumnBatches.concat(scattered.map(buckets => bucketAt(buckets, part)))
+    }
+
+  /**
+   * [[partitionAllInt64]] for a second split inside a parent bucket. Piece assignment is
+   * [[partitionInt64Within]]. A null key is dropped. `parts` buckets are returned, including empty
+   * ones, in piece order. [[partitionAllInt64]] is unchanged.
+   */
+  private[scarlet] def partitionAllInt64Within(
+      batches: Vector[ColumnBatch],
+      keyOrdinal: Int,
+      parentWidth: Int,
+      parts: Int,
+      parallelism: Int,
+  ): Vector[ColumnBatch] =
+    require(batches.nonEmpty, "partitionAllInt64Within needs at least one batch")
+    val scattered = MorselScheduler.map(batches, parallelism) { (_, batch) =>
+      partitionInt64Within(batch, keyOrdinal, parentWidth, parts)
+    }
+    Vector.tabulate(parts) { part =>
       ColumnBatches.concat(scattered.map(buckets => bucketAt(buckets, part)))
     }
 

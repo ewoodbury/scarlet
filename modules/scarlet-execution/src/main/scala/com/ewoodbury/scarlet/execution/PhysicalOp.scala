@@ -75,12 +75,16 @@ enum PhysicalOp:
   case HashJoin(left: PhysicalOp, right: PhysicalOp)
 
   /**
-   * In-memory shuffle-hash inner join of `(Long, Long)` pairs. `left` and `right` are exchanges
-   * with the same partition count. The kernel builds the left bucket and probes the right. A null
-   * key is dropped on both sides by the exchange and is not inserted. Every value cell must be
-   * present. The interpreter refuses a null value, so the plan stays on the row path. Output
-   * columns are `(key, left, right)`. There is no spill and no build budget. Output kind is
-   * [[PhysicalOp.Kind.LongTriples]].
+   * Shuffle-hash inner join of `(Long, Long)` pairs. `left` and `right` are exchanges with the
+   * same partition count. The kernel builds the left bucket and probes the right. A null key is
+   * dropped on both sides by the exchange and is not inserted. Every value cell must be present.
+   * The interpreter refuses a null value, so the plan stays on the row path. Output columns are
+   * `(key, left, right)`. When `spillEnabled` is on and a build bucket's retained estimate is
+   * above `spillBudgetBytes`, that bucket is sub-partitioned by the quotient of `Long.hashCode`
+   * and the parent width. Each non-empty build piece is one spill file. One piece is probed at a
+   * time. A piece still over the budget throws. At or under the budget, and whenever spill is off,
+   * the bucket stays in memory and writes nothing. Broadcast, sort-merge, and outer joins on long
+   * keys do not use this node. Output kind is [[PhysicalOp.Kind.LongTriples]].
    */
   case LongHashJoin(left: PhysicalOp, right: PhysicalOp)
 
