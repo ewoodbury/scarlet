@@ -470,6 +470,21 @@ object BatchCodec:
     Seq.tabulate(rows)(row => erasedLongPair(longRef(left, row), longRef(right, row)))
 
   /**
+   * Reads `rows(0 until count)` of a long-pair batch. A clear bit is a null `Long`, the same rule
+   * as [[decodeLongPairs]]. [[decodeIntPairs]] rejects a clear bit and is not this decoder. A
+   * clear bit on a row the index does not name is not read. `count` is the live prefix. Slots at
+   * `count` and beyond are not decoded.
+   */
+  def decodeLongPairs(batch: ColumnBatch, rows: Array[Int], count: Int): Seq[(Long, Long)] =
+    val (left, right) = longPair(batch)
+    val live = selectionCount(rows, count)
+    ColumnMetrics.decoded(live)
+    Seq.tabulate(live) { slot =>
+      val row = rows(slot)
+      erasedLongPair(longRef(left, row), longRef(right, row))
+    }
+
+  /**
    * Join rows are `(key, build value, probe value)`. A null stays an error: the decoded `Int`
    * would otherwise be the stored zero. A full decode checks live bits by word; a prefix decode
    * checks only the rows it returns. Spare capacity past `length` is ignored.

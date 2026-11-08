@@ -8,10 +8,10 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
 /**
  * `reduceByKey` for int pairs, long pairs, and string pairs.
  *
- * A two-filter key or value stack on an int or string child partial-reduces survivor ids. The
- * exchange sees dense partials. A single filter, a whole-row string filter, and every other child
- * stay on the dense reduce. The `None` path is the only one that interprets that child. The long
- * arm stays on the dense reduce.
+ * A two-filter key or value stack on an int, long, or string child partial-reduces survivor ids.
+ * The exchange sees dense partials. A single filter, a whole-row string filter, a long row filter,
+ * and every other child stay on the dense reduce. The `None` path is the only one that interprets
+ * that child.
  */
 private[execution] object ReduceArms:
 
@@ -66,15 +66,30 @@ private[execution] object ReduceArms:
     // Named erasure boundary. Grouped long-pair reduction declares `(Long, Long) => Long`.
     @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
     val op = reduceFunc.asInstanceOf[(Long, Long) => Long]
-    Columns.LongPairs(
-      LongHashReduce.byKey(
-        longPairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)),
-        ColumnarPlanner.shuffleWidth,
-        ColumnarPlanner.parallelism,
-        ColumnarPlanner.batchSize,
-        (left, right) => op(left, right),
-      ),
-    )
+    // A two-filter long-pair stack scans survivor ids. The `None` path is the only one that
+    // interprets that child.
+    val binOp: LongHashReduce.LongBinOp = (left: Long, right: Long) => op(left, right)
+    val width = ColumnarPlanner.shuffleWidth
+    val workers = ColumnarPlanner.parallelism
+    val batchSize = ColumnarPlanner.batchSize
+    val reduced = FilterChain.selected(
+      source,
+      child,
+      selectedPartition,
+      preserveAbsence,
+      ordinals,
+    ) match
+      case Some(parts) =>
+        LongHashReduce.byKeySelected(parts, width, workers, batchSize, binOp)
+      case None =>
+        LongHashReduce.byKey(
+          longPairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)),
+          width,
+          workers,
+          batchSize,
+          binOp,
+        )
+    Columns.LongPairs(reduced)
 
   def stringByKey[V](
       source: Plan[_],

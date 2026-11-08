@@ -101,6 +101,89 @@ class TestLongHashReduce extends AnyFlatSpec with Matchers:
     parts.foreach(part => assertValidity(part, BatchCodec.decodeLongPairs(part)))
   }
 
+  "int64Selected" should "drop a null key, keep one null, and unbox a second null" in {
+    // Row 1 is a null key and sits inside the live prefix. The slot past `count` repeats key 2
+    // and must not be read: reading it would combine 5 with 5.
+    val keys = Int64Column.of(
+      Array(1L, 7L, 1L, 2L, 3L, 2L),
+      Validity.pack(6, row => row != 1),
+      6,
+    )
+    val values = Int64Column.of(
+      Array(0L, 9L, 0L, 5L, 0L, 5L),
+      Validity.pack(6, row => row == 1 || row == 3 || row == 5),
+      6,
+    )
+    val batch = new ColumnBatch(
+      Vector(LogicalType.Int64, LogicalType.Int64),
+      Vector(keys, values),
+      6,
+    )
+    val ids = Array(0, 1, 2, 3, 4, 5)
+    val selected = Selected(batch, ids, 5)
+    val combine: LongHashReduce.LongBinOp = (left, right) => left + right + 1L
+    val reduced = LongHashReduce.int64Selected(selected, 0, selected.count, 0, 1, combine)
+    val decoded = BatchCodec.decodeLongPairs(reduced)
+
+    decoded should contain theSameElementsAs Seq(
+      pair(longRef(1L), longRef(1L)),
+      pair(longRef(2L), longRef(5L)),
+      pair(longRef(3L), absent),
+    )
+    assertValidity(reduced, decoded)
+    selected.rows should be theSameInstanceAs ids
+    val none = LongHashReduce.int64Selected(selected, 2, 2, 0, 1, combine)
+    none.length shouldBe 0
+    an[IllegalArgumentException] should be thrownBy {
+      LongHashReduce.int64Selected(selected, 0, ids.length, 0, 1, combine)
+    }
+  }
+
+  it should "match int64 when every present row is selected" in {
+    val rows = Seq((1L, 10L), (1L, 1L), (2L, 7L))
+    val batch = longPairs(rows)
+    val ids = Array(0, 1, 2)
+    val selected = Selected(batch, ids, ids.length)
+    val viaSelection = LongHashReduce.int64Selected(selected, 0, ids.length, 0, 1, plus)
+    val viaDense = LongHashReduce.int64(batch, 0, 1, plus)
+
+    BatchCodec.decodeLongPairs(viaSelection) should contain theSameElementsAs
+      BatchCodec.decodeLongPairs(viaDense)
+  }
+
+  "byKeySelected" should "republish a missing partial across morsels of one selection" in {
+    val keys = Int64Column.of(Array(3L, 1L, 2L, 1L), Validity.allValid(4), 4)
+    val values = Int64Column.of(
+      Array(4L, 0L, 0L, 5L),
+      Validity.pack(4, row => row == 0 || row == 3),
+      4,
+    )
+    val batch = new ColumnBatch(
+      Vector(LogicalType.Int64, LogicalType.Int64),
+      Vector(keys, values),
+      4,
+    )
+    val ids = Array(0, 1, 2, 3)
+    val selected = Selected(batch, ids, ids.length)
+    val combine: LongHashReduce.LongBinOp = (left, right) => left + right + 1L
+    val parts = LongHashReduce.byKeySelected(
+      Vector(selected),
+      numPartitions = 4,
+      parallelism = 2,
+      batchSize = 1,
+      combine,
+    )
+    val decoded = parts.flatMap(part => BatchCodec.decodeLongPairs(part))
+
+    decoded should contain theSameElementsAs Seq(
+      pair(longRef(3L), longRef(4L)),
+      pair(longRef(1L), longRef(6L)),
+      pair(longRef(2L), absent),
+    )
+    parts.foreach(part => assertValidity(part, BatchCodec.decodeLongPairs(part)))
+    selected.rows should be theSameInstanceAs ids
+  }
+
   private def longPairs(rows: Seq[(Long, Long)]): ColumnBatch =
     val keys = Int64Column(rows.map(_._1))
     val values = Int64Column(rows.map(_._2))

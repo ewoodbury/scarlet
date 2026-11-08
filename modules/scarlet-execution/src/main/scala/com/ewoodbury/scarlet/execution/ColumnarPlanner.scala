@@ -82,11 +82,11 @@ object ColumnarPlanner:
    * [[ColumnarFallback]] is its named form. Any other failure, including a boolean column in the
    * element pipeline, propagates.
    *
-   * A pair, triple, or string-pair stack of two or more filters decodes [[FilterChain.selected]]
-   * and does not gather. That call interprets the source under the stack, so this does not
-   * interpret the source again. Every other plan decodes [[ColumnarInterpreter.interpret]]. The
-   * result cast is the same erasure boundary as [[tryRun]]: the decoded partitions have the plan's
-   * element type.
+   * A pair, long-pair, triple, or string-pair stack of two or more filters decodes
+   * [[FilterChain.selected]] and does not gather. That call interprets the source under the stack,
+   * so this does not interpret the source again. Every other plan decodes
+   * [[ColumnarInterpreter.interpret]]. The result cast is the same erasure boundary as [[tryRun]]:
+   * the decoded partitions have the plan's element type.
    */
   private[execution] def runLowered[A](plan: Plan[A], op: PhysicalOp): Option[Seq[Partition[A]]] =
     try
@@ -140,8 +140,8 @@ object ColumnarPlanner:
    * batch of a partition contributes before the next partition is read. Each returned chunk is
    * appended once, in order.
    *
-   * A partition-preserving pair, triple, or string-pair filter stack decodes a prefix of
-   * [[FilterChain.selected]]. The decoder sees `min(remaining, count)` rows, so the rest of the
+   * A partition-preserving pair, long-pair, triple, or string-pair filter stack decodes a prefix
+   * of [[FilterChain.selected]]. The decoder sees `min(remaining, count)` rows, so the rest of the
    * index is not read and the stack is not gathered. Any other plan uses
    * [[ColumnarInterpreter.decodePrefixFor]].
    */
@@ -181,13 +181,15 @@ object ColumnarPlanner:
     op.kind match
       case PhysicalOp.Kind.Pairs =>
         BatchCodec.decodeIntPairs(selected.batch, selected.rows, count)
+      case PhysicalOp.Kind.LongPairs =>
+        BatchCodec.decodeLongPairs(selected.batch, selected.rows, count)
       case PhysicalOp.Kind.Triples =>
         BatchCodec.decodeIntTriples(selected.batch, selected.rows, count)
       case PhysicalOp.Kind.StringPairs =>
         BatchCodec.decodeStringPairs(selected.batch, selected.rows, count)
       case other =>
         throw new ColumnarFallback(
-          s"selection decode expected pairs, triples, or string pairs, got $other",
+          s"selection decode expected pairs, long pairs, triples, or string pairs, got $other",
         )
 
   /** Append chunks in order and stop once `limit` elements are stored. */

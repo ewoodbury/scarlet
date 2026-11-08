@@ -18,8 +18,9 @@ import PredicatePlan.{Atom, Compiled}
  * [[PredicatePlan.applyAtom]], one kernel per filter. The survivor index is four bytes per row,
  * which costs more than the intermediate column a chained kernel writes for the next filter to
  * read. A boolean column is one bit per row. A long-pair row filter chains the same way, one
- * [[LongPairKernel]] per filter. A long key or value filter chains through
- * [[PredicatePlan.applyAtom]]. A long stack still does not publish a [[Selected]]. A whole-row
+ * [[LongPairKernel]] per filter. Two or more long key or value filters are a [[selected]] stack,
+ * the same admission as an int-pair stack. [[run]] still chains each one through
+ * [[PredicatePlan.applyAtom]]. A single long key or value filter is only that chain. A whole-row
  * triple filter chains too: it is not a slot atom, so it does not compact through [[Selection]].
  * Long triples and outer batches still refuse. A map or a pipeline is not a filter and stops the
  * peel.
@@ -27,9 +28,10 @@ import PredicatePlan.{Atom, Compiled}
  * [[PredicatePlan.applyAtom]] does not take the compiled stack. Encoders, including the
  * absence-preserving copy under an outer join, do not run the predicate.
  *
- * [[selected]] is the boundary that keeps the survivor index for an int-pair, int-triple, or
- * string-pair stack. It appends absolute ids per morsel and does not compact. [[compact]] still
- * serves every other caller. A string-pair whole-row filter is not a slot atom, so it is `None`.
+ * [[selected]] is the boundary that keeps the survivor index for an int-pair, long-pair,
+ * int-triple, or string-pair stack. It appends absolute ids per morsel and does not compact.
+ * [[compact]] still serves every other caller. A string-pair whole-row filter and a long-pair row
+ * filter are not slot atoms, so each is `None`.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Throw"))
 private[execution] object FilterChain:
@@ -68,11 +70,12 @@ private[execution] object FilterChain:
         applyCompiled(columns, compiled, ordinals)
 
   /**
-   * Survivor ids for one int-pair, int-triple, or string-pair stack of two or more filters. A
-   * single filter, a whole-row string filter, and every other kind return `None` and are not
-   * interpreted. A `Some` interprets the source under the stack once. Each batch gets one
-   * [[Selected]]: morsels append absolute ids into `rows`, in morsel order, and nothing is
-   * concatenated or compacted.
+   * Survivor ids for one int-pair, long-pair, int-triple, or string-pair stack of two or more
+   * filters. A single filter, a whole-row string filter, a long-pair row filter, and every other
+   * kind return `None` and are not interpreted. A `Some` interprets the source under the stack
+   * once. Each batch gets one [[Selected]]: morsels append absolute ids into `rows`, in morsel
+   * order, and nothing is concatenated or compacted. Long pairs use the int rule and do not
+   * rewrite ordinals: a long-pair root already carries both columns.
    */
   def selected(
       plan: Plan[_],
@@ -82,7 +85,8 @@ private[execution] object FilterChain:
       ordinals: Set[Int],
   ): Option[Vector[Selected]] =
     op.kind match
-      case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples | PhysicalOp.Kind.StringPairs =>
+      case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.Triples |
+          PhysicalOp.Kind.StringPairs =>
         PredicatePlan.compile(plan, op) match
           case Some(compiled)
               if compiled.atoms.length > 1 &&
@@ -148,6 +152,7 @@ private[execution] object FilterChain:
   private def kindBatches(kind: PhysicalOp.Kind, columns: Columns): Vector[ColumnBatch] =
     kind match
       case PhysicalOp.Kind.Pairs => ColumnarInterpreter.pairsOf(columns)
+      case PhysicalOp.Kind.LongPairs => ColumnarInterpreter.longPairsOf(columns)
       case PhysicalOp.Kind.Triples => ColumnarInterpreter.triplesOf(columns)
       case PhysicalOp.Kind.StringPairs => StringPairWalk.batches(columns)
       case _ => missing

@@ -5,7 +5,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.{BatchCodec, ColumnBatch, Int64Column, LogicalType}
+import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.HashPartitioner
@@ -237,6 +237,152 @@ class TestLongPairReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     ColumnarPlanner.tryTake(reduced.plan, 1) shouldBe None
   }
 
+  "two key filters" should "keep a lone null, unbox one null against a value, and unbox two nulls" in {
+    // One morsel, so the selected scan sees every row. Key 1 is null twice: the second null
+    // becomes present through op(0, 0). Key 4 is null and then 5, so the null unboxes to 0.
+    // Key 2 is a lone null and stays null. Both filters keep every present key, which is what
+    // admits the selection.
+    val input = Seq(
+      pair(longRef(3L), longRef(4L)),
+      pair(longRef(1L), absent),
+      pair(longRef(1L), absent),
+      pair(longRef(2L), absent),
+      pair(longRef(4L), absent),
+      pair(longRef(4L), longRef(5L)),
+    )
+    val rows = DistCollection(input, 1)
+    val combine = (left: Long, right: Long) => left + right + 1L
+    val reduced = keepKeys(rows).reduceByKey[Long, Long](combine)
+    val columnar = reduced.collect().toList
+    val literal = Seq(
+      pair(longRef(3L), longRef(4L)),
+      pair(longRef(1L), longRef(1L)),
+      pair(longRef(2L), absent),
+      pair(longRef(4L), longRef(6L)),
+    )
+
+    ColumnarPlanner.lower(reduced.plan).map(_.shape) shouldBe Some(
+      "LongHashAggregate(Exchange(FilterKey(FilterKey(Scan))))",
+    )
+    columnar should contain theSameElementsAs literal
+    columnar should contain theSameElementsAs row(
+      rows.reduceByKey[Long, Long](combine).collect().toList,
+    )
+    longPairBatches(reduced.plan).foreach(assertValidity)
+  }
+
+  it should "skip the two compacted copies a chained reduce would publish" in {
+    val source = DistCollection.ofLongPairs(Array(1L, 2L, 1L, 4L), Array(10L, 20L, 5L, 1L), 1)
+    val filtered = keepKeys(source)
+    val reduced = filtered.reduceByKey[Long, Long](_ + _)
+    val encode = published {
+      val scan = ColumnarPlanner.lower(source.plan).getOrElse(fail("expected a long-pair scan"))
+      ColumnarInterpreter.interpret(source.plan, scan)
+    }
+    val selectedCount = published(reduced.collect())
+    val (afterFilter, dense) = ColumnMetrics.withSink(new CountingSink) {
+      val op = ColumnarPlanner
+        .lower(filtered.plan)
+        .getOrElse(fail("expected a long-pair filter plan"))
+      val columns = ColumnarInterpreter.interpret(filtered.plan, op)
+      val mid = ColumnMetrics.batchCount
+      val _ = LongHashReduce.byKey(
+        ColumnarInterpreter.longPairsOf(columns),
+        ColumnarPlanner.shuffleWidth,
+        ColumnarPlanner.parallelism,
+        ColumnarPlanner.batchSize,
+        (left, right) => left + right,
+      )
+      (mid, ColumnMetrics.batchCount)
+    }
+    val compactPublishes = afterFilter - encode
+    compactPublishes should be > 0L
+    (dense - selectedCount) shouldBe compactPublishes
+    reduced.collect().toMap shouldBe Map(1L -> 15L, 2L -> 20L, 4L -> 1L)
+  }
+
+  it should "unbox a missing value that meets a present value in a later morsel" in {
+    ScarletConf.set(
+      originalConf.copy(columnarExecution = true, columnarBatchSize = 1, threadPoolSize = 2),
+    )
+    val input = Seq(
+      pair(longRef(3L), longRef(4L)),
+      pair(longRef(1L), absent),
+      pair(longRef(2L), absent),
+      pair(longRef(1L), longRef(5L)),
+    )
+    val rows = DistCollection(input, 1)
+    val combine = (left: Long, right: Long) => left + right + 1L
+    val reduced = keepKeys(rows).reduceByKey[Long, Long](combine)
+    val columnar = reduced.collect().toList
+    val literal = Seq(
+      pair(longRef(1L), longRef(6L)),
+      pair(longRef(2L), absent),
+      pair(longRef(3L), longRef(4L)),
+    )
+
+    columnar should contain theSameElementsAs literal
+    columnar should contain theSameElementsAs row(
+      rows.reduceByKey[Long, Long](combine).collect().toList,
+    )
+    longPairBatches(reduced.plan).foreach(assertValidity)
+  }
+
+  it should "merge two missing values from separate morsels of one input batch" in {
+    ScarletConf.set(
+      originalConf.copy(columnarExecution = true, columnarBatchSize = 1, threadPoolSize = 2),
+    )
+    val input = Seq(
+      pair(longRef(3L), longRef(4L)),
+      pair(longRef(1L), absent),
+      pair(longRef(2L), absent),
+      pair(longRef(1L), absent),
+    )
+    val rows = DistCollection(input, 1)
+    val combine = (left: Long, right: Long) => left + right + 1L
+    val reduced = keepKeys(rows).reduceByKey[Long, Long](combine)
+    val columnar = reduced.collect().toList
+    val literal = Seq(
+      pair(longRef(1L), longRef(1L)),
+      pair(longRef(2L), absent),
+      pair(longRef(3L), longRef(4L)),
+    )
+
+    columnar should contain theSameElementsAs literal
+    columnar should contain theSameElementsAs row(
+      rows.reduceByKey[Long, Long](combine).collect().toList,
+    )
+    longPairBatches(reduced.plan).foreach(assertValidity)
+  }
+
+  it should "merge two missing values that arrive in separate input partitions" in {
+    ScarletConf.set(
+      originalConf.copy(columnarExecution = true, columnarBatchSize = 1, threadPoolSize = 2),
+    )
+    val input = Seq(
+      pair(longRef(3L), longRef(4L)),
+      pair(longRef(1L), absent),
+      pair(longRef(2L), absent),
+      pair(longRef(1L), absent),
+    )
+    val rows = DistCollection(input, 3)
+    val combine = (left: Long, right: Long) => left + right + 1L
+    val reduced = keepKeys(rows).reduceByKey[Long, Long](combine)
+    val columnar = reduced.collect().toList
+    val literal = Seq(
+      pair(longRef(1L), longRef(1L)),
+      pair(longRef(2L), absent),
+      pair(longRef(3L), longRef(4L)),
+    )
+
+    columnar should contain theSameElementsAs literal
+    columnar should contain theSameElementsAs row(
+      rows.reduceByKey[Long, Long](combine).collect().toList,
+    )
+    longPairBatches(reduced.plan).foreach(assertValidity)
+    ColumnarPlanner.tryTake(reduced.plan, 1) shouldBe None
+  }
+
   it should "collect an empty source as no rows and four empty batches" in {
     val rows = DistCollection.ofLongPairs(Array.empty[Long], Array.empty[Long], 4)
     val reduced = rows.reduceByKey[Long, Long](_ + _)
@@ -339,6 +485,17 @@ class TestLongPairReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEa
   )
   private def valueMissing(row: (Long, Long)): Boolean =
     row.productElement(1).asInstanceOf[AnyRef] eq null
+
+  private def keepKeys(rows: DistCollection[(Long, Long)]): DistCollection[(Long, Long)] =
+    rows
+      .filterKeys[Long, Long]((key: Long) => key >= Long.MinValue)
+      .filterKeys[Long, Long]((key: Long) => key <= Long.MaxValue)
+
+  private def published[A](body: => A): Long =
+    ColumnMetrics.withSink(new CountingSink) {
+      val _ = body
+      ColumnMetrics.batchCount
+    }
 
   private def row[A](body: => A): A =
     val saved = ScarletConf.get
