@@ -16,20 +16,29 @@ columnar path with the row path in the same run.
 
 ## Queries at 1M rows
 
+Measured again after the scan-path work (2026-11-07, `main` @ `05d1faf`). DuckDB and Spark columns
+are unchanged from the original run.
+
 | Query | DuckDB | Spark | Scarlet |
 | --- | ---: | ---: | ---: |
-| filter + count | 0.86 ms | 60.35 ms | 3.78 ms |
-| filter + sum | 0.97 ms | 51.30 ms | 6.35 ms |
-| filter + groupByKey | 1.46 ms | 82.62 ms | 7.79 ms |
-| filter + reduceByKey | 1.78 ms | 82.58 ms | 14.52 ms |
-| filter + join | 4.52 ms | 78.71 ms | 22.16 ms |
-| filter + sort | 54.96 ms | 680.65 ms | 40.44 ms |
+| filter + count | 0.86 ms | 60.35 ms | 2.26 ms |
+| filter + sum | 0.97 ms | 51.30 ms | 1.86 ms |
+| filter + groupByKey (materialises groups) | 1.46 ms | 82.62 ms | 8.61 ms |
+| filter + reduceByKey (long pairs) | 1.78 ms | 82.58 ms | 5.9-8.5 ms |
+| filter + join | 4.52 ms | 78.71 ms | 20.97 ms |
+| filter + sort | 54.96 ms | 680.65 ms | 42.69 ms |
 
-All six checksums match on all three engines. Against DuckDB, Scarlet is 4.3-8.2x slower on the
-scan, aggregate, and join cases and 0.74x on the sort. Against Spark at this size, Scarlet is
-3.6-16.8x faster on every case, but that is not a scale-out result: Spark local mode at 1M rows is
-dominated by job and scheduler overhead. The Scarlet `reduceByKey` row uses the long-pair path;
-the int-pair path is 7.6 ms on the same data.
+All six checksums match on all three engines. Against DuckDB, Scarlet is 1.9x slower on the sum,
+2.6x on the count, 3.3-4.8x on the reduce, 4.6x on the join, and 0.78x on the sort.
+
+**The groupByKey row is not the same query on the two sides.** DuckDB runs
+`SELECT k, count(*) ... GROUP BY k` and never materialises the values. Scarlet builds every
+group's value list and decodes all 1e6 values before `.size` runs. Measured split on the same data:
+7.93 ms for the benchmark shape, 6.01 ms to build the groups without decoding values, and 3.29 ms
+for a single-threaded direct count per key. The 5.9x figure should not be quoted as an engine gap;
+a fair case needs a `countByKey`-style action that never builds the value arrays.
+
+The Scarlet `reduceByKey` row uses the long-pair path; the int-pair path is faster on the same data.
 
 ## Spark at 10M rows
 
@@ -63,10 +72,15 @@ but it means the 10M table is Spark-only. The Spark sort is the interesting numb
 
 ## Reading
 
-The 4-6x gap to DuckDB on scans and aggregates is the expected cost of JVM execution, source
-encoding, and no compression or SIMD. The sort win is the rank-split path doing what it was built
-for. The useful target is the scan/aggregate gap: compression and a cheaper source encode are the
-two levers that would move it, and both are already on the backlog.
+The remaining 2-5x gap to DuckDB on scans, aggregates and joins is the scalar JVM kernel plus the
+source encode, not representation. Two measured spikes killed the earlier explanations: a 10-bit
+packed column scans slower than a raw int array at this size (1.91 vs 0.84 ns/row), and the Panama
+Vector API loses to the scalar loop on JDK 17 (4.95 vs 2.61 ns/row, and 1.48 vs 0.63 on a
+compare-only predicate) because the preferred species is 128-bit and `div` is not native. What did
+move the numbers was removing work: `count` and `sum` now walk the filter stack in place instead of
+gathering (count 3.66 to 2.30 ms, allocation 22.7 to 8.3 MB at width 4), and long-pair
+`reduceByKey` partial-reduces survivor ids instead of two chained filter copies (19.0 to 5.9 ms at
+`CROSS_ROUNDS=20`). The sort win is the rank-split path doing what it was built for.
 
 Spark is the right comparison for scale-out behavior, not for single-node kernel speed. At 1M rows
 it mostly measures its own overhead; at 10M its sort already shows the shuffle cost. The next
