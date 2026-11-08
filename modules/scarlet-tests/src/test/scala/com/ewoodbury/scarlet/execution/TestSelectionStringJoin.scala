@@ -15,7 +15,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * String inner shuffle-hash join over a filter selection.
  *
- * A two-filter stack on either side keeps the survivor index. The exchange scatters those rows
+ * A filter stack on either side, including one filter, keeps the survivor index. The exchange scatters those rows
  * and does not slice them. A null key on a selected row is dropped. `""` matches. A null value
  * stays on the row path. The two sides keep independent dictionaries.
  */

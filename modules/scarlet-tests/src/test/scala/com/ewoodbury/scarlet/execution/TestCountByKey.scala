@@ -98,6 +98,10 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     lateNullRowCounts() shouldBe Map(1 -> 2, 2 -> 1)
   }
 
+  it should "fall back when one key filter meets a null value after the first row" in {
+    lateNullOneFilterCounts() shouldBe Map(1 -> 2)
+  }
+
   it should "lower two filters and match the row path" in {
     val source = DistCollection.ofIntPairs(Array(1, 2, 3, 1, 3), Array(1, -1, 4, 5, 0), 4)
     val counted = source
@@ -285,6 +289,25 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   private def lateNullCounts(): Map[Int, Int] =
     val counted = lateNullSource().countByKey
     require(ColumnarPlanner.lower(counted.plan).nonEmpty, "late-null source did not lower")
+    counted.collect().map { case (key, value) => (key.asInstanceOf[Int], value) }.toMap
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Equals",
+    ),
+  )
+  private def lateNullOneFilterCounts(): Map[Int, Int] =
+    val counted = lateNullSource().filterKeys { (key: Any) =>
+      key match
+        case found: Int => found == 1
+        case _ => false
+    }.countByKey
+    require(
+      ColumnarPlanner.lower(counted.plan).nonEmpty,
+      "one-filter late-null source did not lower",
+    )
     counted.collect().map { case (key, value) => (key.asInstanceOf[Int], value) }.toMap
 
   @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.AsInstanceOf"))

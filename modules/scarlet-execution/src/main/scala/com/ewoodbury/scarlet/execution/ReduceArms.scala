@@ -8,10 +8,10 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
 /**
  * `reduceByKey` for int pairs, long pairs, and string pairs.
  *
- * A key or value stack on an int, long, or string child partial-reduces survivor ids, including a
- * stack of one. The exchange sees dense partials. A whole-row string filter, a long row filter,
- * and every other child stay on the dense reduce. The `None` path is the only one that interprets
- * that child.
+ * A slot-filter stack on an int, long, or string child partial-reduces survivor ids, including a
+ * stack of one. An int-pair row filter does the same. The exchange sees dense partials. A
+ * whole-row string filter, a long-pair row filter, a map, a scan, and a non-pair child stay on the
+ * dense reduce. The `None` path is the only one that interprets that child.
  */
 private[execution] object ReduceArms:
 
@@ -28,8 +28,8 @@ private[execution] object ReduceArms:
     // Named erasure boundary. Grouped pair reduction declares `(Int, Int) => Int`.
     @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
     val op = reduceFunc.asInstanceOf[(Int, Int) => Int]
-    // A slot-filter stack scans survivor ids, including one filter. The `None` path is the only
-    // one that interprets that child.
+    // A slot-filter stack scans survivor ids, including one filter. An int-pair row filter does
+    // the same. The `None` path is the only one that interprets that child.
     val binOp: HashReduce.IntBinOp = (left: Int, right: Int) => op(left, right)
     val width = ColumnarPlanner.shuffleWidth
     val workers = ColumnarPlanner.parallelism

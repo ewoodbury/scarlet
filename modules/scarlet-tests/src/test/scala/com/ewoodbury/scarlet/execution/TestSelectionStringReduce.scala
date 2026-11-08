@@ -14,7 +14,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * String `reduceByKey` over a filter selection.
  *
- * A two-filter stack keeps the survivor index and the scan drops those rows. The exchange still
+ * A filter stack, including one filter, keeps the survivor index and the scan drops those rows. The exchange still
  * sees one dense partial per input batch. A null key is dropped. `""` is kept. A null value on a
  * dropped row is not read. A null value on a selected row follows [[StringHashReduce.reduce]]: a
  * clear value bit is not a null this kernel understands, so the stored int is combined.

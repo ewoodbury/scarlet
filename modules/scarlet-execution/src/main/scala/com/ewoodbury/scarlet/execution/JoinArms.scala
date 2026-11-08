@@ -8,10 +8,10 @@ import ColumnPipeline.JoinInput
 /**
  * Int inner shuffle-hash join.
  *
- * A slot-filter stack on either side scatters survivor ids, including a stack of one. The exchange
- * reads those rows and does not slice them. Every other child stays on the sliced dense exchange.
- * [[FilterChain.selected]] interprets a stack once. The `None` path is the only one that
- * interprets that child.
+ * A slot-filter stack on either side scatters survivor ids, including a stack of one. An int-pair
+ * row filter does the same. The exchange reads those rows and does not slice them. A child with no
+ * selection steps stays on the sliced dense exchange. [[FilterChain.selected]] interprets a stack
+ * once. The `None` path is the only one that interprets that child.
  *
  * A null value is a clear bit in the join output. The two-dense path keeps that bit and lets the
  * triple ops above the join preserve it. A mixed join refuses a live null before the kernel,

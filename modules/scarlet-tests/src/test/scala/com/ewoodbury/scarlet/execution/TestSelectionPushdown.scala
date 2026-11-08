@@ -103,7 +103,7 @@ class TestSelectionPushdown extends AnyFlatSpec with Matchers with BeforeAndAfte
     queried.groupedSum shouldBe row(queried.groupedSum)
   }
 
-  "a sort after a key filter" should "demand both columns and take the dense path" in {
+  "a sort after a key filter" should "demand both columns and sort the survivor index" in {
     val source = pairs()
     val filtered = source.filterKeys((key: Int) => key > 0)
     val sortPlan = Plan.SortByIntKeyOp(filtered.plan)
