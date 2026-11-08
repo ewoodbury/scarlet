@@ -13,7 +13,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Columnar inner shuffle-hash join of `(String, Int)` with `(String, Int)`.
  *
  * The row path is the oracle. The two sides keep independent dictionaries and match by string
- * equality. A null key is dropped. `""` matches `""`. A null value stays on the row path.
+ * equality. A null key is dropped. `""` matches `""`. A null value stays a clear validity bit.
  * Broadcast, sort-merge, and outer joins stay on the row path.
  */
 class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
@@ -210,15 +210,18 @@ class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     filtered.collect().toList should contain theSameElementsAs row(filtered.collect().toList)
   }
 
-  it should "refuse a null value and throw when a value column is not fully present" in {
+  it should "keep a matched null value and leave that bit clear" in {
     val source = DistCollection(
-      Plan.Source(Seq(Partition(Seq("red" -> 1, erasedNullValue("blue"))))),
+      Plan.Source(Seq(Partition(Seq("red" -> 1, erasedNullValue("red"))))),
     )
     val joined = source.join(DistCollection(Seq("red" -> 2), 1))
     ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
       "StringHashJoin(Exchange(Scan), Exchange(Scan))",
     )
-    ColumnarPlanner.tryRun(joined.plan) shouldBe None
+    ColumnarPlanner.tryRun(joined.plan).isDefined shouldBe true
+    val collected = joined.collect().toList
+    shown(collected) should contain theSameElementsAs shown(row(joined.collect().toList))
+    shown(collected) should contain("red,null,2")
 
     val missing = new ColumnBatch(
       Vector(LogicalType.Utf8Dict, LogicalType.Int32),
@@ -226,12 +229,14 @@ class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       1,
     )
     val probe = BatchCodec.stringIntPairs(Seq("a" -> 1))
-    an[IllegalStateException] should be thrownBy {
-      StringHashJoin.inner(Vector(missing), Vector(probe), partitions = 1, parallelism = 1)
-    }
-    an[IllegalStateException] should be thrownBy {
-      StringHashJoin.inner(Vector(probe), Vector(missing), partitions = 1, parallelism = 1)
-    }
+    keptNull(
+      StringHashJoin.inner(Vector(missing), Vector(probe), partitions = 1, parallelism = 1),
+      nullOnLeft = true,
+    )
+    keptNull(
+      StringHashJoin.inner(Vector(probe), Vector(missing), partitions = 1, parallelism = 1),
+      nullOnLeft = false,
+    )
   }
 
   private def refuse[A](collection: DistCollection[A]): Unit =
@@ -298,6 +303,50 @@ class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
   )
   private def erasedNullValue(key: String): (String, Int) =
     Tuple2[String, Integer](key, null).asInstanceOf[(String, Int)]
+
+  private def keptNull(parts: Vector[ColumnBatch], nullOnLeft: Boolean): Unit =
+    parts.length shouldBe 1
+    val batch = parts.lift(0).getOrElse(fail("missing partition"))
+    batch.length shouldBe 1
+    batch.columns.toList match
+      case (keys: DictUtf8Column) :: (left: Int32Column) :: (right: Int32Column) :: Nil =>
+        keys.isValid(0) shouldBe true
+        keys.dictionary(keys.codes(0)) shouldBe "a"
+        left.isAbsent(0) shouldBe false
+        right.isAbsent(0) shouldBe false
+        if (nullOnLeft) then
+          left.isValid(0) shouldBe false
+          right.isValid(0) shouldBe true
+          right.values(0) shouldBe 1
+        else
+          right.isValid(0) shouldBe false
+          left.isValid(0) shouldBe true
+          left.values(0) shouldBe 1
+      case other => fail(s"expected a string join batch, found $other")
+
+  /**
+   * Named erasure boundary. A join row may hold a null int. `productElement` reads it without
+   * unboxing. Tuple `==` unboxes a null int.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def shown(rows: Iterable[Product]): Seq[String] =
+    rows.toSeq.map { row =>
+      val values = row.productElement(1).asInstanceOf[Product]
+      Seq(row.productElement(0), values.productElement(0), values.productElement(1))
+        .map {
+          case null => "null"
+          case value: Int => String.valueOf(value)
+          case value: String => value
+          case _ => "other"
+        }
+        .mkString(",")
+    }
 
   private def row[A](body: => A): A =
     val saved = ScarletConf.get

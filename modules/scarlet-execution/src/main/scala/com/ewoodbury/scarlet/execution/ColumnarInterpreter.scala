@@ -20,12 +20,13 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * chosen. A null value on a long inner hash join stays columnar. A clear validity bit is a null
  * value, not an absence bit. A selected null on an int inner join, and a null on the dense side of
  * a mixed int hash join, stay a clear validity bit. That bit is not absence. A null on a dropped
- * row is not a decline. A live null value on a string join, string `reduceByKey`, or string
- * `groupByKey` is that fallback too. A string-pair filter keeps the null int. A value projection
- * that kept a null int is that fallback too. With spill off, an over-budget int `countByKey`
- * throws `ClosedKernelRefusal`, which does not extend `ClassCastException`, so the action fails
- * instead of rerunning on rows. With spill on, an over-budget post-exchange bucket spills. A count
- * table that still does not fit throws `ClosedKernelRefusal`. Long and string `countByKey` are not
+ * row is not a decline. A null value on a string inner hash join stays columnar. String
+ * `reduceByKey` and string `groupByKey` with a live null value are that fallback. Outer joins
+ * still decline. A string-pair filter keeps the null int. A value projection that kept a null int
+ * is that fallback too. With spill off, an over-budget int `countByKey` throws
+ * `ClosedKernelRefusal`, which does not extend `ClassCastException`, so the action fails instead
+ * of rerunning on rows. With spill on, an over-budget post-exchange bucket spills. A count table
+ * that still does not fit throws `ClosedKernelRefusal`. Long and string `countByKey` are not
  * columnar.
  */
 @SuppressWarnings(
@@ -188,7 +189,10 @@ private[execution] object ColumnarInterpreter:
    * drops those rows before decode. Outer joins are [[Columns.Outer]] and do not use this decoder.
    * Long triples are only a long inner join and use
    * [[BatchCodec.decodeLongTriplesPreservingAbsence]]. A clear validity bit is a null value, not
-   * an absence bit. A fully present batch still decodes to the same longs.
+   * an absence bit. A fully present batch still decodes to the same longs. String triples are a
+   * string inner hash join and use [[BatchCodec.decodeStringJoinKeepingNulls]]. A clear value bit
+   * is a null int, not an absence bit. A clear key bit is still an error. A fully present batch
+   * still decodes to the same strings and ints.
    */
   private[execution] def decodeFor(columns: Columns, op: PhysicalOp): Seq[Partition[_]] =
     decodeWith(columns, intPairDecoder(op), longDecoder(op), tripleDecoder(op))
@@ -290,7 +294,7 @@ private[execution] object ColumnarInterpreter:
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeStringPairs(batch, rows))
         case Columns.StringTriples(parts) =>
           // Joins are not partition-preserving, so `take` does not reach this arm.
-          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeStringJoin(batch, rows))
+          prefixRows(parts, limit, BatchCodec.decodeStringJoinKeepingNulls)
         case Columns.Bools(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeBools(batch, rows))
         case Columns.GroupedInts(_) | Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
@@ -1018,7 +1022,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.StringTriples(parts) =>
       // Named erasure boundary for the string join. The decoded rows are `(String, (Int, Int))`.
       // [[ColumnarPlanner.runLowered]] casts the partition sequence to the plan's element type.
-      parts.map(batch => Partition(BatchCodec.decodeStringJoin(batch)))
+      parts.map(batch => Partition(BatchCodec.decodeStringJoinKeepingNulls(batch, batch.length)))
     case Columns.Bools(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeBools(batch)))
     case Columns.GroupedInts(parts) =>

@@ -17,7 +17,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  *
  * A filter stack on either side, including one filter, keeps the survivor index. The exchange scatters those rows
  * and does not slice them. A null key on a selected row is dropped. `""` matches. A null value
- * stays on the row path. The two sides keep independent dictionaries.
+ * stays a clear validity bit and is not an absence bit. The two sides keep independent
+ * dictionaries.
  */
 class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -312,15 +313,18 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
     refuse(left.fullOuterJoin(right))
   }
 
-  it should "keep a null value on the row path" in {
+  it should "keep a matched null value" in {
     val source = DistCollection(
-      Plan.Source(Seq(Partition(Seq("red" -> 1, erasedNullValue("blue"), "red" -> 2)))),
+      Plan.Source(Seq(Partition(Seq("red" -> 1, erasedNullValue("red"), "red" -> 2)))),
     )
     val joined = source.filterKeys((_: String) => true).join(DistCollection(Seq("red" -> 3), 1))
     val op = ColumnarPlanner.lower(joined.plan).getOrElse(fail("null value join did not lower"))
 
     op.shape should include("StringHashJoin")
-    ColumnarPlanner.tryRun(joined.plan) shouldBe None
+    ColumnarPlanner.tryRun(joined.plan).isDefined shouldBe true
+    val found = joined.collect().toSeq
+    shown(found) should contain theSameElementsAs shown(row(joined.collect().toSeq))
+    shown(found) should contain("red,null,3")
   }
 
   "StringJoinInput" should "read only the selected prefix across two dictionaries" in {
@@ -386,15 +390,33 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
 
     val selectedNull = Selected(batch, Array(0, 1), 2)
     ColumnPipeline.valuesFullyPresent(Vector(selectedNull)) shouldBe false
-    val thrown = the[IllegalStateException] thrownBy {
-      StringHashJoin.inner(
-        StringJoinInput.Selected(Vector(selectedNull)),
-        StringJoinInput.Dense(Vector(probe)),
-        numPartitions = 1,
-        parallelism = 1,
-      )
-    }
-    thrown.getMessage should include("build value column is not fully present")
+    val kept = StringHashJoin.inner(
+      StringJoinInput.Selected(Vector(selectedNull)),
+      StringJoinInput.Dense(Vector(probe)),
+      numPartitions = 1,
+      parallelism = 1,
+    )
+    val joined = kept.lift(0).getOrElse(fail("missing partition"))
+    val outKeys = utf8(joined)
+    val left = int32(joined, 1)
+    val right = int32(joined, 2)
+    val red = rowOf(outKeys, "red")
+    val empty = rowOf(outKeys, "")
+
+    joined.length shouldBe 2
+    outKeys.isValid(red) shouldBe true
+    left.isValid(red) shouldBe false
+    left.isAbsent(red) shouldBe false
+    right.isValid(red) shouldBe true
+    right.isAbsent(red) shouldBe false
+    right.values(red) shouldBe 30
+    outKeys.isValid(empty) shouldBe true
+    left.isValid(empty) shouldBe true
+    left.isAbsent(empty) shouldBe false
+    left.values(empty) shouldBe 1
+    right.isValid(empty) shouldBe true
+    right.isAbsent(empty) shouldBe false
+    right.values(empty) shouldBe 10
 
     val nullKeyRow = Selected(batch, Array(1, 2), 2)
     val droppedKey = StringHashJoin.inner(
@@ -493,6 +515,17 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
     case (column: DictUtf8Column) :: _ => column
     case other => fail(s"expected a dictionary key, found $other")
 
+  private def int32(batch: ColumnBatch, ordinal: Int): Int32Column =
+    batch.columns.lift(ordinal) match
+      case Some(column: Int32Column) => column
+      case other => fail(s"expected Int32 at $ordinal, got $other")
+
+  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+  private def rowOf(keys: DictUtf8Column, text: String): Int =
+    (0 until keys.length).find { row =>
+      keys.isValid(row) && keys.dictionary(keys.codes(row)) == text
+    }.getOrElse(fail(s"missing key $text"))
+
   private def pairBatch(keys: DictUtf8Column, values: Int32Column): ColumnBatch =
     new ColumnBatch(
       Vector(LogicalType.Utf8Dict, LogicalType.Int32),
@@ -532,3 +565,27 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
     // A null Int is not expressible as (String, Int); Tuple2[String, Integer] erases to the same
     // tuple, so the cast only restores the erased type.
     Tuple2[String, Integer](key, null).asInstanceOf[(String, Int)]
+
+  /**
+   * Named erasure boundary. A join row may hold a null int. `productElement` reads it without
+   * unboxing. Tuple `==` unboxes a null int.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def shown(rows: Iterable[Product]): Seq[String] =
+    rows.toSeq.map { row =>
+      val values = row.productElement(1).asInstanceOf[Product]
+      Seq(row.productElement(0), values.productElement(0), values.productElement(1))
+        .map {
+          case null => "null"
+          case value: Int => String.valueOf(value)
+          case value: String => value
+          case _ => "other"
+        }
+        .mkString(",")
+    }

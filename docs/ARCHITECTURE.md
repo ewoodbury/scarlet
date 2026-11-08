@@ -99,7 +99,7 @@ null. A null string key orders as `""` and stays null. Shape strings are exact.
 | String `distinct`. One copy of each string, including one null and one empty string. Equal strings share a hash bucket. Order is unspecified | `Utf8Dict` | `Dedupe(Exchange(Scan))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
 | Automatic or explicit shuffle-hash long join. Both sides are exchanged on `Long.hashCode`. A null key is dropped. A null value stays columnar. A build bucket over `spillBudgetBytes`, when `spillEnabled` is on, is sub-partitioned by the quotient of `Long.hashCode` and the parent width. Each non-empty build piece is one spill file. One piece is joined at a time. A piece still over the budget throws. At or under the budget, and whenever spill is off, the bucket stays in memory and writes nothing. Broadcast, sort-merge, and outer joins on long keys stay on the row path | `Columnar` | `LongHashJoin(Exchange(Scan), Exchange(Scan))` |
-| Automatic or explicit shuffle-hash string join. Both sides are exchanged on `String.hashCode`. A null key is dropped. `""` matches `""`. A null value stays on the row path. The two sides keep independent dictionaries and match by string equality. `"é"` and `"e\u0301"` do not match. A key or value filter on either side, including a stack of one, scatters the survivor index and does not compact. A build bucket over `spillBudgetBytes` spills when `spillEnabled` is on. The estimate includes the dictionary. At or under the budget, and when spill is off, the bucket stays in memory. Broadcast, sort-merge, and outer joins stay on the row path. Output columns are `(key, left, right)` and the key is the probe row | `StringTriple` | `StringHashJoin(Exchange(Scan), Exchange(Scan))` |
+| Automatic or explicit shuffle-hash string join. Both sides are exchanged on `String.hashCode`. A null key is dropped. `""` matches `""`. A null value stays columnar. The two sides keep independent dictionaries and match by string equality. `"é"` and `"e\u0301"` do not match. A key or value filter on either side, including a stack of one, scatters the survivor index and does not compact. A build bucket over `spillBudgetBytes` spills when `spillEnabled` is on. The estimate includes the dictionary. At or under the budget, and when spill is off, the bucket stays in memory. Broadcast, sort-merge, and outer joins stay on the row path. Output columns are `(key, left, right)` and the key is the probe row | `StringTriple` | `StringHashJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge int join. Both sides are hash-partitioned, sorted inside each partition, and merged. Null keys are dropped before the sort | `Columnar` | `SortMergeJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge left outer int join. Both sides are hash-partitioned. The left exchange carries a null key to partition 0. The right exchange drops a null key. A null key does not match. A preserved null key publishes a clear key bit. Absence is the right value's absence bit. A null value stays on the row path | `Columnar` | `SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge right outer int join. The right exchange carries a null key. The left exchange drops one. The left-outer walk runs on swapped inputs, then the value columns are swapped back to `(key, left, right)`. Absence is the left value's absence bit. A null value stays on the row path | `Columnar` | `SortMergeRightOuter(Exchange(Scan), Exchange(Scan))` |
@@ -266,9 +266,8 @@ is taken from the probe row. The two sides keep independent dictionaries and mat
 equality. A key or value filter on either side, including a stack of one, scatters the survivor
 index and does not compact. A build bucket over `spillBudgetBytes` spills when `spillEnabled` is
 on. The estimate includes the dictionary. At or under the budget, and when spill is off, the
-bucket stays in memory. The layout is `StringTriple`. A null value stays on the row path. A
-broadcast hint, a
-sort-merge hint, and every outer join on string keys stay on the row path.
+bucket stays in memory. The layout is `StringTriple`. A null value stays columnar. A broadcast
+hint, a sort-merge hint, and every outer join on string keys stay on the row path.
 Broadcast of int pairs records both children and builds the right input.
 A later cost-based pass may build the left input instead.
 For a broadcast join, the other child is probed in place, so the join itself adds no exchange.
@@ -390,13 +389,13 @@ from a partition-selector `require`. A null value on a left, right, or full oute
 `ColumnarFallback`. A null value on a long inner hash join stays columnar. A clear validity bit
 is a null value, not an absence bit. A selected null and a null on the dense side of a mixed
 int hash join stay columnar. A null on a dropped row stays columnar. The absence bit is only a
-missing partner. A live null value on a string join,
-string `reduceByKey`, or string `groupByKey` is that fallback. A value projection that kept a null
-int is that fallback too. A string-pair filter keeps the null int. With spill off, an over-budget
-int `countByKey` throws `ClosedKernelRefusal` and the action fails. With spill on,
-an over-budget post-exchange bucket spills, and a count table that still does not fit throws
-`ClosedKernelRefusal`. That exception does not extend `ClassCastException`, so a refusal does not
-rerun on rows.
+missing partner. A null value on a string inner hash join stays columnar. String `reduceByKey`
+and string `groupByKey` with a live null value are that fallback. Outer joins still decline. A
+value projection that kept a null int is that fallback too. A string-pair filter keeps the null
+int. With spill off, an over-budget int `countByKey` throws `ClosedKernelRefusal` and the action
+fails. With spill on, an over-budget post-exchange bucket spills, and a count table that still
+does not fit throws `ClosedKernelRefusal`. That exception does not extend `ClassCastException`,
+so a refusal does not rerun on rows.
 
 ## Ordering guarantees
 
@@ -548,11 +547,12 @@ Still open inside the set, and therefore not a promise of this commit:
   `spillEnabled` is on. A piece still over the budget throws.
 - A null value on an outer join is a `ColumnarFallback`. A null value on a long inner hash join
   stays columnar. A selected null and a null on the dense side of a mixed int hash join stay
-  columnar. A null on a dropped row stays columnar. A string join, string `reduceByKey`, or string
-  `groupByKey` with a live null value is a `ColumnarFallback`. A value projection that kept a null
-  int is the same decline. A string-pair filter keeps that null int. An inner sort-merge keeps a
-  null value. The absence bit is only a missing partner. A clear validity bit is a null value,
-  which an outer join does not publish, so a null value cannot use the absence bit.
+  columnar. A null on a dropped row stays columnar. A null value on a string inner hash join stays
+  columnar. String `reduceByKey` and string `groupByKey` with a live null value are a
+  `ColumnarFallback`. Outer joins still decline. A value projection that kept a null int is the
+  same decline. A string-pair filter keeps that null int. An inner sort-merge keeps a null value.
+  The absence bit is only a missing partner. A clear validity bit is a null value, which an outer
+  join does not publish, so a null value cannot use the absence bit.
 - An int, long, or string sort of one or more filters, including a row filter, sorts the survivor
   index. Over the budget, with spill on, that index is spilled. Dropped rows are not written.
 - `groupByKey`, `distinct`, and `union` already have a columnar path and are not part of the closed

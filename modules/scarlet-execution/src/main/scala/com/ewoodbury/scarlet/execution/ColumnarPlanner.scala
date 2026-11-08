@@ -41,11 +41,11 @@ object ColumnarPlanner:
    * stays a clear validity bit and [[tryRun]] keeps the matched row. It is not an absence bit.
    * Broadcast, sort-merge, and every outer join on long keys stay on the row path. A
    * `(String, Int)` inner join lowers only for an absent hint or a shuffle-hash hint, to
-   * [[PhysicalOp.StringHashJoin]]. A null key is dropped. A live null value still lowers, and
-   * [[tryRun]] returns `None` so the row path runs. A key or value filter on either side,
-   * including a stack of one, scatters that side's survivor index and does not compact. An
-   * over-budget build bucket spills when `spillEnabled` is on; the estimate includes the
-   * dictionary. At or under the budget, and whenever spill is off, the join stays in memory.
+   * [[PhysicalOp.StringHashJoin]]. A null key is dropped. A null value stays a clear validity bit
+   * and [[tryRun]] keeps the matched row. It is not an absence bit. A key or value filter on
+   * either side, including a stack of one, scatters that side's survivor index and does not
+   * compact. An over-budget build bucket spills when `spillEnabled` is on; the estimate includes
+   * the dictionary. At or under the budget, and whenever spill is off, the join stays in memory.
    * Broadcast, sort-merge, and every outer join on string keys stay on the row path. The layout is
    * [[Layout.StringTriple]]. An explicit sort-merge hint on int pairs lowers to
    * [[PhysicalOp.SortMergeJoin]]. A left, right, or full outer sort-merge hint on int pairs lowers

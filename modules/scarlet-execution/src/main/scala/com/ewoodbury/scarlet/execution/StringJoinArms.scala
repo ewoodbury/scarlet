@@ -13,11 +13,10 @@ import StringHashJoin.StringJoinInput
  * exchange. [[FilterChain.selected]] interprets a stack once. The `None` path is the only one that
  * interprets that child. Both dense sides keep the batch [[StringHashJoin.inner]] call.
  *
- * A null key is dropped by the exchange. `""` is a present key. A live null value is a
- * [[com.ewoodbury.scarlet.columnar.ColumnarFallback]], so the action runs on the row path instead
- * of throwing on the bit. A null on a dropped row is not live. An over-budget build bucket spills
- * inside [[StringHashJoin.inner]] when spill is enabled. A bucket at or under the budget, and
- * every bucket while spill is off, stays on that in-memory join.
+ * A null key is dropped by the exchange. `""` is a present key. A clear validity bit is a null
+ * value, not an absence bit, and the matched row is kept. A null on a dropped row is not live. An
+ * over-budget build bucket spills inside [[StringHashJoin.inner]] when spill is enabled. A bucket
+ * at or under the budget, and every bucket while spill is off, stays on that in-memory join.
  */
 private[execution] object StringJoinArms:
 
@@ -38,16 +37,12 @@ private[execution] object StringJoinArms:
       case (None, None) =>
         val leftBatches = batches(left, leftOp, selectedPartition, preserveAbsence, ordinals)
         val rightBatches = batches(right, rightOp, selectedPartition, preserveAbsence, ordinals)
-        StringPairWalk.refuseNullValues(leftBatches)
-        StringPairWalk.refuseNullValues(rightBatches)
         StringHashJoin.inner(leftBatches, rightBatches, width, workers)
       case _ =>
         val leftSide =
           side(left, leftOp, leftSelected, selectedPartition, preserveAbsence, ordinals)
         val rightSide =
           side(right, rightOp, rightSelected, selectedPartition, preserveAbsence, ordinals)
-        refuse(leftSide)
-        refuse(rightSide)
         StringHashJoin.inner(leftSide, rightSide, width, workers)
 
   private def selection(
@@ -71,10 +66,6 @@ private[execution] object StringJoinArms:
       case Some(parts) => StringJoinInput.Selected(parts)
       case None =>
         StringJoinInput.Dense(batches(plan, op, selectedPartition, preserveAbsence, ordinals))
-
-  private def refuse(input: StringJoinInput): Unit = input match
-    case StringJoinInput.Dense(rows) => StringPairWalk.refuseNullValues(rows)
-    case StringJoinInput.Selected(parts) => StringPairWalk.refuseSelectedNullValues(parts)
 
   private def batches(
       plan: Plan[_],

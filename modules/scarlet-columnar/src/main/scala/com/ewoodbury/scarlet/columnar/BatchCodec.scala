@@ -701,16 +701,24 @@ object BatchCodec:
         )
 
   /**
-   * String-key join rows are `(key, left, right)`. The key is the dictionary string for that row's
-   * code. A null stays an error: a clear key bit has no string, and a clear value bit would decode
-   * as the stored zero. A full decode checks live bits by word; a prefix decode checks only the
-   * rows it returns. Spare capacity past `length` is ignored. This does not call
-   * [[decodeLongTriples]] or [[decodeStringPairs]].
+   * String-key join rows are `(key, left, right)`. A clear bit is an error. A clear value would
+   * decode as zero. [[decodeStringJoinKeepingNulls]] keeps that bit as a null int. A clear key bit
+   * is still an error. A fully present batch decodes to the same strings and ints.
    */
   def decodeStringJoin(batch: ColumnBatch): Seq[(String, (Int, Int))] =
     decodeStringJoin(batch, batch.length)
 
-  def decodeStringJoin(batch: ColumnBatch, maxRows: Int): Seq[(String, (Int, Int))] =
+  private[scarlet] def decodeStringJoinKeepingNulls(
+      batch: ColumnBatch,
+      maxRows: Int,
+  ): Seq[(String, (Int, Int))] =
+    decodeStringJoin(batch, maxRows, preserveValues = true)
+
+  def decodeStringJoin(
+      batch: ColumnBatch,
+      maxRows: Int,
+      preserveValues: Boolean = false,
+  ): Seq[(String, (Int, Int))] =
     batch.columns match
       case Seq(keys: DictUtf8Column, left: Int32Column, right: Int32Column) =>
         require(
@@ -718,17 +726,22 @@ object BatchCodec:
           "join columns disagree on length",
         )
         val rows = decodedLength(batch, maxRows)
-        if (rows == batch.length) then
-          requireLive(keys)
-          requireLive(left)
-          requireLive(right)
-        else
-          requireLivePrefix(keys, rows)
-          requireLivePrefix(left, rows)
-          requireLivePrefix(right, rows)
+        if (rows == batch.length) then requireLive(keys)
+        else requireLivePrefix(keys, rows)
+        if (!preserveValues) then
+          if (rows == batch.length) then
+            requireLive(left)
+            requireLive(right)
+          else
+            requireLivePrefix(left, rows)
+            requireLivePrefix(right, rows)
         ColumnMetrics.decoded(rows)
         Seq.tabulate(rows) { row =>
-          (keys.dictionary(keys.codes(row)), (left.values(row), right.values(row)))
+          erasedStringJoin(
+            keys.dictionary(keys.codes(row)),
+            intRef(left, row),
+            intRef(right, row),
+          )
         }
       case _ =>
         throw new IllegalArgumentException(
@@ -1025,13 +1038,19 @@ object BatchCodec:
   private def erasedIntPair(key: java.lang.Integer, value: java.lang.Integer): (Int, Int) =
     Tuple2(key, value).asInstanceOf[(Int, Int)]
 
-  /**
-   * Named erasure boundary. The decoded pair has to carry a null int so a kept clear value bit
-   * matches the row path. Building it from `java.lang.Integer` keeps the null from becoming `0`.
-   */
+  /** Named erasure boundary. A null `Integer` stays null instead of unboxing to `0`. */
   @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
   private def erasedStringInt(key: String, value: java.lang.Integer): (String, Int) =
     Tuple2(key, value).asInstanceOf[(String, Int)]
+
+  /** Named erasure boundary. A null `Integer` stays null instead of unboxing to `0`. */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
+  private def erasedStringJoin(
+      key: String,
+      left: java.lang.Integer,
+      right: java.lang.Integer,
+  ): (String, (Int, Int)) =
+    Tuple2(key, Tuple2(left, right)).asInstanceOf[(String, (Int, Int))]
 
   /**
    * Named erasure boundary. The decoded triple has to carry a null component so a map that
