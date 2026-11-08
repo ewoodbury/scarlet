@@ -329,13 +329,15 @@ object CrossEngineBench:
     order
 
   /**
-   * Value is null when `index` is a positive multiple of 4096. Row 0 stays a present pair so the
-   * source classifies. The key stays present.
+   * Value is null when `index` is 1 mod 4096. Row 0 stays a present pair so the source classifies.
+   * A dense key is `index % 1024`, so that null row's key is 1 and the key filter keeps it. Sort
+   * keys are the permutation, so a sort null stays only when the permuted key is not divisible by
+   * 3. The key itself stays present.
    */
   private def nullableInts(rows: Int, keys: Array[Int]): IndexedSeq[(Int, Int)] =
     val values = lcgValues(rows)
     IndexedSeq.tabulate(rows) { index =>
-      if (index > 0 && index % nullStride == 0) then intPair(boxedInt(keys(index)), absentInt)
+      if (index % nullStride == 1) then intPair(boxedInt(keys(index)), absentInt)
       else keys(index) -> values(index)
     }
 
@@ -343,7 +345,7 @@ object CrossEngineBench:
     val keys = longKeys(rows)
     val values = lcgLongs(rows)
     IndexedSeq.tabulate(rows) { index =>
-      if (index > 0 && index % nullStride == 0) then longPair(boxedLong(keys(index)), absentLong)
+      if (index % nullStride == 1) then longPair(boxedLong(keys(index)), absentLong)
       else keys(index) -> values(index)
     }
 
