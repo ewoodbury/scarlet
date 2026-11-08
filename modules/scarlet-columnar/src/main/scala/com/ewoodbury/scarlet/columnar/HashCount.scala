@@ -11,18 +11,28 @@ import com.ewoodbury.scarlet.core.ScarletConf
  *
  * [[byKey]] counts dense batches. [[byKeySelected]] counts a survivor index. Both partial-count
  * with [[PartialCombine]] and then exchange the `(key, count)` partials. The exchange does not see
- * the source rows.
+ * the source rows. The partial combine before the exchange stays in memory.
  *
- * There is no spill path. Before any table is allocated, the input-row byte estimate is compared
- * with [[ScarletConf.spillBudgetBytes]]. The check ignores [[ScarletConf.spillEnabled]]. Over
- * budget this throws [[ClosedKernelRefusal]] and the action fails. It does not rerun on rows.
+ * Spill is off unless [[ScarletConf.spillEnabled]] is set, and that flag defaults off. While it is
+ * off, the input-row estimate is compared with [[ScarletConf.spillBudgetBytes]] before any table,
+ * partial combine, or store. [[refuse]] throws [[ClosedKernelRefusal]] when the estimate is over
+ * the budget, and the action fails instead of rerunning on rows. While spill is on, that
+ * whole-input check is skipped when a one-row table fits in the budget. A budget that cannot hold
+ * one row still refuses the input row count: every morsel would refuse, and the reported count is
+ * the input rather than whichever morsel failed. [[int32]] and [[int32Selected]] still refuse a
+ * morsel whose estimate is over the budget. After the exchange, a bucket at or under the budget is
+ * added in memory. A bucket over the budget is finished by [[HashCountSpill]]. A table that still
+ * does not fit throws [[ClosedKernelRefusal]] before it is allocated. The running partial is
+ * `O(distinct keys)`. [[inputRowBytes]] charges every row about to be inserted as its own key,
+ * which overestimates when partials share a key. That overestimate is intentional.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object HashCount:
 
   /**
    * Count one batch. A null key is skipped. Column 1 is not read. An empty batch publishes an
-   * empty pair batch and does not allocate a table.
+   * empty pair batch and does not allocate a table. A non-empty batch whose row estimate is over
+   * the budget throws [[ClosedKernelRefusal]] before the table is allocated.
    */
   def int32(batch: ColumnBatch): ColumnBatch =
     requireKey(batch)
@@ -34,7 +44,9 @@ object HashCount:
 
   /**
    * [[int32]] over `rows(from until until)`. A null key in that prefix is skipped. Slots at
-   * `count` and beyond are not read. An empty range publishes an empty pair batch.
+   * `count` and beyond are not read. An empty range publishes an empty pair batch. A non-empty
+   * range whose row estimate is over the budget throws [[ClosedKernelRefusal]] before the table is
+   * allocated.
    */
   def int32Selected(selected: Selected, from: Int, until: Int): ColumnBatch =
     require(from >= 0, s"selection start must be >= 0, got $from")
@@ -55,9 +67,10 @@ object HashCount:
    * Partial-count each morsel, merge those partials per input batch, exchange on the key, then add
    * the partial counts in each bucket. An empty input is `numPartitions` empty pair batches.
    *
-   * The source value column is dropped before the morsel split, so the split does not copy it. A
-   * run whose input-row estimate is above [[ScarletConf.spillBudgetBytes]] throws
-   * [[ClosedKernelRefusal]] before that split. `spillEnabled` is not consulted. The action fails.
+   * The source value column is dropped before the morsel split, so the split does not copy it.
+   * Spill off refuses the input-row estimate before that split. Spill on skips that refusal when a
+   * one-row table fits, spills an over-budget bucket after the exchange, and still refuses a
+   * morsel or a fold that does not fit.
    */
   def byKey(
       batches: Vector[ColumnBatch],
@@ -69,16 +82,17 @@ object HashCount:
     if (batches.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs)
     else
       batches.foreach(requireKey)
-      refuse(batches.iterator.map(_.length.toLong).sum)
+      val rows = batches.iterator.map(_.length.toLong).sum
+      if (refuseBeforeCombine) then refuse(rows)
       val keysOnly = batches.map(batch => ColumnBatches.takeColumn(batch, 0))
       val combined = PartialCombine.perBatch(keysOnly, batchSize, parallelism, int32, addCounts)
-      finish(combined, numPartitions, parallelism)
+      finish(combined, numPartitions, parallelism, batchSize)
 
   /**
    * [[byKey]] for a selection. Each live prefix is partial-counted, the dense partials are
    * exchanged, and each bucket adds those counts. Filtered rows die in the scan. An empty input is
    * `numPartitions` empty pair batches. The budget check charges survivor rows, not the rows the
-   * filter dropped.
+   * filter dropped. Spill matches [[byKey]].
    */
   def byKeySelected(
       selected: Vector[Selected],
@@ -90,7 +104,8 @@ object HashCount:
     if (selected.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs)
     else
       selected.foreach(one => requireKey(one.batch))
-      refuse(selected.iterator.map(_.count.toLong).sum)
+      val rows = selected.iterator.map(_.count.toLong).sum
+      if (refuseBeforeCombine) then refuse(rows)
       val combined = PartialCombine.perBatchSelected(
         selected,
         batchSize,
@@ -98,7 +113,7 @@ object HashCount:
         (one, from, until) => int32Selected(one, from, until),
         addCounts,
       )
-      finish(combined, numPartitions, parallelism)
+      finish(combined, numPartitions, parallelism, batchSize)
 
   /**
    * Estimated bytes of a count table for `rows` input keys.
@@ -119,16 +134,22 @@ object HashCount:
       combined: Vector[ColumnBatch],
       numPartitions: Int,
       parallelism: Int,
+      batchSize: Int,
   ): Vector[ColumnBatch] =
     if (combined.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs)
     else
       val buckets = HashExchange.partitionAll(combined, keyOrdinal = 0, numPartitions, parallelism)
-      MorselScheduler.map(buckets, parallelism)((_, bucket) => addCounts(bucket))
+      val conf = ScarletConf.get
+      if (buckets.exists(bucket => HashCountSpill.exceeds(bucket, conf))) then
+        buckets.map(bucket => HashCountSpill.finish(bucket, parallelism, batchSize, conf))
+      else MorselScheduler.map(buckets, parallelism)((_, bucket) => addCounts(bucket))
 
   /**
    * Add `(key, count)` partials. This reads the count this operator stored, not the source value.
+   * A non-empty batch is refused before the table is allocated. [[HashCountSpill]] folds with this
+   * kernel, so a partial that does not fit throws [[ClosedKernelRefusal]] and does not allocate.
    */
-  private def addCounts(batch: ColumnBatch): ColumnBatch =
+  private[scarlet] def addCounts(batch: ColumnBatch): ColumnBatch =
     if (batch.length == 0) then ColumnBatches.emptyIntPairs
     else
       refuse(batch.length.toLong)
@@ -164,9 +185,23 @@ object HashCount:
         )
 
   /**
-   * Refuse before a table exists. `spillEnabled` is ignored: this operator has no spill copy, and
-   * a disabled spill flag must not keep an over-budget input on the columnar path. The throw is
-   * not a [[ColumnarFallback]], so the action fails instead of rerunning on rows.
+   * Whether the whole input is refused before a partial combine.
+   *
+   * Spill off always checks. Spill on checks only when a one-row table does not fit in the budget.
+   * Every morsel would refuse in that case, and a parallel morsel failure would report whichever
+   * morsel lost the race. The input count is what the action already publishes for that budget. A
+   * budget that can hold one row skips this check. Morsels still refuse themselves, and an
+   * over-budget bucket spills after the exchange.
+   */
+  private def refuseBeforeCombine: Boolean =
+    val conf = ScarletConf.get
+    !conf.spillEnabled || inputRowBytes(1L) > conf.spillBudgetBytes
+
+  /**
+   * Refuse before a table exists. This does not read [[ScarletConf.spillEnabled]]. The throw is
+   * not a [[ColumnarFallback]], so the action fails instead of rerunning on rows. Callers skip the
+   * whole-input call when spill is on and a one-row table fits. A morsel, a partial combine, and a
+   * spill fold still call this.
    */
   private def refuse(rows: Long): Unit =
     val budget = ScarletConf.get.spillBudgetBytes

@@ -187,7 +187,7 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     kernelCounts(counted) shouldBe Map.empty[Int, Int]
   }
 
-  it should "refuse an over-budget input before the table exists, spill flag ignored" in {
+  it should "refuse when a one-row table does not fit, spill on or off" in {
     val batch = intPairs(Array(1, 2, 1), Array(4, 5, 6))
     classOf[ClassCastException].isAssignableFrom(classOf[ClosedKernelRefusal]) shouldBe false
     List(false, true).foreach { enabled =>

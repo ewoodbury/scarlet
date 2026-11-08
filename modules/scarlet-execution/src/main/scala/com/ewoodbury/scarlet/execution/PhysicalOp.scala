@@ -229,9 +229,12 @@ enum PhysicalOp:
    * `countByKey`. The child is an [[PhysicalOp.Exchange]]. The kernel shuffles. A null key is
    * dropped. The value column is not read, so a null value still counts. One `(key, count)` row is
    * published per distinct key, including an empty bucket. Output kind is always
-   * [[PhysicalOp.Kind.Pairs]]. The count is an `Int` and wraps. There is no spill copy. An input
-   * that does not fit the budget throws [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]]
-   * before the table is allocated, and the action fails instead of rerunning on rows.
+   * [[PhysicalOp.Kind.Pairs]]. The count is an `Int` and wraps. With spill off, an input that does
+   * not fit the budget throws [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] before the
+   * table is allocated, and the action fails instead of rerunning on rows. With spill on, an
+   * over-budget post-exchange bucket spills. A count table that still does not fit throws
+   * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]]. The running partial is `O(distinct
+   * keys)`.
    */
   case CountByKey(child: PhysicalOp)
 
