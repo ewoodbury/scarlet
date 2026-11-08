@@ -82,13 +82,13 @@ null. A null string key orders as `""` and stays null. Shape strings are exact.
 | String source, scalar filter/map, filter-map run, dictionary equality filter and mapped dictionary result | `Utf8Dict` | `Scan`, `Filter(Scan)`, `Project(Scan)`, `Pipeline2(Scan)`, `Filter(Scan)`, `Project(Filter(Scan))` respectively |
 | Int-pair source and row/key/value filters | `Columnar` | `Scan`, `FilterRow(Scan)`, `FilterKey(Scan)`, `FilterValue(Scan)` |
 | `sortByIntKey` of an int-pair scan. Each source partition is sorted by effective key, then rank-merged into `defaultShufflePartitions`. A null key orders as zero and stays null. A null value is retained. Ties keep input order. Output partition sizes differ by at most one, each partition is sorted, and concatenation is globally sorted. Distribution is `Range(defaultShufflePartitions, Seq(0))` and ordering is `Sorted(Seq(0), Seq(true))`, ascending by that effective key. An int-pair filter, including a stack of one, sorts the survivor index and does not gather before the split. A map, mapValues, projection, or other non-filter child stays on the row path. A filter above the sort stays on the row path. Over the budget, with spill on, that survivor index is spilled and dropped rows are not written | `Columnar` | `SortByIntKey(Scan)`, `SortByIntKey(FilterKey(Scan))`, `SortByIntKey(FilterValue(FilterKey(Scan)))` |
-| `sortByLongKey` of a long-pair scan, or of filters over that scan. Rank boundaries match `sortByIntKey`. A null key orders as zero and stays null. A null value is retained. Ties keep input order. Distribution is `Range(defaultShufflePartitions, Seq(0))` and ordering is `Sorted(Seq(0), Seq(true))`. A key or value filter, including a stack of one, sorts the survivor index and does not gather before the split. A long-pair row filter does not build an index. A map, mapValues, projection, or other non-filter child stays on the row path. A filter above the sort stays on the row path. Over the budget, with spill on, each input partition is one sorted run and the runs are merged `spillFanIn` at a time. A key or value filter spills that survivor index, and dropped rows are not written. The result matches this in-memory split. One input partition is still sorted in memory. At or under the budget, and whenever spill is off, the in-memory split runs and writes nothing | `Columnar` | `SortByLongKey(Scan)`, `SortByLongKey(FilterKey(Scan))`, `SortByLongKey(FilterValue(FilterKey(Scan)))` |
-| `sortByStringKey` of a string-pair scan, or of key and value filters over that scan. Rank boundaries match `sortByIntKey`. A present key orders by `String.compareTo` (UTF-16 code units). A null key orders as `""` and stays null. Ties keep input order. Distribution is `Range(defaultShufflePartitions, Seq(0))` and ordering is `Sorted(Seq(0), Seq(true))`. A key or value filter, including a stack of one, sorts the survivor index and does not gather before the split. A whole-row string filter does not build an index and does not lower. A map, mapValues, projection, or other non-filter child stays on the row path. A filter above the sort stays on the row path. Over the budget, with spill on, each input partition is one sorted run and the runs are merged `spillFanIn` at a time. A key or value filter spills that survivor index, and dropped rows are not written. The result matches this in-memory split. One input partition is still sorted in memory. At or under the budget, and whenever spill is off, the in-memory split runs and writes nothing | `StringPair` | `SortByStringKey(Scan)`, `SortByStringKey(FilterKey(Scan))`, `SortByStringKey(FilterValue(FilterKey(Scan)))` |
+| `sortByLongKey` of a long-pair scan, or of filters over that scan. Rank boundaries match `sortByIntKey`. A null key orders as zero and stays null. A null value is retained. Ties keep input order. Distribution is `Range(defaultShufflePartitions, Seq(0))` and ordering is `Sorted(Seq(0), Seq(true))`. A key or value filter, including a stack of one, sorts the survivor index and does not gather before the split. A long-pair row filter sorts that survivor index, including a stack of one. A map, mapValues, projection, or other non-filter child stays on the row path. A filter above the sort stays on the row path. Over the budget, with spill on, each input partition is one sorted run and the runs are merged `spillFanIn` at a time. A key, value, or row filter spills that survivor index, and dropped rows are not written. The result matches this in-memory split. One input partition is still sorted in memory. At or under the budget, and whenever spill is off, the in-memory split runs and writes nothing | `Columnar` | `SortByLongKey(Scan)`, `SortByLongKey(FilterKey(Scan))`, `SortByLongKey(FilterRow(Scan))`, `SortByLongKey(FilterValue(FilterKey(Scan)))` |
+| `sortByStringKey` of a string-pair scan, or of filters over that scan. Rank boundaries match `sortByIntKey`. A present key orders by `String.compareTo` (UTF-16 code units). A null key orders as `""` and stays null. Ties keep input order. Distribution is `Range(defaultShufflePartitions, Seq(0))` and ordering is `Sorted(Seq(0), Seq(true))`. A key or value filter, including a stack of one, sorts the survivor index and does not gather before the split. A whole-row string filter sorts that survivor index, including a stack of one. A map, mapValues, projection, or other non-filter child stays on the row path. A filter above the sort stays on the row path. Over the budget, with spill on, each input partition is one sorted run and the runs are merged `spillFanIn` at a time. A key, value, or row filter spills that survivor index, and dropped rows are not written. The result matches this in-memory split. One input partition is still sorted in memory. At or under the budget, and whenever spill is off, the in-memory split runs and writes nothing | `StringPair` | `SortByStringKey(Scan)`, `SortByStringKey(FilterKey(Scan))`, `SortByStringKey(FilterRow(Scan))`, `SortByStringKey(FilterValue(FilterKey(Scan)))` |
 | Empty typed int-pair source | `Columnar` | `Scan` |
 | Long-pair source, including an empty source | `Columnar` | `Scan` |
 | Long-pair `keys`, `values`, `mapValues`, row `filter`, `filterKeys`, and `filterValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `FilterRow(Scan)`, `FilterKey(Scan)`, `FilterValue(Scan)` |
 | Pair `keys`, `values`, int `mapValues`, mapped key/value columns, filtered int `mapValues` | `Columnar` | `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `Project(Key(Scan))`, `Project(Value(Scan))`, `FilterValue(MapValue(Scan))` |
-| String-pair source and `keys`, `values`, int `mapValues`, `filterKeys`, `filterValues`. A null key is a value and `""` is distinct | `StringPair`; `Utf8Dict` for `keys`, `Columnar` for `values` | `Scan`, `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `FilterKey(Scan)`, `FilterValue(Scan)` |
+| String-pair source and `keys`, `values`, int `mapValues`, row `filter`, `filterKeys`, and `filterValues`. A null key is a value and `""` is distinct. A null int stays absent | `StringPair`; `Utf8Dict` for `keys`, `Columnar` for `values` | `Scan`, `Key(Scan)`, `Value(Scan)`, `MapValue(Scan)`, `FilterRow(Scan)`, `FilterKey(Scan)`, `FilterValue(Scan)` |
 | Int `reduceByKey`, after a value filter or int `mapValues`, and nested reduction | `Columnar` | `HashAggregate(Exchange(Scan))`, `HashAggregate(Exchange(FilterValue(Scan)))`, `HashAggregate(Exchange(MapValue(Scan)))`, `HashAggregate(Exchange(HashAggregate(Exchange(Scan))))` |
 | Long `reduceByKey` | `Columnar` | `LongHashAggregate(Exchange(Scan))` |
 | String `reduceByKey`. A null key is dropped and `""` is kept. The exchange hashes each dictionary string once | `StringPair` | `StringHashAggregate(Exchange(Scan))` |
@@ -387,9 +387,10 @@ have run. An `IllegalStateException` from a physical/logical mismatch or a broad
 above `broadcastBuildBudgetBytes` is not a fallback, and neither is the `IllegalArgumentException`
 from a partition-selector `require`. A null value on a left, right, or full outer join, and on a
 long inner join, is a `ColumnarFallback`. A null value on a selected row of an int inner join is
-also a `ColumnarFallback`; a null on a dropped row is not. A string join does not use that
-fallback: a null value never lowers, and a clear live value bit still throws. With spill off,
-an over-budget int `countByKey` throws `ClosedKernelRefusal` and the action fails. With spill on,
+also a `ColumnarFallback`; a null on a dropped row is not. A live null value on a string join,
+string `reduceByKey`, or string `groupByKey` is that fallback. A value projection that kept a null
+int is that fallback too. A string-pair filter keeps the null int. With spill off, an over-budget
+int `countByKey` throws `ClosedKernelRefusal` and the action fails. With spill on,
 an over-budget post-exchange bucket spills, and a count table that still does not fit throws
 `ClosedKernelRefusal`. That exception does not extend `ClassCastException`, so a refusal does not
 rerun on rows.
@@ -473,16 +474,16 @@ the survivor index is spilled. Dropped rows are not written.
 
 A long-pair `sortByLongKey` keeps the physical op `SortByLongKey`. It spills the same way: one
 sorted run per input partition, merged `spillFanIn` at a time, then scattered by the same rank
-boundaries. A key or value filter spills the survivor index instead of the dropped rows. A
-long-pair row filter does not build an index. The long-pair codec is the one the store already
-writes. One input partition is still sorted in memory. At or under the budget, and whenever spill
+boundaries. A key, value, or row filter spills the survivor index instead of the dropped rows.
+The long-pair codec is the one the store already writes. One input partition is still sorted in
+memory. At or under the budget, and whenever spill
 is off, the in-memory split runs and writes nothing.
 
 A string-pair `sortByStringKey` keeps the physical op `SortByStringKey`. It spills the same way:
 one sorted run per input partition, merged `spillFanIn` at a time, then scattered by the same rank
-boundaries. A key or value filter spills the survivor index instead of the dropped rows. A
-whole-row string filter does not build an index. Each output partition has its own dictionary. The
-store writes that dictionary, then the codes. A null key orders as `""` and stays null. One input
+boundaries. A key, value, or row filter spills the survivor index instead of the dropped rows.
+Each output partition has its own dictionary. The store writes that dictionary, then the codes. A
+null key orders as `""` and stays null. One input
 partition is still sorted in memory. At or under the budget, and whenever spill is off, the
 in-memory split runs and writes nothing.
 
@@ -520,7 +521,8 @@ In the set today, on present values:
 - Boolean scans, filters, count, and take. A Boolean map is outside the set.
 - Sum of int, long, and double.
 - Int and long pair row filters, plus key and value filters and same-type mapValues for int, long,
-  and string pairs. A whole-row filter on a string pair stays on the row path.
+  and string pairs. A whole-row filter on a string pair keeps a survivor index, the same as an
+  int-pair row filter.
 - `reduceByKey` for int, long, and string keys.
 - `countByKey` for int keys.
 - Inner shuffle-hash join for int, long, and string keys.
@@ -530,9 +532,9 @@ In the set today, on present values:
 Still open inside the set, and therefore not a promise of this commit:
 
 - A stack of one or more slot filters on an int, long, or string pair keeps a survivor index. An
-  int-pair row filter does the same. A long-pair row filter and a whole-row string filter do not.
-  Single-column filters stay chained column kernels, because an int survivor index is the wrong
-  selection for one column.
+  int-pair row filter, a long-pair row filter, and a whole-row string filter do the same, including
+  a stack of one. Single-column filters stay chained column kernels, because an int survivor index
+  is the wrong selection for one column.
 - Int `countByKey` over `spillBudgetBytes`: with spill off, over budget throws `ClosedKernelRefusal`
   and the action fails; with spill on, an over-budget post-exchange bucket spills; a table that
   still does not fit throws `ClosedKernelRefusal`. Long and string `countByKey` are not columnar.
@@ -541,11 +543,12 @@ Still open inside the set, and therefore not a promise of this commit:
   `spillEnabled` is on. A piece still over the budget throws.
 - A null value on an outer join, and on a long inner join, is a `ColumnarFallback`. A null on a
   selected row of an int hash join is the same decline. A null on a dropped row stays columnar. A
-  string join with a null value does not lower. An inner sort-merge keeps a null value. A clear
-  validity bit on an outer join means the partner is absent, so a null value cannot use that bit.
-- An int, long, or string sort of one or more slot filters sorts the survivor index. Over the
-  budget, with spill on, that index is spilled. A long-pair row filter and a whole-row string
-  filter still do not build an index.
+  string join, string `reduceByKey`, or string `groupByKey` with a live null value is a
+  `ColumnarFallback`. A value projection that kept a null int is the same decline. A string-pair
+  filter keeps that null int. An inner sort-merge keeps a null value. A clear validity bit on an
+  outer join means the partner is absent, so a null value cannot use that bit.
+- An int, long, or string sort of one or more filters, including a row filter, sorts the survivor
+  index. Over the budget, with spill on, that index is spilled. Dropped rows are not written.
 - `groupByKey`, `distinct`, and `union` already have a columnar path and are not part of the closed
   kernel. `flatMap`, `mapPartitions`, cogroup, untyped `sortBy`, single-precision `Float`,
   double-key wide operators, and type-changing maps stay on the row executor.

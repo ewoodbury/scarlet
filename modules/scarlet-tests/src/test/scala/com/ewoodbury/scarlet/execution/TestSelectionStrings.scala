@@ -13,9 +13,10 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
  * A string-pair stack of `filterKeys` / `filterValues`, including one filter, publishes one
- * survivor index. Collect, take, and `groupByKey` read that index. A map and a scan stay on
- * [[StringPairWalk]]. Counts are [[ColumnMetrics.batchCount]]: the gap against a direct interpret
- * is the compact the selection path does not publish.
+ * survivor index. A whole-row filter does the same, including a stack of one. Collect, take, and
+ * `groupByKey` read that index. A map and a scan stay on [[StringPairWalk]]. Counts are
+ * [[ColumnMetrics.batchCount]]: the gap against a direct interpret is the compact the selection
+ * path does not publish.
  */
 class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -288,32 +289,134 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
     groupedStrings(groupedOnce.collect()) shouldBe groupedStrings(row(groupedOnce.collect()))
   }
 
-  it should "leave a whole-row string filter unselected" in {
+  it should "keep one whole-row string filter, and a stack of two, on one index" in {
     val calls = new AtomicInteger
-    val filtered = source
-      .filter { (row: (String, Int)) =>
-        calls.incrementAndGet()
-        keeps(row._1)
-      }
-      .filter { (row: (String, Int)) =>
-        calls.incrementAndGet()
-        row._2 > Int.MinValue
-      }
-    val scan = lowered(source.plan)
-    val op = PhysicalOp.Filter(PhysicalOp.Filter(scan, PhysicalOp.Slot.Row), PhysicalOp.Slot.Row)
+    val once = source.filter { (row: (String, Int)) =>
+      calls.incrementAndGet()
+      keeps(row._1)
+    }
+    val twice = once.filter { (row: (String, Int)) =>
+      calls.incrementAndGet()
+      row._2 > Int.MinValue
+    }
+    val onceOp = lowered(once.plan)
+    val twiceOp = lowered(twice.plan)
+    val onceCompiled =
+      PredicatePlan.compile(once.plan, onceOp).getOrElse(fail("one row filter did not compile"))
+    val twiceCompiled =
+      PredicatePlan.compile(twice.plan, twiceOp).getOrElse(fail("two row filters did not compile"))
 
-    ColumnarPlanner.lower(filtered.plan) shouldBe None
-    FilterChain.selected(filtered.plan, op, None, false, Set(0, 1)) shouldBe None
+    shape(once.plan) shouldBe "FilterRow(Scan)"
+    shape(twice.plan) shouldBe "FilterRow(FilterRow(Scan))"
+    PredicatePlan.selectionSteps(onceCompiled) match
+      case Some(Vector(Selection.Step.StringPair(_))) => ()
+      case other => fail(s"expected one string-pair row step, got $other")
+    PredicatePlan.selectionSteps(twiceCompiled) match
+      case Some(Vector(Selection.Step.StringPair(_), Selection.Step.StringPair(_))) => ()
+      case other => fail(s"expected two string-pair row steps, got $other")
+    PredicatePlan.encoded(twiceCompiled, Set(0)).atoms match
+      case Vector(PredicatePlan.Atom.StringRow(_), PredicatePlan.Atom.StringRow(_)) => ()
+      case other => fail(s"a whole-row step must stay a row step, got $other")
     calls.get() shouldBe 0
+    FilterChain.selected(once.plan, onceOp, None, false, Set(0, 1)) shouldBe defined
+    FilterChain.selected(twice.plan, twiceOp, None, false, Set(0, 1)) shouldBe defined
+
+    calls.set(0)
+    val onceGot = once.collect().toList
+    calls.get() shouldBe 8
+    onceGot shouldBe row(once.collect().toList)
+    calls.set(0)
+    val got = twice.collect().toList
+    calls.get() shouldBe 15
+    got shouldBe List(
+      nullKey(4),
+      "" -> 1,
+      "red" -> 0,
+      "red" -> 5,
+      "" -> 8,
+      nullKey(2),
+      "blue" -> 6,
+    )
+    got shouldBe row(twice.collect().toList)
+    twice.count() shouldBe row(twice.count())
   }
 
-  it should "keep a mixed whole-row and key stack on the dense path" in {
+  it should "keep a null key and an empty key, and leave accents distinct" in {
+    val composed = "é"
+    val decomposed = "e\u0301"
+    val rows = DistCollection(Seq(composed -> 1, decomposed -> 2, "" -> 3, nullKey(4)), 1)
+    val filtered = rows.filter((row: (String, Int)) => row._1 != decomposed)
+    val op = lowered(filtered.plan)
+    val steps = PredicatePlan
+      .selectionSteps(
+        PredicatePlan.compile(filtered.plan, op).getOrElse(fail("accent filter did not compile")),
+      )
+      .getOrElse(fail("accent filter has no steps"))
+
+    steps match
+      case Vector(Selection.Step.StringPair(_)) => ()
+      case other => fail(s"expected one string-pair row step, got $other")
+    val got = filtered.collect().toList
+    got shouldBe List(composed -> 1, "" -> 3, nullKey(4))
+    got shouldBe row(filtered.collect().toList)
+    filtered.count() shouldBe row(filtered.count())
+  }
+
+  it should "keep a null int the row path keeps, and not store it as zero" in {
+    val rows = Seq(
+      boxedStringInt("a", null),
+      boxedStringInt(null, java.lang.Integer.valueOf(2)),
+      boxedStringInt("", java.lang.Integer.valueOf(0)),
+    )
+    val input = DistCollection(rows, 1)
+    val filtered = input.filter { (row: (String, Int)) =>
+      BatchCodec.isAbsent(row._1) || row._1 == "a" || row._1 == ""
+    }
+    val op = ColumnarPlanner.lower(filtered.plan).getOrElse(fail("null int filter did not lower"))
+    op.shape shouldBe "FilterRow(Scan)"
+    val got = filtered.collect().toList
+
+    sameStringInts(got, row(filtered.collect().toList))
+    got.length shouldBe 3
+    absentComponent(got.head, 1) shouldBe true
+    absentComponent(got(1), 0) shouldBe true
+    intComponent(got(1), 1) shouldBe 2
+    stringComponent(got(2), 0) shouldBe ""
+    intComponent(got(2), 1) shouldBe 0
+    filtered.count() shouldBe row(filtered.count())
+  }
+
+  it should "keep a mixed whole-row and key stack on one index" in {
     val filtered = source
       .filter((row: (String, Int)) => row._2 > 0)
+      .filterValues((value: Int) => value < 10)
       .filterKeys((key: String) => keeps(key))
-    val found = filtered.collect().toSeq
+    val op = lowered(filtered.plan)
+    val compiled =
+      PredicatePlan.compile(filtered.plan, op).getOrElse(fail("mixed stack did not compile"))
+    val steps =
+      PredicatePlan.selectionSteps(compiled).getOrElse(fail("mixed stack has no steps"))
 
-    found should contain theSameElementsAs row(filtered.collect().toSeq)
+    steps match
+      case Vector(
+            Selection.Step.StringPair(_),
+            Selection.Step.Int32(valueOrdinal, _),
+            Selection.Step.Utf8(keyOrdinal, _),
+          ) =>
+        valueOrdinal shouldBe 1
+        keyOrdinal shouldBe 0
+      case other => fail(s"expected one string-pair step vector, got $other")
+    PredicatePlan.encoded(compiled, Set(1)).atoms match
+      case Vector(
+            PredicatePlan.Atom.StringRow(_),
+            PredicatePlan.Atom.PairValue(ordinal, _),
+            PredicatePlan.Atom.Utf8(_, _),
+          ) =>
+        ordinal shouldBe 1
+      case other => fail(s"a whole-row step must keep the value ordinal, got $other")
+    FilterChain.selected(filtered.plan, op, None, false, Set(0, 1)) shouldBe defined
+    filtered.collect().toList shouldBe row(filtered.collect().toList)
+    filtered.count() shouldBe row(filtered.count())
   }
 
   private def source: DistCollection[(String, Int)] =
@@ -394,3 +497,47 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def nullKey(value: Int): (String, Int) = (null: String) -> value
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def boxedStringInt(key: String, value: java.lang.Integer): (String, Int) =
+    Tuple2(key, value).asInstanceOf[(String, Int)]
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.Equals",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def sameStringInts(left: Seq[(String, Int)], right: Seq[(String, Int)]): Unit =
+    left.length shouldBe right.length
+    left.zip(right).foreach { (one, other) =>
+      one.productElement(0) shouldBe other.productElement(0)
+      one.productElement(1) shouldBe other.productElement(1)
+    }
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def absentComponent(row: (String, Int), ordinal: Int): Boolean =
+    row.productElement(ordinal).asInstanceOf[AnyRef] eq null
+
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def intComponent(row: (String, Int), ordinal: Int): Int =
+    row.productElement(ordinal) match
+      case value: Int => value
+      case other => fail(s"expected a present int, got $other")
+
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def stringComponent(row: (String, Int), ordinal: Int): String =
+    row.productElement(ordinal) match
+      case value: String => value
+      case other => fail(s"expected a present string, got $other")

@@ -41,9 +41,9 @@ object ColumnarPlanner:
    * does not change the lowered shape: [[tryRun]] reads the value columns and returns `None`.
    * Broadcast, sort-merge, and every outer join on long keys stay on the row path. A
    * `(String, Int)` inner join lowers only for an absent hint or a shuffle-hash hint, to
-   * [[PhysicalOp.StringHashJoin]]. A null key is dropped. A null value stays on the row path
-   * because the source is not [[PhysicalOp.Kind.StringPairs]]. A key or value filter on either
-   * side, including a stack of one, scatters that side's survivor index and does not compact. An
+   * [[PhysicalOp.StringHashJoin]]. A null key is dropped. A live null value still lowers, and
+   * [[tryRun]] returns `None` so the row path runs. A key or value filter on either side,
+   * including a stack of one, scatters that side's survivor index and does not compact. An
    * over-budget build bucket spills when `spillEnabled` is on; the estimate includes the
    * dictionary. At or under the budget, and whenever spill is off, the join stays in memory.
    * Broadcast, sort-merge, and every outer join on string keys stay on the row path. The layout is
@@ -61,7 +61,7 @@ object ColumnarPlanner:
    * filters over that scan. A map, aggregate, or join under the sort stays on the row path. Any
    * parent of that sort stays on the row path. A slot filter sorts the survivor index. Over the
    * budget, with spill on, that index is spilled. A long-pair row filter and a whole-row string
-   * filter do not build an index. A long sort spills when `spillEnabled` is on and the retained
+   * filter sort that index too. A long sort spills when `spillEnabled` is on and the retained
    * estimate exceeds `spillBudgetBytes`. The physical op stays `SortByLongKey`. A string sort
    * spills on that same budget. The physical op stays `SortByStringKey`. At or under the budget,
    * and whenever spill is off, the split stays in memory and writes nothing. [[partitioning]] and
@@ -87,10 +87,10 @@ object ColumnarPlanner:
    * element pipeline, propagates.
    *
    * A pair, long-pair, triple, or string-pair stack whose selection steps are defined decodes
-   * [[FilterChain.selected]], including a stack of one slot filter, and does not gather. That call
-   * interprets the source under the stack, so this does not interpret the source again. Every
-   * other plan decodes [[ColumnarInterpreter.interpret]]. The result cast is the same erasure
-   * boundary as [[tryRun]]: the decoded partitions have the plan's element type.
+   * [[FilterChain.selected]], including a stack of one, and does not gather. That call interprets
+   * the source under the stack, so this does not interpret the source again. Every other plan
+   * decodes [[ColumnarInterpreter.interpret]]. The result cast is the same erasure boundary as
+   * [[tryRun]]: the decoded partitions have the plan's element type.
    */
   private[execution] def runLowered[A](plan: Plan[A], op: PhysicalOp): Option[Seq[Partition[A]]] =
     try
@@ -144,10 +144,10 @@ object ColumnarPlanner:
    * batch of a partition contributes before the next partition is read. Each returned chunk is
    * appended once, in order.
    *
-   * A partition-preserving pair, long-pair, triple, or string-pair filter stack, including one
-   * slot filter, decodes a prefix of [[FilterChain.selected]]. The decoder sees
-   * `min(remaining, count)` rows, so the rest of the index is not read and the stack is not
-   * gathered. Any other plan uses [[ColumnarInterpreter.decodePrefixFor]].
+   * A partition-preserving pair, long-pair, triple, or string-pair filter stack, including a stack
+   * of one, decodes a prefix of [[FilterChain.selected]]. The decoder sees `min(remaining, count)`
+   * rows, so the rest of the index is not read and the stack is not gathered. Any other plan uses
+   * [[ColumnarInterpreter.decodePrefixFor]].
    */
   private def prefixOf(plan: Plan[_], op: PhysicalOp, count: Int, n: Int): Seq[Any] =
     val ordinals = ColumnUse.ordinals(plan, op)
@@ -249,7 +249,8 @@ object ColumnarPlanner:
   private def pairCountStep(step: Selection.Step): Boolean = step match
     case Selection.Step.Int32(_, _) | Selection.Step.IntPair(_) => true
     case Selection.Step.Int64(_, _) | Selection.Step.Float64(_, _) | Selection.Step.Bool(_, _) |
-        Selection.Step.Utf8(_, _) | Selection.Step.IntTriple(_, _) =>
+        Selection.Step.Utf8(_, _) | Selection.Step.IntTriple(_, _) | Selection.Step.LongPair(_) |
+        Selection.Step.StringPair(_) =>
       false
 
   /** Counts the admitted stack in place. The source scan is encoded once and not filtered. */
@@ -741,10 +742,20 @@ object ColumnarPlanner:
       steps.foldLeft(Option(child)) { (current, step) =>
         current.flatMap(op => lowerElementStep(op, step))
       }
-    case PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.LongTriples |
-        PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
-        PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
+    case PhysicalOp.Kind.StringPairs =>
+      steps.foldLeft(Option(child)) { (current, step) =>
+        current.flatMap(op => lowerStringRow(op, step))
+      }
+    case PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
+        PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
+        PhysicalOp.Kind.GroupedLongs =>
       None
+
+  /** A whole-row string filter. A project still refuses the chain. */
+  private def lowerStringRow(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
+    step match
+      case ElementStep.Filter(_) => Some(PhysicalOp.Filter(child, PhysicalOp.Slot.Row))
+      case ElementStep.Project(_) => None
 
   private def lowerElementStep(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
     step match
@@ -972,8 +983,8 @@ object ColumnarPlanner:
   /**
    * The first present value selects the kind. A leading empty cell can only witness a string. A
    * pair witness is two `Int` cells or two `Long` cells. A `(String, Int)` cell witnesses string
-   * pairs, and a leading null key keeps looking until a present string key. A null value does not.
-   * A leading null component does not witness [[PhysicalOp.Kind.LongPairs]]. Other actions do not
+   * pairs, including a null int. A leading null key keeps looking until a present string key. A
+   * leading null component does not witness [[PhysicalOp.Kind.LongPairs]]. Other actions do not
    * unbox a null. Grouped sum also accepts a null component; see [[groupedPairSource]].
    */
   private def classifyValue(value: Any, rest: Iterator[Any]): Option[PhysicalOp.Kind] =
@@ -983,7 +994,7 @@ object ColumnarPlanner:
       case Some(_: Double) => Some(PhysicalOp.Kind.Floats)
       case Some((_: Int, _: Int)) => Some(PhysicalOp.Kind.Pairs)
       case Some((_: Long, _: Long)) => Some(PhysicalOp.Kind.LongPairs)
-      case Some((_: String, _: Int)) => StringPairPlan.confirm(rest)
+      case Some(value) if StringPairPlan.presentKey(value) => StringPairPlan.confirm(rest)
       case Some(value) if StringPairPlan.nullKey(value) => StringPairPlan.witness(rest)
       case Some(_: Boolean) => Some(PhysicalOp.Kind.Bools)
       case Some(_: String) => Some(PhysicalOp.Kind.Strings)

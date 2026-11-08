@@ -47,21 +47,36 @@ class TestStringPairCodec extends AnyFlatSpec with Matchers:
     BatchCodec.decodeStringPairs(batch) shouldBe Seq(nullKey(1), "present" -> 2)
   }
 
-  it should "reject a clear value bit and ignore it past a prefix" in {
+  it should "decode a clear value bit as absent and ignore one past a prefix" in {
     val batch = pairBatch(
       DictUtf8Column.of(Array("red"), Array(0, 0), Validity.allValid(2), 2),
       Int32Column.of(Array(4, 0), Validity.pack(2, row => row == 0), 2),
       2,
     )
+    val decoded = BatchCodec.decodeStringPairs(batch)
 
-    val caught = intercept[IllegalArgumentException] {
-      BatchCodec.decodeStringPairs(batch)
-    }
-    caught.getMessage shouldBe "requirement failed: null Int32 at row 1"
+    decoded.length shouldBe 2
+    decoded.head shouldBe ("red" -> 4)
+    absentValue(decoded(1)) shouldBe true
+    keyOf(decoded(1)) shouldBe "red"
     BatchCodec.decodeStringPairs(batch, 1) shouldBe Seq("red" -> 4)
   }
 
-  it should "decode a selected prefix and ignore a clear value bit past it" in {
+  it should "round-trip a null int as a clear value bit" in {
+    val rows = Seq(erased("a", null), erased("", java.lang.Integer.valueOf(0)))
+    val batch = BatchCodec.stringIntPairs(rows)
+    val values = intColumn(batch)
+    val decoded = BatchCodec.decodeStringPairs(batch)
+
+    values.isValid(0) shouldBe false
+    values.isValid(1) shouldBe true
+    values.values(1) shouldBe 0
+    absentValue(decoded.head) shouldBe true
+    keyOf(decoded.head) shouldBe "a"
+    decoded(1) shouldBe ("" -> 0)
+  }
+
+  it should "decode a selected clear value bit and ignore one the index does not name" in {
     val batch = pairBatch(
       DictUtf8Column.of(
         Array("red", ""),
@@ -72,12 +87,13 @@ class TestStringPairCodec extends AnyFlatSpec with Matchers:
       Int32Column.of(Array(4, 5, 0), Validity.pack(3, row => row != 2), 3),
       3,
     )
+    val kept = BatchCodec.decodeStringPairs(batch, Array(0, 1, 99), 2)
+    val absent = BatchCodec.decodeStringPairs(batch, Array(0, 2), 2)
 
-    BatchCodec.decodeStringPairs(batch, Array(0, 1, 99), 2) shouldBe Seq("red" -> 4, nullKey(5))
-    val caught = intercept[IllegalArgumentException] {
-      BatchCodec.decodeStringPairs(batch, Array(0, 2), 2)
-    }
-    caught.getMessage shouldBe "requirement failed: null Int32 at row 2"
+    kept shouldBe Seq("red" -> 4, nullKey(5))
+    absent.head shouldBe ("red" -> 4)
+    keyOf(absent(1)) shouldBe ""
+    absentValue(absent(1)) shouldBe true
   }
 
   it should "reject a batch that is not a string key and an int value" in {
@@ -96,3 +112,31 @@ class TestStringPairCodec extends AnyFlatSpec with Matchers:
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def nullKey(value: Int): (String, Int) = (null: String) -> value
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def erased(key: String, value: java.lang.Integer): (String, Int) =
+    Tuple2(key, value).asInstanceOf[(String, Int)]
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def absentValue(row: (String, Int)): Boolean =
+    row.productElement(1).asInstanceOf[AnyRef] eq null
+
+  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
+  private def keyOf(row: (String, Int)): String = row.productElement(0) match
+    case value: String => value
+    case other => fail(s"expected a present string, got $other")
+
+  private def intColumn(batch: ColumnBatch): Int32Column = batch.columns.toList match
+    case (_: DictUtf8Column) :: (values: Int32Column) :: Nil => values
+    case _ => fail(s"expected a string pair, found ${batch.schema}")

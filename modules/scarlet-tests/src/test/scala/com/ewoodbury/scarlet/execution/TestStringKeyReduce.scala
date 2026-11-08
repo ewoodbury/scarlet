@@ -155,7 +155,16 @@ class TestStringKeyReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
     ColumnarPlanner.lower(rows.join(rows).plan).map(_.shape) shouldBe Some(
       "StringHashJoin(Exchange(Scan), Exchange(Scan))",
     )
-    ColumnarPlanner.lower(nullValue.reduceByKey[String, Int](_ + _).plan) shouldBe None
+    val reduced = nullValue.reduceByKey[String, Int](_ + _)
+    val nullGrouped = nullValue.groupByKey
+    ColumnarPlanner.lower(reduced.plan).map(_.shape) shouldBe Some(
+      "StringHashAggregate(Exchange(Scan))",
+    )
+    ColumnarPlanner.tryRun(reduced.plan) shouldBe None
+    ColumnarPlanner.lower(nullGrouped.plan).map(_.shape) shouldBe Some(
+      "GroupByKey(Exchange(Scan))",
+    )
+    ColumnarPlanner.tryRun(nullGrouped.plan) shouldBe None
   }
 
   it should "emit one empty string-pair batch per shuffle partition" in {

@@ -18,8 +18,9 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * [[ColumnarFallback]] is the named form of a deliberate decline, including a null value on a
  * left, right, or full outer join: the value columns are already encoded, and the kernel is not
  * chosen. A null value on a long inner join is that fallback too. A null value on a selected row
- * of an int inner join is that fallback too. A null on a dropped row is not. A string join does
- * not use that fallback: a null value never lowers, and a clear live value bit still throws. With
+ * of an int inner join is that fallback too. A null on a dropped row is not. A live null value on
+ * a string join, string `reduceByKey`, or string `groupByKey` is that fallback too. A string-pair
+ * filter keeps the null int. A value projection that kept a null int is that fallback too. With
  * spill off, an over-budget int `countByKey` throws `ClosedKernelRefusal`, which does not extend
  * `ClassCastException`, so the action fails instead of rerunning on rows. With spill on, an
  * over-budget post-exchange bucket spills. A count table that still does not fit throws
@@ -369,12 +370,14 @@ private[execution] object ColumnarInterpreter:
           throw new IllegalStateException(
             s"physical tree does not match ${plan.getClass.getSimpleName}",
           )
-    // Two or more int pair or triple filters compact once. A long-pair row filter chains one
-    // kernel per filter. A single-column stack chains kernels. A lone filter stays on the
-    // existing kernels.
+    // A string-pair filter is not [[FilterChain.accepts]]. A key or value stack stays in
+    // [[StringPairWalk]]. A whole-row string stack is one selection pass there. A long-pair row
+    // filter still chains one kernel per filter on this path. Collect reads
+    // [[FilterChain.selected]].
     // `accepts` walks the logical plan, so it runs only for a filter node.
-    case (_, PhysicalOp.Filter(child, _)) if child.kind eq PhysicalOp.Kind.StringPairs =>
-      StringPairWalk.filter(plan, child, selectedPartition, preserveAbsence, ordinals)
+    case (logical, physical @ PhysicalOp.Filter(child, _))
+        if child.kind eq PhysicalOp.Kind.StringPairs =>
+      StringPairWalk.filter(logical, physical, selectedPartition, preserveAbsence, ordinals)
     case (logical, physical)
         if physical.isInstanceOf[PhysicalOp.Filter] && FilterChain.accepts(logical, physical) =>
       FilterChain.run(logical, physical, selectedPartition, preserveAbsence, ordinals)
@@ -728,9 +731,8 @@ private[execution] object ColumnarInterpreter:
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
       // Long-pair encode always keeps a null key and a null value. preserveAbsence is passed for
       // symmetry with the int sort. It does not change the long encode. A null key orders as zero
-      // and stays null. A key or value filter sorts survivor ids and does not gather first. A
-      // long-pair row filter has no index, so `None` interprets that child and the dense split
-      // runs. The physical op stays SortByLongKey. RankSplitLongRuns chooses the in-memory split
+      // and stays null. A key, value, or row filter sorts survivor ids and does not gather first.
+      // The physical op stays SortByLongKey. RankSplitLongRuns chooses the in-memory split
       // or a spill of the survivor index. Take decodes the prefix.
       val width = ColumnarPlanner.shuffleWidth
       val workers = ColumnarPlanner.parallelism
@@ -759,9 +761,9 @@ private[execution] object ColumnarInterpreter:
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
       // String-pair encode keeps a null key. preserveAbsence matches the other sorts. A null key
-      // orders as "" and stays null. A key or value filter sorts survivor ids and does not gather
-      // first. A whole-row string filter does not lower, so this arm does not see it. The `None`
-      // path is the scan. StringRankSplitRuns chooses the in-memory split or a spill of the
+      // orders as "" and stays null. A key, value, or row filter sorts survivor ids and does not
+      // gather first. The `None` path is the scan. StringRankSplitRuns chooses the in-memory split
+      // or a spill of the
       // survivor index. Take decodes the prefix.
       val width = ColumnarPlanner.shuffleWidth
       val workers = ColumnarPlanner.parallelism

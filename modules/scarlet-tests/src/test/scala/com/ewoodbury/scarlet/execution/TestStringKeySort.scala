@@ -174,11 +174,13 @@ class TestStringKeySort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     collect(sorted.values) shouldBe Seq(5, 6, 12, 13, 2, 8, 14, 1, 3, 9, 10, 4, 7, 11)
   }
 
-  it should "leave a filter or a map under the sort on the row path" in {
+  it should "sort a whole-row filter and leave a map under the sort on the row path" in {
     val filtered = mixed.filter((pair: (String, Int)) => pair._2 != 1).sortByStringKey
     val mapped = mixed.map((pair: (String, Int)) => (pair._1, pair._2)).sortByStringKey
 
-    ColumnarPlanner.lower(filtered.plan) shouldBe None
+    ColumnarPlanner.lower(filtered.plan).map(_.shape) shouldBe Some(
+      "SortByStringKey(FilterRow(Scan))",
+    )
     ColumnarPlanner.lower(mapped.plan) shouldBe None
     collect(filtered) shouldBe rowOf(filtered)
     collect(mapped) shouldBe rowOf(mapped)

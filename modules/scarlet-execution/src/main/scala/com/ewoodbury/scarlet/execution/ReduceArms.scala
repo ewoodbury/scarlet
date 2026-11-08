@@ -9,8 +9,8 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * `reduceByKey` for int pairs, long pairs, and string pairs.
  *
  * A slot-filter stack on an int, long, or string child partial-reduces survivor ids, including a
- * stack of one. An int-pair row filter does the same. The exchange sees dense partials. A
- * whole-row string filter, a long-pair row filter, a map, a scan, and a non-pair child stay on the
+ * stack of one. An int-pair row filter, a long-pair row filter, and a whole-row string filter do
+ * the same. The exchange sees dense partials. A map, a scan, and a non-pair child stay on the
  * dense reduce. The `None` path is the only one that interprets that child.
  */
 private[execution] object ReduceArms:
@@ -66,8 +66,8 @@ private[execution] object ReduceArms:
     // Named erasure boundary. Grouped long-pair reduction declares `(Long, Long) => Long`.
     @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
     val op = reduceFunc.asInstanceOf[(Long, Long) => Long]
-    // A long key or value stack scans survivor ids, including one filter. The `None` path is the
-    // only one that interprets that child.
+    // A long key, value, or row stack scans survivor ids, including one filter. The `None` path is
+    // the only one that interprets that child.
     val binOp: LongHashReduce.LongBinOp = (left: Long, right: Long) => op(left, right)
     val width = ColumnarPlanner.shuffleWidth
     val workers = ColumnarPlanner.parallelism
@@ -115,6 +115,7 @@ private[execution] object ReduceArms:
       ordinals,
     ) match
       case Some(parts) =>
+        StringPairWalk.refuseSelectedNullValues(parts)
         Columns.StringPairs(StringHashReduce.byKeySelected(parts, width, workers, batchSize, op))
       case None =>
         val batches = StringPairWalk.batches(
@@ -126,4 +127,5 @@ private[execution] object ReduceArms:
             ordinals,
           ),
         )
+        StringPairWalk.refuseNullValues(batches)
         Columns.StringPairs(StringHashReduce.byKey(batches, width, workers, batchSize, op))

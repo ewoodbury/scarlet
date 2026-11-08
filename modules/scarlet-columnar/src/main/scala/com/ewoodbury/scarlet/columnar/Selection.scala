@@ -19,10 +19,11 @@ import scala.annotation.tailrec
  *
  * A primitive, boolean, or pair slot skips a null and does not call the predicate. A present zero
  * is still a candidate. A key or value slot looks at that ordinal only, so a null on the other
- * ordinal can survive. A pair row needs both ordinals. A triple needs all three present and names
- * the absolute row when one is null, before any predicate call. A general string predicate is
- * called on every candidate, including an empty cell. An empty cell that passes stays absent in
- * the output.
+ * ordinal can survive. A pair row needs both ordinals. A long-pair row needs both ordinals and
+ * calls only when both bits are set. A string-pair row passes a null key and does not turn a null
+ * int into zero. A triple needs all three present and names the absolute row when one is null,
+ * before any predicate call. A general string predicate is called on every candidate, including an
+ * empty cell. An empty cell that passes stays absent in the output.
  *
  * [[applySelected]] returns that index and does not gather. [[materialize]] gathers every column
  * by absolute row and copies the source validity bit. A clear bit stores zero and leaves the
@@ -30,11 +31,12 @@ import scala.annotation.tailrec
  * present prefix is what the gather writes when every survivor is present. The output arrays are
  * sized to the index capacity, which is the morsel width. The batch length is the survivor count.
  *
- * [[count]] walks the same int-slot and int-pair steps and returns the survivor total.
- * [[sumInt32]] walks those steps and adds one ordinal. Neither allocates the index or gathers a
- * batch. When every ordinal those steps read is dense on the range, the walk skips the per-row bit
- * test. An ordinal no step reads is not tested. [[sumInt32]] still skips a null measure slot when
- * that ordinal is not one of those steps, or when its own range has a hole.
+ * [[count]] walks the same int-slot and int-pair steps and returns the survivor total. A long-pair
+ * row and a string-pair row are not count steps. [[sumInt32]] walks those steps and adds one
+ * ordinal. Neither allocates the index or gathers a batch. When every ordinal those steps read is
+ * dense on the range, the walk skips the per-row bit test. An ordinal no step reads is not tested.
+ * [[sumInt32]] still skips a null measure slot when that ordinal is not one of those steps, or
+ * when its own range has a hole.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[scarlet] object Selection:
@@ -46,6 +48,8 @@ private[scarlet] object Selection:
     case Bool(column: Int, predicate: ColumnKernel.BoolPredicate)
     case Utf8(column: Int, predicate: ColumnKernel.Utf8Predicate)
     case IntPair(predicate: PairKernel.IntPairPredicate)
+    case LongPair(predicate: LongPairKernel.LongPairPredicate)
+    case StringPair(predicate: StringPairRow.Predicate)
     case IntTriple(column: Int, predicate: ColumnKernel.Int32Predicate)
 
   /**
@@ -517,7 +521,7 @@ private[scarlet] object Selection:
     case Step.IntPair(predicate) =>
       predicate(keyValues(row), valueValues(row))
     case Step.Int64(_, _) | Step.Float64(_, _) | Step.Bool(_, _) | Step.Utf8(_, _) |
-        Step.IntTriple(_, _) =>
+        Step.IntTriple(_, _) | Step.LongPair(_) | Step.StringPair(_) =>
       rejectedCountStep
 
   private def keepsChecked(
@@ -537,7 +541,7 @@ private[scarlet] object Selection:
       Validity.isSet(valueWords, row) &&
       predicate(keyValues(row), valueValues(row))
     case Step.Int64(_, _) | Step.Float64(_, _) | Step.Bool(_, _) | Step.Utf8(_, _) |
-        Step.IntTriple(_, _) =>
+        Step.IntTriple(_, _) | Step.LongPair(_) | Step.StringPair(_) =>
       rejectedCountStep
 
   private def rejectedCountStep: Boolean =
@@ -563,6 +567,10 @@ private[scarlet] object Selection:
       seedUtf8(batch, ordinal, start, length, predicate, index)
     case Step.IntPair(predicate) =>
       seedPair(batch, start, length, predicate, index)
+    case Step.LongPair(predicate) =>
+      WholeRowSelection.seedLong(batch, start, length, predicate, index)
+    case Step.StringPair(predicate) =>
+      WholeRowSelection.seedString(batch, start, length, predicate, index)
     case Step.IntTriple(ordinal, predicate) =>
       seedTriple(batch, ordinal, start, length, predicate, index)
 
@@ -580,6 +588,10 @@ private[scarlet] object Selection:
         restrictUtf8(batch, ordinal, predicate, index, count)
       case Step.IntPair(predicate) =>
         restrictPair(batch, predicate, index, count)
+      case Step.LongPair(predicate) =>
+        WholeRowSelection.restrictLong(batch, predicate, index, count)
+      case Step.StringPair(predicate) =>
+        WholeRowSelection.restrictString(batch, predicate, index, count)
       case Step.IntTriple(ordinal, predicate) =>
         restrictTriple(batch, ordinal, predicate, index, count)
 

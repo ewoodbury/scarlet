@@ -6,15 +6,16 @@ import scala.annotation.tailrec
  * Witness for a `(String, Int)` source.
  *
  * A present string key selects the kind. A null key is not a witness: classification keeps
- * looking, and an all-null-key source stays on the row path. A null value is not a pair this path
- * can unbox, so the source stays on the row path. Grouped sum does not use this kind.
+ * looking, and an all-null-key source stays on the row path. A null int is still a value of this
+ * pair: the witness reads `productElement`, so the null is not rejected as a non-`Int`. Grouped
+ * sum does not use this kind.
  *
  * Named erasure boundary. The source element type is erased, so the witness matches `Any`.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
 private[execution] object StringPairPlan:
 
-  /** Every remaining row is a string key, or a null key, with an `Int` value. */
+  /** Every remaining row is a string key, or a null key, with an int value. A null int counts. */
   def confirm(rest: Iterator[Any]): Option[PhysicalOp.Kind] =
     Option.when(rest.forall(stringIntPair))(PhysicalOp.Kind.StringPairs)
 
@@ -28,18 +29,39 @@ private[execution] object StringPairPlan:
       else if (presentKey(value)) then confirm(rest)
       else None
 
-  /** A null key beside an `Int` value. A present string is not this case. */
-  @SuppressWarnings(Array("org.wartremover.warts.Null"))
-  def nullKey(value: Any): Boolean = value match
-    case (null, _: Int) => true
+  /**
+   * A null key beside an int value, including a null int. A present string is not this case.
+   * `productElement` does not unbox, so a null int is not missed by `_: Int`.
+   */
+  def nullKey(value: Any): Boolean = pair(value) match
+    case Some(product) =>
+      absent(product.productElement(0)) && intCell(product.productElement(1))
+    case None => false
+
+  /** A present string key, including `""`, beside an int value or a null int. */
+  def presentKey(value: Any): Boolean = pair(value) match
+    case Some(product) =>
+      stringCell(product.productElement(0)) && intCell(product.productElement(1))
+    case None => false
+
+  private def stringIntPair(value: Any): Boolean =
+    nullKey(value) || presentKey(value)
+
+  /** A tuple, including one whose int is null. Another two-field product is not this pair. */
+  private def pair(value: Any): Option[Product] = value match
+    case tuple: Tuple2[?, ?] => Some(tuple)
+    case _ => None
+
+  private def absent(cell: Any): Boolean = cell match
+    case null => true
     case _ => false
 
-  @SuppressWarnings(Array("org.wartremover.warts.Null"))
-  private def stringIntPair(value: Any): Boolean = value match
-    case (null, _: Int) => true
-    case (_: String, _: Int) => true
+  private def stringCell(cell: Any): Boolean = cell match
+    case _: String => true
     case _ => false
 
-  private def presentKey(value: Any): Boolean = value match
-    case (_: String, _: Int) => true
+  /** A present `Int`, or a null int. Any other reference is not this column. */
+  private def intCell(cell: Any): Boolean = cell match
+    case null => true
+    case _: Int => true
     case _ => false

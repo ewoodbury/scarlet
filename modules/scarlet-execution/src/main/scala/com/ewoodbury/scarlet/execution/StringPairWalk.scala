@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{BatchCodec, ColumnBatch, ColumnKernel, Int32Column}
+import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan}
 
 import ColumnarInterpreter.Columns
@@ -9,14 +9,16 @@ import ColumnarInterpreter.Columns
  * Encode, project, filter, and `mapValues` for `(String, Int)` batches.
  *
  * A batch is a UTF-8 dictionary key and an int value. A null key is a clear bit on the key and
- * stays in the batch. The value bit stays set, including on that row: a clear value bit is a null
- * `Int`, which this path does not lower. `mapValues` rewrites column 1 and copies the key bit
- * unchanged, so the new value does not inherit a clear key bit.
+ * stays in the batch. A null int is a clear value bit and is not stored as zero. `mapValues`
+ * rewrites column 1 and copies both bits, so a null int stays null and the new value does not
+ * inherit a clear key bit. A value projection of a kept null int declines. A value filter drops a
+ * clear bit first, so that projection stays columnar when every survivor is present.
  *
  * [[encoded]] may publish a one-column batch when demand narrowed the read to the key or the
  * value. A [[PhysicalOp.Column]] or the filter path consumes that shape; a column wraps the batch
- * as [[Columns.Strings]] or [[Columns.Ints]]. [[BatchCodec.decodeStringPairs]] requires both
- * columns and is never called on a narrowed batch.
+ * as [[Columns.Strings]] or [[Columns.Ints]]. [[BatchCodec.decodeStringPairs]] reads both columns
+ * and is never called on a narrowed batch. A whole-row stack is one [[Selection]] pass over both
+ * columns. A key or value stack stays on the dense kernels below.
  *
  * Named erasure boundary. The physical slot chose the predicate, and lowering checked that
  * `mapValues` declares `Int => Int`.
@@ -33,6 +35,16 @@ private[execution] object StringPairWalk:
         partitions.map(partition => BatchCodec.stringIntPairs(rowsOf(partition))).toVector
     Columns.StringPairs(batches)
 
+  /** A live null int cannot be joined, reduced, or grouped. The row path runs instead. */
+  def refuseNullValues(batches: Vector[ColumnBatch]): Unit =
+    if (!ColumnPipeline.valuesFullyPresent(batches)) then
+      throw new ColumnarFallback("string pair value is null")
+
+  /** Same decline as [[refuseNullValues]], on `rows(0 until count)` only. */
+  def refuseSelectedNullValues(selected: Vector[Selected]): Unit =
+    if (!ColumnPipeline.valuesFullyPresent(selected)) then
+      throw new ColumnarFallback("string pair value is null")
+
   def batches(columns: Columns): Vector[ColumnBatch] = columns match
     case Columns.StringPairs(parts) => parts
     case _ =>
@@ -43,7 +55,11 @@ private[execution] object StringPairWalk:
       case PhysicalOp.Kind.LongPairs => Columns.Longs(columns)
       case PhysicalOp.Kind.Pairs => Columns.Ints(columns)
       case PhysicalOp.Kind.StringPairs if ordinal == 0 => Columns.Strings(columns)
-      case PhysicalOp.Kind.StringPairs => Columns.Ints(columns)
+      case PhysicalOp.Kind.StringPairs =>
+        // A kept null int is not an Int32 column. Decline before decode throws.
+        if (!ColumnPipeline.intsFullyPresent(columns)) then
+          throw new ColumnarFallback("string pair value is null")
+        Columns.Ints(columns)
       case _ =>
         throw new IllegalStateException("columnar projection expected a pair")
 
@@ -63,6 +79,23 @@ private[execution] object StringPairWalk:
 
   def filter(
       plan: Plan[_],
+      op: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): Columns =
+    op match
+      case PhysicalOp.Filter(child, _) =>
+        PredicatePlan.compile(plan, op) match
+          case Some(compiled) if compiled.atoms.exists(isStringRow) =>
+            selectRows(plan, op, compiled, selectedPartition, preserveAbsence, ordinals)
+          case _ =>
+            filterSlot(plan, child, selectedPartition, preserveAbsence, ordinals)
+      case _ =>
+        throw new IllegalStateException("string pair filter expected a key or a value")
+
+  private def filterSlot(
+      plan: Plan[_],
       child: PhysicalOp,
       selectedPartition: Option[Int],
       preserveAbsence: Boolean,
@@ -80,15 +113,56 @@ private[execution] object StringPairWalk:
     }
     Columns.StringPairs(filtered)
 
+  /** One pass over the source under a stack that contains a whole-row atom. */
+  private def selectRows(
+      plan: Plan[_],
+      op: PhysicalOp,
+      compiled: PredicatePlan.Compiled,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): Columns =
+    val steps = PredicatePlan
+      .selectionSteps(PredicatePlan.encoded(compiled, ordinals))
+      .getOrElse(missingRows)
+    val (source, child) = PredicatePlan.childOf(plan, op)
+    val input = ColumnarInterpreter.interpretAt(
+      source,
+      child,
+      selectedPartition,
+      preserveAbsence,
+      ordinals,
+    )
+    val filtered = ColumnarInterpreter.onEachMorsel(batches(input)) { morsel =>
+      Selection(morsel.batch, morsel.start, morsel.length, steps)
+    }
+    Columns.StringPairs(filtered)
+
+  private def isStringRow(atom: PredicatePlan.Atom): Boolean = atom match
+    case PredicatePlan.Atom.StringRow(_) => true
+    case PredicatePlan.Atom.Int32(_, _) | PredicatePlan.Atom.Int64(_, _) |
+        PredicatePlan.Atom.Float64(_, _) | PredicatePlan.Atom.Bool(_, _) |
+        PredicatePlan.Atom.Utf8(_, _) | PredicatePlan.Atom.Utf8Literals(_, _) |
+        PredicatePlan.Atom.PairRow(_) | PredicatePlan.Atom.TripleRow(_) |
+        PredicatePlan.Atom.LongPairRow(_) | PredicatePlan.Atom.LongPairKey(_) |
+        PredicatePlan.Atom.LongPairValue(_, _) | PredicatePlan.Atom.PairKey(_) |
+        PredicatePlan.Atom.PairValue(_, _) =>
+      false
+
+  private def missingRows: Nothing =
+    throw new IllegalStateException("string pair row filter lost its selection")
+
   private def keysOnly(rows: Iterable[(String, Int)]): ColumnBatch =
     BatchCodec.strings(rows.map(pair => pair._1))
 
   private def valuesOnly(rows: Iterable[(String, Int)]): ColumnBatch =
-    BatchCodec.ints(rows.map(pair => pair._2))
+    // A null int stays a clear bit. [[BatchCodec.ints]] would store it as zero. The projection
+    // declines later if that bit is still live.
+    BatchCodec.stringIntValues(rows)
 
   @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
   private def rowsOf(partition: Partition[_]): Iterable[(String, Int)] =
-    // Classification already rejected a null value, so unboxing the int is safe.
+    // The encoder reads the value with productElement, so a null int is not unboxed here.
     partition.data.asInstanceOf[Iterable[(String, Int)]]
 
   /**

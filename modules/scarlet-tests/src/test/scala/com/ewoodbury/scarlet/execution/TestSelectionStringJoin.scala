@@ -316,12 +316,10 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
     val source = DistCollection(
       Plan.Source(Seq(Partition(Seq("red" -> 1, erasedNullValue("blue"), "red" -> 2)))),
     )
-    val joined = source
-      .filterKeys((_: String) => true)
-      .filterValues((_: Int) => true)
-      .join(DistCollection(Seq("red" -> 3), 1))
+    val joined = source.filterKeys((_: String) => true).join(DistCollection(Seq("red" -> 3), 1))
+    val op = ColumnarPlanner.lower(joined.plan).getOrElse(fail("null value join did not lower"))
 
-    ColumnarPlanner.lower(joined.plan) shouldBe Option.empty[PhysicalOp]
+    op.shape should include("StringHashJoin")
     ColumnarPlanner.tryRun(joined.plan) shouldBe None
   }
 

@@ -660,8 +660,104 @@ class TestSelection extends AnyFlatSpec with Matchers:
     BatchCodec.decodeInts(rejected) shouldBe Seq.empty[Int]
   }
 
+  it should "not call a long row predicate on a null value that a key filter kept" in {
+    val batch = new ColumnBatch(
+      Vector(LogicalType.Int64, LogicalType.Int64),
+      Vector(
+        Int64Column.fromNullable(Seq(Some(1L), Some(4L), Some(0L))),
+        Int64Column.fromNullable(Seq(None, Some(8L), Some(3L))),
+      ),
+      3,
+    )
+    val rowCalls = new AtomicInteger
+    val selected = Selection(
+      batch,
+      0,
+      batch.length,
+      Seq(
+        Selection.Step.Int64(0, (value: Long) => value >= 0L),
+        Selection.Step.LongPair((key, value) => {
+          rowCalls.incrementAndGet()
+          if (value == 0L) then fail("row predicate saw a null payload")
+          key < 10L
+        }),
+      ),
+    )
+
+    rowCalls.get() shouldBe 2
+    BatchCodec.decodeLongPairs(selected) shouldBe Seq((4L, 8L), (0L, 3L))
+  }
+
+  it should "pass a null string key and not turn a null int into zero" in {
+    val composed = "é"
+    val decomposed = "e\u0301"
+    val keys = DictUtf8Column.fromNullable(
+      Seq(Some("a"), None, Some(""), Some(composed), Some(decomposed)),
+    )
+    val values = Int32Column.of(Array(0, 2, 0, 3, 4), Validity.pack(5, row => row != 0), 5)
+    val batch = new ColumnBatch(
+      Vector(LogicalType.Utf8Dict, LogicalType.Int32),
+      Vector(keys, values),
+      5,
+    )
+    val nulls = new AtomicInteger
+    val zeros = new AtomicInteger
+    val selected = Selection(
+      batch,
+      0,
+      batch.length,
+      Seq(
+        Selection.Step.StringPair(
+          new StringPairRow.Adapted(row => keepPresentOrNullInt(row, nulls, zeros)),
+        ),
+      ),
+    )
+    val outValues = int32(selected, 1)
+
+    val outKeys = utf8(selected)
+
+    nulls.get() shouldBe 1
+    zeros.get() shouldBe 1
+    selected.length shouldBe 4
+    outKeys.isValid(0) shouldBe true
+    outKeys.dictionary(outKeys.codes(0)) shouldBe "a"
+    outKeys.isValid(1) shouldBe false
+    outKeys.codes(1) shouldBe 0
+    outKeys.dictionary(outKeys.codes(2)) shouldBe composed
+    outKeys.dictionary(outKeys.codes(3)) shouldBe decomposed
+    assert(composed != decomposed)
+    outValues.isValid(0) shouldBe false
+    outValues.values(0) shouldBe 0
+    outValues.isValid(1) shouldBe true
+    outValues.values(1) shouldBe 2
+    outValues.values(2) shouldBe 3
+    outValues.values(3) shouldBe 4
+  }
+
   private def single(column: Column): ColumnBatch =
     new ColumnBatch(Vector(column.logicalType), Vector(column), column.length)
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Equals",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def keepPresentOrNullInt(
+      row: (String, Int),
+      nulls: AtomicInteger,
+      zeros: AtomicInteger,
+  ): Boolean =
+    val raw = row.productElement(1)
+    if (raw.asInstanceOf[AnyRef] eq null) then
+      nulls.incrementAndGet()
+      true
+    else
+      val value = row._2
+      if (value == 0) then zeros.incrementAndGet()
+      value > 0
 
   private def isUs(value: String): Boolean =
     !BatchCodec.isAbsent(value) && value.equals("US")

@@ -14,11 +14,14 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * Columnar `keys`, `values`, `mapValues`, `filterKeys`, and `filterValues` on `(String, Int)`.
  *
- * The row path is the oracle. A null key stays in the batch. A null value stays on the row path.
+ * The row path is the oracle. A null key stays in the batch. A null int stays absent. A null int
+ * on `reduceByKey`, `groupByKey`, or an inner join stays on the row path.
  * Distinct and a string `mapValues` stay on the row path. `reduceByKey`, `groupByKey`, and an
  * inner shuffle-hash join lower.
  */
 class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
+
+  private final case class Label(name: String, n: Int)
 
   private val original = ScarletConf.get
   private val accent = "é"
@@ -147,21 +150,64 @@ class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
     source.take(4) shouldBe rowOf(source).take(4)
   }
 
-  it should "lower a leading null key and refuse a null value or all-null keys" in {
+  it should "lower a leading null key and a null int, and refuse all-null keys" in {
     val leading = pairs(Seq(nullKey(1), "red" -> 2))
     val nullValue = pairs(Seq("red" -> 1, erasedNullValue("blue")))
     val bothNull = pairs(Seq(erasedNullPair))
     val onlyNull = pairs(Seq(nullKey(1), nullKey(2)))
     val empty = pairs(Seq.empty)
+    val decoded = columnar(nullValue)
 
     ColumnarPlanner.lower(leading.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.StringPairs)
     columnar(leading) shouldBe Seq(nullKey(1), "red" -> 2)
-    ColumnarPlanner.lower(nullValue.plan) shouldBe None
-    stayedOnRows(nullValue) shouldBe Seq("red" -> 1, erasedNullValue("blue"))
+    ColumnarPlanner.lower(nullValue.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.StringPairs)
+    decoded.length shouldBe 2
+    decoded.head shouldBe ("red" -> 1)
+    keyOf(decoded(1)) shouldBe "blue"
+    absentValue(decoded(1)) shouldBe true
     ColumnarPlanner.lower(bothNull.plan) shouldBe None
     ColumnarPlanner.lower(onlyNull.plan) shouldBe None
     stayedOnRows(onlyNull) shouldBe Seq(nullKey(1), nullKey(2))
     ColumnarPlanner.lower(empty.plan) shouldBe None
+  }
+
+  it should "decline a value projection that kept a null int" in {
+    val rows = pairs(Seq("red" -> 1, erasedNullValue("blue"), "green" -> 3))
+    val direct = rows.values
+    val byKey = rows.filterKeys(keepKey).values
+    val byRow = rows.filter(keepRow).values
+    val mapped = rows.mapValues((value: Int) => value + 1).values
+    val kept = rows.filterKeys(notBlue).values
+
+    ColumnarPlanner.lower(direct.plan).map(_.shape) shouldBe Some("Value(Scan)")
+    ColumnarPlanner.lower(byKey.plan).map(_.shape) shouldBe Some("Value(FilterKey(Scan))")
+    ColumnarPlanner.lower(byRow.plan).map(_.shape) shouldBe Some("Value(FilterRow(Scan))")
+    ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some("Value(MapValue(Scan))")
+    ColumnarPlanner.tryRun(direct.plan) shouldBe None
+    ColumnarPlanner.tryRun(byKey.plan) shouldBe None
+    ColumnarPlanner.tryRun(byRow.plan) shouldBe None
+    ColumnarPlanner.tryRun(mapped.plan) shouldBe None
+    ColumnarPlanner.tryTake(byKey.plan, 1) shouldBe None
+    columnar(kept) shouldBe rowOf(kept)
+  }
+
+  it should "project the values a value filter kept, including after it drops a null int" in {
+    val present = pairs(Seq("red" -> 1, "green" -> -2, "gold" -> 4))
+    val presentValues = present.filterValues((value: Int) => value > 0).values
+    val withNull = pairs(Seq("red" -> 1, erasedNullValue("blue"), "green" -> -2, "gold" -> 4))
+    val dropped = withNull.filterValues((value: Int) => value > 0).values
+
+    demand(presentValues) shouldBe Set(1)
+    columnar(presentValues) shouldBe rowOf(presentValues)
+    demand(dropped) shouldBe Set(1)
+    ColumnarPlanner.lower(dropped.plan).map(_.shape) shouldBe Some("Value(FilterValue(Scan))")
+    columnar(dropped) shouldBe Seq(1, 4)
+  }
+
+  it should "leave a two-field case class on the row path" in {
+    val labels = DistCollection(Seq(Label("red", 1), Label("blue", 2)), 1)
+
+    ColumnarPlanner.lower(labels.plan) shouldBe None
   }
 
   it should "lower reduceByKey, groupByKey, and an inner join, and keep distinct and a string mapValues on the row path" in {
@@ -289,6 +335,21 @@ class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
   private def erasedNullValue(key: String): (String, Int) =
     Tuple2[String, Integer](key, null).asInstanceOf[(String, Int)]
 
+  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
+  private def keyOf(row: (String, Int)): String = row.productElement(0) match
+    case value: String => value
+    case other => fail(s"expected a present string, got $other")
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def absentValue(row: (String, Int)): Boolean =
+    row.productElement(1).asInstanceOf[AnyRef] eq null
+
   @SuppressWarnings(
     Array(
       "org.wartremover.warts.AsInstanceOf",
@@ -312,6 +373,20 @@ class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
   private def isEmptyKey(key: String): Boolean = key match
     case null => false
     case text => text.isEmpty
+
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def keepKey(key: String): Boolean = key match
+    case _ => true
+
+  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
+  private def keepRow(pair: (String, Int)): Boolean =
+    pair.productElement(0) match
+      case _ => true
+
+  @SuppressWarnings(Array("org.wartremover.warts.Equals", "org.wartremover.warts.Null"))
+  private def notBlue(key: String): Boolean = key match
+    case null => true
+    case text => text != "blue"
 
   @SuppressWarnings(Array("org.wartremover.warts.Equals", "org.wartremover.warts.Null"))
   private def isRed(key: String): Boolean = key match
