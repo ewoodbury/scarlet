@@ -18,6 +18,7 @@ private[execution] object GroupByKeyLowering:
       Some(PhysicalOp.GroupByKey(PhysicalOp.Exchange(child)))
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.Strings |
-        PhysicalOp.Kind.Bools | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
-        PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
+        PhysicalOp.Kind.Bools | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.LongCounts |
+        PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
+        PhysicalOp.Kind.GroupedLongs =>
       None

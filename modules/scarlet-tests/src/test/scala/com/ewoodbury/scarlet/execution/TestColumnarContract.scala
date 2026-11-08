@@ -30,14 +30,14 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 203 accepted fixtures. Int countByKey is new. 202 + 1 = 203.
-    accepted.size shouldBe 203
-    // 35 exclusions. 203 + 35 = 238. countByKey was not excluded.
+    // 204 accepted fixtures. Long countByKey is new. 203 + 1 = 204.
+    accepted.size shouldBe 204
+    // 35 exclusions. 204 + 35 = 239. Long countByKey was not excluded.
     // Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by
     // execution tests, not contract fixtures, because the contract does not track the int
     // refusals either.
     excluded.size shouldBe 35
-    (accepted.size + excluded.size) shouldBe 238
+    (accepted.size + excluded.size) shouldBe 239
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -530,6 +530,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         Some("CountByKey(Exchange(Scan))"),
       ),
       AcceptedCase(
+        "countByKey long",
+        Plan.CountByKeyOp(longPairSource),
+        hashedInfo(layout),
+        Some("CountByKey(Exchange(Scan))"),
+      ),
+      AcceptedCase(
         "groupByKey with string keys",
         Plan.GroupByKeyOp(stringKeySource),
         hashedInfo(Layout.GroupedString(ScarletConf.get.columnarBatchSize)),
@@ -893,27 +899,30 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case PhysicalOp.Kind.Ints => true
     case PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs |
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools |
-        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs |
-        PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
-        PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
+        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
+        PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples |
+        PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
+        PhysicalOp.Kind.GroupedLongs =>
       false
 
   private def sumsLongs(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Longs => true
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs |
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools |
-        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs |
-        PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
-        PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
+        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
+        PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples |
+        PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
+        PhysicalOp.Kind.GroupedLongs =>
       false
 
   private def sumsFloats(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Floats => true
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Pairs |
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools |
-        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs |
-        PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
-        PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
+        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
+        PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples |
+        PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
+        PhysicalOp.Kind.GroupedLongs =>
       false
 
   private def preservesPartitions(op: PhysicalOp): Boolean = op match

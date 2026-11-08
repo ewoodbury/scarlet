@@ -13,10 +13,7 @@ object BatchCodec:
    */
   private val LengthMismatch: String = "key and value arrays differ in length"
 
-  /**
-   * An `ArraySeq.ofInt` is copied from its primitive array. Any other iterable is filled from its
-   * iterator. An owned partition array is [[copiedInts]]: this module does not see that holder.
-   */
+  /** Copies an `ArraySeq.ofInt`. Any other iterable fills. An owned array is [[copiedInts]]. */
   def ints(values: Iterable[Int]): ColumnBatch = values match
     case array: ArraySeq.ofInt => copiedInts(array.unsafeArray)
     case other => int32Batch(fillInts(other))
@@ -24,29 +21,17 @@ object BatchCodec:
   def nullableInts(values: Seq[Option[Int]]): ColumnBatch =
     batch(Int32Column.fromNullable(values))
 
-  /**
-   * An `ArraySeq.ofLong` is copied from its primitive array. Any other iterable, including a
-   * `Seq[Long]`, is filled from its iterator. An owned partition array is [[copiedLongs]]: this
-   * module does not see that holder.
-   */
+  /** Copies an `ArraySeq.ofLong`. Any other iterable fills. An owned array is [[copiedLongs]]. */
   def longs(values: Iterable[Long]): ColumnBatch = values match
     case array: ArraySeq.ofLong => copiedLongs(array.unsafeArray)
     case other => fromOwnedLongs(fillLongs(other))
 
-  /**
-   * Copies `values` into a long column. The column does not retain `values`. See [[copiedInts]]
-   * for why the column does not adopt the array. The partition that produced `values` stays
-   * readable.
-   */
+  /** Copies `values`. The column does not retain the array. See [[copiedInts]]. */
   private[scarlet] def copiedLongs(values: Array[Long]): ColumnBatch =
     ColumnMetrics.primitiveEncode()
     fromOwnedLongs(Arrays.copyOf(values, values.length))
 
-  /**
-   * Adopts `values`. The caller must not mutate that array and must not retain it. [[copiedLongs]]
-   * is the path that copies first. Private, like [[int32Batch]], so a later caller cannot alias a
-   * published column.
-   */
+  /** Adopts `values`. The caller must not mutate or retain it. [[copiedLongs]] copies first. */
   private def fromOwnedLongs(values: Array[Long]): ColumnBatch =
     int64Batch(values)
 
@@ -54,21 +39,15 @@ object BatchCodec:
     batch(Int64Column.fromNullable(values))
 
   /**
-   * Copies `values` into an int column. The column does not retain `values`.
-   *
-   * The partition that produced `values` stays readable for the row path and for a later action,
-   * so it is not single-use. A column buffer is writable. Sharing the array would let a column
-   * write change that partition. Construction already copied the caller's range, so this is the
-   * one encode copy.
+   * Copies `values`. The column does not retain the array. The partition stays readable, so a
+   * column must not share it. This is the one encode copy.
    */
   private[scarlet] def copiedInts(values: Array[Int]): ColumnBatch =
     ColumnMetrics.primitiveEncode()
     int32Batch(Arrays.copyOf(values, values.length))
 
   /**
-   * An `ArraySeq.ofDouble` is copied from its primitive array. Any other iterable is filled from
-   * its iterator. An owned partition array is [[copiedFloat64s]]: this module does not see that
-   * holder.
+   * Copies an `ArraySeq.ofDouble`. Any other iterable fills. An owned array is [[copiedFloat64s]].
    */
   def float64s(values: Iterable[Double]): ColumnBatch = values match
     case array: ArraySeq.ofDouble => copiedFloat64s(array.unsafeArray)
@@ -83,10 +62,8 @@ object BatchCodec:
     batch(Float64Column.fromNullable(values))
 
   /**
-   * An `ArraySeq.ofBoolean` is copied from its primitive array. Any other sequence is filled from
-   * its iterator. The `Seq` signature stays for callers compiled against it. [[boolsFromIterable]]
-   * is the same encoding for a non-sequence iterable. An owned partition array is [[copiedBools]]:
-   * this module does not see that holder. The column stores bytes and does not retain `values`.
+   * Copies an `ArraySeq.ofBoolean`. Any other sequence fills from its iterator. The `Seq`
+   * signature stays. See [[copiedBools]]. The column stores bytes and does not retain `values`.
    */
   def bools(values: Seq[Boolean]): ColumnBatch = boolsFromIterable(values)
 
@@ -97,11 +74,7 @@ object BatchCodec:
     case array: ArraySeq.ofBoolean => copiedBools(array.unsafeArray)
     case other => boolBatch(fillBoolBytes(other))
 
-  /**
-   * Copies `values` into a boolean column. The column does not retain `values`. See [[copiedInts]]
-   * for why the column does not adopt the array. The partition that produced `values` stays
-   * readable.
-   */
+  /** Copies `values`. The column does not retain the array. See [[copiedInts]]. */
   private[scarlet] def copiedBools(values: Array[Boolean]): ColumnBatch =
     ColumnMetrics.primitiveEncode()
     boolBatch(boolBytes(values))
@@ -125,10 +98,9 @@ object BatchCodec:
     batch(DictUtf8Column.fromNullable(values))
 
   /**
-   * One UTF-8 dictionary column and one int column. A null key is an empty slot. `""` is a present
-   * string, including when its code is `0`. A null int is a clear value bit. `productElement` does
-   * not unbox, so that null is not stored as `0`. A fully present value column stays all-valid.
-   * The column does not retain the input.
+   * UTF-8 key and int value. A null key is an empty slot. `""` is present, including code `0`. A
+   * null int is a clear bit. `productElement` does not unbox it. A present column stays all-valid
+   * and is not retained.
    */
   @SuppressWarnings(
     Array(
@@ -178,11 +150,8 @@ object BatchCodec:
     batch(Int32Column.of(ints, componentValidity(absent, count), count))
 
   /**
-   * Writes a present int value. A null cell marks the row absent.
-   *
-   * Named erasure boundary. The cell is the erased field of a `(String, Int)`. `productElement`
-   * does not unbox, so a null stays absent. A non-null cell is a reference, so the class test is
-   * safe.
+   * Writes a present int. A null cell is absent. Named erasure boundary: `productElement` does
+   * not unbox a `(String, Int)` cell, so a null stays absent. A non-null cell is a reference.
    */
   @SuppressWarnings(
     Array(
@@ -218,10 +187,7 @@ object BatchCodec:
     require(keys.length == values.length, LengthMismatch)
     copiedIntPairs(keys, values)
 
-  /**
-   * Copies `keys` and `values`. Unequal lengths are rejected with the same sentence as
-   * [[intPairs]]. See [[copiedInts]] for why the arrays are copied rather than adopted.
-   */
+  /** Copies both arrays. Unequal lengths use the [[intPairs]] sentence. See [[copiedInts]]. */
   private[scarlet] def copiedIntPairs(keys: Array[Int], values: Array[Int]): ColumnBatch =
     require(keys.length == values.length, LengthMismatch)
     val rows = keys.length
@@ -233,8 +199,7 @@ object BatchCodec:
 
   /**
    * Copies `keys` and `values` into two `Int64` columns. Unequal lengths are rejected with the
-   * same sentence as [[intPairs]]. The column does not retain either array. See [[copiedIntPairs]]
-   * for why the arrays are copied rather than adopted.
+   * same sentence as [[intPairs]]. The column does not retain either array.
    */
   private[scarlet] def copiedLongPairs(keys: Array[Long], values: Array[Long]): ColumnBatch =
     require(keys.length == values.length, LengthMismatch)
@@ -543,10 +508,29 @@ object BatchCodec:
       erasedLongPair(longRef(left, row), longRef(right, row))
     }
 
+  /** `(Long, Int)` counts. Both columns are live. A null key was dropped before publish. */
+  def decodeLongCounts(batch: ColumnBatch): Seq[(Long, Int)] =
+    decodeLongCounts(batch, batch.length)
+
+  def decodeLongCounts(batch: ColumnBatch, maxRows: Int): Seq[(Long, Int)] =
+    val (keys, counts) = longCount(batch)
+    require(
+      keys.length == batch.length && counts.length == batch.length,
+      "count columns disagree on length",
+    )
+    val rows = decodedLength(batch, maxRows)
+    if (rows == batch.length) then
+      requireLive(keys)
+      requireLive(counts)
+    else
+      requireLivePrefix(keys, rows)
+      requireLivePrefix(counts, rows)
+    ColumnMetrics.decoded(rows)
+    Seq.tabulate(rows)(row => (keys.values(row), counts.values(row)))
+
   /**
-   * Join rows are `(key, build value, probe value)`. A null stays an error: the decoded `Int`
-   * would otherwise be the stored zero. A full decode checks live bits by word; a prefix decode
-   * checks only the rows it returns. Spare capacity past `length` is ignored.
+   * A null join int is an error, not stored zero. A prefix checks only returned rows. Spare
+   * capacity past `length` is ignored.
    */
   def decodeIntTriples(batch: ColumnBatch): Seq[(Int, (Int, Int))] =
     decodeIntTriples(batch, batch.length)
@@ -577,9 +561,8 @@ object BatchCodec:
         )
 
   /**
-   * Reads `rows(0 until count)` of an int-triple batch. A clear bit on a selected row is an error,
-   * the same rule as the dense decoder. A clear bit on any other row is not read. `count` is the
-   * live prefix. Slots at `count` and beyond are not decoded.
+   * Reads `rows(0 until count)`. A clear bit on a selected row is an error, same as the dense
+   * decoder. Any other clear bit is not read. Slots at `count` and beyond are not decoded.
    */
   def decodeIntTriples(
       batch: ColumnBatch,
@@ -607,9 +590,8 @@ object BatchCodec:
         )
 
   /**
-   * Reads an int-triple batch and keeps a clear bit as a null `Int`. A fully present batch still
-   * decodes to the stored ints. [[decodeIntTriples]] rejects a clear bit. A triple map is the
-   * caller that keeps those nulls. A whole-row filter drops them before decode.
+   * Keeps a clear bit as a null `Int`. [[decodeIntTriples]] rejects one. A triple map keeps those
+   * nulls. A whole-row filter drops them before decode. A present cell stays the stored int.
    */
   private[scarlet] def decodeIntTriplesPreservingAbsence(
       batch: ColumnBatch,
@@ -789,9 +771,8 @@ object BatchCodec:
         )
 
   /**
-   * An absence bit is `None`, even when the payload is `0`. A set validity bit is the stored
-   * `Int`. A clear bit with no absence mark is a null value, not a missing partner. This is the
-   * only `Option` site.
+   * Absence is `None` even at payload `0`. A set bit is the stored `Int`. A clear bit with no
+   * absence mark is a null, not a missing partner. This is the only `Option` site.
    */
   private def optionalInt(column: Int32Column, row: Int): Option[Int] =
     if (column.isAbsent(row)) then None
@@ -928,11 +909,8 @@ object BatchCodec:
     )
 
   /**
-   * Writes a present `Int`. A null cell marks the row absent. Any other non-int cell fails.
-   *
-   * Named erasure boundary. The cell is the erased field of an `(Int, Int)`. `productElement` does
-   * not unbox, so a null stays absent. A non-null cell is a reference, so the class-name cast is
-   * safe.
+   * Writes a present `Int`. A null cell is absent. Any other non-int fails. Named erasure
+   * boundary: `productElement` does not unbox an `(Int, Int)` cell, so a null stays absent.
    */
   @SuppressWarnings(
     Array(
@@ -964,8 +942,7 @@ object BatchCodec:
 
   /**
    * Fills both long columns in one pass. A null component is absent. Any other non-long cell
-   * fails. The absence bitmap is allocated only after the first null, so a fully present pair
-   * column stays all-valid.
+   * fails. The absence bitmap appears only after the first null, so a present column stays valid.
    */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def fillLongPairs(values: Iterable[(Long, Long)]): ColumnBatch =
@@ -988,11 +965,8 @@ object BatchCodec:
     )
 
   /**
-   * Writes a present `Long`. A null cell marks the row absent. Any other non-long cell fails.
-   *
-   * Named erasure boundary. The cell is the erased field of a `(Long, Long)`. `productElement`
-   * does not unbox, so a null stays absent. A non-null cell is a reference, so the class test is
-   * safe.
+   * Writes a present `Long`. A null cell is absent. Any other non-long fails. Named erasure
+   * boundary: `productElement` does not unbox a `(Long, Long)` cell, so a null stays absent.
    */
   @SuppressWarnings(
     Array(
@@ -1022,9 +996,8 @@ object BatchCodec:
         throw new ColumnarFallback(s"columnar long pair expected a Long, found $found")
 
   /**
-   * A present cell is the stored int. A clear bit is a null reference, not `0`.
-   *
-   * The return type stays `java.lang.Integer`. A `scala.Int` return unboxes that null to `0`.
+   * A present cell is the stored int. A clear bit is a null reference, not `0`. The return type
+   * stays `java.lang.Integer`. A `scala.Int` return unboxes that null to `0`.
    */
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def intRef(column: Int32Column, row: Int): java.lang.Integer =
@@ -1066,9 +1039,8 @@ object BatchCodec:
     Tuple2(key, Tuple2(left, right)).asInstanceOf[(Int, (Int, Int))]
 
   /**
-   * A present cell is the stored long. A clear bit is a null reference, not `0`.
-   *
-   * The return type stays `java.lang.Long`. A `scala.Long` return unboxes that null to `0`.
+   * A present cell is the stored long. A clear bit is a null reference, not `0`. The return type
+   * stays `java.lang.Long`. A `scala.Long` return unboxes that null to `0`.
    */
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def longRef(column: Int64Column, row: Int): java.lang.Long =
@@ -1187,6 +1159,14 @@ object BatchCodec:
       case Seq(left: Int64Column, right: Int64Column) => (left, right)
       case _ =>
         throw new IllegalArgumentException(s"expected two Int64 columns, got ${batch.schema}")
+
+  private def longCount(batch: ColumnBatch): (Int64Column, Int32Column) =
+    batch.columns match
+      case Seq(keys: Int64Column, counts: Int32Column) => (keys, counts)
+      case _ =>
+        throw new IllegalArgumentException(
+          s"expected Int64 and Int32 columns, got ${batch.schema}",
+        )
 
   private def decodedLength(batch: ColumnBatch, maxRows: Int): Int =
     require(maxRows >= 0, s"maximum decoded rows must be >= 0, got $maxRows")

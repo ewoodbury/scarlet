@@ -30,14 +30,15 @@ class TestColumnarKinds extends AnyFlatSpec with Matchers:
     kindOrdinal(PhysicalOp.Kind.Strings) shouldBe 5
     kindOrdinal(PhysicalOp.Kind.Bools) shouldBe 6
     kindOrdinal(PhysicalOp.Kind.LongPairs) shouldBe 7
-    kindOrdinal(PhysicalOp.Kind.LongTriples) shouldBe 8
-    kindOrdinal(PhysicalOp.Kind.StringPairs) shouldBe 9
-    kindOrdinal(PhysicalOp.Kind.StringTriples) shouldBe 10
-    kindOrdinal(PhysicalOp.Kind.GroupedInts) shouldBe 11
-    kindOrdinal(PhysicalOp.Kind.GroupedStrings) shouldBe 12
-    kindOrdinal(PhysicalOp.Kind.GroupedLongs) shouldBe 13
+    kindOrdinal(PhysicalOp.Kind.LongCounts) shouldBe 8
+    kindOrdinal(PhysicalOp.Kind.LongTriples) shouldBe 9
+    kindOrdinal(PhysicalOp.Kind.StringPairs) shouldBe 10
+    kindOrdinal(PhysicalOp.Kind.StringTriples) shouldBe 11
+    kindOrdinal(PhysicalOp.Kind.GroupedInts) shouldBe 12
+    kindOrdinal(PhysicalOp.Kind.GroupedStrings) shouldBe 13
+    kindOrdinal(PhysicalOp.Kind.GroupedLongs) shouldBe 14
     Plan.SourceDescriptor.values.length shouldBe 8
-    PhysicalOp.Kind.values.length shouldBe 14
+    PhysicalOp.Kind.values.length shouldBe 15
   }
 
 inline def descriptorOrdinal(inline descriptor: Plan.SourceDescriptor): Int =
@@ -61,9 +62,10 @@ inline def kindOrdinal(inline kind: PhysicalOp.Kind): Int =
     case PhysicalOp.Kind.Strings => 5
     case PhysicalOp.Kind.Bools => 6
     case PhysicalOp.Kind.LongPairs => 7
-    case PhysicalOp.Kind.LongTriples => 8
-    case PhysicalOp.Kind.StringPairs => 9
-    case PhysicalOp.Kind.StringTriples => 10
-    case PhysicalOp.Kind.GroupedInts => 11
-    case PhysicalOp.Kind.GroupedStrings => 12
-    case PhysicalOp.Kind.GroupedLongs => 13
+    case PhysicalOp.Kind.LongCounts => 8
+    case PhysicalOp.Kind.LongTriples => 9
+    case PhysicalOp.Kind.StringPairs => 10
+    case PhysicalOp.Kind.StringTriples => 11
+    case PhysicalOp.Kind.GroupedInts => 12
+    case PhysicalOp.Kind.GroupedStrings => 13
+    case PhysicalOp.Kind.GroupedLongs => 14
