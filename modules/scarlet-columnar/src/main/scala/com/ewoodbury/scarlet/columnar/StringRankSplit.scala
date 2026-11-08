@@ -24,8 +24,9 @@ package com.ewoodbury.scarlet.columnar
  * effective key of the next non-empty partition. Concatenation is globally sorted.
  *
  * `rows == 0` returns `partitions` fresh empty string-pair batches and does not sort, including an
- * empty `batches` vector. `partitions <= 0` and `parallelism <= 0` are rejected. This object does
- * not spill.
+ * empty `batches` vector. `partitions <= 0` and `parallelism <= 0` are rejected.
+ * [[sortAndSplitSelected]] sorts the live prefix of each [[Selected]]. An empty prefix is an empty
+ * run. A null key orders as `""` and stays null. `""` stays present. This object does not spill.
  */
 object StringRankSplit:
 
@@ -40,6 +41,31 @@ object StringRankSplit:
     if (rows == 0) then Vector.fill(partitions)(ColumnBatches.emptyStringPairs)
     else merge(sortRuns(batches, parallelism), rows, partitions)
 
+  /**
+   * [[sortAndSplit]] for a survivor index. `rows` is the sum of the live prefixes. An empty
+   * selection publishes `partitions` empty string-pair batches and does not sort. Each other
+   * prefix is one sorted run of `count` rows. The merge is [[merge]]. The run keeps the source
+   * dictionary.
+   */
+  def sortAndSplitSelected(
+      selected: Vector[Selected],
+      partitions: Int,
+      parallelism: Int,
+  ): Vector[ColumnBatch] =
+    require(partitions > 0, s"numPartitions must be positive, got $partitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(selected.nonEmpty, "sortAndSplitSelected needs at least one batch")
+    val rows = selectedRows(selected)
+    if (rows == 0) then
+      selected.foreach(one => checkedPair(one.batch))
+      Vector.fill(partitions)(ColumnBatches.emptyStringPairs)
+    else merge(sortRunsSelected(selected, parallelism), rows, partitions)
+
+  private def selectedRows(selected: Vector[Selected]): Int =
+    val total = selected.iterator.map(_.count.toLong).sum
+    require(total <= Int.MaxValue.toLong, s"sortAndSplitSelected input reached $total rows")
+    total.toInt
+
   private def rowCount(batches: Vector[ColumnBatch]): Int =
     val total = batches.iterator.map { batch =>
       val _ = checkedPair(batch)
@@ -50,6 +76,12 @@ object StringRankSplit:
 
   private def sortRuns(batches: Vector[ColumnBatch], parallelism: Int): Vector[ColumnBatch] =
     MorselScheduler.map(batches, parallelism)((_, batch) => sortBatch(batch))
+
+  private def sortRunsSelected(
+      selected: Vector[Selected],
+      parallelism: Int,
+  ): Vector[ColumnBatch] =
+    MorselScheduler.map(selected, parallelism)((_, one) => sortSelected(one))
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def sortBatch(batch: ColumnBatch): ColumnBatch =
@@ -65,6 +97,27 @@ object StringRankSplit:
       }
       sortIndices(keys.dictionary, keys.codes, keys.validity.words, order)
       gather(keys, values, order)
+
+  /**
+   * One dense run of the live prefix. `order` holds the absolute ids, so [[sortIndices]] and
+   * [[gather]] are the ones [[sortBatch]] uses. Ties keep the smaller id, which is input order. A
+   * null key orders as `""` and stays null. `""` stays present. A null value stays null. The batch
+   * has `count` rows, including when `count` is 0 or 1: the source still holds the dropped rows,
+   * so it is not reused. [[gather]] keeps the source dictionary, including an entry no survivor
+   * uses.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def sortSelected(selected: Selected): ColumnBatch =
+    val (keys, values) = checkedPair(selected.batch)
+    val count = selected.count
+    val order = new Array[Int](count)
+    var slot = 0
+    while (slot < count) {
+      order(slot) = selected.rows(slot)
+      slot += 1
+    }
+    sortIndices(keys.dictionary, keys.codes, keys.validity.words, order)
+    gather(keys, values, order)
 
   /** Sort `order` by effective key, then by the row index stored in `order`. */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))

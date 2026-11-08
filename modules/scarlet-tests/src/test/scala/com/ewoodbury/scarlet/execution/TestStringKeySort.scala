@@ -184,6 +184,23 @@ class TestStringKeySort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     collect(mapped) shouldBe rowOf(mapped)
   }
 
+  it should "lower filterKeys then sortByStringKey and match the row path" in {
+    val sorted = mixed.filterKeys(blankKey).sortByStringKey
+    val scan = mixed.sortByStringKey
+    val above = scan.filterKeys(blankKey)
+    val underMap = mixed.mapValues((value: Int) => value + 1).filterKeys(blankKey)
+
+    ColumnarPlanner.lower(scan.plan).map(_.shape) shouldBe Some("SortByStringKey(Scan)")
+    ColumnarPlanner.lower(sorted.plan).map(_.shape) shouldBe Some(
+      "SortByStringKey(FilterKey(Scan))",
+    )
+    collect(sorted) shouldBe rowOf(sorted)
+    ColumnarPlanner.lower(above.plan) shouldBe None
+    collect(above) shouldBe rowOf(above)
+    ColumnarPlanner.lower(underMap.plan).map(_.shape) shouldBe Some("FilterKey(MapValue(Scan))")
+    ColumnarPlanner.lower(underMap.sortByStringKey.plan) shouldBe None
+  }
+
   it should "report range distribution, ascending order, and SortByStringKey(Scan)" in {
     val sorted = mixed.sortByStringKey
     val info = ColumnarPlanner.partitioning(sorted.plan).getOrElse(fail("expected a layout"))

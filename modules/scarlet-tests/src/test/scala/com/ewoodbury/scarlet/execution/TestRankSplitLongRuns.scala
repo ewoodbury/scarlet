@@ -439,6 +439,65 @@ class TestRankSplitLongRuns extends AnyFlatSpec with Matchers with BeforeAndAfte
     }
   }
 
+  "sortAndSplitSelected spill" should "match the in-memory split and write the survivor index" in {
+    val batch = longBatch(
+      Seq(
+        (Some(4L), Some(1L)),
+        (None, Some(2L)),
+        (Some(3L), Some(3L)),
+        (Some(1L), None),
+      ),
+    )
+    val dropped = longBatch(Seq((Some(9L), Some(9L))))
+    // Drop key 3 and the whole second batch. The null key orders as zero and stays null.
+    val selected = Vector(Selected(batch, Array(0, 1, 3), 3), Selected(dropped, Array(0), 0))
+    val memory = RankSplitLong.sortAndSplitSelected(selected, partitions = 2, parallelism = 1)
+    val empty = Vector(Selected(batch, Array(0, 1, 2, 3), 0))
+
+    withConf(0L, batchSize = 2, fanIn = 2, shufflePartitions = 2) { dir =>
+      val spilled = RankSplitLongRuns.sortAndSplitSelected(
+        selected,
+        partitions = 2,
+        parallelism = 2,
+        ScarletConf.get,
+      )
+      val flat = spilled.flatMap(one => cells(one))
+
+      identical(spilled, memory)
+      flat.exists { case (None, Some(2L)) => true; case _ => false } shouldBe true
+      flat.exists { case (Some(1L), None) => true; case _ => false } shouldBe true
+      flat.exists { case (Some(3L), Some(3L)) => true; case _ => false } shouldBe false
+      flat.exists { case (Some(9L), Some(9L)) => true; case _ => false } shouldBe false
+      // One live prefix. The empty selection is not a file, and there is no merge.
+      RankSplitLongRuns.filesWrittenForTest shouldBe 1L
+      RankSplitLongRuns.mergePassesForTest shouldBe 0L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+
+      RankSplitLongRuns.resetForTest()
+      val nothing = RankSplitLongRuns.sortAndSplitSelected(
+        empty,
+        partitions = 2,
+        parallelism = 1,
+        ScarletConf.get,
+      )
+      nothing.map(_.length) shouldBe Vector(0, 0)
+      RankSplitLongRuns.filesWrittenForTest shouldBe 0L
+    }
+
+    withConf(0L, enabled = false, shufflePartitions = 2) { dir =>
+      val stayed = RankSplitLongRuns.sortAndSplitSelected(
+        selected,
+        partitions = 2,
+        parallelism = 1,
+        ScarletConf.get,
+      )
+
+      identical(stayed, memory)
+      RankSplitLongRuns.filesWrittenForTest shouldBe 0L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+  }
+
   private def identical(actual: Vector[ColumnBatch], expected: Vector[ColumnBatch]): Unit =
     actual.length shouldBe expected.length
     actual.zip(expected).foreach { (left, right) =>

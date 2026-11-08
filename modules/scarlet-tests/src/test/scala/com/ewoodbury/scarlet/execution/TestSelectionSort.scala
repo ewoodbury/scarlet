@@ -18,7 +18,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * A filter stack keeps the survivor index, including one slot filter. The rank split sorts those
  * rows and still publishes a compacted sorted batch. A null key orders as zero and stays null.
  * Ties keep input order. A scan still sorts on the dense path. Over a tiny spill budget the
- * selection is materialised and the dense spill writer runs.
+ * survivor index is spilled. Dropped rows are not written. Spill off writes nothing.
  */
 class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -381,10 +381,20 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     workers.getMessage should include("parallelism must be positive")
   }
 
-  "sortAndSplitSelected spill" should "materialise, match the in-memory split, and write runs" in {
+  "sortAndSplitSelected spill" should "match the in-memory split and write the survivor index" in {
     val batch = BatchCodec.intPairs(Seq(4 -> 1, 1 -> 2, 3 -> 3, 1 -> 4))
     val selected = Vector(Selected(batch, Array(0, 1, 3), 3))
     val memory = RankSplit.sortAndSplitSelected(selected, partitions = 2, parallelism = 1)
+    val nullKeys = Int32Column.of(Array(4, 1, 3, 1), Validity.pack(4, row => row != 1), 4)
+    val nullValues = Int32Column.of(Array(1, 2, 3, 4), Validity.pack(4, row => row != 3), 4)
+    val nullBatch = new ColumnBatch(
+      Vector(LogicalType.Int32, LogicalType.Int32),
+      Vector(nullKeys, nullValues),
+      4,
+    )
+    // Drop the present key 3. The null key orders as zero and stays null.
+    val nullSelected = Vector(Selected(nullBatch, Array(0, 1, 3), 3))
+    val nullMemory = RankSplit.sortAndSplitSelected(nullSelected, partitions = 2, parallelism = 1)
 
     withSpill(budget = 1L) { dir =>
       val spilled = RankSplitRuns.sortAndSplitSelected(
@@ -396,6 +406,20 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       identical(spilled, memory)
       RankSplitRuns.filesWrittenForTest should be > 0L
       SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+
+      RankSplitRuns.resetForTest()
+      val nullSpilled = RankSplitRuns.sortAndSplitSelected(
+        nullSelected,
+        partitions = 2,
+        parallelism = 1,
+        ScarletConf.get,
+      )
+      identical(nullSpilled, nullMemory)
+      val nullFlat = nullSpilled.flatMap(one => cells(one))
+      nullFlat should contain((None, Some(2)))
+      nullFlat should contain((Some(1), None))
+      nullFlat.exists { case (Some(3), Some(3)) => true; case _ => false } shouldBe false
+      RankSplitRuns.filesWrittenForTest should be > 0L
     }
     RankSplitRuns.resetForTest()
     ScarletConf.set(ScarletConf.get.copy(spillEnabled = false, spillBudgetBytes = 0L))

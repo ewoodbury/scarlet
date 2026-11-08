@@ -57,13 +57,15 @@ object ColumnarPlanner:
    * the probe side. A full outer join on int pairs lowers for a broadcast hint, a shuffle-hash
    * hint, an absent hint, or a sort-merge hint. An absent hint uses the shuffle-hash op. A null
    * value does not change that shape: [[tryRun]] reads the value columns and returns `None`, and
-   * the row path runs. [[SortLowering]] accepts a typed key sort only for a scan of the matching
-   * pair kind. Any other child, and any parent of that sort, stays on the row path. A long sort
-   * spills when `spillEnabled` is on and the retained estimate exceeds `spillBudgetBytes`. The
-   * physical op stays `SortByLongKey`. A string sort spills on that same budget. The physical op
-   * stays `SortByStringKey`. At or under the budget, and whenever spill is off, the string split
-   * stays in memory and writes nothing. [[partitioning]] and [[tryRun]] follow a refusal. They
-   * also drop a lowered tree whose layout is invalid.
+   * the row path runs. [[SortLowering]] accepts an int, long, or string key sort of a scan, or of
+   * filters over that scan. A map, aggregate, or join under the sort stays on the row path. Any
+   * parent of that sort stays on the row path. A slot filter sorts the survivor index. Over the
+   * budget, with spill on, that index is spilled. A long-pair row filter and a whole-row string
+   * filter do not build an index. A long sort spills when `spillEnabled` is on and the retained
+   * estimate exceeds `spillBudgetBytes`. The physical op stays `SortByLongKey`. A string sort
+   * spills on that same budget. The physical op stays `SortByStringKey`. At or under the budget,
+   * and whenever spill is off, the split stays in memory and writes nothing. [[partitioning]] and
+   * [[tryRun]] follow a refusal. They also drop a lowered tree whose layout is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     if (!ScarletConf.get.columnarExecution) then None
