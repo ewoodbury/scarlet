@@ -258,15 +258,15 @@ final case class DistCollection[A](plan: Plan[A]):
   /**
    * Sorts `(Long, Long)` pairs ascending by column 0. Builds [[Plan.SortByLongKeyOp]] from the
    * key-value plan. Generic [[sortBy]] stays an opaque [[Plan.SortByOp]] and runs on the row path.
-   * A scan of long pairs, or key and value filters over that scan, lowers to a columnar rank split.
-   * Those filters sort the survivor index. A long-pair row filter lowers and does not build an
-   * index, so that sort uses the dense path. A map, aggregate, or join under the sort stays on the
-   * row path, as does a filter, join, aggregate, or projection above it. A null `Long` key orders
-   * as zero and the row is retained. This matches `sortBy(_._1)` and is not a null-safe ordering.
-   * Over the budget, with spill on, a survivor index is spilled and dropped rows are not written.
-   * A dense input still writes one sorted run per partition and merges `spillFanIn` at a time. One
-   * input partition is still sorted in memory. At or under the budget, and whenever spill is off,
-   * the in-memory split runs and writes nothing.
+   * A scan of long pairs, or key and value filters over that scan, lowers to a columnar rank
+   * split. Those filters sort the survivor index. A long-pair row filter lowers and does not build
+   * an index, so that sort uses the dense path. A map, aggregate, or join under the sort stays on
+   * the row path, as does a filter, join, aggregate, or projection above it. A null `Long` key
+   * orders as zero and the row is retained. This matches `sortBy(_._1)` and is not a null-safe
+   * ordering. Over the budget, with spill on, a survivor index is spilled and dropped rows are not
+   * written. A dense input still writes one sorted run per partition and merges `spillFanIn` at a
+   * time. One input partition is still sorted in memory. At or under the budget, and whenever
+   * spill is off, the in-memory split runs and writes nothing.
    */
   def sortByLongKey(using ev: A =:= (Long, Long)): DistCollection[(Long, Long)] =
     DistCollection(Plan.SortByLongKeyOp(kvPlan))
