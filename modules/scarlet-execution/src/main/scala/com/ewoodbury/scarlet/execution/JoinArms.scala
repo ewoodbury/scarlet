@@ -13,9 +13,9 @@ import ColumnPipeline.JoinInput
  * selection steps stays on the sliced dense exchange. [[FilterChain.selected]] interprets a stack
  * once. The `None` path is the only one that interprets that child.
  *
- * A null value is a clear bit in the output, including a selection. It is not an absence bit.
- * A null key is dropped by the exchange. A selected side skips the slice; both dense sides use
- * the caller's flag and slice.
+ * A null value is a clear bit in the output, including a selection. It is not an absence bit. A
+ * null key is dropped by the exchange. A selected side skips the slice; both dense sides use the
+ * caller's flag and slice.
  */
 private[execution] object JoinArms:
 

@@ -18,11 +18,11 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * [[ColumnarFallback]] is the named form of a deliberate decline, including a null value on a
  * left, right, or full outer join: the value columns are already encoded, and the kernel is not
  * chosen. A null value on a long inner join is that fallback too. A selected null on an int inner
- * join, and a null on the dense side of a mixed int hash join, stay a clear validity bit. That
- * bit is not absence. A null on a dropped row is not a decline. A live null value on a string
- * join, string `reduceByKey`, or string `groupByKey` is that fallback too. A string-pair
- * filter keeps the null int. A value projection that kept a null int is that fallback too. With
- * spill off, an over-budget int `countByKey` throws `ClosedKernelRefusal`, which does not extend
+ * join, and a null on the dense side of a mixed int hash join, stay a clear validity bit. That bit
+ * is not absence. A null on a dropped row is not a decline. A live null value on a string join,
+ * string `reduceByKey`, or string `groupByKey` is that fallback too. A string-pair filter keeps
+ * the null int. A value projection that kept a null int is that fallback too. With spill off, an
+ * over-budget int `countByKey` throws `ClosedKernelRefusal`, which does not extend
  * `ClassCastException`, so the action fails instead of rerunning on rows. With spill on, an
  * over-budget post-exchange bucket spills. A count table that still does not fit throws
  * `ClosedKernelRefusal`. Long and string `countByKey` are not columnar.
