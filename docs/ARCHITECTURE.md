@@ -437,11 +437,13 @@ The rules that hold for every kind:
 ## Spill
 
 Grouped sum, an inner broadcast join's build, an int shuffle-hash build bucket, sort-merge joins,
-an int-pair `sortByIntKey`, a long-pair `sortByLongKey`, and a string-pair `sortByStringKey` spill
-when `spillEnabled` is on.
+an int-pair `sortByIntKey`, a long-pair `sortByLongKey`, a string-pair `sortByStringKey`, and an
+over-budget int, long, or string `reduceByKey` bucket spill when `spillEnabled` is on.
 `spillBudgetBytes` is the in-memory trigger. The flag defaults off. `spillMaxFiles` and
-`spillMaxBytes` cap one spill store. Long hash reduce never spills; an input that does not fit
-stays in memory. String-key reduce and the string-key join do not spill.
+`spillMaxBytes` cap one spill store.
+
+A reduce spills per bucket, and the running partial is `O(distinct keys)`, so the bound is one
+bucket plus its partial, not the query. The string-key join has no spill at all.
 
 At or under `spillBudgetBytes`, and whenever `spillEnabled` is off, a sort-merge partition stays
 in memory. Over the budget, with spill on, each side is written as sorted runs and merged
@@ -482,7 +484,9 @@ Roadmap and sequencing are tracked externally; the headline items:
   `Seq`.
 - The sort-merge operator still materialises its inputs and its result.
 - The int shuffle-hash build bucket spills. The long and string shuffle-hash joins, including `longInnerJoin`, do not spill and have no build budget.
-- Long hash reduce never spills; an input that does not fit stays in memory.
 - `countByKey` has no spill path. Over the byte budget it falls back to rows, so a large input is
   correct but loses the columnar path rather than spilling a count table.
-- String-key reduce and the string-key join do not spill. An input that does not fit stays in memory.
+- The string-key join does not spill. An input that does not fit stays in memory.
+- Int, long, and string `reduceByKey` buckets spill, but the running partial is `O(distinct keys)`,
+  so the bound is one bucket plus its partial, not the query. A reduce with more distinct keys than
+  fit stays resident no matter how much of the input spills.
