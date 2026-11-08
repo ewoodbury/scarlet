@@ -71,15 +71,19 @@ class TestHashCountSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     List(false, true).foreach { enabled =>
       withConf(enabled, budget = 0L) { dir =>
         val dense = HashCount.byKey(
-          Vector.empty[Path],
+          Vector.empty[ColumnBatch],
           numPartitions = 4,
           parallelism = 1,
           batchSize = 8,
         )
         dense.length shouldBe 4
         dense.map(_.length) shouldBe Seq(0, 0, 0, 0)
-        val selected =
-          HashCount.byKeySelected(Vector.empty[Path], numPartitions = 4, parallelism = 1, batchSize = 8)
+        val selected = HashCount.byKeySelected(
+          Vector.empty[Selected],
+          numPartitions = 4,
+          parallelism = 1,
+          batchSize = 8,
+        )
         selected.length shouldBe 4
         selected.map(_.length) shouldBe Seq(0, 0, 0, 0)
         HashCountSpill.filesWrittenForTest shouldBe 0L
