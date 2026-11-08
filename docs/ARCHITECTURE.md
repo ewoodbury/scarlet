@@ -497,9 +497,10 @@ In the set today, on present values:
 
 Still open inside the set, and therefore not a promise of this commit:
 
-- A stack of one slot filter still builds dense columns. A stack of two or more already keeps a
-  survivor index. Single-column filters stay chained column kernels, because an int survivor index
-  is the wrong selection for one column.
+- A stack of one or more slot filters on an int, long, or string pair keeps a survivor index. An
+  int-pair row filter does the same. A long-pair row filter and a whole-row string filter do not.
+  Single-column filters stay chained column kernels, because an int survivor index is the wrong
+  selection for one column.
 - `countByKey` over `spillBudgetBytes` throws `ClosedKernelRefusal` and the action fails. It does
   not spill. Long and string `countByKey` are not columnar.
 - Long and string inner hash joins do not spill.
@@ -507,8 +508,9 @@ Still open inside the set, and therefore not a promise of this commit:
   selected row of an int hash join is the same decline. A null on a dropped row stays columnar. A
   string join with a null value does not lower. An inner sort-merge keeps a null value. A clear
   validity bit on an outer join means the partner is absent, so a null value cannot use that bit.
-- An int sort of two or more slot filters gathers that index before the dense spill writer. A
-  single int filter is already dense. A filtered long or string sort does not lower.
+- An int sort of one or more slot filters sorts the survivor index. Over the budget, with spill
+  on, that selection is materialised and the dense spill writer runs. A filtered long or string
+  sort does not lower.
 - `groupByKey`, `distinct`, and `union` already have a columnar path and are not part of the closed
   kernel. `flatMap`, `mapPartitions`, cogroup, untyped `sortBy`, single-precision `Float`,
   double-key wide operators, and type-changing maps stay on the row executor.
