@@ -33,12 +33,12 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * null key on the probe side only, and builds one table per partition. A right outer join calls
  * those same entry points with the right input as the probe and the left input as the build, then
  * swaps the value columns back to `(key, left, right)`. A probe-side row with no partner is kept,
- * and the build value's absence bit is set. That bit is absence. A null value is not absence.
- * Match order is a kernel detail. The published multiset is multiplicity, values, and null
- * semantics. A full outer join probes the left input and also emits build rows no probe matched.
- * Broadcast gives each probe thread its own bitmap and ORs them after the probes join. Shuffle
- * keeps one bitmap per partition and finishes that partition immediately. Null build keys are
- * carried outside the table and emitted once. Those bitmaps are not part of the build budget.
+ * and the build value's absence bit is set. A null value is not absence. Match order is a kernel
+ * detail. The published multiset is multiplicity, values, and null semantics. A full outer join
+ * probes the left input and also emits build rows no probe matched. Broadcast gives each probe
+ * thread its own bitmap and ORs them after the probes join. Shuffle keeps one bitmap per partition
+ * and finishes that partition immediately. Null build keys are carried outside the table and
+ * emitted once. Those bitmaps are not part of the build budget.
  */
 object ColumnPipeline:
 
