@@ -18,9 +18,9 @@ package com.ewoodbury.scarlet.columnar
  * `floorMod(floorDiv(Long.hashCode(key), parentWidth), parts)`. A string bucket can be split again
  * by [[partitionUtf8Within]] with `floorMod(floorDiv(StringHash.hash(text), parentWidth), parts)`.
  * A second `floorMod(hash, parts)` does not: when `parts` divides `parentWidth`, every key in the
- * bucket has the same residue. String buckets keep the source dictionary;
- * [[ColumnBatches.concat]] remaps unlike dictionaries when those buckets are combined, so code
- * equality in the combined bucket is string equality.
+ * bucket has the same residue. String buckets keep the source dictionary; [[ColumnBatches.concat]]
+ * remaps unlike dictionaries when those buckets are combined, so code equality in the combined
+ * bucket is string equality.
  *
  * [[partitionAllSelected]] scatters an int-pair [[Selected]]. It reads `values(rows(i))` for
  * `i < count` and does not share the source, including when `numPartitions` is 1. A null key is
