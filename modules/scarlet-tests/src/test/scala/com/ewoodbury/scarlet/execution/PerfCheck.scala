@@ -3,8 +3,7 @@ package com.ewoodbury.scarlet.execution
 import cats.effect.unsafe.implicits.global
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.ColumnMetrics
-import com.ewoodbury.scarlet.columnar.CountingSink
+import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
