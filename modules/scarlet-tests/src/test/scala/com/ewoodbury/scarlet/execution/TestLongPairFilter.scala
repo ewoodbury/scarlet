@@ -7,6 +7,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
+import com.ewoodbury.scarlet.columnar.Selection
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -100,6 +101,51 @@ class TestLongPairFilter extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     columnar(valueThenKey) shouldBe row(valueThenKey.collect().toList)
     assertColumnar(keyThenValue, "FilterValue(FilterKey(Scan))")
     assertColumnar(valueThenKey, "FilterKey(FilterValue(Scan))")
+  }
+
+  it should "keep a clear value bit through a two-filter collect" in {
+    // Two key filters, so the null value on key 2 survives the index. A decoder that rejects a
+    // clear bit leaves this collect. A decoder that stores the null as zero fails the absent check.
+    val filtered = nullable
+      .filterKeys[Long, Long]((key: Long) => key >= 0L)
+      .filterKeys[Long, Long]((key: Long) => key < 10L)
+    val op = ColumnarPlanner.lower(filtered.plan).getOrElse(fail("two key filters did not lower"))
+    val compiled =
+      PredicatePlan.compile(filtered.plan, op).getOrElse(fail("stack did not compile"))
+    val steps =
+      PredicatePlan.selectionSteps(compiled).getOrElse(fail("long key filters have no steps"))
+
+    steps.length shouldBe 2
+    steps.foreach {
+      case Selection.Step.Int64(ordinal, _) => ordinal shouldBe 0
+      case other => fail(s"expected an Int64 key step, got $other")
+    }
+    FilterChain.selected(filtered.plan, op, None, false, Set(0, 1)) shouldBe defined
+
+    val got = columnar(filtered)
+    got.length shouldBe 2
+    val first = pairAt(got, 0)
+    val second = pairAt(got, 1)
+    longComponent(first, 0) shouldBe 0L
+    longComponent(first, 1) shouldBe 1L
+    longComponent(second, 0) shouldBe 2L
+    absentRef(component(second, 1)) shouldBe true
+    val taken = ColumnarPlanner
+      .tryTake(filtered.plan, 2)
+      .getOrElse(fail("take left the columnar path"))
+    taken.length shouldBe 2
+    absentRef(component(pairAt(taken, 1), 1)) shouldBe true
+
+    val once = nullable.filterKeys[Long, Long]((key: Long) => key >= 0L)
+    val onceOp = ColumnarPlanner.lower(once.plan).getOrElse(fail("one key filter did not lower"))
+    FilterChain.selected(once.plan, onceOp, None, false, Set(0, 1)) shouldBe None
+
+    val rows = nullable
+      .filter((_: (Long, Long)) => true)
+      .filter((_: (Long, Long)) => true)
+    val rowOp = ColumnarPlanner.lower(rows.plan).getOrElse(fail("row filters did not lower"))
+    PredicatePlan.compile(rows.plan, rowOp).flatMap(PredicatePlan.selectionSteps) shouldBe None
+    FilterChain.selected(rows.plan, rowOp, None, false, Set(0, 1)) shouldBe None
   }
 
   "a whole-row filter" should "lower to FilterRow(Scan)" in {

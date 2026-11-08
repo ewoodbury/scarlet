@@ -12,10 +12,10 @@ import com.ewoodbury.scarlet.core.Plan
  * [[compile]] walks consecutive filters and stops at a map, the same cut as [[FilterChain]]. The
  * cast reads the erased function once and does not call it. [[applyAtom]] runs one existing kernel
  * on the given range. It does not take a [[Compiled]], so an encoder cannot apply the predicate a
- * second time. [[selectionSteps]] returns steps only for a pair, triple, or string-pair slot
+ * second time. [[selectionSteps]] returns steps for a pair, triple, string-pair, or long-pair slot
  * stack. An element stack is `None`, and the caller chains [[applyAtom]], one morsel visit per
- * atom. [[pairSteps]] is the keep vector for a pair stack. It is not a second compile, and it is
- * not [[selectionSteps]].
+ * atom. A long row atom is not a slot step. [[pairSteps]] is the keep vector for a pair stack. It
+ * is not a second compile, and it is not [[selectionSteps]].
  *
  * Named erasure boundary. The physical slot chose the function. A wrong erased type throws
  * [[ColumnarFallback]], and [[ColumnarPlanner.tryRun]] returns `None`. A cast that fails while a
@@ -123,15 +123,18 @@ private[execution] object PredicatePlan:
         throw new ColumnarFallback("string pair row filter does not lower")
 
   /**
-   * Pair, triple, and string-pair slot steps. An element atom, including an int filter at ordinal
-   * 0, is `None`, so that stack is not one [[Selection]] pass. A long key or value atom is not a
-   * slot step, so a long stack is `None` too. A string-pair key is [[Selection.Step.Utf8]]. A
-   * string-pair value is [[Selection.Step.Int32]], the same step a pair value already uses. A
-   * whole-row atom is not a slot atom, so that stack is `None`.
+   * Pair, triple, string-pair, and long-pair slot steps. An element atom, including an int filter
+   * at ordinal 0, is `None`, so that stack is not one [[Selection]] pass. A long key is
+   * [[Selection.Step.Int64]] at ordinal 0. A long value is [[Selection.Step.Int64]] at the
+   * compiled ordinal. Those atoms are not pair atoms, and [[encoded]] does not rewrite them. A
+   * long row atom is not a slot step, so that stack is `None`. A string-pair key is
+   * [[Selection.Step.Utf8]]. A string-pair value is [[Selection.Step.Int32]], the same step a pair
+   * value already uses. A whole-row atom is not a slot atom, so that stack is `None`.
    */
   def selectionSteps(compiled: Compiled): Option[Vector[Selection.Step]] =
     if (compiled.atoms.isEmpty) then None
     else if (compiled.atoms.forall(isPairAtom)) then Some(compiled.atoms.map(pairSelection))
+    else if (compiled.atoms.forall(isLongSlotAtom)) then Some(compiled.atoms.map(longSelection))
     else if (compiled.atoms.forall(isTripleAtom)) then Some(compiled.atoms.map(tripleSelection))
     else if (compiled.atoms.forall(isStringPairAtom)) then
       Some(compiled.atoms.map(stringPairSelection))
@@ -432,6 +435,14 @@ private[execution] object PredicatePlan:
       case _ => throw new IllegalStateException("triple filter lost its slot predicate")
     Atom.Int32(ordinal, new JoinColumn(recognized, ordinal))
 
+  /** Key or value only. A [[Atom.LongPairRow]] is not a slot step. */
+  private def isLongSlotAtom(atom: Atom): Boolean = atom match
+    case Atom.LongPairKey(_) | Atom.LongPairValue(_, _) => true
+    case Atom.PairRow(_) | Atom.PairKey(_) | Atom.PairValue(_, _) | Atom.TripleRow(_) |
+        Atom.LongPairRow(_) | Atom.Int32(_, _) | Atom.Int64(_, _) | Atom.Float64(_, _) |
+        Atom.Bool(_, _) | Atom.Utf8(_, _) | Atom.Utf8Literals(_, _) | Atom.StringRow =>
+      false
+
   private def isPairAtom(atom: Atom): Boolean = atom match
     case Atom.PairRow(_) | Atom.PairKey(_) | Atom.PairValue(_, _) => true
     case Atom.TripleRow(_) | Atom.LongPairRow(_) | Atom.LongPairKey(_) | Atom.LongPairValue(_, _) |
@@ -454,6 +465,14 @@ private[execution] object PredicatePlan:
         Atom.PairRow(_) | Atom.TripleRow(_) | Atom.LongPairRow(_) | Atom.LongPairKey(_) |
         Atom.LongPairValue(_, _) | Atom.PairKey(_) | Atom.StringRow =>
       false
+
+  private def longSelection(atom: Atom): Selection.Step = atom match
+    case Atom.LongPairKey(keep) => Selection.Step.Int64(0, keep)
+    case Atom.LongPairValue(ordinal, keep) => Selection.Step.Int64(ordinal, keep)
+    case Atom.PairRow(_) | Atom.PairKey(_) | Atom.PairValue(_, _) | Atom.TripleRow(_) |
+        Atom.LongPairRow(_) | Atom.Int32(_, _) | Atom.Int64(_, _) | Atom.Float64(_, _) |
+        Atom.Bool(_, _) | Atom.Utf8(_, _) | Atom.Utf8Literals(_, _) | Atom.StringRow =>
+      throw new IllegalStateException("long pair selection expected a key or a value")
 
   private def pairSelection(atom: Atom): Selection.Step = atom match
     case Atom.PairKey(keep) => Selection.Step.Int32(0, keep)

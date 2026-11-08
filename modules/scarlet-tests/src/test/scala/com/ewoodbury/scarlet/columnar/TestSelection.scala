@@ -305,6 +305,51 @@ class TestSelection extends AnyFlatSpec with Matchers:
     int32(batch, 0).values.toSeq shouldBe Seq(1, 0, 4, 0)
   }
 
+  it should "match two chained long key filters and keep a null on the other column" in {
+    val batch = new ColumnBatch(
+      Vector(LogicalType.Int64, LogicalType.Int64),
+      Vector(
+        Int64Column.fromNullable(Seq(Some(1L), None, Some(4L), Some(0L))),
+        Int64Column.fromNullable(Seq(None, Some(9L), Some(8L), Some(3L))),
+      ),
+      4,
+    )
+    val firstCalls = new AtomicInteger
+    val secondCalls = new AtomicInteger
+    val first: ColumnKernel.Int64Predicate = value => {
+      firstCalls.incrementAndGet()
+      value != 4L
+    }
+    val second: ColumnKernel.Int64Predicate = value => {
+      secondCalls.incrementAndGet()
+      value >= 0L
+    }
+    val steps = Seq(Selection.Step.Int64(0, first), Selection.Step.Int64(0, second))
+    val indexed = Selection.applySelected(batch, 0, batch.length, steps)
+    val gathered = Selection.materialize(indexed)
+    val kernel = ColumnKernel.filterInt64(ColumnKernel.filterInt64(batch, 0, first), 0, second)
+
+    // The index and the chained kernel share the predicates, so each path contributes its calls.
+    firstCalls.get() shouldBe 6
+    secondCalls.get() shouldBe 4
+    indexed.count shouldBe 2
+    indexed.rows(0) shouldBe 0
+    indexed.rows(1) shouldBe 3
+    sameLongPairs(BatchCodec.decodeLongPairs(gathered), BatchCodec.decodeLongPairs(kernel))
+    sameLongPairs(
+      BatchCodec.decodeLongPairs(indexed.batch, indexed.rows, indexed.count),
+      BatchCodec.decodeLongPairs(gathered),
+    )
+    val value = int64(gathered, 1)
+    value.isValid(0) shouldBe false
+    value.values(0) shouldBe 0L
+    value.isValid(1) shouldBe true
+    value.values(1) shouldBe 3L
+    int64(gathered, 0).isValid(0) shouldBe true
+    int64(gathered, 0).isValid(1) shouldBe true
+    int64(batch, 1).isValid(0) shouldBe false
+  }
+
   it should "keep a null value past a 64-row boundary" in {
     val rows = 70
     val pairs = (0 until rows).map { row =>
@@ -623,6 +668,36 @@ class TestSelection extends AnyFlatSpec with Matchers:
 
   private def columnAt(batch: ColumnBatch, ordinal: Int): Column =
     batch.columns.lift(ordinal).getOrElse(fail(s"missing column $ordinal"))
+
+  private def int64(batch: ColumnBatch, ordinal: Int): Int64Column =
+    columnAt(batch, ordinal) match
+      case column: Int64Column => column
+      case other => fail(s"expected Int64, got $other")
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Equals",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def sameLongPairs(left: Seq[(Long, Long)], right: Seq[(Long, Long)]): Unit =
+    left.length shouldBe right.length
+    left.zip(right).foreach { (one, other) =>
+      component(one, 0) shouldBe component(other, 0)
+      component(one, 1) shouldBe component(other, 1)
+    }
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def component(row: (Long, Long), ordinal: Int): AnyRef =
+    row.productElement(ordinal).asInstanceOf[AnyRef]
 
   private def int32(batch: ColumnBatch, ordinal: Int): Int32Column =
     columnAt(batch, ordinal) match
