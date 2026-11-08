@@ -201,14 +201,21 @@ private[scarlet] object StringHashJoinSpill:
       parallelism = parallelism,
     )
 
-  /** One file for a non-empty piece. Morsels of a large piece share that file. */
+  /**
+   * One file for a non-empty piece. Morsels of a large piece share that file. Each morsel is
+   * rewritten so its dictionary holds only the codes that morsel uses. The read-back piece is then
+   * charged for those strings, not for the parent dictionary.
+   */
   private def spillPiece(
       store: SpillStore,
       piece: ColumnBatch,
       batchSize: Int,
   ): Option[SpillFile] =
     if (piece.length == 0) then None
-    else Some(publish(store, ColumnBatches.slice(piece, batchSize)))
+    else
+      val morsels =
+        ColumnBatches.slice(piece, batchSize).map(ColumnBatches.compactDictionaries)
+      Some(publish(store, morsels))
 
   private def publish(store: SpillStore, morsels: Vector[ColumnBatch]): SpillFile =
     val file = store.write(morsels)

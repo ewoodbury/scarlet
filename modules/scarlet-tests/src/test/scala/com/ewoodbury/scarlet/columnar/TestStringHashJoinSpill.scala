@@ -150,6 +150,53 @@ class TestStringHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAf
     }
   }
 
+  "a shared dictionary" should "spill each key with only the strings that key uses" in {
+    val pad = "a" * 400
+    val leftKey = "!" + pad
+    val rightKey = "%" + pad
+    val parent = 4
+    val parts = 2
+    Math.floorMod(leftKey.hashCode, parent) shouldBe Math.floorMod(rightKey.hashCode, parent)
+    Math.floorMod(Math.floorDiv(leftKey.hashCode, parent), parts) should not be Math.floorMod(
+      Math.floorDiv(rightKey.hashCode, parent),
+      parts,
+    )
+    Math.floorMod(leftKey.hashCode, parts) shouldBe Math.floorMod(rightKey.hashCode, parts)
+
+    val build = pairs(rowsOf(leftKey, half, identity) ++ rowsOf(rightKey, half, row => 1000 + row))
+    val probe = pairs(Seq(leftKey -> 1, rightKey -> 2))
+    val memory = join(build, probe, parent)
+    val buckets = HashExchange.partitionAllUtf8(build, keyOrdinal = 0, parent, parallelism = 1)
+    val hot = buckets.maxBy(_.length)
+    hot.length shouldBe half * 2
+    StringHashJoinSpill.dictionaryEntries(hot) shouldBe 2
+    val budget = math.max(
+      StringHashJoinSpill.retainedBytes(half, 1, utf8Length(leftKey)),
+      StringHashJoinSpill.retainedBytes(half, 1, utf8Length(rightKey)),
+    )
+    val sharedPiece = StringHashJoinSpill.retainedBytes(
+      half,
+      StringHashJoinSpill.dictionaryEntries(hot),
+      StringHashJoinSpill.dictionaryBytes(hot),
+    )
+    sharedPiece should be > budget
+    estimate(hot) should be > budget
+
+    withConf(budget) { dir =>
+      SpillStore.splitCount(hot.length, estimate(hot), ScarletConf.get) shouldBe parts
+      val spilled = join(build, probe, parent)
+      val matches = ordered(pairsOf(spilled))
+
+      spilled.length shouldBe parent
+      matches shouldBe ordered(pairsOf(memory))
+      matches.count(_._1 == leftKey) shouldBe half
+      matches.count(_._1 == rightKey) shouldBe half
+      StringHashJoinSpill.filesWrittenForTest shouldBe 2L
+      StringHashJoinSpill.openTablesForTest shouldBe 1
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+  }
+
   "spill disabled" should "ignore a budget the build exceeds and write no files" in {
     val build = pairs(rowsOf("", half, identity) ++ rowsOf(accent, half, row => 1000 + row))
     val probe = pairs(Seq("" -> 10, accent -> 20))

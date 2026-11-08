@@ -491,8 +491,9 @@ Broadcast, sort-merge, and outer long joins do not spill.
 A string shuffle-hash build bucket over `spillBudgetBytes` is sub-partitioned by the quotient of
 `String.hashCode` and the parent width, the same second split an int bucket uses. A second
 residue of that hash does not separate keys once `parts` divides the parent width. The retained-byte
-estimate includes the dictionary, not only the code arrays. Each non-empty build piece is one
-spill file. One piece is joined at a time, and the probe is not spilled. A piece still over the
+estimate includes the dictionary, not only the code arrays. Each spilled morsel keeps only the
+codes it uses, so a piece is not charged for another piece's strings. Each non-empty build piece
+is one spill file. One piece is joined at a time, and the probe is not spilled. A piece still over the
 budget throws. The two sides keep independent dictionaries and match by string equality. At or
 under the budget, and whenever spill is off, that bucket stays in memory and writes nothing.
 Broadcast, sort-merge, and outer string joins stay on the row path.
