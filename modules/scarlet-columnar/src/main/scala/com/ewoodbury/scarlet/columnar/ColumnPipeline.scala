@@ -469,13 +469,13 @@ object ColumnPipeline:
 
   /**
    * Left outer join with no exchange. `probe` is the probe side. A probe-side row with no partner
-   * is appended once, and the build value's absence bit is set. A null value is not absence and
-   * is not representable on this path. Call this only when the probe and
-   * build value columns are fully valid. [[valuesFullyPresent]] reads the validity words encoding
-   * already wrote. A null probe key does not match and is kept. A null build key is not inserted,
-   * so it does not match probe key 0. Output columns are `(key, probe value, build value)`. An
-   * empty probe returns no batches. An empty build emits every probe-side row with the build value
-   * absent. `buildBudgetBytes` is the same budget as [[broadcastJoin]].
+   * is appended once, and the build value's absence bit is set. A null value is not absence and is
+   * not representable on this path. Call this only when the probe and build value columns are
+   * fully valid. [[valuesFullyPresent]] reads the validity words encoding already wrote. A null
+   * probe key does not match and is kept. A null build key is not inserted, so it does not match
+   * probe key 0. Output columns are `(key, probe value, build value)`. An empty probe returns no
+   * batches. An empty build emits every probe-side row with the build value absent.
+   * `buildBudgetBytes` is the same budget as [[broadcastJoin]].
    */
   def broadcastLeftOuterJoin(
       probe: Vector[ColumnBatch],

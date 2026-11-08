@@ -21,11 +21,10 @@ package com.ewoodbury.scarlet.columnar
  * Outer joins use a separate walk. A null key is not sorted, so it cannot match key `0`. A
  * preserved null key is emitted with a clear bit on the key column. The other value's absence bit
  * is set, and its validity bit stays clear. A null value is not absence, so both value columns
- * must be fully present.
- * [[leftOuter]], [[rightOuter]], and [[fullOuter]] fail when a value is null, rather than
- * publishing that null as absence. [[rightOuter]] is [[leftOuter]] on swapped inputs, with the
- * value columns swapped back. [[fullOuter]] emits a group that exists on only one side, and emits
- * both sides when one of them is empty.
+ * must be fully present. [[leftOuter]], [[rightOuter]], and [[fullOuter]] fail when a value is
+ * null, rather than publishing that null as absence. [[rightOuter]] is [[leftOuter]] on swapped
+ * inputs, with the value columns swapped back. [[fullOuter]] emits a group that exists on only one
+ * side, and emits both sides when one of them is empty.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object SortMerge:
@@ -58,8 +57,8 @@ object SortMerge:
   /**
    * Left outer join of one co-located partition. A null key does not match. Each left row whose
    * key is missing on the right is emitted once, including a null key, and the right value's
-   * absence bit is set. A right null key is dropped. A clear key bit is a null key. The payload
-   * is not read.
+   * absence bit is set. A right null key is dropped. A clear key bit is a null key. The payload is
+   * not read.
    */
   def leftOuter(left: ColumnBatch, right: ColumnBatch): ColumnBatch =
     outer(left, right, preserveRight = false)

@@ -94,8 +94,8 @@ object Validity:
       dense
 
   /**
-   * True when any row in `[0, live)` is set. `live == 0` is false. Bits at index `live` and
-   * beyond are ignored, so spare capacity past the live prefix does not count.
+   * True when any row in `[0, live)` is set. `live == 0` is false. Bits at index `live` and beyond
+   * are ignored, so spare capacity past the live prefix does not count.
    */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private[columnar] def anySet(words: Array[Long], live: Int): Boolean =

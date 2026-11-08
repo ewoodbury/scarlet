@@ -709,8 +709,8 @@ object BatchCodec:
    * Outer-join rows are `(key, left, right)`. `absent` names the value column wrapped in `Option`.
    * [[AbsentSide.Left]] returns `(key, (Option[Int], Int))`. [[AbsentSide.Right]] returns
    * `(key, (Int, Option[Int]))`. [[AbsentSide.Both]] returns `(key, (Option[Int], Option[Int]))`.
-   * An absence bit on an optional column is `None`. A clear bit on the key, or on a column that
-   * is not optional, stays null. A null value is not absence. [[optionalInt]] is the only `Option`
+   * An absence bit on an optional column is `None`. A clear bit on the key, or on a column that is
+   * not optional, stays null. A null value is not absence. [[optionalInt]] is the only `Option`
    * construction. `maxRows` limits the prefix the same way as [[decodeIntTriples]].
    */
   @SuppressWarnings(Array("org.wartremover.warts.Any"))

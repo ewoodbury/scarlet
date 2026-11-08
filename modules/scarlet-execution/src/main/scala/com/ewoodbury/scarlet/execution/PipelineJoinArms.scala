@@ -375,8 +375,8 @@ private[execution] object PipelineJoinArms:
   /**
    * Run the left-outer kernel with `probe` as the right input and `build` as the left input, then
    * restore `(key, left, right)`. The kernel writes `(key, probe value, build value)`, so the
-   * value columns arrive as `(right, left)`. The cleared build-value bit moves with the left
-   * column. That bit is absence. A null value is not absence, and this path cannot represent one.
+   * value columns arrive as `(right, left)`. The build value's absence bit moves with the left
+   * column. A null value is not absence, and this path cannot represent one.
    */
   private def rightOuter(
       probe: Vector[ColumnBatch],

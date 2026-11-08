@@ -234,9 +234,9 @@ object HashJoin:
     )
 
   /**
-   * `firstAbsence` follows the first value array and `secondAbsence` the second. That order is
-   * the array order, which an outer probe passes as `(probe, build)`. The inner path passes
-   * neither, and this does not allocate a bitmap for it.
+   * `firstAbsence` follows the first value array and `secondAbsence` the second. That order is the
+   * array order, which an outer probe passes as `(probe, build)`. The inner path passes neither,
+   * and this does not allocate a bitmap for it.
    */
   private def publish(
       keys: Array[Int],
@@ -286,8 +286,8 @@ object HashJoin:
    * Build table shared by every probe. `probe` writes `(key, probe value, build value)`. An empty
    * build returns an empty batch when `preserveProbe` is false. `preserveProbe` keeps the probe
    * side: each probe-side row with no partner is emitted, including a null probe key, and the
-   * build value's absence bit is set. Its validity bit stays clear. A null value is not absence.
-   * A null build key is not inserted, so it does not match probe key 0. The chain walk is
+   * build value's absence bit is set. Its validity bit stays clear. A null value is not absence. A
+   * null build key is not inserted, so it does not match probe key 0. The chain walk is
    * newest-first, which is a kernel detail.
    */
   final class Int32Build private (
@@ -330,8 +330,8 @@ object HashJoin:
 
     /**
      * `preserveProbe` appends each probe-side row with no partner. The build value's absence bit
-     * is set on that row, and its validity bit stays clear. A null probe key does not match and
-     * is kept only when `preserveProbe` is set. A null value is not absence.
+     * is set on that row, and its validity bit stays clear. A null probe key does not match and is
+     * kept only when `preserveProbe` is set. A null value is not absence.
      */
     def probe(side: JoinSide, preserveProbe: Boolean): ColumnBatch =
       val probeKeys = ColumnHash.int32At(side.batch, side.key)
@@ -717,8 +717,8 @@ object HashJoin:
 
   /**
    * One `(key, absent probe, build value)` row per null-key build row. The key bit stays clear.
-   * The probe value's absence bit is set and its validity bit stays clear. The build value bit
-   * is copied. These rows are not inserted.
+   * The probe value's absence bit is set and its validity bit stays clear. The build value bit is
+   * copied. These rows are not inserted.
    */
   private[scarlet] def emitNullBuildKeys(batch: ColumnBatch): ColumnBatch =
     val keys = ColumnHash.int32At(batch, 0)

@@ -36,8 +36,8 @@ object Column:
 
 /**
  * An `Int32` column. `absence` is an outer-join mark: this side has no partner. `None` means no
- * row is absent. A set absence bit is not a null value. The validity bit still says whether an
- * int is stored.
+ * row is absent. A set absence bit is not a null value. The validity bit still says whether an int
+ * is stored.
  */
 final class Int32Column private (
     val values: Array[Int],

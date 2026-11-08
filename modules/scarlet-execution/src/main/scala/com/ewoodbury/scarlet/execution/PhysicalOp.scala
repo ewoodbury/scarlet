@@ -24,8 +24,8 @@ import com.ewoodbury.scarlet.core.Partition
  * planner records the right child. A later cost-based pass may choose the left child. The other
  * child is probed in place. A hash or broadcast left outer join always builds the right input. The
  * left input is the probe side. A hash or broadcast right outer join always builds the left input
- * and probes the right. A probe-side row with no partner clears the build value's validity bit.
- * That bit is absence. A null value is not absence. A sort-merge outer join has no build table.
+ * and probes the right. A probe-side row with no partner sets the build value's absence bit. A
+ * null value is not absence. A sort-merge outer join has no build table.
  */
 enum PhysicalOp:
   case Scan(sourceKind: PhysicalOp.Kind, partitions: Seq[Partition[_]])
@@ -115,9 +115,9 @@ enum PhysicalOp:
    * Sort-merge left outer join of int pairs. `left` and `right` are exchanges with the same
    * partition count. The left exchange carries a null key to partition 0. The right exchange drops
    * a null key. Each partition is sorted by present key and merged. A null key does not match. A
-   * left row with no right partner is kept, including a null key, and the right value's validity
-   * bit is clear. That bit is absence. A preserved null key publishes a clear bit on the key
-   * column. A null value is not absence and stays on the row path. Output columns are
+   * left row with no right partner is kept, including a null key, and the right value's absence
+   * bit is set. Its validity bit stays clear. A preserved null key publishes a clear bit on the
+   * key column. A null value is not absence and stays on the row path. Output columns are
    * `(key, left, right)`. One batch per partition.
    */
   case SortMergeLeftOuter(left: PhysicalOp, right: PhysicalOp)
@@ -126,8 +126,8 @@ enum PhysicalOp:
    * Sort-merge right outer join of int pairs. `left` and `right` are exchanges. The right exchange
    * carries a null key to partition 0. The left exchange drops a null key. The left-outer walk
    * runs with the inputs swapped, then the value columns are swapped back to `(key, left, right)`.
-   * Absence is the left value's clear bit. A null value stays on the row path. Output columns are
-   * `(key, left, right)`. One batch per partition.
+   * Absence is the left value's absence bit. A null value stays on the row path. Output columns
+   * are `(key, left, right)`. One batch per partition.
    */
   case SortMergeRightOuter(left: PhysicalOp, right: PhysicalOp)
 
@@ -135,8 +135,8 @@ enum PhysicalOp:
    * Sort-merge full outer join of int pairs. `left` and `right` are exchanges. Both exchanges
    * carry a null key to partition 0. A group on only one side is emitted, with the other value
    * absent. A null key on either side is emitted once and does not match. An empty side emits
-   * every row of the other side. Either value's clear bit is absence. A null value stays on the
-   * row path. Output columns are `(key, left, right)`. One batch per partition.
+   * every row of the other side. Either value's absence bit is a missing partner. A null value
+   * stays on the row path. Output columns are `(key, left, right)`. One batch per partition.
    */
   case SortMergeFullOuter(left: PhysicalOp, right: PhysicalOp)
 
@@ -145,8 +145,8 @@ enum PhysicalOp:
    * side, and its exchange carries a null key to partition 0. The right input is the build side,
    * and its exchange drops a null key, so a null build key is not inserted. Each partition builds
    * one table and probes with the left-outer kernel. Output columns are `(key, left, right)`.
-   * Absence is a probe-side row with no partner, and the right value's validity bit is clear. A
-   * null value is not absence and stays on the row path. The build table uses the same budget as a
+   * Absence is a probe-side row with no partner, and the right value's absence bit is set. A null
+   * value is not absence and stays on the row path. The build table uses the same budget as a
    * broadcast join. This is a different node from [[HashJoin]], so the inner join does not carry
    * null keys.
    */
@@ -157,7 +157,7 @@ enum PhysicalOp:
    * side, and its exchange carries a null key to partition 0. The left input is the build side,
    * and its exchange drops a null key, so a null build key is not inserted. Each partition builds
    * one table and probes with the left-outer kernel, then swaps the value columns back to
-   * `(key, left, right)`. Absence is the left value's clear bit. A null value is not absence and
+   * `(key, left, right)`. Absence is the left value's absence bit. A null value is not absence and
    * stays on the row path. The build table uses the same budget as a broadcast join.
    */
   case HashRightOuter(left: PhysicalOp, right: PhysicalOp)
@@ -176,9 +176,9 @@ enum PhysicalOp:
    * fills the hash table. The left input is the probe side and is probed in place. There is no
    * build side: building the left input would keep unmatched right rows. Output columns are
    * `(key, left, right)`. Absence is a probe-side row with no partner, and the right value's
-   * validity bit is clear. A null value is not absence and is not representable on this path. A
-   * null value on either input stays on the row path. This is a different node from
-   * [[BroadcastJoin]], so the inner join does not carry an outer flag.
+   * absence bit is set. A null value is not absence and is not representable on this path. A null
+   * value on either input stays on the row path. This is a different node from [[BroadcastJoin]],
+   * so the inner join does not carry an outer flag.
    */
   case BroadcastLeftOuter(left: PhysicalOp, right: PhysicalOp)
 
@@ -186,7 +186,7 @@ enum PhysicalOp:
    * Right outer join with no exchange. `left` and `right` stay the logical inputs. The left input
    * fills the hash table. The right input is the probe side and is probed in place. The left-outer
    * kernel writes `(key, probe value, build value)`, and the value columns are swapped back to
-   * `(key, left, right)`. Absence is the left value's clear bit. A null value is not absence and
+   * `(key, left, right)`. Absence is the left value's absence bit. A null value is not absence and
    * stays on the row path. This is a different node from [[BroadcastJoin]] and from
    * [[BroadcastLeftOuter]].
    */
@@ -197,9 +197,9 @@ enum PhysicalOp:
    * key to partition 0. The left input is the probe side. The right input is the build side. Each
    * partition builds one table, probes with one bitmap, and emits that partition's unmatched build
    * rows. A null build key is carried outside the table and emitted once. Output columns are
-   * `(key, left, right)`. Either value's clear bit is absence. A null value is not absence and
-   * stays on the row path. The build table uses the same budget as a broadcast join. The bitmap is
-   * not part of that budget.
+   * `(key, left, right)`. Either value's absence bit is a missing partner. A null value is not
+   * absence and stays on the row path. The build table uses the same budget as a broadcast join.
+   * The bitmap is not part of that budget.
    */
   case HashFullOuter(left: PhysicalOp, right: PhysicalOp)
 
@@ -209,8 +209,8 @@ enum PhysicalOp:
    * thread keeps its own matched-row bitmap. The bitmaps are OR'd after the probes join. A clear
    * bit emits that build row with the left value absent. A null build key is carried outside the
    * table and emitted once. An empty probe still emits every build row. Output columns are
-   * `(key, left, right)`. Either value's clear bit is absence. A null value stays on the row path.
-   * The bitmap is not part of the build budget.
+   * `(key, left, right)`. Either value's absence bit is a missing partner. A null value stays on
+   * the row path. The bitmap is not part of the build budget.
    */
   case BroadcastFullOuter(left: PhysicalOp, right: PhysicalOp)
 

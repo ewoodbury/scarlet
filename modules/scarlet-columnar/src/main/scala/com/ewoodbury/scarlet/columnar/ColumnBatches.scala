@@ -62,9 +62,8 @@ private[scarlet] object Morsels:
  *
  * A slice shorter than or equal to `batchSize` is the input batch itself. Concatenation of one
  * batch, or of only empty batches, returns the head batch. Copied ranges keep values, validity,
- * and an Int32 absence bitmap when the copied rows contain one.
- * [[Morsels.of]] uses the same cuts and does not copy. It also owns the zero-row batch constructor
- * for each schema.
+ * and an Int32 absence bitmap when the copied rows contain one. [[Morsels.of]] uses the same cuts
+ * and does not copy. It also owns the zero-row batch constructor for each schema.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object ColumnBatches:

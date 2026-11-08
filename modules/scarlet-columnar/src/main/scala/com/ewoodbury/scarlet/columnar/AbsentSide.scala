@@ -5,8 +5,8 @@ package com.ewoodbury.scarlet.columnar
  *
  * The batch stays `(key, left, right)`. [[AbsentSide.Left]] decodes `(key, (Option[Int], Int))`.
  * [[AbsentSide.Right]] decodes `(key, (Int, Option[Int]))`. [[AbsentSide.Both]] decodes
- * `(key, (Option[Int], Option[Int]))`. An absence bit is a missing partner. A clear validity
- * bit is a null value, which this path does not publish.
+ * `(key, (Option[Int], Option[Int]))`. An absence bit is a missing partner. A clear validity bit
+ * is a null value, which this path does not publish.
  */
 enum AbsentSide:
 

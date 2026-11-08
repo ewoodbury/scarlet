@@ -651,8 +651,8 @@ private[scarlet] object SortMergeRuns:
       (presentBatch, nullBatch)
 
   /**
-   * One outer row per null-key pair. The key bit stays clear. The other value's absence bit is
-   * set and its validity bit stays clear.
+   * One outer row per null-key pair. The key bit stays clear. The other value's absence bit is set
+   * and its validity bit stays clear.
    */
   private def nullSideRows(nullPairs: ColumnBatch, onLeft: Boolean): ColumnBatch =
     if (nullPairs.length == 0) then ColumnBatches.emptyIntJoin
