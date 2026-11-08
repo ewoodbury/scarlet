@@ -139,7 +139,6 @@ private[scarlet] object WholeRowSelection:
     val values = ColumnKernel.asInt32(ColumnKernel.columnAt(batch, 1), 1)
     require(keys.length == values.length, "key and value columns differ in length")
     (keys, values)
-}
 
 /**
  * Whole-row predicate for a `(String, Int)` pair.
