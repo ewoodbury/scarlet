@@ -501,8 +501,8 @@ Still open inside the set, and therefore not a promise of this commit:
 - A stack of one slot filter still builds dense columns. A stack of two or more already keeps a
   survivor index. Single-column filters stay chained column kernels, because an int survivor index
   is the wrong selection for one column.
-- `countByKey` over `spillBudgetBytes` throws `ColumnarFallback` and the action reruns on rows. It
-  does not spill. Long and string `countByKey` are not columnar.
+- `countByKey` over `spillBudgetBytes` throws `ClosedKernelRefusal` and the action fails. It does
+  not spill. Long and string `countByKey` are not columnar.
 - Long and string inner hash joins do not spill.
 - A null value on an outer join, and on a long inner join, is a `ColumnarFallback`. A null on a
   selected row of an int hash join is the same decline. A null on a dropped row stays columnar. A
