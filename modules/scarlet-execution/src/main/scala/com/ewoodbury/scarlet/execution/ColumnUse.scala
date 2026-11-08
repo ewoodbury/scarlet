@@ -79,14 +79,14 @@ private[execution] object ColumnUse:
    * long, float, boolean, or string map adds nothing.
    */
   private def consumedOrdinals(kind: PhysicalOp.Kind): Set[Int] = kind match
-    case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs |
-        PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
-        PhysicalOp.Kind.GroupedLongs =>
+    case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts |
+        PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.GroupedInts |
+        PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
       Set(0, 1)
     case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples =>
       Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
-        PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools | PhysicalOp.Kind.LongCounts =>
+        PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools =>
       Set.empty[Int]
 
   private def slotDemand(slot: PhysicalOp.Slot): Set[Int] = slot match
