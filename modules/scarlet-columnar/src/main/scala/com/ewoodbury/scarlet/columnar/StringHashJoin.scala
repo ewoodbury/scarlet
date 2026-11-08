@@ -2,6 +2,8 @@ package com.ewoodbury.scarlet.columnar
 
 import java.util.{Arrays, HashMap}
 
+import com.ewoodbury.scarlet.core.ScarletConf
+
 /**
  * Inner shuffle-hash join of dictionary string keys and `Int32` values.
  *
@@ -19,9 +21,13 @@ import java.util.{Arrays, HashMap}
  * not probed. `""` is a present key. Every live value cell must be present. Spare capacity past
  * `length` is ignored, which is what a filter publishes. A null value outside a selection is not
  * live. The planner refuses a null value, so a clear live value bit is a bug and throws
- * `IllegalStateException`. There is no spill and no build budget. Output columns are
- * `(key, left, right)`. The key is the probe row's dictionary and code. One batch per partition.
- * An empty side, or a partition with no matches, publishes [[ColumnBatches.emptyStringJoin]].
+ * `IllegalStateException`. Spill is off unless [[ScarletConf.spillEnabled]] is set. A build bucket
+ * whose [[StringHashJoinSpill.retainedBytes]] estimate is above [[ScarletConf.spillBudgetBytes]]
+ * is finished by [[StringHashJoinSpill]]. That estimate includes the dictionary. A bucket at or
+ * under the budget, and every bucket while spill is off, is joined here and writes nothing. Output
+ * columns are `(key, left, right)`. The key is the probe row's dictionary and code. One batch per
+ * partition. An empty side, or a partition with no matches, publishes
+ * [[ColumnBatches.emptyStringJoin]].
  */
 @SuppressWarnings(
   Array(
@@ -69,6 +75,12 @@ object StringHashJoin:
    * [[StringJoinInput.Selected]] is partitioned with [[HashExchange.partitionAllSelectedUtf8]] and
    * is not sliced. A null key is dropped. `""` is a present key. Output columns are
    * `(key, left, right)`.
+   *
+   * Spill is off unless [[ScarletConf.spillEnabled]] is set. A build bucket whose
+   * [[StringHashJoinSpill.retainedBytes]] estimate is above [[ScarletConf.spillBudgetBytes]] is
+   * finished by [[StringHashJoinSpill]]. A run whose buckets all fit stays on [[MorselScheduler]]
+   * and writes nothing. A selected side is scattered before that choice, so a spill sees survivor
+   * rows only.
    */
   def inner(
       build: StringJoinInput,
@@ -83,12 +95,31 @@ object StringHashJoin:
     else
       val buildBuckets = exchange(build, numPartitions, parallelism)
       val probeBuckets = exchange(probe, numPartitions, parallelism)
-      MorselScheduler.map(probeBuckets, parallelism) { (part, probeBatch) =>
-        val built = buildBuckets.lift(part).getOrElse {
-          throw new IllegalStateException(s"missing build partition $part")
-        }
-        joinPartition(built, probeBatch)
+      val conf = ScarletConf.get
+      if (buildBuckets.exists(bucket => StringHashJoinSpill.exceeds(bucket, conf))) then
+        StringHashJoinSpill.finish(buildBuckets, probeBuckets, parallelism, conf)
+      else joinExchanged(buildBuckets, probeBuckets, parallelism)
+
+  /** Already-exchanged buckets. No second partition, and no spill store. */
+  private def joinExchanged(
+      buildBuckets: Vector[ColumnBatch],
+      probeBuckets: Vector[ColumnBatch],
+      parallelism: Int,
+  ): Vector[ColumnBatch] =
+    MorselScheduler.map(probeBuckets, parallelism) { (part, probeBatch) =>
+      val built = buildBuckets.lift(part).getOrElse {
+        throw new IllegalStateException(s"missing build partition $part")
       }
+      joinPartition(built, probeBatch)
+    }
+
+  /**
+   * One already-exchanged bucket pair. Does not partition and does not spill.
+   * [[StringHashJoinSpill]] probes with this. A null key is not inserted and not probed. `""` is a
+   * present key. A clear live value bit throws.
+   */
+  private[scarlet] def joinBucket(build: ColumnBatch, probe: ColumnBatch): ColumnBatch =
+    joinPartition(build, probe)
 
   private def exchange(
       input: StringJoinInput,

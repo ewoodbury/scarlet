@@ -99,7 +99,7 @@ null. A null string key orders as `""` and stays null. Shape strings are exact.
 | String `distinct`. One copy of each string, including one null and one empty string. Equal strings share a hash bucket. Order is unspecified | `Utf8Dict` | `Dedupe(Exchange(Scan))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
 | Automatic or explicit shuffle-hash long join. Both sides are exchanged on `Long.hashCode`. A null key is dropped. A null value stays on the row path. A build bucket over `spillBudgetBytes`, when `spillEnabled` is on, is sub-partitioned by the quotient of `Long.hashCode` and the parent width. Each non-empty build piece is one spill file. One piece is joined at a time. A piece still over the budget throws. At or under the budget, and whenever spill is off, the bucket stays in memory and writes nothing. Broadcast, sort-merge, and outer joins on long keys stay on the row path | `Columnar` | `LongHashJoin(Exchange(Scan), Exchange(Scan))` |
-| Automatic or explicit shuffle-hash string join. Both sides are exchanged on `String.hashCode`. A null key is dropped. `""` matches `""`. A null value stays on the row path. The two sides keep independent dictionaries and match by string equality. `"é"` and `"e\u0301"` do not match. A key or value filter on either side, including a stack of one, scatters the survivor index and does not compact. There is no spill and no build budget. Broadcast, sort-merge, and outer joins stay on the row path. Output columns are `(key, left, right)` and the key is the probe row | `StringTriple` | `StringHashJoin(Exchange(Scan), Exchange(Scan))` |
+| Automatic or explicit shuffle-hash string join. Both sides are exchanged on `String.hashCode`. A null key is dropped. `""` matches `""`. A null value stays on the row path. The two sides keep independent dictionaries and match by string equality. `"é"` and `"e\u0301"` do not match. A key or value filter on either side, including a stack of one, scatters the survivor index and does not compact. A build bucket over `spillBudgetBytes` spills when `spillEnabled` is on. The estimate includes the dictionary. At or under the budget, and when spill is off, the bucket stays in memory. Broadcast, sort-merge, and outer joins stay on the row path. Output columns are `(key, left, right)` and the key is the probe row | `StringTriple` | `StringHashJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge int join. Both sides are hash-partitioned, sorted inside each partition, and merged. Null keys are dropped before the sort | `Columnar` | `SortMergeJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge left outer int join. Both sides are hash-partitioned. The left exchange carries a null key to partition 0. The right exchange drops a null key. A null key does not match. A preserved null key publishes a clear key bit. Absence is the right value's clear bit. A null value stays on the row path | `Columnar` | `SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge right outer int join. The right exchange carries a null key. The left exchange drops one. The left-outer walk runs on swapped inputs, then the value columns are swapped back to `(key, left, right)`. Absence is the left value's clear bit. A null value stays on the row path | `Columnar` | `SortMergeRightOuter(Exchange(Scan), Exchange(Scan))` |
@@ -263,7 +263,10 @@ A `(String, Int)` inner join with an absent hint or an explicit shuffle-hash hin
 is dropped on both sides. `""` matches `""`. Output columns are `(key, left, right)` and the key
 is taken from the probe row. The two sides keep independent dictionaries and match by string
 equality. A key or value filter on either side, including a stack of one, scatters the survivor
-index and does not compact. There is no spill and no build budget. The layout is `StringTriple`. A null value stays on the row path. A broadcast hint, a
+index and does not compact. A build bucket over `spillBudgetBytes` spills when `spillEnabled` is
+on. The estimate includes the dictionary. At or under the budget, and when spill is off, the
+bucket stays in memory. The layout is `StringTriple`. A null value stays on the row path. A
+broadcast hint, a
 sort-merge hint, and every outer join on string keys stay on the row path.
 Broadcast of int pairs records both children and builds the right input.
 A later cost-based pass may build the left input instead.
@@ -442,14 +445,13 @@ The rules that hold for every kind:
 ## Spill
 
 Grouped sum, an inner broadcast join's build, an int shuffle-hash build bucket, a long shuffle-hash
-build bucket, sort-merge joins,
-an int-pair `sortByIntKey`, a long-pair `sortByLongKey`, a string-pair `sortByStringKey`, and an
-over-budget int, long, or string `reduceByKey` bucket spill when `spillEnabled` is on.
-`spillBudgetBytes` is the in-memory trigger. The flag defaults off. `spillMaxFiles` and
-`spillMaxBytes` cap one spill store.
+build bucket, a string shuffle-hash build bucket, sort-merge joins, an int-pair `sortByIntKey`, a
+long-pair `sortByLongKey`, a string-pair `sortByStringKey`, and an over-budget int, long, or string
+`reduceByKey` bucket spill when `spillEnabled` is on. `spillBudgetBytes` is the in-memory trigger.
+The flag defaults off. `spillMaxFiles` and `spillMaxBytes` cap one spill store.
 
 A reduce spills per bucket, and the running partial is `O(distinct keys)`, so the bound is one
-bucket plus its partial, not the query. The string-key join has no spill at all.
+bucket plus its partial, not the query.
 
 At or under `spillBudgetBytes`, and whenever `spillEnabled` is off, a sort-merge partition stays
 in memory. Over the budget, with spill on, each side is written as sorted runs and merged
@@ -486,6 +488,14 @@ One piece is joined at a time. A piece still over the budget throws. At or under
 whenever spill is off, that bucket stays in memory and writes nothing. The probe is not spilled.
 Broadcast, sort-merge, and outer long joins do not spill.
 
+A string shuffle-hash build bucket over `spillBudgetBytes` is sub-partitioned by
+`floorMod(String.hashCode, parts)`, the same exchange the in-memory join uses. The retained-byte
+estimate includes the dictionary, not only the code arrays. Each non-empty build piece is one
+spill file. One piece is joined at a time, and the probe is not spilled. A piece still over the
+budget throws. The two sides keep independent dictionaries and match by string equality. At or
+under the budget, and whenever spill is off, that bucket stays in memory and writes nothing.
+Broadcast, sort-merge, and outer string joins stay on the row path.
+
 ## Closed kernel
 
 The closed kernel is the set of plans that must lower and run columnar on present values. Finishing
@@ -515,7 +525,8 @@ Still open inside the set, and therefore not a promise of this commit:
 - `countByKey` over `spillBudgetBytes` throws `ClosedKernelRefusal` and the action fails. It does
   not spill. Long and string `countByKey` are not columnar.
 - The long inner hash join spills an over-budget build bucket when `spillEnabled` is on. A piece
-  still over the budget throws. The string inner hash join does not spill.
+  still over the budget throws. The string inner hash join spills an over-budget build bucket when
+  `spillEnabled` is on. A piece still over the budget throws.
 - A null value on an outer join, and on a long inner join, is a `ColumnarFallback`. A null on a
   selected row of an int hash join is the same decline. A null on a dropped row stays columnar. A
   string join with a null value does not lower. An inner sort-merge keeps a null value. A clear
@@ -540,7 +551,7 @@ Roadmap and sequencing are tracked externally; the headline items:
 - Fusion has no cost model or general predicate pushdown. `collect` decodes every output row into a
   `Seq`.
 - The sort-merge operator still materialises its inputs and its result.
-- The int and long shuffle-hash build buckets spill. A piece still over the budget throws. The string shuffle-hash join does not spill and has no build budget.
+- The int, long, and string shuffle-hash build buckets spill. A piece still over the budget throws rather than joining in memory.
 - `countByKey` has no spill path. Over the byte budget the action fails instead of rerunning on
   rows or spilling a count table.
 - Int, long, and string `reduceByKey` buckets spill, but the running partial is `O(distinct keys)`,
