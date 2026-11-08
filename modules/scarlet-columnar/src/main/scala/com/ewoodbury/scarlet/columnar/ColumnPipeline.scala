@@ -696,6 +696,16 @@ object ColumnPipeline:
     (0 until selected.count).forall(slot => Validity.isSet(words, rows(slot)))
 
   /**
+   * True when every live cell of a one-column int batch is present. A string-pair value projection
+   * stores that column at ordinal 0. A clear bit is a null int, and an empty batch is present.
+   */
+  private[scarlet] def intsFullyPresent(batches: Vector[ColumnBatch]): Boolean =
+    batches.forall { batch =>
+      val values = ColumnHash.int32At(batch, 0)
+      Validity.livePresent(values.validity, values.length)
+    }
+
+  /**
    * True when every live value cell is present. Long-pair batches store the value at ordinal 1 as
    * `Int64`. The check reads validity words that are already materialised and does not walk the
    * rows again.

@@ -169,6 +169,26 @@ class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
     ColumnarPlanner.lower(empty.plan) shouldBe None
   }
 
+  it should "decline a value projection that kept a null int" in {
+    val rows = pairs(Seq("red" -> 1, erasedNullValue("blue"), "green" -> 3))
+    val direct = rows.values
+    val byKey = rows.filterKeys(keepKey).values
+    val byRow = rows.filter(keepRow).values
+    val mapped = rows.mapValues((value: Int) => value + 1).values
+    val kept = rows.filterKeys(notBlue).values
+
+    ColumnarPlanner.lower(direct.plan).map(_.shape) shouldBe Some("Value(Scan)")
+    ColumnarPlanner.lower(byKey.plan).map(_.shape) shouldBe Some("Value(FilterKey(Scan))")
+    ColumnarPlanner.lower(byRow.plan).map(_.shape) shouldBe Some("Value(FilterRow(Scan))")
+    ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some("Value(MapValue(Scan))")
+    ColumnarPlanner.tryRun(direct.plan) shouldBe None
+    ColumnarPlanner.tryRun(byKey.plan) shouldBe None
+    ColumnarPlanner.tryRun(byRow.plan) shouldBe None
+    ColumnarPlanner.tryRun(mapped.plan) shouldBe None
+    ColumnarPlanner.tryTake(byKey.plan, 1) shouldBe None
+    columnar(kept) shouldBe rowOf(kept)
+  }
+
   it should "lower reduceByKey, groupByKey, and an inner join, and keep distinct and a string mapValues on the row path" in {
     val rows = source
     val grouped = rows.groupByKey
@@ -332,6 +352,20 @@ class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
   private def isEmptyKey(key: String): Boolean = key match
     case null => false
     case text => text.isEmpty
+
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def keepKey(key: String): Boolean = key match
+    case _ => true
+
+  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
+  private def keepRow(pair: (String, Int)): Boolean =
+    pair.productElement(0) match
+      case _ => true
+
+  @SuppressWarnings(Array("org.wartremover.warts.Equals", "org.wartremover.warts.Null"))
+  private def notBlue(key: String): Boolean = key match
+    case null => true
+    case text => text != "blue"
 
   @SuppressWarnings(Array("org.wartremover.warts.Equals", "org.wartremover.warts.Null"))
   private def isRed(key: String): Boolean = key match

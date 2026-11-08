@@ -11,7 +11,8 @@ import ColumnarInterpreter.Columns
  * A batch is a UTF-8 dictionary key and an int value. A null key is a clear bit on the key and
  * stays in the batch. A null int is a clear value bit and is not stored as zero. `mapValues`
  * rewrites column 1 and copies both bits, so a null int stays null and the new value does not
- * inherit a clear key bit. A value projection of a null int declines.
+ * inherit a clear key bit. A value projection of a null int declines, including one after a filter
+ * or `mapValues` that kept the null.
  *
  * [[encoded]] may publish a one-column batch when demand narrowed the read to the key or the
  * value. A [[PhysicalOp.Column]] or the filter path consumes that shape; a column wraps the batch
@@ -54,7 +55,11 @@ private[execution] object StringPairWalk:
       case PhysicalOp.Kind.LongPairs => Columns.Longs(columns)
       case PhysicalOp.Kind.Pairs => Columns.Ints(columns)
       case PhysicalOp.Kind.StringPairs if ordinal == 0 => Columns.Strings(columns)
-      case PhysicalOp.Kind.StringPairs => Columns.Ints(columns)
+      case PhysicalOp.Kind.StringPairs =>
+        // A kept null int is not an Int32 column. Decline before decode throws.
+        if (!ColumnPipeline.intsFullyPresent(columns)) then
+          throw new ColumnarFallback("string pair value is null")
+        Columns.Ints(columns)
       case _ =>
         throw new IllegalStateException("columnar projection expected a pair")
 

@@ -20,11 +20,11 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * chosen. A null value on a long inner join is that fallback too. A null value on a selected row
  * of an int inner join is that fallback too. A null on a dropped row is not. A live null value on
  * a string join, string `reduceByKey`, or string `groupByKey` is that fallback too. A string-pair
- * filter keeps the null int. With spill off, an over-budget int `countByKey` throws
- * `ClosedKernelRefusal`, which does not extend `ClassCastException`, so the action fails instead
- * of rerunning on rows. With spill on, an over-budget post-exchange bucket spills. A count table
- * that still does not fit throws `ClosedKernelRefusal`. Long and string `countByKey` are not
- * columnar.
+ * filter keeps the null int. A value projection that kept a null int is that fallback too. With
+ * spill off, an over-budget int `countByKey` throws `ClosedKernelRefusal`, which does not extend
+ * `ClassCastException`, so the action fails instead of rerunning on rows. With spill on, an
+ * over-budget post-exchange bucket spills. A count table that still does not fit throws
+ * `ClosedKernelRefusal`. Long and string `countByKey` are not columnar.
  */
 @SuppressWarnings(
   Array(
