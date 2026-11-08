@@ -30,14 +30,14 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 204 accepted fixtures. Long countByKey is new. 203 + 1 = 204.
-    accepted.size shouldBe 204
-    // 35 exclusions. 204 + 35 = 239. Long countByKey was not excluded.
+    // 205 accepted fixtures. String countByKey is new. 204 + 1 = 205.
+    accepted.size shouldBe 205
+    // 35 exclusions. 205 + 35 = 240. String countByKey was not excluded.
     // Long broadcast, sort-merge, and outer joins stay on the row path. They are covered by
     // execution tests, not contract fixtures, because the contract does not track the int
     // refusals either.
     excluded.size shouldBe 35
-    (accepted.size + excluded.size) shouldBe 239
+    (accepted.size + excluded.size) shouldBe 240
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -533,6 +533,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         "countByKey long",
         Plan.CountByKeyOp(longPairSource),
         hashedInfo(layout),
+        Some("CountByKey(Exchange(Scan))"),
+      ),
+      AcceptedCase(
+        "countByKey string",
+        Plan.CountByKeyOp(stringKeySource),
+        hashedInfo(stringPairLayout),
         Some("CountByKey(Exchange(Scan))"),
       ),
       AcceptedCase(

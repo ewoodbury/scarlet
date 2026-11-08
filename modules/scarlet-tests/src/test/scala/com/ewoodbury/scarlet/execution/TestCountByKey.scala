@@ -114,13 +114,46 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     found shouldBe Map(1 -> 2)
   }
 
-  it should "stay on the row path for string keys" in {
+  it should "lower string keys and match the row path" in {
     val strings = DistCollection(
       Plan.Source(Seq(Partition(Seq("a" -> 1, "b" -> 2)), Partition(Seq("a" -> 3)))),
     )
-    ColumnarPlanner.lower(strings.countByKey.plan) shouldBe None
-    countsOf(strings.countByKey.collect()) shouldBe Map("a" -> 2, "b" -> 1)
-    countsOf(row(strings.countByKey.collect())) shouldBe Map("a" -> 2, "b" -> 1)
+    assertString(strings, Map("a" -> 2, "b" -> 1))
+  }
+
+  it should "drop a null string key, keep an empty key, and count a null int" in {
+    val source = DistCollection(
+      Seq(
+        stringPair("a", java.lang.Integer.valueOf(1)),
+        nullKey(9),
+        stringPair("a", absentInt),
+        stringPair("", java.lang.Integer.valueOf(4)),
+        stringPair("", java.lang.Integer.valueOf(5)),
+      ),
+      2,
+    )
+    assertString(source, Map("a" -> 2, "" -> 2))
+  }
+
+  it should "lower a string-pair filter stack and match the row path" in {
+    val source = DistCollection(
+      Plan.Source(
+        Seq(
+          Partition(Seq("a" -> 1, "b" -> -1, "a" -> 4, "c" -> 0)),
+          Partition(Seq("b" -> 3, "a" -> 2)),
+        ),
+      ),
+    )
+    val counted = source
+      .filterKeys((key: String) => key != "b")
+      .filterValues((value: Int) => value > 0)
+      .countByKey
+    val lowered = ColumnarPlanner.lower(counted.plan)
+    lowered.map(_.shape) shouldBe Some("CountByKey(Exchange(FilterValue(FilterKey(Scan))))")
+    lowered.map(_.kind) shouldBe Some(PhysicalOp.Kind.StringPairs)
+    val found = countsOf(counted.collect())
+    found shouldBe countsOf(row(counted.collect()))
+    found shouldBe Map("a" -> 3)
   }
 
   it should "lower long keys and keep hash collisions distinct" in {
@@ -298,6 +331,21 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     found shouldBe expected
     counted.count() shouldBe expected.size.toLong
 
+  private def assertString(
+      source: DistCollection[(String, Int)],
+      expected: Map[String, Int],
+  ): Unit =
+    val counted = source.countByKey
+    val lowered = ColumnarPlanner.lower(counted.plan)
+    lowered.map(_.shape) shouldBe Some("CountByKey(Exchange(Scan))")
+    lowered.map(_.kind) shouldBe Some(PhysicalOp.Kind.StringPairs)
+    ColumnarPlanner.partitioning(counted.plan).map(_.layout) shouldBe Some(
+      Layout.StringPair(ScarletConf.get.columnarBatchSize),
+    )
+    val found = countsOf(counted.collect())
+    found shouldBe countsOf(row(counted.collect()))
+    found shouldBe expected
+
   private def assertLong(source: DistCollection[(Long, Long)], expected: Map[Long, Int]): Unit =
     val counted = source.countByKey
     val lowered = ColumnarPlanner.lower(counted.plan)
@@ -379,6 +427,14 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     lateNullSource().countByKey.collect().map { case (key, value) =>
       (key.asInstanceOf[Int], value)
     }.toMap
+
+  /** Named erasure boundary. `Tuple2` keeps a null `Integer`; `(String, Int)` would unbox it. */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
+  private def stringPair(key: String, value: java.lang.Integer): (String, Int) =
+    Tuple2(key, value).asInstanceOf[(String, Int)]
+
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def absentInt: java.lang.Integer = null
 
   @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
   private def longPair(key: java.lang.Long, value: java.lang.Long): (Long, Long) =

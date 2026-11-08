@@ -229,15 +229,17 @@ enum PhysicalOp:
    * `countByKey`. The child is an [[PhysicalOp.Exchange]]. The kernel shuffles. A null key is
    * dropped. The value column is not read, so a null value still counts. One `(key, count)` row is
    * published per distinct key, including an empty bucket. Output kind is
-   * [[PhysicalOp.Kind.Pairs]] for a [[PhysicalOp.Kind.Pairs]] child and
-   * [[PhysicalOp.Kind.LongCounts]] for a [[PhysicalOp.Kind.LongPairs]] child. Any other child is a
-   * planner bug. The count is an `Int` and wraps. A long count is `[Int64, Int32]`. The long
-   * estimate charges 8-byte keys. With spill off, an input that does not fit the budget throws
+   * [[PhysicalOp.Kind.Pairs]] for a [[PhysicalOp.Kind.Pairs]] child,
+   * [[PhysicalOp.Kind.LongCounts]] for a [[PhysicalOp.Kind.LongPairs]] child, and
+   * [[PhysicalOp.Kind.StringPairs]] for a [[PhysicalOp.Kind.StringPairs]] child. Any other child
+   * is a planner bug. The count is an `Int` and wraps. A long count is `[Int64, Int32]`. The long
+   * estimate charges 8-byte keys. The string estimate charges dictionary bytes. With spill off, an
+   * input that does not fit the budget throws
    * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] before the table is allocated, and the
    * action fails instead of rerunning on rows. With spill on, an over-budget post-exchange bucket
    * spills. A count table that still does not fit throws
    * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]]. The running partial is `O(distinct
-   * keys)`. A string key stays on the row path.
+   * keys)`.
    */
   case CountByKey(child: PhysicalOp)
 
@@ -320,9 +322,10 @@ enum PhysicalOp:
       child.kind match
         case PhysicalOp.Kind.Pairs => PhysicalOp.Kind.Pairs
         case PhysicalOp.Kind.LongPairs => PhysicalOp.Kind.LongCounts
+        case PhysicalOp.Kind.StringPairs => PhysicalOp.Kind.StringPairs
         case other =>
           throw new IllegalStateException(
-            s"countByKey column is $other, expected int or long pairs",
+            s"countByKey column is $other, expected int, long, or string pairs",
           )
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
     case LongHashJoin(_, _) => PhysicalOp.Kind.LongTriples
