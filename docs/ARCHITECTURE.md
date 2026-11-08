@@ -386,8 +386,9 @@ declares `String` and returns another value, is also a fallback, and that functi
 have run. An `IllegalStateException` from a physical/logical mismatch or a broadcast build table
 above `broadcastBuildBudgetBytes` is not a fallback, and neither is the `IllegalArgumentException`
 from a partition-selector `require`. A null value on a left, right, or full outer join, and on a
-long inner join, is a `ColumnarFallback`. A null value on a selected row of an int inner join is
-also a `ColumnarFallback`; a null on a dropped row is not. A live null value on a string join,
+long inner join, is a `ColumnarFallback`. A selected null and a null on the dense side of a mixed
+int hash join stay columnar. A null on a dropped row stays columnar. The absence bit is only a
+missing partner. A live null value on a string join,
 string `reduceByKey`, or string `groupByKey` is that fallback. A value projection that kept a null
 int is that fallback too. A string-pair filter keeps the null int. With spill off, an over-budget
 int `countByKey` throws `ClosedKernelRefusal` and the action fails. With spill on,
@@ -543,13 +544,13 @@ Still open inside the set, and therefore not a promise of this commit:
 - The long inner hash join spills an over-budget build bucket when `spillEnabled` is on. A piece
   still over the budget throws. The string inner hash join spills an over-budget build bucket when
   `spillEnabled` is on. A piece still over the budget throws.
-- A null value on an outer join, and on a long inner join, is a `ColumnarFallback`. A null on a
-  selected row of an int hash join is the same decline. A null on a dropped row stays columnar. A
-  string join, string `reduceByKey`, or string `groupByKey` with a live null value is a
-  `ColumnarFallback`. A value projection that kept a null int is the same decline. A string-pair
-  filter keeps that null int. An inner sort-merge keeps a null value. An absence bit on an
-  outer join means the partner is absent. A clear validity bit is a null value, which this path
-  does not publish, so a null value cannot use the absence bit.
+- A null value on an outer join, and on a long inner join, is a `ColumnarFallback`. A selected
+  null and a null on the dense side of a mixed int hash join stay columnar. A null on a dropped
+  row stays columnar. A string join, string `reduceByKey`, or string `groupByKey` with a live
+  null value is a `ColumnarFallback`. A value projection that kept a null int is the same
+  decline. A string-pair filter keeps that null int. An inner sort-merge keeps a null value. The
+  absence bit is only a missing partner. A clear validity bit is a null value, which an outer
+  join does not publish, so a null value cannot use the absence bit.
 - An int, long, or string sort of one or more filters, including a row filter, sorts the survivor
   index. Over the budget, with spill on, that index is spilled. Dropped rows are not written.
 - `groupByKey`, `distinct`, and `union` already have a columnar path and are not part of the closed
