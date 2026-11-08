@@ -87,10 +87,10 @@ object ColumnarPlanner:
    * element pipeline, propagates.
    *
    * A pair, long-pair, triple, or string-pair stack whose selection steps are defined decodes
-   * [[FilterChain.selected]], including a stack of one, and does not gather. That call
-   * interprets the source under the stack, so this does not interpret the source again. Every
-   * other plan decodes [[ColumnarInterpreter.interpret]]. The result cast is the same erasure
-   * boundary as [[tryRun]]: the decoded partitions have the plan's element type.
+   * [[FilterChain.selected]], including a stack of one, and does not gather. That call interprets
+   * the source under the stack, so this does not interpret the source again. Every other plan
+   * decodes [[ColumnarInterpreter.interpret]]. The result cast is the same erasure boundary as
+   * [[tryRun]]: the decoded partitions have the plan's element type.
    */
   private[execution] def runLowered[A](plan: Plan[A], op: PhysicalOp): Option[Seq[Partition[A]]] =
     try
@@ -145,9 +145,9 @@ object ColumnarPlanner:
    * appended once, in order.
    *
    * A partition-preserving pair, long-pair, triple, or string-pair filter stack, including a stack
-   * of one, decodes a prefix of [[FilterChain.selected]]. The decoder sees
-   * `min(remaining, count)` rows, so the rest of the index is not read and the stack is not
-   * gathered. Any other plan uses [[ColumnarInterpreter.decodePrefixFor]].
+   * of one, decodes a prefix of [[FilterChain.selected]]. The decoder sees `min(remaining, count)`
+   * rows, so the rest of the index is not read and the stack is not gathered. Any other plan uses
+   * [[ColumnarInterpreter.decodePrefixFor]].
    */
   private def prefixOf(plan: Plan[_], op: PhysicalOp, count: Int, n: Int): Seq[Any] =
     val ordinals = ColumnUse.ordinals(plan, op)
@@ -249,8 +249,8 @@ object ColumnarPlanner:
   private def pairCountStep(step: Selection.Step): Boolean = step match
     case Selection.Step.Int32(_, _) | Selection.Step.IntPair(_) => true
     case Selection.Step.Int64(_, _) | Selection.Step.Float64(_, _) | Selection.Step.Bool(_, _) |
-        Selection.Step.Utf8(_, _) | Selection.Step.IntTriple(_, _) |
-        Selection.Step.LongPair(_) | Selection.Step.StringPair(_) =>
+        Selection.Step.Utf8(_, _) | Selection.Step.IntTriple(_, _) | Selection.Step.LongPair(_) |
+        Selection.Step.StringPair(_) =>
       false
 
   /** Counts the admitted stack in place. The source scan is encoded once and not filtered. */

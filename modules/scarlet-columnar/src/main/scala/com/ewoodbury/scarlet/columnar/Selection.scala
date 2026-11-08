@@ -22,8 +22,8 @@ import scala.annotation.tailrec
  * ordinal can survive. A pair row needs both ordinals. A long-pair row needs both ordinals and
  * calls only when both bits are set. A string-pair row passes a null key and does not turn a null
  * int into zero. A triple needs all three present and names the absolute row when one is null,
- * before any predicate call. A general string predicate is called on every candidate, including
- * an empty cell. An empty cell that passes stays absent in the output.
+ * before any predicate call. A general string predicate is called on every candidate, including an
+ * empty cell. An empty cell that passes stays absent in the output.
  *
  * [[applySelected]] returns that index and does not gather. [[materialize]] gathers every column
  * by absolute row and copies the source validity bit. A clear bit stores zero and leaves the
