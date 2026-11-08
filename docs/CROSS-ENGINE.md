@@ -63,8 +63,9 @@ Spark, same settings, warmup 2, measured 5:
 
 The Scarlet 10M run did not complete under the harness's heap; the sort and the duplicated long
 filter collection together exceeded the budget. That is a harness limit, not an engine failure,
-but it means the 10M table is Spark-only. The Spark sort is the interesting number: it grows from
-681 ms at 1M to 9.2 s at 10M, which is the shuffle and spill path showing up.
+but it means the 10M table is Spark-only. The 10e6 Scarlet column is not in this change. The Spark
+sort is the interesting number: it grows from 681 ms at 1M to 9.2 s at 10M, which is the shuffle
+and spill path showing up.
 
 ## Caveats
 
@@ -115,9 +116,18 @@ JAVA_HOME=$(/usr/libexec/java_home -v 17) \
   PYSPARK_DRIVER_PYTHON=/tmp/spark-venv/bin/python \
   /tmp/spark-venv/bin/python cross_engine_spark.py
 
-# Scarlet side
-sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.CrossEngineBench"
+# Scarlet side: one query per process, 4 GB heap
+CROSS_ROWS=10000000 CROSS_FILTERS=2 CROSS_NULLS=false CROSS_QUERY=filter-count \
+  CROSS_WARMUP=3 CROSS_ROUNDS=10 \
+  sbt -J-Xmx4g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.CrossEngineBench"
 ```
+
+`CROSS_ROWS` defaults to 1000000, `CROSS_FILTERS` to 2 (`1` is the key filter only), and
+`CROSS_NULLS` to false. `CROSS_WARMUP` defaults to 3 and `CROSS_ROUNDS` to 10. Set `CROSS_QUERY`
+to one of `filter-count`, `filter-sum`, `filter-groupbykey`, `filter-reducebykey`, `filter-join`,
+or `filter-sort`. Omit it to run all six in that process, dropping each query's input before the
+next. `encode_ms` is reported separately and is not subtracted from the action. The action timer
+still includes the scan encode. Spill is on for this harness only.
 
 The Python harnesses live outside the repo; the Scarlet harness is
 `modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/CrossEngineBench.scala`.
