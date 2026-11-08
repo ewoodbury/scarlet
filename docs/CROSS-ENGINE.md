@@ -17,26 +17,36 @@ columnar path with the row path in the same run.
 ## Queries at 1M rows
 
 Measured again after the scan-path work (2026-11-07, `main` @ `05d1faf`). DuckDB and Spark columns
-are unchanged from the original run.
+are unchanged from the original run. The `countByKey` row was added on 2026-11-08 (`main` @
+`6cf4349`): DuckDB and Spark run the same `SELECT k, count(*) ... GROUP BY k` they already ran, and
+the Scarlet column is `QueryBench`'s `filter-countbykey` at four threads, p50 of 40 rounds.
 
 | Query | DuckDB | Spark | Scarlet |
 | --- | ---: | ---: | ---: |
 | filter + count | 0.86 ms | 60.35 ms | 2.26 ms |
 | filter + sum | 0.97 ms | 51.30 ms | 1.86 ms |
+| filter + countByKey | 1.46 ms | 82.62 ms | 7.05 ms |
 | filter + groupByKey (materialises groups) | 1.46 ms | 82.62 ms | 8.61 ms |
 | filter + reduceByKey (long pairs) | 1.78 ms | 82.58 ms | 5.9-8.5 ms |
 | filter + join | 4.52 ms | 78.71 ms | 20.97 ms |
 | filter + sort | 54.96 ms | 680.65 ms | 42.69 ms |
 
-All six checksums match on all three engines. Against DuckDB, Scarlet is 1.9x slower on the sum,
-2.6x on the count, 3.3-4.8x on the reduce, 4.6x on the join, and 0.78x on the sort.
+All seven checksums match on all three engines. Against DuckDB, Scarlet is 1.9x slower on the sum,
+2.6x on the count, 4.8x on the count per key, 3.3-4.8x on the reduce, 4.6x on the join, and 0.78x
+on the sort.
 
-**The groupByKey row is not the same query on the two sides.** DuckDB runs
-`SELECT k, count(*) ... GROUP BY k` and never materialises the values. Scarlet builds every
-group's value list and decodes all 1e6 values before `.size` runs. Measured split on the same data:
-7.93 ms for the benchmark shape, 6.01 ms to build the groups without decoding values, and 3.29 ms
-for a single-threaded direct count per key. The 5.9x figure should not be quoted as an engine gap;
-a fair case needs a `countByKey`-style action that never builds the value arrays.
+**The `groupByKey` row is not the same query on the two sides, and the `countByKey` row is.**
+DuckDB runs `SELECT k, count(*) ... GROUP BY k` and never materialises the values. For the
+`groupByKey` entry Scarlet builds every group's value list and decodes all 1e6 values before
+`.size` runs: measured split on the same data, 7.93 ms for that shape, 6.01 ms to build the groups
+without decoding, and 3.29 ms for a single-threaded direct count per key. The `countByKey` action
+counts rows per key without touching the value column, which is the same work DuckDB does, so 7.05
+against 1.46 ms is the like-for-like figure; the 5.9x on the materialising row should not be quoted
+as an engine gap.
+
+One asymmetry remains in that comparison: DuckDB's statement carries `ORDER BY k` over 1024 groups,
+while Scarlet's checksum folds the counts in whatever order the hash finishes in. The DuckDB number
+therefore includes a small sort the Scarlet number does not.
 
 The Scarlet `reduceByKey` row uses the long-pair path; the int-pair path is faster on the same data.
 
@@ -80,7 +90,9 @@ compare-only predicate) because the preferred species is 128-bit and `div` is no
 move the numbers was removing work: `count` and `sum` now walk the filter stack in place instead of
 gathering (count 3.66 to 2.30 ms, allocation 22.7 to 8.3 MB at width 4), and long-pair
 `reduceByKey` partial-reduces survivor ids instead of two chained filter copies (19.0 to 5.9 ms at
-`CROSS_ROUNDS=20`). The sort win is the rank-split path doing what it was built for.
+`CROSS_ROUNDS=20`), and `countByKey` counts per key without the value arrays `groupByKey` builds
+(7.05 against 10.35 ms at four threads, 23.6 against 47.5 MB). The sort win is the rank-split path
+doing what it was built for.
 
 Spark is the right comparison for scale-out behavior, not for single-node kernel speed. At 1M rows
 it mostly measures its own overhead; at 10M its sort already shows the shuffle cost. The next
