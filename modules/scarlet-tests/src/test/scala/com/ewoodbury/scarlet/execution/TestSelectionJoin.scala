@@ -221,7 +221,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     keyCalls.get() shouldBe 2
     narrowCalls.get() shouldBe 2
     found should contain theSameElementsAs shown(row(joined.collect()))
-    found should contain("2,absent,200")
+    found should contain("2,null,200")
     found should contain("1,10,100")
     ColumnarPlanner.tryRun(joined.plan).isDefined shouldBe true
   }
@@ -247,7 +247,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     keyCalls.get() shouldBe 2
     valueCalls.get() shouldBe 2
     found should contain theSameElementsAs shown(row(joined.collect()))
-    found should contain("4,40,absent")
+    found should contain("4,40,null")
     found should contain("1,10,100")
     ColumnarPlanner.tryRun(joined.plan).isDefined shouldBe true
   }
@@ -533,7 +533,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
 
   /**
    * Named erasure boundary. A join row may hold a null value. `productElement` reads it without
-   * unboxing. `absent` is that null.
+   * unboxing. The printed token is `null`. That is a clear validity bit, not an absence bit.
    */
   @SuppressWarnings(
     Array(
@@ -547,7 +547,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       val values = row.productElement(1).asInstanceOf[Product]
       Seq(row.productElement(0), values.productElement(0), values.productElement(1))
         .map {
-          case null => "absent"
+          case null => "null"
           case value: Int => String.valueOf(value)
           case _ => "other"
         }
