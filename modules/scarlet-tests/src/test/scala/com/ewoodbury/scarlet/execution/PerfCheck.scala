@@ -3,6 +3,8 @@ package com.ewoodbury.scarlet.execution
 import cats.effect.unsafe.implicits.global
 
 import com.ewoodbury.scarlet.api.DistCollection
+import com.ewoodbury.scarlet.columnar.ColumnMetrics
+import com.ewoodbury.scarlet.columnar.CountingSink
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
@@ -10,10 +12,11 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 /**
  * Lightweight CI performance and correctness check. Not part of `make test`.
  *
- * Runs three filter queries on 200k rows in both layouts, compares the checksums, and fails only
- * when a checksum differs or the columnar p50 is more than twice the row p50. The threshold is
- * deliberately loose: a shared CI runner is noisy, and this is a smoke test for a clear
- * regression, not a benchmark.
+ * Runs three filter queries on 200k rows in both layouts and compares checksums. It fails when a
+ * checksum differs, the published batches are wrong, or the columnar p50 is more than twice the
+ * row p50. A columnar sample must publish a batch and a row sample must publish none. The
+ * threshold is deliberately loose: a shared CI runner is noisy, and this is a smoke test for a
+ * clear regression, not a benchmark.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Var"))
 object PerfCheck:
@@ -81,25 +84,29 @@ object PerfCheck:
     )
 
     cases.flatMap { case (name, action) =>
-      val columnar = measure(columnar = true, action)
-      val row = measure(columnar = false, action)
-      val ratio = columnar._1 / math.max(row._1, 0.001)
+      val columnar = measure(name, columnar = true, action)
+      val row = measure(name, columnar = false, action)
+      val ratio = columnar.millis / math.max(row.millis, 0.001)
       println(
-        f"PERF $name%-20s columnar=${columnar._1}%8.3f ms row=${row._1}%8.3f ms " +
-          f"ratio=$ratio%5.2f checksum=${columnar._2}",
+        f"PERF $name%-20s columnar=${columnar.millis}%8.3f ms row=${row.millis}%8.3f ms " +
+          f"ratio=$ratio%5.2f checksum=${columnar.checksum}",
       )
       val problems = List(
-        Option.when(columnar._2 != row._2)(
-          s"$name checksum ${columnar._2} != ${row._2}",
+        Option.when(columnar.checksum != row.checksum)(
+          s"$name checksum ${columnar.checksum} != ${row.checksum}",
         ),
         Option.when(ratio > maxRatio)(
           f"$name columnar is $ratio%.2f times the row path",
         ),
+        columnar.batchProblem,
+        row.batchProblem,
       ).flatten
       problems
     }
 
-  private def measure(columnar: Boolean, action: () => Any): (Double, Long) =
+  private final case class Measured(millis: Double, checksum: Long, batchProblem: Option[String])
+
+  private def measure(name: String, columnar: Boolean, action: () => Any): Measured =
     val conf = ScarletConf.get
     ScarletConf.set(conf.copy(columnarExecution = columnar))
     var round = 0
@@ -108,15 +115,26 @@ object PerfCheck:
       round += 1
     val samples = new Array[Double](rounds)
     var checksum = 0L
+    var problem: Option[String] = None
     round = 0
+    // Do not catch ColumnarFallback. A decline reruns on rows and publishes no batch.
     while (round < rounds) do
-      val start = System.nanoTime()
-      val value = action()
-      samples(round) = (System.nanoTime() - start) / 1_000_000.0
-      checksum = checksumOf(value)
+      val sink = new CountingSink
+      val previous = ColumnMetrics.install(sink)
+      try
+        val start = System.nanoTime()
+        val value = action()
+        samples(round) = (System.nanoTime() - start) / 1_000_000.0
+        checksum = checksumOf(value)
+        if problem.isEmpty then problem = publishedMiss(name, columnar, sink.batchCount)
+      finally ColumnMetrics.restore(previous)
       round += 1
     java.util.Arrays.sort(samples)
-    (samples(samples.length / 2), checksum)
+    Measured(samples(samples.length / 2), checksum, problem)
+
+  private def publishedMiss(name: String, columnar: Boolean, batches: Long): Option[String] =
+    if columnar then Option.when(batches == 0L)(s"$name columnar published no column batch")
+    else Option.when(batches != 0L)(s"$name row published $batches column batches")
 
   private def checksumOf(value: Any): Long = value match
     case number: Long => number
