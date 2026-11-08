@@ -30,9 +30,9 @@ package com.ewoodbury.scarlet.columnar
  *
  * `rows == 0` returns `partitions` empty long-pair batches and does not sort. `partitions <= 0`,
  * `parallelism <= 0`, and an empty `batches` vector are rejected. [[sortAndSplitSelected]] sorts
- * the live prefix of each [[Selected]]. An empty prefix is an empty run. A null key orders as
- * zero and stays null. This object does not choose spill. [[RankSplitLongRuns]] does, and it calls
- * this split when the input fits.
+ * the live prefix of each [[Selected]]. An empty prefix is an empty run. A null key orders as zero
+ * and stays null. This object does not choose spill. [[RankSplitLongRuns]] does, and it calls this
+ * split when the input fits.
  */
 object RankSplitLong:
 
