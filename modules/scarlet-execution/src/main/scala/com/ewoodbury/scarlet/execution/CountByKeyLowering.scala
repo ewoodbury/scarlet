@@ -7,8 +7,8 @@ package com.ewoodbury.scarlet.execution
  * column is not read, so a null value still counts. Output kind is [[PhysicalOp.Kind.Pairs]]: one
  * `(key, count)` row per distinct key. The count is an `Int` and wraps. [[PhysicalOp.Kind.Pairs]]
  * lowers. Every other kind stays on the row path. There is no spill copy; an input that does not
- * fit the budget throws [[com.ewoodbury.scarlet.columnar.ColumnarFallback]] and the action reruns
- * on rows.
+ * fit the budget throws [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] and the action
+ * fails instead of rerunning on rows.
  */
 private[execution] object CountByKeyLowering:
 

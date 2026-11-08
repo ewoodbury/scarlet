@@ -185,21 +185,31 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   it should "refuse an over-budget input before the table exists, spill flag ignored" in {
     val batch = intPairs(Array(1, 2, 1), Array(4, 5, 6))
+    classOf[ClassCastException].isAssignableFrom(classOf[ClosedKernelRefusal]) shouldBe false
     List(false, true).foreach { enabled =>
       ScarletConf.set(ScarletConf.get.copy(spillEnabled = enabled, spillBudgetBytes = 1L))
-      val refused = the[ColumnarFallback] thrownBy HashCount.byKey(Vector(batch), 2, 1, 8)
-      refused.getMessage should include("budget")
+      val refused = the[ClosedKernelRefusal] thrownBy HashCount.byKey(Vector(batch), 2, 1, 8)
+      refused.rows shouldBe 3L
+      refused.bytes should be > refused.budget
+      refused.budget shouldBe 1L
+      refused.getMessage should include(s"${refused.rows} input rows")
+      refused.getMessage should include(s"${refused.bytes} bytes")
+      refused.getMessage should include(s"${refused.budget} byte budget")
     }
   }
 
-  it should "rerun the action on rows when the columnar budget refuses" in {
+  it should "fail the action when the columnar budget refuses" in {
     val source = DistCollection.ofIntPairs(Array(1, 1, 2), Array(4, 5, 6), 2)
     List(false, true).foreach { enabled =>
       ScarletConf.set(
         ScarletConf.get.copy(columnarExecution = true, spillEnabled = enabled, spillBudgetBytes = 1L),
       )
       ScarletRuntime.get.shuffle.clear()
-      countsOf(source.countByKey.collect()) shouldBe Map(1 -> 2, 2 -> 1)
+      // The row path would count these keys. The action must fail before that map is produced.
+      val refused = the[ClosedKernelRefusal] thrownBy source.countByKey.collect()
+      refused.rows shouldBe 3L
+      refused.budget shouldBe 1L
+      refused.bytes should be > refused.budget
     }
   }
 

@@ -15,7 +15,7 @@ import com.ewoodbury.scarlet.core.ScarletConf
  *
  * There is no spill path. Before any table is allocated, the input-row byte estimate is compared
  * with [[ScarletConf.spillBudgetBytes]]. The check ignores [[ScarletConf.spillEnabled]]. Over
- * budget this throws [[ColumnarFallback]] and the action reruns on rows.
+ * budget this throws [[ClosedKernelRefusal]] and the action fails. It does not rerun on rows.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object HashCount:
@@ -57,7 +57,7 @@ object HashCount:
    *
    * The source value column is dropped before the morsel split, so the split does not copy it. A
    * run whose input-row estimate is above [[ScarletConf.spillBudgetBytes]] throws
-   * [[ColumnarFallback]] before that split. `spillEnabled` is not consulted.
+   * [[ClosedKernelRefusal]] before that split. `spillEnabled` is not consulted. The action fails.
    */
   def byKey(
       batches: Vector[ColumnBatch],
@@ -165,15 +165,13 @@ object HashCount:
 
   /**
    * Refuse before a table exists. `spillEnabled` is ignored: this operator has no spill copy, and
-   * a disabled spill flag must not keep an over-budget input on the columnar path.
+   * a disabled spill flag must not keep an over-budget input on the columnar path. The throw is
+   * not a [[ColumnarFallback]], so the action fails instead of rerunning on rows.
    */
   private def refuse(rows: Long): Unit =
     val budget = ScarletConf.get.spillBudgetBytes
     val bytes = inputRowBytes(rows)
-    if (bytes > budget) then
-      throw new ColumnarFallback(
-        s"countByKey keeps no spill copy; $rows input rows ($bytes bytes) exceed the $budget byte budget",
-      )
+    if (bytes > budget) then throw new ClosedKernelRefusal(rows, bytes, budget)
 
   private final class Table(capacity: Int):
     private val mask: Int = capacity - 1
