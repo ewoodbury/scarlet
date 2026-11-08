@@ -68,6 +68,12 @@ sealed trait WideOp
 
 // Concrete wide operation implementations
 final case class GroupByKeyWideOp(meta: SimpleWideOpMeta) extends WideOp
+
+/**
+ * Keyed count. The metadata reuses [[WideOpKind.GroupByKey]] so the shuffle writer hashes by key.
+ * This is not [[GroupByKeyWideOp]]: that operator returns `(K, Iterable[V])`.
+ */
+final case class CountByKeyWideOp(meta: SimpleWideOpMeta) extends WideOp
 final case class ReduceByKeyWideOp[V](meta: ReduceWideOpMeta[V]) extends WideOp
 final case class SortByWideOp[A, B](meta: SortWideOpMeta[A, B]) extends WideOp
 final case class PartitionByWideOp(meta: SimpleWideOpMeta) extends WideOp
@@ -96,6 +102,9 @@ final case class MapPartitionsOp[A, B](f: Iterator[A] => Iterator[B]) extends Op
 // Bypassed wide operations, appended as narrow no-op stages when upstream data is already
 // partitioned the way the operation wants it
 final case class GroupByKeyLocalOp[K, V]() extends Operation[(K, V), (K, Iterable[V])]
+
+/** Local count of an already key-hashed partition. The value is not read. */
+final case class CountByKeyLocalOp[K, V]() extends Operation[(K, V), (K, Int)]
 final case class ReduceByKeyLocalOp[K, V](reduceFunc: (V, V) => V)
     extends Operation[(K, V), (K, V)]
 final case class PartitionByLocalOp[K, V](numPartitions: Int) extends Operation[(K, V), (K, V)]
@@ -146,7 +155,7 @@ object Operation {
       conf: com.ewoodbury.scarlet.core.ScarletConf,
   ): Boolean = {
     plan match {
-      case _: Plan.GroupByKeyOp[_, _] | _: Plan.ReduceByKeyOp[_, _] =>
+      case _: Plan.GroupByKeyOp[_, _] | _: Plan.CountByKeyOp[_, _] | _: Plan.ReduceByKeyOp[_, _] =>
         // Already hash-partitioned at the default shuffle width.
         upstreamPartitioning.exists(_.isHashPartitioned(conf.defaultShufflePartitions))
 

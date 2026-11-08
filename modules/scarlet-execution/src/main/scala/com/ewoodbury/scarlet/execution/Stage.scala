@@ -122,6 +122,23 @@ object Stage {
   }
 
   /**
+   * Local keyed count on a single partition. Used for shuffle-bypass countByKey and as the
+   * per-partition operator of a countByKey shuffle stage (input is already key-partitioned). A
+   * null key is dropped. The value is not read, so a null value still counts. The count is an
+   * `Int` and wraps on overflow.
+   */
+  def countByKeyLocal[K, V]: Stage[(K, V), (K, Int)] = {
+    SingleOpStage { p =>
+      Partition(
+        NullKeys
+          .drop(p.data)
+          .groupMapReduce(_._1)((_: (K, V)) => 1)((left, right) => left + right)
+          .toSeq,
+      )
+    }
+  }
+
+  /**
    * Local keyed reduce on a single partition. Used for shuffle-bypass reduceByKey and as the
    * per-partition operator of a reduceByKey shuffle stage (input is already key-partitioned). A
    * null key is dropped before reducing. `groupMapReduce` is a single pass; a key with one value
