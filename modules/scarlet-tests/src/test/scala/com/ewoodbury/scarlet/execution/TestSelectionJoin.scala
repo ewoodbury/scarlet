@@ -17,7 +17,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  *
  * A filter stack on either side, including one filter, keeps the survivor index. The exchange scatters those rows
  * and does not slice them. A null value on a dropped row stays on this path. A null value on a
- * selected row, or on a dense side beside a selection, declines. A null key is still dropped.
+ * selected row, or on a dense side beside a selection, stays columnar. A null key is still
+ * dropped.
  */
 class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -200,7 +201,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.tryRun(joined.plan).isDefined shouldBe true
   }
 
-  it should "refuse a null value on a selected row" in {
+  it should "keep a null value on a selected row" in {
     val keyCalls = new AtomicInteger
     val narrowCalls = new AtomicInteger
     val build = DistCollection(
@@ -216,17 +217,16 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val joined = build.join(DistCollection.ofIntPairs(Array(1, 2), Array(100, 200), 2))
 
     shape(joined) shouldBe "HashJoin(Exchange(FilterKey(FilterKey(Scan))), Exchange(Scan))"
-    an[ColumnarFallback] should be thrownBy run(joined)
+    val found = shown(joined.collect())
     keyCalls.get() shouldBe 2
     narrowCalls.get() shouldBe 2
-    ColumnarPlanner.tryRun(joined.plan) shouldBe None
-    val found = shown(joined.collect())
     found should contain theSameElementsAs shown(row(joined.collect()))
-    found should contain("2,absent,200")
+    found should contain("2,null,200")
     found should contain("1,10,100")
+    ColumnarPlanner.tryRun(joined.plan).isDefined shouldBe true
   }
 
-  it should "refuse a null value on the dense side of a mixed join" in {
+  it should "keep a null value on the dense side of a mixed join" in {
     val keyCalls = new AtomicInteger
     val valueCalls = new AtomicInteger
     val build = DistCollection
@@ -243,10 +243,13 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val joined = build.join(probe)
 
     shape(joined) shouldBe buildShape
-    an[ColumnarFallback] should be thrownBy run(joined)
+    val found = shown(joined.collect())
     keyCalls.get() shouldBe 2
     valueCalls.get() shouldBe 2
-    ColumnarPlanner.tryRun(joined.plan) shouldBe None
+    found should contain theSameElementsAs shown(row(joined.collect()))
+    found should contain("4,40,null")
+    found should contain("1,10,100")
+    ColumnarPlanner.tryRun(joined.plan).isDefined shouldBe true
   }
 
   it should "drop a null key on a selected row" in {
@@ -390,7 +393,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     triples(parts) should contain theSameElementsAs triples(gathered)
   }
 
-  it should "treat a null outside the prefix as present and a selected null as absent" in {
+  it should "treat a null outside the prefix as present and a selected null as not fully present" in {
     val batch = BatchCodec.nullableIntPairs(
       Seq((Some(1), None), (Some(2), Some(5)), (None, Some(9))),
     )
@@ -404,6 +407,33 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnPipeline.valuesFullyPresent(Vector.empty[Selected]) shouldBe true
   }
 
+  it should "keep a selected null value clear and not absent" in {
+    val build = BatchCodec.nullableIntPairs(Seq((Some(1), None), (Some(2), Some(5))))
+    val selected = Selected(build, Array(0), 1)
+    val probe = BatchCodec.nullableIntPairs(Seq((Some(1), Some(100))))
+    val parts = ColumnPipeline.innerJoin(
+      JoinInput.Selected(Vector(selected)),
+      JoinInput.Dense(Vector(probe)),
+      numPartitions = 1,
+      parallelism = 1,
+    )
+    val joined = parts.lift(0).getOrElse(fail("missing partition"))
+    val keys = int32(joined, 0)
+    val left = int32(joined, 1)
+    val right = int32(joined, 2)
+
+    joined.length shouldBe 1
+    keys.isValid(0) shouldBe true
+    keys.values(0) shouldBe 1
+    left.isValid(0) shouldBe false
+    left.isAbsent(0) shouldBe false
+    right.isValid(0) shouldBe true
+    right.isAbsent(0) shouldBe false
+    right.values(0) shouldBe 100
+    // The null cell stores 0. That payload is not the partner.
+    left.values(0) shouldBe 0
+  }
+
   private def buildPairs: DistCollection[(Int, Int)] =
     DistCollection.ofIntPairs(buildKeys, buildValues, 4)
 
@@ -415,10 +445,6 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
 
   private def shape(data: DistCollection[_]): String =
     ColumnarPlanner.lower(data.plan).map(_.shape).getOrElse(fail("expected a columnar plan"))
-
-  private def run(data: DistCollection[_]): Unit =
-    val op = ColumnarPlanner.lower(data.plan).getOrElse(fail("expected a columnar plan"))
-    val _ = ColumnarInterpreter.interpret(data.plan, op)
 
   /**
    * The dense baseline compacts the filter, then slices and joins. The selection collect skips
@@ -464,6 +490,11 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
   private def triples(batches: Vector[ColumnBatch]): Seq[(Int, (Int, Int))] =
     batches.filter(_.length > 0).flatMap(batch => BatchCodec.decodeIntTriples(batch))
 
+  private def int32(batch: ColumnBatch, ordinal: Int): Int32Column =
+    batch.columns.lift(ordinal) match
+      case Some(column: Int32Column) => column
+      case other => fail(s"expected Int32 at $ordinal, got $other")
+
   private def published[A](body: => A): Long =
     ColumnMetrics.withSink(new CountingSink) {
       val _ = body
@@ -502,7 +533,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
 
   /**
    * Named erasure boundary. A join row may hold a null value. `productElement` reads it without
-   * unboxing. `absent` is that null.
+   * unboxing. The printed token is `null`. That is a clear validity bit, not an absence bit.
    */
   @SuppressWarnings(
     Array(
@@ -516,7 +547,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       val values = row.productElement(1).asInstanceOf[Product]
       Seq(row.productElement(0), values.productElement(0), values.productElement(1))
         .map {
-          case null => "absent"
+          case null => "null"
           case value: Int => String.valueOf(value)
           case _ => "other"
         }

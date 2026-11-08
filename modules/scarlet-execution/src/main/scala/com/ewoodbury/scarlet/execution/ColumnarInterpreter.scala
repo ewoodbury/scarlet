@@ -17,11 +17,12 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * returns another value, is still a fallback, and that function may already have run.
  * [[ColumnarFallback]] is the named form of a deliberate decline, including a null value on a
  * left, right, or full outer join: the value columns are already encoded, and the kernel is not
- * chosen. A null value on a long inner join is that fallback too. A null value on a selected row
- * of an int inner join is that fallback too. A null on a dropped row is not. A live null value on
- * a string join, string `reduceByKey`, or string `groupByKey` is that fallback too. A string-pair
- * filter keeps the null int. A value projection that kept a null int is that fallback too. With
- * spill off, an over-budget int `countByKey` throws `ClosedKernelRefusal`, which does not extend
+ * chosen. A null value on a long inner join is that fallback too. A selected null on an int inner
+ * join, and a null on the dense side of a mixed int hash join, stay a clear validity bit. That bit
+ * is not absence. A null on a dropped row is not a decline. A live null value on a string join,
+ * string `reduceByKey`, or string `groupByKey` is that fallback too. A string-pair filter keeps
+ * the null int. A value projection that kept a null int is that fallback too. With spill off, an
+ * over-budget int `countByKey` throws `ClosedKernelRefusal`, which does not extend
  * `ClassCastException`, so the action fails instead of rerunning on rows. With spill on, an
  * over-budget post-exchange bucket spills. A count table that still does not fit throws
  * `ClosedKernelRefusal`. Long and string `countByKey` are not columnar.
@@ -179,9 +180,11 @@ private[execution] object ColumnarInterpreter:
    * decoder and do not call the int-pair function. A long column projected from a long pair keeps
    * a clear bit via [[BatchCodec.decodeLongsPreservingAbsence]]. An element long scan still uses
    * [[BatchCodec.decodeLongs]], which rejects a clear bit. Int triples use
-   * [[BatchCodec.decodeIntTriplesPreservingAbsence]] only for a [[PhysicalOp.Project]]. A map may
-   * keep a null component. Every other triple op uses [[BatchCodec.decodeIntTriples]], which
-   * rejects a clear bit. A whole-row filter drops those rows before decode.
+   * [[BatchCodec.decodeIntTriplesPreservingAbsence]] for a [[PhysicalOp.Project]] and for an int
+   * inner join: [[PhysicalOp.HashJoin]], [[PhysicalOp.BroadcastJoin]], or
+   * [[PhysicalOp.SortMergeJoin]]. A map or that join may keep a null component. A filter or other
+   * triple op uses [[BatchCodec.decodeIntTriples]], which rejects a clear bit. A whole-row filter
+   * drops those rows before decode. Outer joins are [[Columns.Outer]] and do not use this decoder.
    */
   private[execution] def decodeFor(columns: Columns, op: PhysicalOp): Seq[Partition[_]] =
     decodeWith(columns, intPairDecoder(op), longDecoder(op), tripleDecoder(op))
@@ -228,10 +231,16 @@ private[execution] object ColumnarInterpreter:
           )
       case _ => (batch, rows) => BatchCodec.decodeIntPairs(batch, rows)
 
-  /** A triple map may keep a null component. Every other triple op rejects a clear bit. */
+  /**
+   * An int inner join or a triple map may keep a null component. A filter or other triple op
+   * rejects a clear bit. A whole-row filter drops that row before decode. Outer joins are
+   * [[Columns.Outer]] and do not use this decoder.
+   */
   private def tripleDecoder(op: PhysicalOp): (ColumnBatch, Int) => Seq[(Int, (Int, Int))] =
     op match
-      case _: PhysicalOp.Project => BatchCodec.decodeIntTriplesPreservingAbsence
+      case _: PhysicalOp.Project | _: PhysicalOp.HashJoin | _: PhysicalOp.BroadcastJoin |
+          _: PhysicalOp.SortMergeJoin =>
+        BatchCodec.decodeIntTriplesPreservingAbsence
       case _ => (batch, rows) => BatchCodec.decodeIntTriples(batch, rows)
 
   private[execution] def decodePrefix(columns: Columns, limit: Int): Seq[Any] =

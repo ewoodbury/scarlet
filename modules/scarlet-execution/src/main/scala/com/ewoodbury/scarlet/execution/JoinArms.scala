@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{ColumnBatch, ColumnPipeline, ColumnarFallback, Selected}
+import com.ewoodbury.scarlet.columnar.{ColumnBatch, ColumnPipeline, Selected}
 import com.ewoodbury.scarlet.core.Plan
 
 import ColumnPipeline.JoinInput
@@ -13,10 +13,9 @@ import ColumnPipeline.JoinInput
  * selection steps stays on the sliced dense exchange. [[FilterChain.selected]] interprets a stack
  * once. The `None` path is the only one that interprets that child.
  *
- * A null value is a clear bit in the join output. The two-dense path keeps that bit and lets the
- * triple ops above the join preserve it. A mixed join refuses a live null before the kernel,
- * because a selection cannot carry absence through the exchange. A null key is dropped by the
- * exchange. A selected side skips the slice; both dense sides use the caller's flag and slice.
+ * A null value is a clear bit in the output, including a selection. It is not an absence bit. A
+ * null key is dropped by the exchange. A selected side skips the slice; both dense sides use the
+ * caller's flag and slice.
  */
 private[execution] object JoinArms:
 
@@ -46,10 +45,6 @@ private[execution] object JoinArms:
       case _ =>
         val build = input(left, leftOp, leftSelected, selectedPartition, ordinals)
         val probe = input(right, rightOp, rightSelected, selectedPartition, ordinals)
-        if (!present(build) || !present(probe)) then
-          throw new ColumnarFallback(
-            "a null value on an inner join stays on the row path",
-          )
         ColumnPipeline.innerJoin(build, probe, width, workers)
 
   private def selection(
@@ -82,7 +77,3 @@ private[execution] object JoinArms:
     ColumnarInterpreter.pairsOf(
       ColumnarInterpreter.interpretAt(plan, op, selectedPartition, preserveAbsence, ordinals),
     )
-
-  private def present(input: JoinInput): Boolean = input match
-    case JoinInput.Dense(batches) => ColumnPipeline.valuesFullyPresent(batches)
-    case JoinInput.Selected(parts) => ColumnPipeline.valuesFullyPresent(parts)
