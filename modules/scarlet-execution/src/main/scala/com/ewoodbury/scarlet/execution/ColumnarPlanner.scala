@@ -38,34 +38,35 @@ object ColumnarPlanner:
    * element chain whose project does not declare the column's type. An int join lowers when its
    * hint is absent, shuffle-hash, or broadcast. A `(Long, Long)` inner join lowers only for an
    * absent hint or a shuffle-hash hint, to [[PhysicalOp.LongHashJoin]]. A null value on that join
-   * stays a clear validity bit and [[tryRun]] keeps the matched row. It is not an absence bit.
-   * Broadcast, sort-merge, and every outer join on long keys stay on the row path. A
-   * `(String, Int)` inner join lowers only for an absent hint or a shuffle-hash hint, to
-   * [[PhysicalOp.StringHashJoin]]. A null key is dropped. A null value stays a clear validity bit
-   * and [[tryRun]] keeps the matched row. It is not an absence bit. A key or value filter on
-   * either side, including a stack of one, scatters that side's survivor index and does not
-   * compact. An over-budget build bucket spills when `spillEnabled` is on; the estimate includes
-   * the dictionary. At or under the budget, and whenever spill is off, the join stays in memory.
-   * Broadcast, sort-merge, and every outer join on string keys stay on the row path. The layout is
-   * [[Layout.StringTriple]]. An explicit sort-merge hint on int pairs lowers to
-   * [[PhysicalOp.SortMergeJoin]]. A left, right, or full outer sort-merge hint on int pairs lowers
-   * to the matching node. Any other sort-merge returns `None`. A left outer join on int pairs
-   * lowers for a broadcast hint, a shuffle-hash hint, an absent hint, or a sort-merge hint. An
-   * absent hint uses the shuffle-hash op, matching an inner join. A right outer join on int pairs
-   * lowers for a broadcast hint, a shuffle-hash hint, an absent hint, or a sort-merge hint. An
-   * absent hint uses the shuffle-hash op. The left input is the build side and the right input is
-   * the probe side. A full outer join on int pairs lowers for a broadcast hint, a shuffle-hash
-   * hint, an absent hint, or a sort-merge hint. An absent hint uses the shuffle-hash op. A null
-   * value does not change that shape: [[tryRun]] reads the value columns and returns `None`, and
-   * the row path runs. [[SortLowering]] accepts an int, long, or string key sort of a scan, or of
-   * filters over that scan. A map, aggregate, or join under the sort stays on the row path. Any
-   * parent of that sort stays on the row path. A slot filter sorts the survivor index. Over the
-   * budget, with spill on, that index is spilled. A long-pair row filter and a whole-row string
-   * filter sort that index too. A long sort spills when `spillEnabled` is on and the retained
-   * estimate exceeds `spillBudgetBytes`. The physical op stays `SortByLongKey`. A string sort
-   * spills on that same budget. The physical op stays `SortByStringKey`. At or under the budget,
-   * and whenever spill is off, the split stays in memory and writes nothing. [[partitioning]] and
-   * [[tryRun]] follow a refusal. They also drop a lowered tree whose layout is invalid.
+   * stays a clear validity bit and [[tryRun]] keeps the matched row. It is not an absence bit. A
+   * long outer join lowers for an absent hint, shuffle-hash, broadcast, or sort-merge. Long inner
+   * broadcast and long inner sort-merge stay on the row path. A `(String, Int)` inner join lowers
+   * only for an absent hint or a shuffle-hash hint, to [[PhysicalOp.StringHashJoin]]. A null key
+   * is dropped. A null value stays a clear validity bit and [[tryRun]] keeps the matched row. It
+   * is not an absence bit. A key or value filter on either side, including a stack of one,
+   * scatters that side's survivor index and does not compact. An over-budget build bucket spills
+   * when `spillEnabled` is on; the estimate includes the dictionary. At or under the budget, and
+   * whenever spill is off, the join stays in memory. Broadcast, sort-merge, and every outer join
+   * on string keys stay on the row path. The layout is [[Layout.StringTriple]]. An explicit
+   * sort-merge hint on int pairs lowers to [[PhysicalOp.SortMergeJoin]]. A left, right, or full
+   * outer sort-merge hint on int pairs lowers to the matching node. Any other sort-merge returns
+   * `None`. A left outer join on int pairs lowers for a broadcast hint, a shuffle-hash hint, an
+   * absent hint, or a sort-merge hint. An absent hint uses the shuffle-hash op, matching an inner
+   * join. A right outer join on int pairs lowers for a broadcast hint, a shuffle-hash hint, an
+   * absent hint, or a sort-merge hint. An absent hint uses the shuffle-hash op. The left input is
+   * the build side and the right input is the probe side. A full outer join on int pairs lowers
+   * for a broadcast hint, a shuffle-hash hint, an absent hint, or a sort-merge hint. An absent
+   * hint uses the shuffle-hash op. A null value does not change that shape: [[tryRun]] reads the
+   * value columns and returns `None`, and the row path runs. [[SortLowering]] accepts an int,
+   * long, or string key sort of a scan, or of filters over that scan. A map, aggregate, or join
+   * under the sort stays on the row path. Any parent of that sort stays on the row path. A slot
+   * filter sorts the survivor index. Over the budget, with spill on, that index is spilled. A
+   * long-pair row filter and a whole-row string filter sort that index too. A long sort spills
+   * when `spillEnabled` is on and the retained estimate exceeds `spillBudgetBytes`. The physical
+   * op stays `SortByLongKey`. A string sort spills on that same budget. The physical op stays
+   * `SortByStringKey`. At or under the budget, and whenever spill is off, the split stays in
+   * memory and writes nothing. [[partitioning]] and [[tryRun]] follow a refusal. They also drop a
+   * lowered tree whose layout is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -748,7 +749,7 @@ object ColumnarPlanner:
       }
     case PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
         PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
-        PhysicalOp.Kind.GroupedLongs =>
+        PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter =>
       None
 
   /** A whole-row string filter. A project still refuses the chain. */
@@ -1041,6 +1042,16 @@ object ColumnarPlanner:
       hashed(PhysicalOp.Kind.LongPairs)
     case _: PhysicalOp.StringHashJoin =>
       hashed(PhysicalOp.Kind.StringTriples)
+    case _: PhysicalOp.LongHashLeftOuter | _: PhysicalOp.LongHashRightOuter |
+        _: PhysicalOp.LongHashFullOuter | _: PhysicalOp.LongSortMergeLeftOuter |
+        _: PhysicalOp.LongSortMergeRightOuter | _: PhysicalOp.LongSortMergeFullOuter =>
+      hashed(PhysicalOp.Kind.LongOuter)
+    case PhysicalOp.LongBroadcastLeftOuter(left, _) =>
+      infoOf(left).copy(layout = layoutOf(PhysicalOp.Kind.LongOuter))
+    case PhysicalOp.LongBroadcastRightOuter(_, right) =>
+      infoOf(right).copy(layout = layoutOf(PhysicalOp.Kind.LongOuter))
+    case PhysicalOp.LongBroadcastFullOuter(left, _) =>
+      infoOf(left).copy(layout = layoutOf(PhysicalOp.Kind.LongOuter))
     case PhysicalOp.BroadcastJoin(left, right, buildSide) =>
       broadcastInfo(left, right, buildSide)
     case PhysicalOp.BroadcastLeftOuter(left, _) =>
@@ -1095,7 +1106,8 @@ object ColumnarPlanner:
       Layout.GroupedLong(ScarletConf.get.columnarBatchSize)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Bools | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
-        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples =>
+        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
+        PhysicalOp.Kind.LongOuter =>
       Layout.Columnar(ScarletConf.get.columnarBatchSize)
 
   private[execution] def batchSize: Int =

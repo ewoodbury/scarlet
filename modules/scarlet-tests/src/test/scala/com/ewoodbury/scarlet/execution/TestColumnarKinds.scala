@@ -7,8 +7,8 @@ import com.ewoodbury.scarlet.core.Plan
 
 /**
  * Names every current source descriptor and physical kind. An inline match is checked where it is
- * expanded, so adding an enum case does not fail this file unless a call site passes that case.
- * A new case fails the build through the `values.length` assertions below and through
+ * expanded, so adding an enum case does not fail this file unless a call site passes that case. A
+ * new case fails the build through the `values.length` assertions below and through
  * `-Wconf:name=PatternMatchExhaustivity:e` on the matches that receive the value.
  */
 class TestColumnarKinds extends AnyFlatSpec with Matchers:
@@ -37,8 +37,9 @@ class TestColumnarKinds extends AnyFlatSpec with Matchers:
     kindOrdinal(PhysicalOp.Kind.GroupedInts) shouldBe 12
     kindOrdinal(PhysicalOp.Kind.GroupedStrings) shouldBe 13
     kindOrdinal(PhysicalOp.Kind.GroupedLongs) shouldBe 14
+    kindOrdinal(PhysicalOp.Kind.LongOuter) shouldBe 15
     Plan.SourceDescriptor.values.length shouldBe 8
-    PhysicalOp.Kind.values.length shouldBe 15
+    PhysicalOp.Kind.values.length shouldBe 16
   }
 
 inline def descriptorOrdinal(inline descriptor: Plan.SourceDescriptor): Int =
@@ -69,3 +70,4 @@ inline def kindOrdinal(inline kind: PhysicalOp.Kind): Int =
     case PhysicalOp.Kind.GroupedInts => 12
     case PhysicalOp.Kind.GroupedStrings => 13
     case PhysicalOp.Kind.GroupedLongs => 14
+    case PhysicalOp.Kind.LongOuter => 15

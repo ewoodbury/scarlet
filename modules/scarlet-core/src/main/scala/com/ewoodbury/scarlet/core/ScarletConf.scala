@@ -49,16 +49,18 @@ final case class ScarletConf(
      * build, an int shuffle-hash build bucket, a long shuffle-hash build bucket, a string
      * shuffle-hash build bucket, a sort-merge partition, an int-pair sort, a long-pair sort, or a
      * string-pair sort whose estimate exceeds `spillBudgetBytes` is spilled. Off by default, so
-     * each stays in memory. Outer hash and broadcast joins do not read this flag; an outer
-     * sort-merge does. A spilled int, long, or string `reduceByKey` bucket may change first-seen
-     * output order; compare it as a map. An int, long, or string `countByKey` with this flag off
-     * still throws `ClosedKernelRefusal` before a table. The long estimate charges 8-byte keys.
-     * The string estimate charges dictionary bytes. With the flag on, an over-budget post-exchange
-     * bucket spills. A count table that still does not fit throws `ClosedKernelRefusal`. An int,
-     * long, or string `groupByKey` bucket over the budget spills when this flag is on: the
-     * post-exchange bucket is sliced in input order and grouped one morsel at a time. Spill off
-     * keeps the in-memory groups and writes nothing. A morsel whose group table does not fit
-     * throws `ClosedKernelRefusal`. The appended groups are not bounded by the budget.
+     * each stays in memory. Outer hash and broadcast joins do not read this flag. An int outer
+     * sort-merge does and writes runs. A long outer sort-merge reads the flag and throws when the
+     * present-key estimate is over the budget, and it writes nothing. A spilled int, long, or
+     * string `reduceByKey` bucket may change first-seen output order; compare it as a map. An int,
+     * long, or string `countByKey` with this flag off still throws `ClosedKernelRefusal` before a
+     * table. The long estimate charges 8-byte keys. The string estimate charges dictionary bytes.
+     * With the flag on, an over-budget post-exchange bucket spills. A count table that still does
+     * not fit throws `ClosedKernelRefusal`. An int, long, or string `groupByKey` bucket over the
+     * budget spills when this flag is on: the post-exchange bucket is sliced in input order and
+     * grouped one morsel at a time. Spill off keeps the in-memory groups and writes nothing. A
+     * morsel whose group table does not fit throws `ClosedKernelRefusal`. The appended groups are
+     * not bounded by the budget.
      */
     spillEnabled: Boolean = false,
     /**

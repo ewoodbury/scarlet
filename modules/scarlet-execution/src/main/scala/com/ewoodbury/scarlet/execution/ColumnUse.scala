@@ -83,7 +83,8 @@ private[execution] object ColumnUse:
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
       Set(0, 1)
-    case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples =>
+    case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
+        PhysicalOp.Kind.LongOuter =>
       Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools =>
@@ -99,7 +100,8 @@ private[execution] object ColumnUse:
       Set(0, 1, 2)
 
   private def fullWidth(op: PhysicalOp): Set[Int] = op.kind match
-    case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples =>
+    case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
+        PhysicalOp.Kind.LongOuter =>
       Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts |
@@ -187,6 +189,51 @@ private[execution] object ColumnUse:
       case (
             Plan.FullOuterJoinOp(left, right, _),
             PhysicalOp.SortMergeFullOuter(leftOp, rightOp),
+          ) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.LeftOuterJoinOp(left, right, _),
+            PhysicalOp.LongHashLeftOuter(leftOp, rightOp),
+          ) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.LeftOuterJoinOp(left, right, _),
+            PhysicalOp.LongBroadcastLeftOuter(leftOp, rightOp),
+          ) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.LeftOuterJoinOp(left, right, _),
+            PhysicalOp.LongSortMergeLeftOuter(leftOp, rightOp),
+          ) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.RightOuterJoinOp(left, right, _),
+            PhysicalOp.LongHashRightOuter(leftOp, rightOp),
+          ) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.RightOuterJoinOp(left, right, _),
+            PhysicalOp.LongBroadcastRightOuter(leftOp, rightOp),
+          ) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.RightOuterJoinOp(left, right, _),
+            PhysicalOp.LongSortMergeRightOuter(leftOp, rightOp),
+          ) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.FullOuterJoinOp(left, right, _),
+            PhysicalOp.LongHashFullOuter(leftOp, rightOp),
+          ) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.FullOuterJoinOp(left, right, _),
+            PhysicalOp.LongBroadcastFullOuter(leftOp, rightOp),
+          ) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.FullOuterJoinOp(left, right, _),
+            PhysicalOp.LongSortMergeFullOuter(leftOp, rightOp),
           ) =>
         pair(left, right, leftOp, rightOp)
       case _ => None

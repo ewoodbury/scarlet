@@ -260,7 +260,11 @@ object ColumnBatches:
       case int64: Int64Column =>
         val values = new Array[Long](length)
         System.arraycopy(int64.values, start, values, 0, length)
-        Int64Column.of(values, validityRange(int64.validity, start, length), length)
+        val validity = validityRange(int64.validity, start, length)
+        int64.absence match
+          case Some(bits) =>
+            Int64Column.withAbsence(values, validity, validityRange(bits, start, length), length)
+          case None => Int64Column.of(values, validity, length)
       case float64: Float64Column =>
         val values = new Array[Double](length)
         System.arraycopy(float64.values, start, values, 0, length)
@@ -318,14 +322,23 @@ object ColumnBatches:
   private def appendInt64(columns: Vector[Int64Column], total: Int): Int64Column =
     val values = new Array[Long](total)
     val words = Validity.allocate(total)
+    val absentWords =
+      if (columns.exists(_.absence.isDefined)) then Some(Validity.allocate(total)) else None
     val written = columns.foldLeft(0) { (offset, column) =>
       val length = column.length
       System.arraycopy(column.values, 0, values, offset, length)
       copyBits(column.validity, 0, words, offset, length)
+      absentWords.foreach { destination =>
+        column.absence.foreach(source => copyBits(source, 0, destination, offset, length))
+      }
       offset + length
     }
     require(written == total, s"copied $written rows into $total")
-    Int64Column.of(values, Validity.fromWords(words, total), total)
+    val validity = Validity.fromWords(words, total)
+    absentWords match
+      case Some(bits) =>
+        Int64Column.withAbsence(values, validity, Validity.fromWords(bits, total), total)
+      case None => Int64Column.of(values, validity, total)
 
   private def appendFloat64(columns: Vector[Float64Column], total: Int): Float64Column =
     val values = new Array[Double](total)

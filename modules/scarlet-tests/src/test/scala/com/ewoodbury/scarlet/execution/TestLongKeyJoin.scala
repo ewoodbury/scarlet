@@ -129,8 +129,7 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val matched = parts.lift(home).getOrElse(fail("missing partition"))
     BatchCodec.decodeLongTriples(matched).map(_._1).distinct.sorted shouldBe Seq(1L, wide).sorted
     parts.zipWithIndex.foreach { (batch, index) =>
-      if (index != home) then
-        BatchCodec.decodeLongTriples(batch).map(_._1) should not contain wide
+      if (index != home) then BatchCodec.decodeLongTriples(batch).map(_._1) should not contain wide
     }
   }
 
@@ -197,14 +196,30 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     collected should contain theSameElementsAs row(joined.collect().toList)
   }
 
-  it should "keep broadcast, sort-merge, and outer joins on the row path" in {
+  it should "keep long inner broadcast and sort-merge on the row path" in {
     val left = DistCollection.ofLongPairs(Array(1L, 2L), Array(10L, 20L), 4)
     val right = DistCollection.ofLongPairs(Array(1L, 3L), Array(100L, 30L), 4)
     refuse(left.broadcastJoin(right))
     refuse(left.sortMergeJoin(right))
-    refuse(left.leftOuterJoin(right))
-    refuse(left.rightOuterJoin(right))
-    refuse(left.fullOuterJoin(right))
+    val leftOuter = left.leftOuterJoin(right)
+    val rightOuter = left.rightOuterJoin(right)
+    val fullOuter = left.fullOuterJoin(right)
+    ColumnarPlanner.lower(leftOuter.plan).map(_.shape) shouldBe Some(
+      "LongHashLeftOuter(Exchange(Scan), Exchange(Scan))",
+    )
+    ColumnarPlanner.lower(rightOuter.plan).map(_.shape) shouldBe Some(
+      "LongHashRightOuter(Exchange(Scan), Exchange(Scan))",
+    )
+    ColumnarPlanner.lower(fullOuter.plan).map(_.shape) shouldBe Some(
+      "LongHashFullOuter(Exchange(Scan), Exchange(Scan))",
+    )
+    ColumnarPlanner.lower(leftOuter.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.LongOuter)
+    ColumnarPlanner.tryRun(leftOuter.plan).isDefined shouldBe true
+    ColumnarPlanner.tryRun(rightOuter.plan).isDefined shouldBe true
+    ColumnarPlanner.tryRun(fullOuter.plan).isDefined shouldBe true
+    leftOuter.collect().toList should contain theSameElementsAs row(leftOuter.collect().toList)
+    rightOuter.collect().toList should contain theSameElementsAs row(rightOuter.collect().toList)
+    fullOuter.collect().toList should contain theSameElementsAs row(fullOuter.collect().toList)
   }
 
   private def refuse[A](collection: DistCollection[A]): Unit =
@@ -225,7 +240,8 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     parts.foreach(assertPresent)
 
   private def longTripleBatches(plan: Plan[_]): Vector[ColumnBatch] =
-    val lowered = ColumnarPlanner.lower(plan).getOrElse(fail(s"expected a lowered plan, got $plan"))
+    val lowered =
+      ColumnarPlanner.lower(plan).getOrElse(fail(s"expected a lowered plan, got $plan"))
     ColumnarInterpreter.interpret(plan, lowered) match
       case ColumnarInterpreter.Columns.LongTriples(parts) => parts
       case other => fail(s"expected long triples, got $other")

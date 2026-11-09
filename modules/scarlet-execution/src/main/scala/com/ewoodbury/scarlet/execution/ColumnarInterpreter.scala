@@ -293,7 +293,7 @@ private[execution] object ColumnarInterpreter:
           // Joins are not partition-preserving, so `take` does not reach this arm.
           prefixRows(parts, limit, BatchCodec.decodeLongTriplesPreservingAbsence)
         case Columns.Outer(parts, absent) =>
-          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeOuter(batch, absent, rows))
+          prefixRows(parts, limit, (batch, rows) => LongOuterDecode.decode(batch, absent, rows))
         case Columns.Strings(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeStrings(batch, rows))
         case Columns.StringPairs(parts) =>
@@ -389,7 +389,8 @@ private[execution] object ColumnarInterpreter:
         case PhysicalOp.Kind.StringPairs => StringPairWalk.encoded(selected, ordinals)
         case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
             PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
-            PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
+            PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs |
+            PhysicalOp.Kind.LongOuter =>
           throw new IllegalStateException(
             s"physical tree does not match ${plan.getClass.getSimpleName}",
           )
@@ -811,6 +812,10 @@ private[execution] object ColumnarInterpreter:
           )
           StringRankSplitRuns.sortAndSplit(batches, width, workers, ScarletConf.get)
       Columns.StringPairs(sorted)
+    case (plan, op) if LongOuterArms.accepts(plan, op) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      LongOuterArms.run(plan, op, selectedPartition, ordinals)
     case _ =>
       throw new IllegalStateException(
         s"physical tree does not match ${plan.getClass.getSimpleName}",
@@ -1026,7 +1031,7 @@ private[execution] object ColumnarInterpreter:
       // [[ColumnarPlanner.runLowered]] casts the partition sequence to the plan's element type.
       parts.map(batch => Partition(BatchCodec.decodeLongTriplesPreservingAbsence(batch)))
     case Columns.Outer(parts, absent) =>
-      parts.map(batch => Partition(BatchCodec.decodeOuter(batch, absent)))
+      parts.map(batch => Partition(LongOuterDecode.decode(batch, absent)))
     case Columns.Strings(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeStrings(batch)))
     case Columns.StringPairs(parts) =>
