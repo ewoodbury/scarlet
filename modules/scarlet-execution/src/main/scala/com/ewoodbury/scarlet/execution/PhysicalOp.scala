@@ -221,7 +221,11 @@ enum PhysicalOp:
    * [[PhysicalOp.Kind.GroupedInts]] for a [[PhysicalOp.Kind.Pairs]] child,
    * [[PhysicalOp.Kind.GroupedStrings]] for a [[PhysicalOp.Kind.StringPairs]] child, and
    * [[PhysicalOp.Kind.GroupedLongs]] for a [[PhysicalOp.Kind.LongPairs]] child. Any other child is
-   * a planner bug. There is no partial combine, no spill, and no sort.
+   * a planner bug. There is no partial combine and no sort. Spill off keeps the in-memory groups
+   * and writes nothing. Spill on slices one over-budget post-exchange bucket in input order. A
+   * morsel whose group table does not fit throws
+   * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] before that table. The appended groups
+   * are not bounded by the budget.
    */
   case GroupByKey(child: PhysicalOp)
 

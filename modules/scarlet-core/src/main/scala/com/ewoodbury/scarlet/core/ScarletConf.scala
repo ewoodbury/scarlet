@@ -54,7 +54,11 @@ final case class ScarletConf(
      * output order; compare it as a map. An int, long, or string `countByKey` with this flag off
      * still throws `ClosedKernelRefusal` before a table. The long estimate charges 8-byte keys.
      * The string estimate charges dictionary bytes. With the flag on, an over-budget post-exchange
-     * bucket spills. A count table that still does not fit throws `ClosedKernelRefusal`.
+     * bucket spills. A count table that still does not fit throws `ClosedKernelRefusal`. An int,
+     * long, or string `groupByKey` bucket over the budget spills when this flag is on: the
+     * post-exchange bucket is sliced in input order and grouped one morsel at a time. Spill off
+     * keeps the in-memory groups and writes nothing. A morsel whose group table does not fit
+     * throws `ClosedKernelRefusal`. The appended groups are not bounded by the budget.
      */
     spillEnabled: Boolean = false,
     /**
@@ -78,7 +82,11 @@ final case class ScarletConf(
      * it spills when spill is on: the post-exchange bucket is sub-partitioned and folded one
      * morsel at a time. The long estimate charges 8-byte keys. The string estimate charges
      * dictionary bytes. Spill off throws `ClosedKernelRefusal` before a table. A count table that
-     * still does not fit throws `ClosedKernelRefusal`.
+     * still does not fit throws `ClosedKernelRefusal`. An int, long, or string `groupByKey` bucket
+     * over it spills when spill is on, sliced in input order. Spill off stays in memory. A morsel
+     * whose group table does not fit throws `ClosedKernelRefusal`. The appended groups are not
+     * bounded by this budget. The long group estimate charges 8-byte keys. The string group
+     * estimate charges dictionary bytes, including an entry no row uses.
      */
     spillBudgetBytes: Long = 64L * 1024L * 1024L,
     /**

@@ -74,7 +74,9 @@ finish. Its numbers are in the next section. They do not replace the 1M table ab
 process and a 4 GB heap. Two processes ran at once, so a neighbor was on the machine, except
 `groupByKey` at 10M rows, which ran alone. `encode_ms` is the encode before warmup. It is not part
 of the p50. The p50 still includes the scan encode. All 48 runs published at least one column
-batch and exited 0. `groupByKey` does not spill; at 10M rows it still fit.
+batch and exited 0. That `groupByKey` run wrote no spill file because `groupByKey` did not
+spill yet. The estimate added in this change charges every input row, so a 1024-key fit does
+not describe it.
 
 `encode_ms` is outside the p50 column. A null value is a null value, at index 1 mod 4096, so the
 key filter keeps it. One filter is the key filter only.

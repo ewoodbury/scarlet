@@ -5,10 +5,13 @@ package com.ewoodbury.scarlet.execution
  *
  * The child is an exchange, and the kernel performs the shuffle. A null key is dropped. A null
  * value is not dropped: a clear value bit is a planner bug. One grouped batch is published per
- * shuffle partition, including an empty bucket. There is no partial combine, no spill, and no
- * sort. Key order inside a partition is first-seen. Value order inside a key is input order.
- * `keys`, `values`, `take`, and a map above the group stay on the row path. `count` is the number
- * of groups. [[PhysicalOp.Kind.Pairs]], [[PhysicalOp.Kind.LongPairs]], and
+ * shuffle partition, including an empty bucket. There is no partial combine and no sort. Spill off
+ * keeps the in-memory groups and writes nothing. Spill on slices one over-budget post-exchange
+ * bucket in input order. A morsel whose group table does not fit throws
+ * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] before that table. The appended groups
+ * are not bounded by the budget. Key order inside a partition is first-seen. Value order inside a
+ * key is input order. `keys`, `values`, `take`, and a map above the group stay on the row path.
+ * `count` is the number of groups. [[PhysicalOp.Kind.Pairs]], [[PhysicalOp.Kind.LongPairs]], and
  * [[PhysicalOp.Kind.StringPairs]] lower. Every other kind stays on the row path.
  */
 private[execution] object GroupByKeyLowering:

@@ -2,6 +2,8 @@ package com.ewoodbury.scarlet.columnar
 
 import java.util.Arrays
 
+import com.ewoodbury.scarlet.core.ScarletConf
+
 /**
  * Groups pair batches by key.
  *
@@ -22,7 +24,15 @@ import java.util.Arrays
  * `rows(0 until count)`, so a null value on a dropped row does not throw. [[stringsSelected]]
  * scatters with [[HashExchange.partitionAllSelectedUtf8]], which drops a null key, keeps `""`, and
  * shares the source dictionary. One grouped batch is published per partition, including an empty
- * bucket. There is no partial combine, no spill, and no sort.
+ * bucket. There is no partial combine and no sort.
+ *
+ * Spill is off unless [[ScarletConf.spillEnabled]] is set. While it is off, an over-budget bucket
+ * stays in memory and writes nothing. While it is on, a post-exchange bucket whose table estimate
+ * is over [[ScarletConf.spillBudgetBytes]] is sliced in input order and grouped one morsel at a
+ * time. A morsel that still does not fit throws [[ClosedKernelRefusal]] before its table is
+ * allocated. The appended groups are not bounded by the budget. The morsel width is
+ * [[ScarletConf.columnarBatchSize]]. Under-budget buckets, and every bucket while spill is off,
+ * keep [[MorselScheduler.map]].
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object GroupByKey:
@@ -45,7 +55,7 @@ object GroupByKey:
       )
       batches.foreach(requirePresentValues)
       val buckets = HashExchange.partitionAll(batches, keyOrdinal = 0, partitions, parallelism)
-      MorselScheduler.map(buckets, parallelism)((_, bucket) => group(bucket))
+      finishBuckets(buckets, parallelism, GroupByKeySpill.exceeds, GroupByKeySpill.finish, group)
 
   /**
    * [[int32]] for a selection. Present values are checked on `rows(0 until count)` only. The
@@ -67,7 +77,7 @@ object GroupByKey:
       selected.foreach(requirePresentSelection)
       val buckets =
         HashExchange.partitionAllSelected(selected, keyOrdinal = 0, partitions, parallelism)
-      MorselScheduler.map(buckets, parallelism)((_, bucket) => group(bucket))
+      finishBuckets(buckets, parallelism, GroupByKeySpill.exceeds, GroupByKeySpill.finish, group)
 
   def strings(
       batches: Vector[ColumnBatch],
@@ -88,7 +98,13 @@ object GroupByKey:
       batches.foreach(requirePresentValues)
       val buckets =
         HashExchange.partitionAllUtf8(batches, keyOrdinal = 0, partitions, parallelism)
-      MorselScheduler.map(buckets, parallelism)((_, bucket) => groupStrings(bucket))
+      finishBuckets(
+        buckets,
+        parallelism,
+        StringGroupByKeySpill.exceeds,
+        StringGroupByKeySpill.finish,
+        groupStrings,
+      )
 
   /**
    * Groups `(Long, Long)`. An empty input publishes `partitions` empty batches. Every batch must
@@ -115,7 +131,13 @@ object GroupByKey:
       batches.foreach(requirePresentLongValues)
       val buckets =
         HashExchange.partitionAllInt64(batches, keyOrdinal = 0, partitions, parallelism)
-      MorselScheduler.map(buckets, parallelism)((_, bucket) => groupLongs(bucket))
+      finishBuckets(
+        buckets,
+        parallelism,
+        LongGroupByKeySpill.exceeds,
+        LongGroupByKeySpill.finish,
+        groupLongs,
+      )
 
   /**
    * [[strings]] for a selection. Present values are checked on `rows(0 until count)` only. The
@@ -137,7 +159,13 @@ object GroupByKey:
       selected.foreach(requirePresentSelection)
       val buckets =
         HashExchange.partitionAllSelectedUtf8(selected, keyOrdinal = 0, partitions, parallelism)
-      MorselScheduler.map(buckets, parallelism)((_, bucket) => groupStrings(bucket))
+      finishBuckets(
+        buckets,
+        parallelism,
+        StringGroupByKeySpill.exceeds,
+        StringGroupByKeySpill.finish,
+        groupStrings,
+      )
 
   private def requirePresentValues(batch: ColumnBatch): Unit =
     val values = ColumnHash.int32At(batch, 1)
@@ -176,7 +204,19 @@ object GroupByKey:
   private val nullValueMessage =
     "groupByKey value column has a null; a clear value bit is a planner bug"
 
-  private def group(batch: ColumnBatch): GroupedIntBatch =
+  private def finishBuckets[A](
+      buckets: Vector[ColumnBatch],
+      parallelism: Int,
+      exceeds: (ColumnBatch, ScarletConf) => Boolean,
+      finish: (ColumnBatch, ScarletConf) => A,
+      groupOne: ColumnBatch => A,
+  ): Vector[A] =
+    val conf = ScarletConf.get
+    if (buckets.exists(bucket => exceeds(bucket, conf))) then
+      buckets.map(bucket => finish(bucket, conf))
+    else MorselScheduler.map(buckets, parallelism)((_, bucket) => groupOne(bucket))
+
+  private[columnar] def group(batch: ColumnBatch): GroupedIntBatch =
     val keys = ColumnHash.int32At(batch, 0)
     val values = ColumnHash.int32At(batch, 1)
     require(keys.length == values.length, "key and value columns differ in length")
@@ -236,7 +276,7 @@ object GroupByKey:
         outValues,
       )
 
-  private def groupStrings(batch: ColumnBatch): GroupedStringBatch =
+  private[columnar] def groupStrings(batch: ColumnBatch): GroupedStringBatch =
     val keys = utf8At(batch, 0)
     val values = ColumnHash.int32At(batch, 1)
     require(keys.length == values.length, "key and value columns differ in length")
@@ -296,7 +336,7 @@ object GroupByKey:
         outValues,
       )
 
-  private def groupLongs(batch: ColumnBatch): GroupedLongBatch =
+  private[columnar] def groupLongs(batch: ColumnBatch): GroupedLongBatch =
     val keys = ColumnHash.int64At(batch, 0)
     val values = ColumnHash.int64At(batch, 1)
     require(keys.length == values.length, "key and value columns differ in length")
