@@ -27,7 +27,10 @@ import com.ewoodbury.scarlet.core.Partition
  * and probes the right. A probe-side row with no partner sets the build value's absence bit. A
  * null value is not absence. A sort-merge outer join has no build table. Long outer joins are the
  * `LongHash*Outer`, `LongBroadcast*Outer`, and `LongSortMerge*Outer` nodes. Their kind is
- * [[PhysicalOp.Kind.LongOuter]]. Hash and broadcast do not spill. Sort-merge runs in memory.
+ * [[PhysicalOp.Kind.LongOuter]]. String outer joins are the `StringHash*Outer`,
+ * `StringBroadcast*Outer`, and `StringSortMerge*Outer` nodes. Their kind is
+ * [[PhysicalOp.Kind.StringOuter]]. Hash and broadcast do not spill. Sort-merge runs in memory and
+ * throws instead of spilling.
  */
 enum PhysicalOp:
   case Scan(sourceKind: PhysicalOp.Kind, partitions: Seq[Partition[_]])
@@ -270,6 +273,67 @@ enum PhysicalOp:
   case LongSortMergeFullOuter(left: PhysicalOp, right: PhysicalOp)
 
   /**
+   * Shuffle-hash left outer join of `(String, Int)` pairs. Both children are exchanges. The left
+   * exchange carries a null key to partition 0. The right exchange drops one. Keys are dictionary
+   * UTF-8. The sides keep independent dictionaries. The table matches strings, not codes. `""` is
+   * present. `"é"` does not match `"e\u0301"`. A clear key bit is tested before the dictionary is
+   * indexed. The build table uses `broadcastBuildBudgetBytes` per partition and does not spill.
+   * The estimate is `StringHashJoinSpill.retainedBytes`, which includes the dictionary. The
+   * matched-row bitmap is not part of that budget. Output kind is [[PhysicalOp.Kind.StringOuter]].
+   * Columns are `(key, left, right)`: `Utf8Dict`, `Int32`, `Int32`. Values use
+   * `Int32Column.withAbsence`. The key column has no absence field. A null value stays on the row
+   * path.
+   */
+  case StringHashLeftOuter(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * Shuffle-hash right outer join of `(String, Int)` pairs. Both children are exchanges. The right
+   * side is the probe and carries a null key. The value columns are swapped back to
+   * `(key, left, right)`. Output kind is [[PhysicalOp.Kind.StringOuter]].
+   */
+  case StringHashRightOuter(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * Shuffle-hash full outer join of `(String, Int)` pairs. Both exchanges carry a null key. The
+   * matched-row bitmap and the null-key copy are not part of the build budget. Output kind is
+   * [[PhysicalOp.Kind.StringOuter]].
+   */
+  case StringHashFullOuter(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * Broadcast left outer join of `(String, Int)` pairs. No exchange. Kind
+   * [[PhysicalOp.Kind.StringOuter]].
+   */
+  case StringBroadcastLeftOuter(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * Broadcast right outer join of `(String, Int)` pairs. No exchange. Kind
+   * [[PhysicalOp.Kind.StringOuter]].
+   */
+  case StringBroadcastRightOuter(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * Broadcast full outer join of `(String, Int)` pairs. No exchange. Kind
+   * [[PhysicalOp.Kind.StringOuter]].
+   */
+  case StringBroadcastFullOuter(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * Sort-merge left outer join of `(String, Int)` pairs. Both children are exchanges. This runs in
+   * memory. Over `spillBudgetBytes` with spill on it throws and writes nothing. Output kind is
+   * [[PhysicalOp.Kind.StringOuter]].
+   */
+  case StringSortMergeLeftOuter(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * Sort-merge right outer join of `(String, Int)` pairs. Kind [[PhysicalOp.Kind.StringOuter]].
+   */
+  case StringSortMergeRightOuter(left: PhysicalOp, right: PhysicalOp)
+
+  /** Sort-merge full outer join of `(String, Int)` pairs. Kind [[PhysicalOp.Kind.StringOuter]]. */
+  case StringSortMergeFullOuter(left: PhysicalOp, right: PhysicalOp)
+
+  /**
    * `groupByKey`. The child is an [[PhysicalOp.Exchange]]. The kernel shuffles. A null key is
    * dropped. A null value is kept, and a clear value bit is a planner bug. One grouped batch is
    * published per shuffle partition, including an empty bucket. Output kind is
@@ -405,6 +469,11 @@ enum PhysicalOp:
         LongBroadcastFullOuter(_, _) | LongSortMergeLeftOuter(_, _) |
         LongSortMergeRightOuter(_, _) | LongSortMergeFullOuter(_, _) =>
       PhysicalOp.Kind.LongOuter
+    case StringHashLeftOuter(_, _) | StringHashRightOuter(_, _) | StringHashFullOuter(_, _) |
+        StringBroadcastLeftOuter(_, _) | StringBroadcastRightOuter(_, _) |
+        StringBroadcastFullOuter(_, _) | StringSortMergeLeftOuter(_, _) |
+        StringSortMergeRightOuter(_, _) | StringSortMergeFullOuter(_, _) =>
+      PhysicalOp.Kind.StringOuter
 
   /**
    * An int inner join, or a filter or project stacked on one. An outer join is a triple batch with
@@ -488,11 +557,27 @@ enum PhysicalOp:
       s"LongSortMergeRightOuter(${left.shape}, ${right.shape})"
     case LongSortMergeFullOuter(left, right) =>
       s"LongSortMergeFullOuter(${left.shape}, ${right.shape})"
+    case StringHashLeftOuter(left, right) => s"StringHashLeftOuter(${left.shape}, ${right.shape})"
+    case StringHashRightOuter(left, right) =>
+      s"StringHashRightOuter(${left.shape}, ${right.shape})"
+    case StringHashFullOuter(left, right) => s"StringHashFullOuter(${left.shape}, ${right.shape})"
+    case StringBroadcastLeftOuter(left, right) =>
+      s"StringBroadcastLeftOuter(${left.shape}, ${right.shape})"
+    case StringBroadcastRightOuter(left, right) =>
+      s"StringBroadcastRightOuter(${left.shape}, ${right.shape})"
+    case StringBroadcastFullOuter(left, right) =>
+      s"StringBroadcastFullOuter(${left.shape}, ${right.shape})"
+    case StringSortMergeLeftOuter(left, right) =>
+      s"StringSortMergeLeftOuter(${left.shape}, ${right.shape})"
+    case StringSortMergeRightOuter(left, right) =>
+      s"StringSortMergeRightOuter(${left.shape}, ${right.shape})"
+    case StringSortMergeFullOuter(left, right) =>
+      s"StringSortMergeFullOuter(${left.shape}, ${right.shape})"
 
 object PhysicalOp:
   enum Kind:
     case Ints, Longs, Floats, Pairs, Triples, Strings, Bools, LongPairs, LongCounts, LongTriples,
-      StringPairs, StringTriples, GroupedInts, GroupedStrings, GroupedLongs, LongOuter
+      StringPairs, StringTriples, GroupedInts, GroupedStrings, GroupedLongs, LongOuter, StringOuter
 
   /** Which logical child of a broadcast join fills the build table. */
   enum BuildSide:

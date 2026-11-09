@@ -156,9 +156,11 @@ private[execution] object ColumnarInterpreter:
     case StringTriples(parts: Vector[ColumnBatch])
 
     /**
-     * Outer-join batches stay `(key, left, right)`. `absent` tells [[BatchCodec.decodeOuter]]
-     * which value column is the `Option`. [[AbsentSide.Right]] is a left outer join.
-     * [[AbsentSide.Left]] is a right outer join. [[AbsentSide.Both]] is a full outer join.
+     * Outer-join batches stay `(key, left, right)`. `absent` tells the decoder which value column
+     * is the `Option`. A string batch is [[StringOuterDecode]]. A long batch is
+     * [[LongOuterDecode]]. An int batch still reaches [[BatchCodec.decodeOuter]] inside
+     * [[LongOuterDecode]]. [[AbsentSide.Right]] is a left outer join. [[AbsentSide.Left]] is a
+     * right outer join. [[AbsentSide.Both]] is a full outer join.
      */
     case Outer(parts: Vector[ColumnBatch], absent: AbsentSide)
 
@@ -293,7 +295,7 @@ private[execution] object ColumnarInterpreter:
           // Joins are not partition-preserving, so `take` does not reach this arm.
           prefixRows(parts, limit, BatchCodec.decodeLongTriplesPreservingAbsence)
         case Columns.Outer(parts, absent) =>
-          prefixRows(parts, limit, (batch, rows) => LongOuterDecode.decode(batch, absent, rows))
+          prefixRows(parts, limit, (batch, rows) => decodeOuterBatch(batch, absent, rows))
         case Columns.Strings(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeStrings(batch, rows))
         case Columns.StringPairs(parts) =>
@@ -390,7 +392,7 @@ private[execution] object ColumnarInterpreter:
         case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
             PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
             PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs |
-            PhysicalOp.Kind.LongOuter =>
+            PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter =>
           throw new IllegalStateException(
             s"physical tree does not match ${plan.getClass.getSimpleName}",
           )
@@ -816,6 +818,9 @@ private[execution] object ColumnarInterpreter:
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       LongOuterArms.run(plan, op, selectedPartition, ordinals)
+    case (plan, op) if StringOuterArms.accepts(plan, op) =>
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      StringOuterArms.run(plan, op, selectedPartition, ordinals)
     case _ =>
       throw new IllegalStateException(
         s"physical tree does not match ${plan.getClass.getSimpleName}",
@@ -1006,6 +1011,15 @@ private[execution] object ColumnarInterpreter:
         Columns.GroupedLongs(_) =>
       throw new IllegalStateException("columnar op expected long pairs")
 
+  private def decodeOuterBatch(
+      batch: ColumnBatch,
+      absent: AbsentSide,
+      maxRows: Int,
+  ): Seq[Any] =
+    if (StringOuterDecode.isStringOuter(batch)) then
+      StringOuterDecode.decode(batch, absent, maxRows)
+    else LongOuterDecode.decode(batch, absent, maxRows)
+
   private def decodeWith(
       columns: Columns,
       decodePairs: (ColumnBatch, Int) => Seq[(Int, Int)],
@@ -1031,7 +1045,7 @@ private[execution] object ColumnarInterpreter:
       // [[ColumnarPlanner.runLowered]] casts the partition sequence to the plan's element type.
       parts.map(batch => Partition(BatchCodec.decodeLongTriplesPreservingAbsence(batch)))
     case Columns.Outer(parts, absent) =>
-      parts.map(batch => Partition(LongOuterDecode.decode(batch, absent)))
+      parts.map(batch => Partition(decodeOuterBatch(batch, absent, batch.length)))
     case Columns.Strings(parts) =>
       parts.map(batch => Partition(BatchCodec.decodeStrings(batch)))
     case Columns.StringPairs(parts) =>

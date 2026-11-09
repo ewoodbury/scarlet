@@ -14,7 +14,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  *
  * The row path is the oracle. The two sides keep independent dictionaries and match by string
  * equality. A null key is dropped. `""` matches `""`. A null value stays a clear validity bit.
- * Broadcast, sort-merge, and outer joins stay on the row path.
+ * String inner broadcast and string inner sort-merge stay on the row path. Outer joins lower.
  */
 class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -185,15 +185,32 @@ class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     agree(byValue, Seq("a" -> ((1, 5))))
   }
 
-  it should "keep outer, broadcast, and sort-merge joins on the row path" in {
+  it should "keep inner broadcast and inner sort-merge on the row path" in {
     val left = DistCollection(Seq("a" -> 1, "b" -> 2), 2)
     val right = DistCollection(Seq("a" -> 10, "c" -> 3), 2)
 
     refuse(left.broadcastJoin(right))
     refuse(left.sortMergeJoin(right))
-    refuse(left.leftOuterJoin(right))
-    refuse(left.rightOuterJoin(right))
-    refuse(left.fullOuterJoin(right))
+
+    val leftOuter = left.leftOuterJoin(right)
+    val rightOuter = left.rightOuterJoin(right)
+    val fullOuter = left.fullOuterJoin(right)
+    ColumnarPlanner.lower(leftOuter.plan).map(_.shape) shouldBe Some(
+      "StringHashLeftOuter(Exchange(Scan), Exchange(Scan))",
+    )
+    ColumnarPlanner.lower(rightOuter.plan).map(_.shape) shouldBe Some(
+      "StringHashRightOuter(Exchange(Scan), Exchange(Scan))",
+    )
+    ColumnarPlanner.lower(fullOuter.plan).map(_.shape) shouldBe Some(
+      "StringHashFullOuter(Exchange(Scan), Exchange(Scan))",
+    )
+    ColumnarPlanner.lower(leftOuter.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.StringOuter)
+    leftOuter.collect().toList should contain theSameElementsAs row(leftOuter.collect().toList)
+    rightOuter.collect().toList should contain theSameElementsAs row(rightOuter.collect().toList)
+    fullOuter.collect().toList should contain theSameElementsAs row(fullOuter.collect().toList)
+    ColumnarPlanner.tryRun(leftOuter.plan).isDefined shouldBe true
+    ColumnarPlanner.tryRun(rightOuter.plan).isDefined shouldBe true
+    ColumnarPlanner.tryRun(fullOuter.plan).isDefined shouldBe true
   }
 
   it should "keep keys, values, and a filter above the join on the row path" in {

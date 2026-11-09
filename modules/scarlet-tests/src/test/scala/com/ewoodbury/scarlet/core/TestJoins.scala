@@ -160,7 +160,7 @@ class TestJoins extends AnyFlatSpec with Matchers {
     }
   }
 
-  it should "plan a wide left outer join that the columnar planner refuses" in {
+  it should "plan a wide left outer join of string pairs" in {
     ScarletRuntime.get.shuffle.clear()
     val left = toDistCollection(Seq("a" -> 1))
     val right = toDistCollection(Seq("a" -> 2, "b" -> 3))
@@ -178,7 +178,9 @@ class TestJoins extends AnyFlatSpec with Matchers {
     val saved = ScarletConf.get
     try {
       ScarletConf.set(saved.copy(columnarExecution = true))
-      ColumnarPlanner.lower(plan) shouldBe None
+      ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
+        "StringHashLeftOuter(Exchange(Scan), Exchange(Scan))",
+      )
     } finally ScarletConf.set(saved)
   }
 
@@ -345,7 +347,7 @@ class TestJoins extends AnyFlatSpec with Matchers {
     }
   }
 
-  it should "plan a wide right outer join that the columnar planner refuses" in {
+  it should "plan a wide right outer join of string pairs" in {
     ScarletRuntime.get.shuffle.clear()
     val left = toDistCollection(Seq("a" -> 1, "b" -> 4))
     val right = toDistCollection(Seq("a" -> 2))
@@ -363,7 +365,9 @@ class TestJoins extends AnyFlatSpec with Matchers {
     val saved = ScarletConf.get
     try {
       ScarletConf.set(saved.copy(columnarExecution = true))
-      ColumnarPlanner.lower(plan) shouldBe None
+      ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
+        "StringHashRightOuter(Exchange(Scan), Exchange(Scan))",
+      )
     } finally ScarletConf.set(saved)
   }
 
@@ -446,7 +450,7 @@ class TestJoins extends AnyFlatSpec with Matchers {
     }
   }
 
-  it should "plan a wide full outer join that the columnar planner refuses" in {
+  it should "plan a wide full outer join of string pairs" in {
     ScarletRuntime.get.shuffle.clear()
     val left = toDistCollection(Seq("a" -> 1, "c" -> 4))
     val right = toDistCollection(Seq("a" -> 2, "b" -> 3))
@@ -464,7 +468,9 @@ class TestJoins extends AnyFlatSpec with Matchers {
     val saved = ScarletConf.get
     try {
       ScarletConf.set(saved.copy(columnarExecution = true))
-      ColumnarPlanner.lower(plan) shouldBe None
+      ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
+        "StringHashFullOuter(Exchange(Scan), Exchange(Scan))",
+      )
     } finally ScarletConf.set(saved)
   }
 
