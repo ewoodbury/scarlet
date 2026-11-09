@@ -92,7 +92,10 @@ private[execution] object PredicatePlan:
   def applyAtom(batch: ColumnBatch, start: Int, length: Int, atom: Atom): ColumnBatch =
     atom match
       case Atom.Int32(_, keep: JoinColumn) =>
-        PairKernel.filterTriple(batch, start, length, keep.onTriple)
+        // The innermost filter runs first. A slot atom publishes stored zeros for itself. A
+        // whole-row atom earlier in the stack still sees the clear bit and drops that row.
+        val dense = ColumnBatches.presentStoredZeros(batch)
+        PairKernel.filterTriple(dense, start, length, keep.onTriple)
       case Atom.Int32(ordinal, keep) =>
         ColumnKernel.filterInt32(batch, ordinal, start, length, keep)
       case Atom.Int64(ordinal, keep) =>

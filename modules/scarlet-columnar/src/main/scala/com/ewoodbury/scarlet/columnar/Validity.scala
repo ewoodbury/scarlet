@@ -123,6 +123,30 @@ object Validity:
     val index = wordIndex(row)
     words(index) = words(index) | (1L << bitOffset(row))
 
+  /** Clears bit `row`. The caller guarantees `row` is inside the bitmap. */
+  private[columnar] inline def clearBit(words: Array[Long], row: Int): Unit =
+    val index = wordIndex(row)
+    words(index) = words(index) & ~(1L << bitOffset(row))
+
+  /**
+   * Every row present except `holes(0 until count)`. `count == 0` is [[allValid]]. A repeated hole
+   * stays clear. The caller keeps each hole inside `[0, capacity)`. The cleared bitmap is a copy,
+   * so this does not punch holes into another column's words.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private[columnar] def except(capacity: Int, holes: Array[Int], count: Int): Validity =
+    require(count >= 0 && count <= holes.length, s"hole count $count outside ${holes.length}")
+    val base = allValid(capacity)
+    if (count == 0) then base
+    else
+      val words = Arrays.copyOf(base.words, base.words.length)
+      var index = 0
+      while (index < count) {
+        clearBit(words, holes(index))
+        index += 1
+      }
+      new Validity(words, capacity)
+
   private[columnar] def allocate(capacity: Int): Array[Long] =
     require(capacity >= 0, s"capacity must be >= 0, got $capacity")
     new Array[Long](wordCount(capacity))

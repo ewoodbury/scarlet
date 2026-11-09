@@ -72,5 +72,6 @@ Documentation
 
 Reviews
 - Review the diff. Open another file only to confirm a finding.
+- A second reader is grok 4.6. Use `--reasoning-effort xhigh` when the diff touches spill math, exchange partitioning, or null classification, and `high` otherwise. Docs and benches get no second model.
 - Do not edit a tree while a review is reading it.
 - OpenCode keeps one local database, so run one OpenCode session at a time. A build and a review can run together.

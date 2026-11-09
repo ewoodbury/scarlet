@@ -93,12 +93,12 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     countsOf(row(counted.collect())) shouldBe Map(1 -> 2, 2 -> 1)
   }
 
-  it should "fall back when a boxed pair source holds a null value after the first row" in {
+  it should "count a boxed null value that arrives after the first row" in {
     lateNullCounts() shouldBe Map(1 -> 2, 2 -> 1)
     lateNullRowCounts() shouldBe Map(1 -> 2, 2 -> 1)
   }
 
-  it should "fall back when one key filter meets a null value after the first row" in {
+  it should "count a null value under one key filter" in {
     lateNullOneFilterCounts() shouldBe Map(1 -> 2)
   }
 
@@ -399,8 +399,10 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.AsInstanceOf"))
   private def lateNullCounts(): Map[Int, Int] =
+    require(lateNullKept(), "late-null source unboxed the null value")
     val counted = lateNullSource().countByKey
     require(ColumnarPlanner.lower(counted.plan).nonEmpty, "late-null source did not lower")
+    require(ColumnarPlanner.tryRun(counted.plan).nonEmpty, "late-null count left the column path")
     counted.collect().map { case (key, value) => (key.asInstanceOf[Int], value) }.toMap
 
   @SuppressWarnings(
@@ -420,7 +422,21 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       ColumnarPlanner.lower(counted.plan).nonEmpty,
       "one-filter late-null source did not lower",
     )
+    require(
+      ColumnarPlanner.tryRun(counted.plan).nonEmpty,
+      "one-filter late-null count left the column path",
+    )
     counted.collect().map { case (key, value) => (key.asInstanceOf[Int], value) }.toMap
+
+  private def lateNullKept(): Boolean =
+    val plan = lateNullSource().plan
+    val op = ColumnarPlanner.lower(plan).getOrElse(fail("late-null source did not lower"))
+    ColumnarInterpreter.pairsOf(ColumnarInterpreter.interpret(plan, op)).exists { batch =>
+      val values = batch.columns.lift(1) match
+        case Some(column: Int32Column) => column
+        case other => fail(s"expected an Int32 value column, got $other")
+      (0 until batch.length).exists(row => !values.isValid(row) && values.values(row) == 0)
+    }
 
   @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.AsInstanceOf"))
   private def lateNullRowCounts(): Map[Int, Int] =

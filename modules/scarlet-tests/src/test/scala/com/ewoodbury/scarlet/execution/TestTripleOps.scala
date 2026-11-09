@@ -254,6 +254,37 @@ class TestTripleOps extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     }
   }
 
+  "a whole-row filter under a slot filter" should "drop the null before the slot predicate" in {
+    val calls = new AtomicInteger
+    val planned = nullableJoin
+      .filter { (row: (Int, (Int, Int))) =>
+        calls.incrementAndGet()
+        row._2._1 > 0
+      }
+      .filterJoinKey(_ >= 0)
+
+    // The whole-row filter is the inner step. It does not offer a null component. Keys 1, 3, and
+    // 5 are present, and key 3's left zero is rejected. The slot filter then keeps both survivors.
+    shows(columnar(planned)) shouldBe Seq("1,10,100", "5,4,0")
+    calls.get() shouldBe 3
+  }
+
+  "a slot filter under a whole-row filter" should "publish a stored zero before that predicate" in {
+    val calls = new AtomicInteger
+    val planned = nullableJoin
+      .filterJoinKey(_ >= 0)
+      .filter { (row: (Int, (Int, Int))) =>
+        calls.incrementAndGet()
+        row._2._1 > 0
+      }
+
+    // The slot filter is the inner step, so it publishes the stored zero first. The whole-row
+    // predicate then sees five present rows. Key 2's null left is zero and is rejected. Key 4's
+    // null right is zero and its left 8 is kept.
+    shows(columnar(planned)) shouldBe Seq("1,10,100", "4,8,0", "5,4,0")
+    calls.get() shouldBe 5
+  }
+
   "a slot filter" should "keep rejecting a null component instead of preserving it" in {
     val keyed = nullableJoin.filterJoinKey(_ >= 0)
 

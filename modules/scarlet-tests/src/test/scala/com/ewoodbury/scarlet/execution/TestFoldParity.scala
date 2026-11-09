@@ -14,9 +14,10 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * Fold results against the row action and, when `lower` accepts the plan, against `interpret`.
  *
- * Grouped sum is compared only to the row action. A later null still lowers, and `interpret`
- * unboxes it. A null on the other ordinal drops the row before the key predicate. That is not the
- * survivor count `Selection` would publish for the same key filter.
+ * Grouped sum is compared only to the row action. A later null still lowers. The boxed scan keeps
+ * that null absent, and the row action unboxes it, so a null sum is compared to the gathered
+ * columnar sum. A null on the other ordinal drops the row before the key predicate. That is not
+ * the survivor count `Selection` would publish for the same key filter.
  */
 class TestFoldParity extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -281,8 +282,8 @@ class TestFoldParity extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     }
 
   /**
-   * Today's pair-column sum: interpret the filter, then [[ColumnReduce.sumInt32At]]. Absence is
-   * kept so a null slot is still a null slot. The default encode unboxes it.
+   * Today's pair-column sum: interpret the filter, then [[ColumnReduce.sumInt32At]]. The scan keeps
+   * a null slot absent. The row action would unbox it.
    */
   private def gatheredSum(plan: Plan[Int]): Long =
     val projected = ColumnarPlanner.lower(plan).getOrElse(fail("expected a columnar plan"))
