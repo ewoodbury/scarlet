@@ -1,0 +1,455 @@
+package com.ewoodbury.scarlet.columnar
+
+/**
+ * In-memory sort-merge outer join of one co-located `(String, Int)` partition.
+ *
+ * A null key is not sorted and does not match `""` or `dictionary(0)`. A preserved null key is
+ * emitted with a clear bit and is not interned. The other value's absence bit is set, and its
+ * validity bit stays clear. A null value is not absence, so both value columns must be fully
+ * present. [[leftOuter]], [[rightOuter]], and [[fullOuter]] fail when a value is null, rather than
+ * publishing that null as absence. [[rightOuter]] is [[leftOuter]] on swapped inputs, with the
+ * value columns swapped back. [[fullOuter]] emits a group that exists on only one side, and emits
+ * both sides when one of them is empty.
+ *
+ * Equal keys keep input order. Comparison is `String.compareTo`. This file has no inner join. It
+ * does not spill and does not open a directory. The caller decides whether the partition fits.
+ */
+@SuppressWarnings(
+  Array(
+    "org.wartremover.warts.Var",
+    "org.wartremover.warts.Null",
+  ),
+)
+object StringSortMerge:
+
+  /**
+   * Left outer join of one co-located partition. A null key does not match. Each left row whose
+   * key is missing on the right is emitted once, including a null key, and the right value's
+   * absence bit is set. A right null key is dropped.
+   */
+  def leftOuter(left: ColumnBatch, right: ColumnBatch): ColumnBatch =
+    outer(left, right, preserveRight = false)
+
+  /**
+   * Right outer join. Runs [[leftOuter]] with the inputs swapped, then swaps the value columns
+   * back to `(key, left, right)`. Absence moves with the left value.
+   */
+  def rightOuter(left: ColumnBatch, right: ColumnBatch): ColumnBatch =
+    swapValues(leftOuter(right, left))
+
+  /**
+   * Full outer join of one co-located partition. Equal keys emit the cartesian product. A group on
+   * only one side emits that side, with the other value absent. A null key on either side is
+   * emitted once. An empty side emits every row of the other side.
+   */
+  def fullOuter(left: ColumnBatch, right: ColumnBatch): ColumnBatch =
+    outer(left, right, preserveRight = true)
+
+  /** Left outer when `preserveRight` is false. Full outer when it is true. */
+  private def outer(
+      left: ColumnBatch,
+      right: ColumnBatch,
+      preserveRight: Boolean,
+  ): ColumnBatch =
+    require(
+      valuesPresent(left) && valuesPresent(right),
+      "an outer join needs fully present value columns",
+    )
+    val leftSide = sortedSide(left)
+    val rightSide = sortedSide(right)
+    val leftNulls = nullKeys(left)
+    val rightNulls = if (preserveRight) then nullKeys(right) else NullKeys.empty
+    val rows = countOuter(
+      leftSide,
+      rightSide,
+      preserveRight,
+      leftNulls.length,
+      rightNulls.length,
+    )
+    if (rows == 0) then ColumnBatches.emptyStringJoin
+    else writeOuter(leftSide, rightSide, preserveRight, leftNulls, rightNulls, rows)
+
+  private def countOuter(
+      left: SortedSide,
+      right: SortedSide,
+      preserveRight: Boolean,
+      leftNulls: Int,
+      rightNulls: Int,
+  ): Int =
+    var leftAt = 0
+    var rightAt = 0
+    var total = 0
+    while (leftAt < left.length && rightAt < right.length) {
+      val order = left.keys(leftAt).compareTo(right.keys(rightAt))
+      if (order < 0) then
+        val end = groupEnd(left.keys, leftAt, left.length)
+        total = addMatches(total, end - leftAt, 1)
+        leftAt = end
+      else if (order > 0) then
+        val end = groupEnd(right.keys, rightAt, right.length)
+        if (preserveRight) then total = addMatches(total, end - rightAt, 1)
+        rightAt = end
+      else
+        val leftEnd = groupEnd(left.keys, leftAt, left.length)
+        val rightEnd = groupEnd(right.keys, rightAt, right.length)
+        total = addMatches(total, leftEnd - leftAt, rightEnd - rightAt)
+        leftAt = leftEnd
+        rightAt = rightEnd
+    }
+    while (leftAt < left.length) {
+      val end = groupEnd(left.keys, leftAt, left.length)
+      total = addMatches(total, end - leftAt, 1)
+      leftAt = end
+    }
+    if (preserveRight) then
+      while (rightAt < right.length) {
+        val end = groupEnd(right.keys, rightAt, right.length)
+        total = addMatches(total, end - rightAt, 1)
+        rightAt = end
+      }
+    val withLeftNulls = addMatches(total, leftNulls, 1)
+    if (preserveRight) then addMatches(withLeftNulls, rightNulls, 1) else withLeftNulls
+
+  private def writeOuter(
+      left: SortedSide,
+      right: SortedSide,
+      preserveRight: Boolean,
+      leftNulls: NullKeys,
+      rightNulls: NullKeys,
+      rows: Int,
+  ): ColumnBatch =
+    val words = DictUtf8Column.Words.empty
+    val codes = new Array[Int](rows)
+    val leftValues = new Array[Int](rows)
+    val rightValues = new Array[Int](rows)
+    val keyWords = Validity.allocate(rows)
+    val leftWords = Validity.allocate(rows)
+    val rightWords = Validity.allocate(rows)
+    val leftAbsence = Validity.allocate(rows)
+    val rightAbsence = Validity.allocate(rows)
+    var leftAt = 0
+    var rightAt = 0
+    var filled = 0
+
+    def emitKey(text: String): Unit =
+      codes(filled) = words.intern(text)
+      Validity.setBit(keyWords, filled)
+
+    def emitMatched(leftRow: Int, rightRow: Int): Unit =
+      emitKey(left.keys(leftRow))
+      copyPresent(left.values, left.valueWords, leftRow, leftValues, leftWords, filled)
+      copyPresent(right.values, right.valueWords, rightRow, rightValues, rightWords, filled)
+      filled += 1
+
+    def emitLeftOnly(leftRow: Int): Unit =
+      emitKey(left.keys(leftRow))
+      copyPresent(left.values, left.valueWords, leftRow, leftValues, leftWords, filled)
+      Validity.setBit(rightAbsence, filled)
+      filled += 1
+
+    def emitRightOnly(rightRow: Int): Unit =
+      emitKey(right.keys(rightRow))
+      copyPresent(right.values, right.valueWords, rightRow, rightValues, rightWords, filled)
+      Validity.setBit(leftAbsence, filled)
+      filled += 1
+
+    def emitNull(nulls: NullKeys, index: Int, onLeft: Boolean): Unit =
+      val destValues = if (onLeft) then leftValues else rightValues
+      val destWords = if (onLeft) then leftWords else rightWords
+      val otherAbsence = if (onLeft) then rightAbsence else leftAbsence
+      copyPresent(nulls.values, nulls.valueWords, index, destValues, destWords, filled)
+      Validity.setBit(otherAbsence, filled)
+      filled += 1
+
+    while (leftAt < left.length && rightAt < right.length) {
+      val order = left.keys(leftAt).compareTo(right.keys(rightAt))
+      if (order < 0) then
+        val end = groupEnd(left.keys, leftAt, left.length)
+        var row = leftAt
+        while (row < end) {
+          emitLeftOnly(row)
+          row += 1
+        }
+        leftAt = end
+      else if (order > 0) then
+        val end = groupEnd(right.keys, rightAt, right.length)
+        if (preserveRight) then
+          var row = rightAt
+          while (row < end) {
+            emitRightOnly(row)
+            row += 1
+          }
+        rightAt = end
+      else
+        val leftEnd = groupEnd(left.keys, leftAt, left.length)
+        val rightEnd = groupEnd(right.keys, rightAt, right.length)
+        var leftRow = leftAt
+        while (leftRow < leftEnd) {
+          var rightRow = rightAt
+          while (rightRow < rightEnd) {
+            emitMatched(leftRow, rightRow)
+            rightRow += 1
+          }
+          leftRow += 1
+        }
+        leftAt = leftEnd
+        rightAt = rightEnd
+    }
+    while (leftAt < left.length) {
+      val end = groupEnd(left.keys, leftAt, left.length)
+      var row = leftAt
+      while (row < end) {
+        emitLeftOnly(row)
+        row += 1
+      }
+      leftAt = end
+    }
+    if (preserveRight) then
+      while (rightAt < right.length) {
+        val end = groupEnd(right.keys, rightAt, right.length)
+        var row = rightAt
+        while (row < end) {
+          emitRightOnly(row)
+          row += 1
+        }
+        rightAt = end
+      }
+    var nullAt = 0
+    while (nullAt < leftNulls.length) {
+      emitNull(leftNulls, nullAt, onLeft = true)
+      nullAt += 1
+    }
+    if (preserveRight) then
+      nullAt = 0
+      while (nullAt < rightNulls.length) {
+        emitNull(rightNulls, nullAt, onLeft = false)
+        nullAt += 1
+      }
+    require(filled == rows, s"sort-merge wrote $filled rows and counted $rows")
+    new ColumnBatch(
+      joinSchema,
+      Vector(
+        DictUtf8Column.of(words.toArray, codes, Validity.fromWords(keyWords, rows), rows),
+        outerValue(leftValues, leftWords, leftAbsence, rows),
+        outerValue(rightValues, rightWords, rightAbsence, rows),
+      ),
+      rows,
+    )
+
+  private def groupEnd(keys: Array[String], start: Int, length: Int): Int =
+    val key = keys(start)
+    var end = start + 1
+    while (end < length && keys(end).compareTo(key) == 0) {
+      end += 1
+    }
+    end
+
+  private def addMatches(total: Int, leftRows: Int, rightRows: Int): Int =
+    val next = total.toLong + leftRows.toLong * rightRows.toLong
+    if (next > Int.MaxValue.toLong) then
+      throw new IllegalStateException(s"sort-merge output reached $next rows")
+    else next.toInt
+
+  private def sortedSide(batch: ColumnBatch): SortedSide =
+    val keys = ColumnKernel.asUtf8(ColumnKernel.columnAt(batch, 0), 0)
+    val values = ColumnHash.int32At(batch, 1)
+    require(keys.length == values.length, "key and value columns differ in length")
+    val width = keys.length
+    val keyWords = keys.validity.words
+    var present = 0
+    var row = 0
+    while (row < width) {
+      if (Validity.isSet(keyWords, row)) then present += 1
+      row += 1
+    }
+    if (present == 0) then SortedSide.empty
+    else
+      val order = new Array[Int](present)
+      var at = 0
+      row = 0
+      while (row < width) {
+        if (Validity.isSet(keyWords, row)) then
+          order(at) = row
+          at += 1
+        row += 1
+      }
+      val texts = new Array[String](width)
+      row = 0
+      while (row < width) {
+        if (Validity.isSet(keyWords, row)) then texts(row) = keys.dictionary(keys.codes(row))
+        row += 1
+      }
+      sortIndices(texts, order)
+      gather(texts, values.values, values.validity.words, order)
+
+  /** Sort `order` by the present key at `keys(order(i))`. Equal keys keep input order. */
+  private def sortIndices(keys: Array[String], order: Array[Int]): Unit =
+    val rows = order.length
+    if (rows > 1) then
+      val buffer = new Array[Int](rows)
+      var src = order
+      var dst = buffer
+      var sortedInOrder = true
+      var width = 1
+      while (width < rows) {
+        var start = 0
+        while (start < rows) {
+          val mid = math.min(start.toLong + width.toLong, rows.toLong).toInt
+          val end = math.min(start.toLong + (width.toLong << 1), rows.toLong).toInt
+          mergeIndices(keys, src, dst, start, mid, end)
+          start = end
+        }
+        val previous = src
+        src = dst
+        dst = previous
+        sortedInOrder = !sortedInOrder
+        val grown = width.toLong << 1
+        width = if (grown >= rows.toLong) rows else grown.toInt
+      }
+      if (!sortedInOrder) then System.arraycopy(src, 0, order, 0, rows)
+
+  private def mergeIndices(
+      keys: Array[String],
+      src: Array[Int],
+      dst: Array[Int],
+      start: Int,
+      mid: Int,
+      end: Int,
+  ): Unit =
+    var left = start
+    var right = mid
+    var out = start
+    while (left < mid && right < end) {
+      if (keys(src(left)).compareTo(keys(src(right))) <= 0) then
+        dst(out) = src(left)
+        left += 1
+      else
+        dst(out) = src(right)
+        right += 1
+      out += 1
+    }
+    while (left < mid) {
+      dst(out) = src(left)
+      left += 1
+      out += 1
+    }
+    while (right < end) {
+      dst(out) = src(right)
+      right += 1
+      out += 1
+    }
+
+  private def gather(
+      keys: Array[String],
+      values: Array[Int],
+      valueWords: Array[Long],
+      order: Array[Int],
+  ): SortedSide =
+    val count = order.length
+    val gatheredKeys = new Array[String](count)
+    val gatheredValues = new Array[Int](count)
+    val gatheredWords = Validity.allocate(count)
+    var out = 0
+    while (out < count) {
+      val row = order(out)
+      gatheredKeys(out) = keys(row)
+      if (Validity.isSet(valueWords, row)) then
+        gatheredValues(out) = values(row)
+        Validity.setBit(gatheredWords, out)
+      out += 1
+    }
+    SortedSide(gatheredKeys, gatheredValues, gatheredWords, count)
+
+  private def outerValue(
+      values: Array[Int],
+      words: Array[Long],
+      absence: Array[Long],
+      rows: Int,
+  ): Int32Column =
+    val validity = Validity.fromWords(words, rows)
+    if (Validity.anySet(absence, rows)) then
+      Int32Column.withAbsence(values, validity, Validity.fromWords(absence, rows), rows)
+    else Int32Column.of(values, validity, rows)
+
+  private def copyPresent(
+      values: Array[Int],
+      words: Array[Long],
+      from: Int,
+      dest: Array[Int],
+      destWords: Array[Long],
+      at: Int,
+  ): Unit =
+    if (Validity.isSet(words, from)) then
+      dest(at) = values(from)
+      Validity.setBit(destWords, at)
+
+  /** Null-key values in input order. These rows are not part of [[sortedSide]]. */
+  private def nullKeys(batch: ColumnBatch): NullKeys =
+    val keys = ColumnKernel.asUtf8(ColumnKernel.columnAt(batch, 0), 0)
+    val values = ColumnHash.int32At(batch, 1)
+    require(keys.length == values.length, "key and value columns differ in length")
+    val keyWords = keys.validity.words
+    val valueWords = values.validity.words
+    val width = keys.length
+    var count = 0
+    var row = 0
+    while (row < width) {
+      if (!Validity.isSet(keyWords, row)) then count += 1
+      row += 1
+    }
+    if (count == 0) then NullKeys.empty
+    else
+      val kept = new Array[Int](count)
+      val keptWords = Validity.allocate(count)
+      var at = 0
+      row = 0
+      while (row < width) {
+        if (!Validity.isSet(keyWords, row)) then
+          if (Validity.isSet(valueWords, row)) then
+            kept(at) = values.values(row)
+            Validity.setBit(keptWords, at)
+          at += 1
+        row += 1
+      }
+      NullKeys(kept, keptWords, count)
+
+  private def valuesPresent(batch: ColumnBatch): Boolean =
+    val values = ColumnHash.int32At(batch, 1)
+    Validity.livePresent(values.validity, values.length)
+
+  /** Restores `(key, left, right)` after a right outer ran as a left outer on swapped inputs. */
+  private def swapValues(batch: ColumnBatch): ColumnBatch =
+    batch.columns match
+      case Seq(key, leftValue, rightValue) =>
+        new ColumnBatch(
+          Vector(key.logicalType, rightValue.logicalType, leftValue.logicalType),
+          Vector(key, rightValue, leftValue),
+          batch.length,
+        )
+      case other =>
+        throw new IllegalArgumentException(s"join output has ${other.size} columns")
+
+  private val joinSchema: Vector[LogicalType] =
+    Vector(LogicalType.Utf8Dict, LogicalType.Int32, LogicalType.Int32)
+
+  private final class SortedSide(
+      val keys: Array[String],
+      val values: Array[Int],
+      val valueWords: Array[Long],
+      val length: Int,
+  )
+
+  private object SortedSide:
+    def empty: SortedSide =
+      SortedSide(Array.empty[String], Array.emptyIntArray, Array.emptyLongArray, 0)
+
+  /** Values whose key bit is clear. The key text is not kept. */
+  private final class NullKeys(
+      val values: Array[Int],
+      val valueWords: Array[Long],
+      val length: Int,
+  )
+
+  private object NullKeys:
+    def empty: NullKeys =
+      NullKeys(Array.emptyIntArray, Array.emptyLongArray, 0)

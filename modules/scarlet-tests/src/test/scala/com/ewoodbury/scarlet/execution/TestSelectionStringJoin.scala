@@ -302,15 +302,23 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
     selectionOf(build.plan) shouldBe defined
   }
 
-  it should "keep broadcast, sort-merge, and outer joins on the row path" in {
+  it should "keep inner broadcast and inner sort-merge on the row path" in {
     val left = buildPairs.filterKeys((key: String) => keepKey(key)).filterValues((_: Int) => true)
     val right = probePairs
+    val filtered = "Exchange(FilterValue(FilterKey(Scan)))"
+    val scan = "Exchange(Scan)"
 
     refuse(left.broadcastJoin(right))
     refuse(left.sortMergeJoin(right))
-    refuse(left.leftOuterJoin(right))
-    refuse(left.rightOuterJoin(right))
-    refuse(left.fullOuterJoin(right))
+    Seq(
+      (left.leftOuterJoin(right), s"StringHashLeftOuter($filtered, $scan)"),
+      (left.rightOuterJoin(right), s"StringHashRightOuter($filtered, $scan)"),
+      (left.fullOuterJoin(right), s"StringHashFullOuter($filtered, $scan)"),
+    ).foreach { (joined, expected) =>
+      shape(joined) shouldBe expected
+      ColumnarPlanner.tryRun(joined.plan).isDefined shouldBe true
+      joined.collect().toList should contain theSameElementsAs row(joined.collect().toList)
+    }
   }
 
   it should "keep a matched null value" in {

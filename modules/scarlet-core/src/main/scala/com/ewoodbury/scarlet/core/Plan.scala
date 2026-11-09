@@ -360,7 +360,9 @@ object Plan {
    *   left input is the probe side. An absent hint uses the shuffle-hash op, matching an inner
    *   join. A null value stays on the row path. An explicit sort-merge hint on int pairs lowers to
    *   `SortMergeLeftOuter`. `(Long, Long)` pairs lower to `LongHashLeftOuter`,
-   *   `LongBroadcastLeftOuter`, or `LongSortMergeLeftOuter` for the same hints.
+   *   `LongBroadcastLeftOuter`, or `LongSortMergeLeftOuter` for the same hints. `(String, Int)`
+   *   pairs lower to `StringHashLeftOuter`, `StringBroadcastLeftOuter`, or
+   *   `StringSortMergeLeftOuter` for the same hints.
    * @tparam K
    *   The key type.
    * @tparam V
@@ -388,7 +390,9 @@ object Plan {
    *   right input is the probe side. An absent hint uses the shuffle-hash op, matching an inner
    *   join. A null value stays on the row path. An explicit sort-merge hint on int pairs lowers to
    *   `SortMergeRightOuter`. `(Long, Long)` pairs lower to `LongHashRightOuter`,
-   *   `LongBroadcastRightOuter`, or `LongSortMergeRightOuter` for the same hints.
+   *   `LongBroadcastRightOuter`, or `LongSortMergeRightOuter` for the same hints. `(String, Int)`
+   *   pairs lower to `StringHashRightOuter`, `StringBroadcastRightOuter`, or
+   *   `StringSortMergeRightOuter` for the same hints.
    * @tparam K
    *   The key type.
    * @tparam V
@@ -419,7 +423,9 @@ object Plan {
    *   left input is the probe side. An absent hint uses the shuffle-hash op. A null value stays on
    *   the row path. An explicit sort-merge hint on int pairs lowers to `SortMergeFullOuter`.
    *   `(Long, Long)` pairs lower to `LongHashFullOuter`, `LongBroadcastFullOuter`, or
-   *   `LongSortMergeFullOuter` for the same hints.
+   *   `LongSortMergeFullOuter` for the same hints. `(String, Int)` pairs lower to
+   *   `StringHashFullOuter`, `StringBroadcastFullOuter`, or `StringSortMergeFullOuter` for the
+   *   same hints.
    * @tparam K
    *   The key type.
    * @tparam V

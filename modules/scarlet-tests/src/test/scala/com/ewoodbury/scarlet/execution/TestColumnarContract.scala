@@ -35,7 +35,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     // 35 exclusions. 205 + 35 = 240. String countByKey was not excluded.
     // Long inner broadcast and long inner sort-merge stay on the row path. Long outer joins are
     // covered by execution tests, not contract fixtures, because the contract does not track the
-    // int refusals either.
+    // int refusals either. String outer joins are covered by execution tests, not contract
+    // fixtures.
     excluded.size shouldBe 35
     (accepted.size + excluded.size) shouldBe 240
     val mismatches = accepted.flatMap { expected =>
@@ -908,7 +909,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples |
         PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
-        PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter =>
+        PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter =>
       false
 
   private def sumsLongs(op: PhysicalOp): Boolean = op.kind match
@@ -918,7 +919,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples |
         PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
-        PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter =>
+        PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter =>
       false
 
   private def sumsFloats(op: PhysicalOp): Boolean = op.kind match
@@ -928,7 +929,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples |
         PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
-        PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter =>
+        PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter =>
       false
 
   private def preservesPartitions(op: PhysicalOp): Boolean = op match
@@ -953,7 +954,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.LongHashRightOuter(_, _) | PhysicalOp.LongHashFullOuter(_, _) |
         PhysicalOp.LongBroadcastLeftOuter(_, _) | PhysicalOp.LongBroadcastRightOuter(_, _) |
         PhysicalOp.LongBroadcastFullOuter(_, _) | PhysicalOp.LongSortMergeLeftOuter(_, _) |
-        PhysicalOp.LongSortMergeRightOuter(_, _) | PhysicalOp.LongSortMergeFullOuter(_, _) =>
+        PhysicalOp.LongSortMergeRightOuter(_, _) | PhysicalOp.LongSortMergeFullOuter(_, _) |
+        PhysicalOp.StringHashLeftOuter(_, _) | PhysicalOp.StringHashRightOuter(_, _) |
+        PhysicalOp.StringHashFullOuter(_, _) | PhysicalOp.StringBroadcastLeftOuter(_, _) |
+        PhysicalOp.StringBroadcastRightOuter(_, _) | PhysicalOp.StringBroadcastFullOuter(_, _) |
+        PhysicalOp.StringSortMergeLeftOuter(_, _) | PhysicalOp.StringSortMergeRightOuter(_, _) |
+        PhysicalOp.StringSortMergeFullOuter(_, _) =>
       false
 
   /** A key sort is not partition-preserving, and `tryTake` still runs it. */
