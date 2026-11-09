@@ -508,8 +508,8 @@ object ColumnarPlanner:
   /**
    * True when grouped sum can read `source` as int pairs. [[classify]] requires two `Int` cells,
    * so a leading null is not a pair and the encode never runs. A 2-tuple whose cells are `Int` or
-   * null is still a pair: the null stays absent in the grouped-sum encode. Other actions keep the
-   * strict witness and do not unbox that null.
+   * null is still a pair. The boxed scan keeps that null absent for grouped sum and for the other
+   * actions that encode the same source.
    */
   private[execution] def groupedPairSource(source: Plan.Source[_]): Boolean =
     classify(source).contains(PhysicalOp.Kind.Pairs) || nullablePairWitness(source)
@@ -984,8 +984,9 @@ object ColumnarPlanner:
    * The first present value selects the kind. A leading empty cell can only witness a string. A
    * pair witness is two `Int` cells or two `Long` cells. A `(String, Int)` cell witnesses string
    * pairs, including a null int. A leading null key keeps looking until a present string key. A
-   * leading null component does not witness [[PhysicalOp.Kind.LongPairs]]. Other actions do not
-   * unbox a null. Grouped sum also accepts a null component; see [[groupedPairSource]].
+   * leading null component does not witness [[PhysicalOp.Kind.Pairs]] or
+   * [[PhysicalOp.Kind.LongPairs]]. A later null on a witnessed boxed int pair stays absent.
+   * Grouped sum also accepts a leading null; see [[groupedPairSource]].
    */
   private def classifyValue(value: Any, rest: Iterator[Any]): Option[PhysicalOp.Kind] =
     Option(value) match

@@ -90,6 +90,34 @@ object ColumnBatches:
     new ColumnBatch(batch.schema, columns, batch.length)
 
   /**
+   * Publishes each stored `0` as a present int.
+   *
+   * A triple slot filter rejects a clear bit. The boxed scan keeps a null as `0`, and this is the
+   * result that filter had when the scan unboxed. A fully present column is returned as it is.
+   * Validity is sized to the value array, which may be longer than the live length; only the live
+   * prefix is set. An absence bitmap is kept, so a missing partner is not dropped.
+   */
+  private[scarlet] def presentStoredZeros(batch: ColumnBatch): ColumnBatch =
+    if (batch.columns.forall(column => Validity.livePresent(column.validity, batch.length))) then
+      batch
+    else new ColumnBatch(batch.schema, batch.columns.map(fillStoredZero), batch.length)
+
+  private def fillStoredZero(column: Column): Column = column match
+    case int32: Int32Column =>
+      if (Validity.livePresent(int32.validity, int32.length)) then int32
+      else
+        val validity = Validity.prefixValid(int32.values.length, int32.length)
+        int32.absence match
+          case Some(bits) => Int32Column.withAbsence(int32.values, validity, bits, int32.length)
+          case None => Int32Column.of(int32.values, validity, int32.length)
+    case other =>
+      if (Validity.livePresent(other.validity, other.length)) then other
+      else
+        throw new IllegalStateException(
+          s"triple slot filter expected an Int32 null, found ${other.logicalType}",
+        )
+
+  /**
    * One copied range of `batch`. Callers that walk [[Morsels]] write one range and drop it before
    * the next, so the slices of a long batch are not all live together.
    */

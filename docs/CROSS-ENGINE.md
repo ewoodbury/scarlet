@@ -80,7 +80,9 @@ batch and exited 0. `groupByKey` does not spill; at 10M rows it still fit.
 key filter keeps it. One filter is the key filter only.
 
 With one filter, the count, `groupByKey`, and join checksums matched the run with no nulls. The
-sum, `reduceByKey`, and sort checksums did not. With two filters, every checksum changed.
+sum, `reduceByKey`, and sort checksums did not. With two filters, every checksum changed. Those
+null runs used the unboxing int-pair scan. A matching count, `groupByKey`, or join checksum does
+not show that the null was kept.
 
 ### 1M rows, no nulls
 

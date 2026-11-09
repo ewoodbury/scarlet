@@ -32,9 +32,9 @@ private[execution] object CountByKeyArms:
     child.kind match
       case PhysicalOp.Kind.Pairs =>
         // A boxed pair source whose first row witnesses `Kind.Pairs` can still hold a null
-        // component later. The pair encode unboxes it. A selection encodes inside
-        // `FilterChain.selected`, and the dense path encodes here, so both throws become the
-        // documented fallback rather than a failed action.
+        // component later. The scan keeps that null absent, and this count does not read the
+        // value column, so a null value still counts. The catch stays for a null the selection
+        // itself throws.
         val selectedParts =
           try
             FilterChain.selected(

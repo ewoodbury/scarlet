@@ -19,9 +19,9 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * Owned int arrays use [[BatchCodec.intPairs]]. Owned long arrays use
  * [[BatchCodec.copiedLongPairs]], the scan's array encode. A null long value is timed with
  * [[BatchCodec.longPairs]], the boxed scan encoder. A null int value is timed with
- * [[BatchCodec.intPairsPreservingAbsence]], the grouped-sum encoder. A normal scan still uses
- * [[BatchCodec.intPairs]], which unboxes. [[BatchCodec.nullableIntPairs]] takes `Option` pairs
- * and is not that path.
+ * [[BatchCodec.intPairsPreservingAbsence]], and the boxed int-pair scan uses that same encoder.
+ * [[BatchCodec.nullableIntPairs]] takes `Option` pairs and is not that path. `groupByKey` still
+ * refuses a null value.
  *
  * Spill is enabled for this process only. The `spillEnabled` default stays false, and the spill
  * budget stays the 64 MiB default.

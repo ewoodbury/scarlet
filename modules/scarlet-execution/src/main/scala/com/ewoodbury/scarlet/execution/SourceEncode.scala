@@ -65,9 +65,10 @@ private[execution] object SourceEncode:
 
   /**
    * Encode the ordinals [[ColumnUse]] demanded. `{0}` copies keys and `{1}` copies values, each as
-   * one `Int32` column at index 0. Any other set, including `{0, 1}`, keeps both columns.
-   * [[encodePairPartitions]] is unchanged, so grouped sum and the absence-preserving copy still
-   * take both arrays. `primitiveEncode` stays one note per partition.
+   * one `Int32` column at index 0. Any other set, including `{0, 1}`, keeps both columns. A boxed
+   * partition keeps a null component absent and does not call `primitiveEncode`. An owned array
+   * has no nulls and is copied, one `primitiveEncode` note per partition. A singleton demand does
+   * not read the other component.
    */
   private[execution] def encodePairs(
       partitions: Seq[Partition[_]],
@@ -76,7 +77,7 @@ private[execution] object SourceEncode:
     if (ordinals.size == 1 && ordinals.contains(0)) then encodeOneSide(partitions, key = true)
     else if (ordinals.size == 1 && ordinals.contains(1)) then
       encodeOneSide(partitions, key = false)
-    else encodePairPartitions(partitions, rows => BatchCodec.intPairs(rows))
+    else encodePairPartitions(partitions, rows => BatchCodec.intPairsPreservingAbsence(rows))
 
   private def encodeOneSide(partitions: Seq[Partition[_]], key: Boolean): Vector[ColumnBatch] =
     import com.ewoodbury.scarlet.core.IntPairArrays
@@ -88,11 +89,12 @@ private[execution] object SourceEncode:
           BatchCodec.copiedInts(column)
         case other =>
           // Named erasure boundary. Classification already selected `(Int, Int)` elements.
+          // `Product` keeps the read on `productElement`, so a null stays absent and the other
+          // component is not read.
           @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
-          val rows = other.asInstanceOf[Iterable[(Int, Int)]]
-          val side: Iterable[Int] =
-            if (key) then rows.map(pair => pair._1) else rows.map(pair => pair._2)
-          BatchCodec.ints(side)
+          val rows = other.asInstanceOf[Iterable[Product]]
+          val ordinal = if (key) then 0 else 1
+          IntPairEncode.side(rows, ordinal)
     }.toVector
 
   /**
@@ -141,9 +143,9 @@ private[execution] object SourceEncode:
     }.toVector
 
   /**
-   * Pair encode for grouped sum. [[BatchCodec.intPairsPreservingAbsence]] keeps a null component
-   * absent and rejects any other non-int cell. An owned pair array has no nulls and is copied
-   * through [[encodePairPartitions]], both columns. A singleton demand does not reach this path.
+   * Pair encode for grouped sum. Both columns are kept, including when a caller demanded one
+   * ordinal. [[BatchCodec.intPairsPreservingAbsence]] keeps a null component absent. An owned pair
+   * array has no nulls and is copied. The normal boxed scan uses that same encoder.
    */
   private[execution] def encodeGroupedPairs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
     encodePairPartitions(partitions, rows => BatchCodec.intPairsPreservingAbsence(rows))

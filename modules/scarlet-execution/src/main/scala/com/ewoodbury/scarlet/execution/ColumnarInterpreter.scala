@@ -376,8 +376,8 @@ private[execution] object ColumnarInterpreter:
         case PhysicalOp.Kind.Longs => Columns.Longs(SourceEncode.encodeLongs(selected))
         case PhysicalOp.Kind.Floats => Columns.Floats(SourceEncode.encodeFloats(selected))
         case PhysicalOp.Kind.Pairs =>
-          // preserveAbsence keeps a null key or a null value in the pair columns. It is not the
-          // probe side. Other pair plans still unbox.
+          // A boxed pair keeps a null component absent. preserveAbsence still forces both columns.
+          // A singleton demand encodes only the ordinal ColumnUse asked for.
           val encoded =
             if (preserveAbsence) then SourceEncode.encodeGroupedPairs(selected)
             else SourceEncode.encodePairs(selected, ordinals)

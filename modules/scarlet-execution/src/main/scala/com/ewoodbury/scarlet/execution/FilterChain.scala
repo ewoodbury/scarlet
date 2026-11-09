@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{ColumnBatch, MorselScheduler, Morsels, Selected, Selection}
+import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.Plan
 
 import ColumnarInterpreter.Columns
@@ -63,7 +63,7 @@ private[execution] object FilterChain:
           Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.Triples(_) |
           Columns.StringPairs(_) =>
         val compiled = PredicatePlan.compile(plan, op).getOrElse(missing)
-        applyCompiled(columns, compiled, ordinals)
+        applyCompiled(presentSlotStack(columns, compiled), compiled, ordinals)
 
   /**
    * Survivor ids for an int-pair, long-pair, int-triple, or string-pair stack, including one
@@ -106,7 +106,14 @@ private[execution] object FilterChain:
             // outer join under any wrapper, not just at the top of the stack.
             columns match
               case Columns.Outer(_, _) => None
-              case _ => Some(selectBatches(kindBatches(op.kind, columns), steps))
+              case _ =>
+                val batches = kindBatches(op.kind, columns)
+                // A pure slot stack rejects a clear bit. Publish the stored 0 before that kernel.
+                // A whole-row step is not in `steps`, so this does not run for one.
+                val ready =
+                  if (steps.exists(tripleSlot)) then batches.map(ColumnBatches.presentStoredZeros)
+                  else batches
+                Some(selectBatches(ready, steps))
           case _ => None
       case _ => None
 
@@ -213,6 +220,26 @@ private[execution] object FilterChain:
         Columns.Outer(_, _) | Columns.GroupedInts(_) | Columns.GroupedStrings(_) |
         Columns.GroupedLongs(_) =>
       missing
+
+  /**
+   * A pure triple-slot stack rejects a clear bit, so the stored `0` is published first. A stack
+   * that contains a whole-row step has no selection steps and is left alone: that step drops the
+   * null row. A slot atom later in the chain publishes zeros for itself.
+   */
+  private def presentSlotStack(columns: Columns, compiled: Compiled): Columns =
+    val slots = PredicatePlan.selectionSteps(compiled).exists(_.exists(tripleSlot))
+    if (!slots) then columns
+    else
+      columns match
+        case Columns.Triples(parts) => Columns.Triples(parts.map(ColumnBatches.presentStoredZeros))
+        case other => other
+
+  private def tripleSlot(step: Selection.Step): Boolean = step match
+    case Selection.Step.IntTriple(_, _) => true
+    case Selection.Step.Int32(_, _) | Selection.Step.Int64(_, _) | Selection.Step.Float64(_, _) |
+        Selection.Step.Bool(_, _) | Selection.Step.Utf8(_, _) | Selection.Step.IntPair(_) |
+        Selection.Step.LongPair(_) | Selection.Step.StringPair(_) =>
+      false
 
   private def opening(plan: Plan[_], op: PhysicalOp): PhysicalOp.Slot =
     PredicatePlan.openingSlot(plan, op).getOrElse(missing)

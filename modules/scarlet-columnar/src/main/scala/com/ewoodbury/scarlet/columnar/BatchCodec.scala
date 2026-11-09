@@ -230,12 +230,12 @@ object BatchCodec:
     )
 
   /**
-   * Boxed `(Int, Int)` pairs for grouped sum. [[fillPairs]] records a null component as absent and
-   * rejects any other non-int cell. A column with no nulls stays all-valid. Other actions use
-   * [[intPairs]], which unboxes.
+   * Boxed `(Int, Int)` pairs. A null component stays absent and a non-int cell is rejected. A
+   * column with no nulls stays all-valid. [[intPairs]] is the dense all-valid constructor and
+   * still unboxes. Owned arrays use [[copiedIntPairs]].
    */
   private[scarlet] def intPairsPreservingAbsence(values: Iterable[(Int, Int)]): ColumnBatch =
-    fillPairs(values)
+    IntPairEncode.pairs(values)
 
   def nullableIntPairs(values: Seq[(Option[Int], Option[Int])]): ColumnBatch =
     val n = values.size
@@ -882,63 +882,6 @@ object BatchCodec:
       row += 1
     }
     filled
-
-  /**
-   * Fills both columns in one pass for [[intPairsPreservingAbsence]]. A null component is absent.
-   * Any other non-int cell fails. The absence bitmap is allocated only after the first null, so a
-   * fully present pair column stays all-valid.
-   */
-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private def fillPairs(values: Iterable[(Int, Int)]): ColumnBatch =
-    val count = values.size
-    val leftValues = new Array[Int](count)
-    val rightValues = new Array[Int](count)
-    val rows = values.iterator
-    var row = 0
-    var leftAbsent = Option.empty[Array[Boolean]]
-    var rightAbsent = Option.empty[Array[Boolean]]
-    while (row < count) {
-      val pair = rows.next()
-      leftAbsent = writeComponent(pair, 0, "key", leftValues, leftAbsent, count, row)
-      rightAbsent = writeComponent(pair, 1, "value", rightValues, rightAbsent, count, row)
-      row += 1
-    }
-    pairBatch(
-      Int32Column.of(leftValues, componentValidity(leftAbsent, count), count),
-      Int32Column.of(rightValues, componentValidity(rightAbsent, count), count),
-    )
-
-  /**
-   * Writes a present `Int`. A null cell is absent. Any other non-int fails. Named erasure
-   * boundary: `productElement` does not unbox an `(Int, Int)` cell, so a null stays absent.
-   */
-  @SuppressWarnings(
-    Array(
-      "org.wartremover.warts.Any",
-      "org.wartremover.warts.AsInstanceOf",
-      "org.wartremover.warts.Null",
-    ),
-  )
-  private def writeComponent(
-      pair: (Int, Int),
-      ordinal: Int,
-      role: String,
-      into: Array[Int],
-      absent: Option[Array[Boolean]],
-      width: Int,
-      row: Int,
-  ): Option[Array[Boolean]] =
-    pair.productElement(ordinal) match
-      case null =>
-        val flags = absent.getOrElse(new Array[Boolean](width))
-        flags(row) = true
-        Some(flags)
-      case value: Int =>
-        into(row) = value
-        absent
-      case other =>
-        val found = other.asInstanceOf[AnyRef].getClass.getName
-        throw new IllegalArgumentException(s"pair component expected an Int $role, found $found")
 
   /**
    * Fills both long columns in one pass. A null component is absent. Any other non-long cell
