@@ -44,7 +44,7 @@ Testing
 - A checksum match is not proof of the columnar path. `ColumnarFallback` extends `ClassCastException`, so a handler that treats it as a row rerun publishes no column batch and still matches the checksum. `ClosedKernelRefusal` does not extend `ClassCastException` and fails the action. A bench that exists to catch a silent row rerun must not catch `ColumnarFallback`.
 - `ColumnMetrics` is process-global. Install a counting sink around the measured action and restore the previous sink in `finally`.
 - A null fixture has to classify. A leading null component is not a pair witness, so the encode never runs. Put the null off row 0, and on a key the filter under test keeps. A null that the filter drops does not exercise the null path.
-- The `spillEnabled` default stays false. A bench that turns spill on does it inside `main` and restores the saved configuration in `finally`. `groupByKey` does not spill. A change that makes it spill updates this sentence.
+- The `spillEnabled` default stays false. A bench that turns spill on does it inside `main` and restores the saved configuration in `finally`. `groupByKey` spills an over-budget post-exchange bucket when spill is on. Spill off keeps the in-memory groups and writes nothing.
 - Record a benchmark number only from a run you executed. Do not fill a table with a timing you did not print.
 
 Code style
