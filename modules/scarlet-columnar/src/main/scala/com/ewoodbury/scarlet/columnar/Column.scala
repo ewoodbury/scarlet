@@ -101,12 +101,23 @@ object Int32Column:
     Column.check(length, values.length, validity)
     new Int32Column(values, validity, length, absence)
 
+/**
+ * An `Int64` column. `absence` is an outer-join mark: this side has no partner. `None` means no
+ * row is absent. A set absence bit is not a null value. The validity bit still says whether a long
+ * is stored.
+ */
 final class Int64Column private (
     val values: Array[Long],
     val validity: Validity,
     val length: Int,
+    private[columnar] val absence: Option[Validity],
 ) extends Column:
   def logicalType: LogicalType = LogicalType.Int64
+
+  /** True when row `row` has no join partner. Bounds match [[Column.isValid]]. */
+  def isAbsent(row: Int): Boolean =
+    require(row >= 0 && row < length, s"row $row outside column length $length")
+    absence.exists(_.isValid(row))
 
 object Int64Column:
 
@@ -125,9 +136,37 @@ object Int64Column:
     }
     of(buffer, Validity.pack(present.length, row => present(row)), present.length)
 
+  /** Retains `values`. Capacity may exceed `length`. No row is absent. */
   def of(values: Array[Long], validity: Validity, length: Int): Int64Column =
+    of(values, validity, None, length)
+
+  /**
+   * Retains `values`. `absence` follows the same capacity rule as `validity`. When no bit in
+   * `0 until length` is set, the column stores no bitmap, so a fully matched column stays on the
+   * path that has no absence word.
+   */
+  private[columnar] def withAbsence(
+      values: Array[Long],
+      validity: Validity,
+      absence: Validity,
+      length: Int,
+  ): Int64Column =
     Column.check(length, values.length, validity)
-    new Int64Column(values, validity, length)
+    require(
+      absence.capacity == values.length,
+      s"absence capacity ${absence.capacity} does not match value capacity ${values.length}",
+    )
+    val stored = if (Validity.anySet(absence.words, length)) then Some(absence) else None
+    of(values, validity, stored, length)
+
+  private def of(
+      values: Array[Long],
+      validity: Validity,
+      absence: Option[Validity],
+      length: Int,
+  ): Int64Column =
+    Column.check(length, values.length, validity)
+    new Int64Column(values, validity, length, absence)
 
 final class Float64Column private (
     val values: Array[Double],

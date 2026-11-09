@@ -359,7 +359,8 @@ object Plan {
    *   planner accepts a broadcast hint, a shuffle-hash hint, or an absent hint for int pairs. The
    *   left input is the probe side. An absent hint uses the shuffle-hash op, matching an inner
    *   join. A null value stays on the row path. An explicit sort-merge hint on int pairs lowers to
-   *   `SortMergeLeftOuter`.
+   *   `SortMergeLeftOuter`. `(Long, Long)` pairs lower to `LongHashLeftOuter`,
+   *   `LongBroadcastLeftOuter`, or `LongSortMergeLeftOuter` for the same hints.
    * @tparam K
    *   The key type.
    * @tparam V
@@ -386,7 +387,8 @@ object Plan {
    *   planner accepts a broadcast hint, a shuffle-hash hint, or an absent hint for int pairs. The
    *   right input is the probe side. An absent hint uses the shuffle-hash op, matching an inner
    *   join. A null value stays on the row path. An explicit sort-merge hint on int pairs lowers to
-   *   `SortMergeRightOuter`.
+   *   `SortMergeRightOuter`. `(Long, Long)` pairs lower to `LongHashRightOuter`,
+   *   `LongBroadcastRightOuter`, or `LongSortMergeRightOuter` for the same hints.
    * @tparam K
    *   The key type.
    * @tparam V
@@ -416,6 +418,8 @@ object Plan {
    *   planner accepts a broadcast hint, a shuffle-hash hint, or an absent hint for int pairs. The
    *   left input is the probe side. An absent hint uses the shuffle-hash op. A null value stays on
    *   the row path. An explicit sort-merge hint on int pairs lowers to `SortMergeFullOuter`.
+   *   `(Long, Long)` pairs lower to `LongHashFullOuter`, `LongBroadcastFullOuter`, or
+   *   `LongSortMergeFullOuter` for the same hints.
    * @tparam K
    *   The key type.
    * @tparam V

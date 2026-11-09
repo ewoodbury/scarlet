@@ -61,8 +61,8 @@ final class SpillStore private (
   }
 
   def write(batches: Vector[ColumnBatch]): SpillFile =
-    val schema = SpillStore.preflight(batches)
-    writeStreaming(schema) { sink =>
+    val _ = SpillStore.preflight(batches)
+    publish(SpillStore.columnTags(batches)) { sink =>
       batches.foreach(sink.write)
     }
 
@@ -72,58 +72,66 @@ final class SpillStore private (
    */
   private[columnar] def writeStreaming(
       schema: Vector[LogicalType],
-  )(emit: SpillBatchWriter => Unit): SpillFile = synchronized {
-    if (closed.get()) then throw new IllegalStateException("spill store is closed")
+  )(emit: SpillBatchWriter => Unit): SpillFile =
     schema.foreach { logicalType =>
       val _ = SpillLayout.tag(logicalType)
     }
-    val records = published.get
-    if (records.length + 1 >= maxFiles) then
-      throw new IllegalStateException(s"spill maxFiles cap is $maxFiles")
-    val pid = ProcessHandle.current().pid
-    val id = UUID.randomUUID.toString
-    val temporary = directory.resolve(s"$id.$pid.tmp")
-    val destination = directory.resolve(s"$id.$pid.spill")
-    val channel =
-      try FileChannel.open(temporary, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+    publish(schema.map(SpillLayout.tag))(emit)
+
+  /** Publishes one file. Tag 4 is an `Int64` column with an absence bitmap. Tag 2 has none. */
+  private def publish(tags: Vector[Int])(emit: SpillBatchWriter => Unit): SpillFile =
+    synchronized {
+      if (closed.get()) then throw new IllegalStateException("spill store is closed")
+      tags.foreach { tag =>
+        val _ = SpillLayout.logicalType(tag)
+      }
+      val records = published.get
+      if (records.length + 1 >= maxFiles) then
+        throw new IllegalStateException(s"spill maxFiles cap is $maxFiles")
+      val pid = ProcessHandle.current().pid
+      val id = UUID.randomUUID.toString
+      val temporary = directory.resolve(s"$id.$pid.tmp")
+      val destination = directory.resolve(s"$id.$pid.spill")
+      val channel =
+        try FileChannel.open(temporary, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+        catch
+          case thrown: Throwable =>
+            val _ = Files.deleteIfExists(temporary)
+            throw thrown
+      try SpillCodec.writeChannel(channel, tags)(emit)
+      catch
+        case thrown: Throwable =>
+          try channel.close()
+          catch case _: Throwable => ()
+          val _ = Files.deleteIfExists(temporary)
+          throw thrown
+      try channel.close()
       catch
         case thrown: Throwable =>
           val _ = Files.deleteIfExists(temporary)
           throw thrown
-    try SpillCodec.writeChannel(channel, schema)(emit)
-    catch
-      case thrown: Throwable =>
-        try channel.close()
-        catch case _: Throwable => ()
+      val size = Files.size(temporary)
+      val used = records.foldLeft(0L)((total, record) => total + record.bytes)
+      if (used >= maxBytes || size >= maxBytes - used) then
         val _ = Files.deleteIfExists(temporary)
-        throw thrown
-    try channel.close()
-    catch
-      case thrown: Throwable =>
-        val _ = Files.deleteIfExists(temporary)
-        throw thrown
-    val size = Files.size(temporary)
-    val used = records.foldLeft(0L)((total, record) => total + record.bytes)
-    if (used >= maxBytes || size >= maxBytes - used) then
-      val _ = Files.deleteIfExists(temporary)
-      throw new IllegalStateException(s"spill maxBytes cap is $maxBytes")
-    try
-      Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE)
-      SpillStore.syncDirectory(directory)
-    catch
-      case thrown: Throwable =>
-        val _ = Files.deleteIfExists(temporary)
-        throw thrown
-    try
-      val _ = published.updateAndGet(current => current :+ SpillStore.Stored(destination, size))
-    catch
-      case thrown: Throwable =>
-        try
-          val _ = Files.deleteIfExists(destination)
-        catch case _: java.io.IOException => ()
-        throw thrown
-    new SpillFile(destination, forget)
-  }
+        throw new IllegalStateException(s"spill maxBytes cap is $maxBytes")
+      try
+        Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE)
+        SpillStore.syncDirectory(directory)
+      catch
+        case thrown: Throwable =>
+          val _ = Files.deleteIfExists(temporary)
+          throw thrown
+      try
+        val _ = published.updateAndGet(current => current :+ SpillStore.Stored(destination, size))
+      catch
+        case thrown: Throwable =>
+          try
+            val _ = Files.deleteIfExists(destination)
+          catch case _: java.io.IOException => ()
+          throw thrown
+      new SpillFile(destination, forget)
+    }
 
   /** Drops one published file and frees its share of the caps. */
   private def forget(location: Path): Unit =
@@ -229,6 +237,24 @@ object SpillStore:
     val handle = ProcessHandle.of(pid)
     handle.isPresent && handle.get.isAlive
 
+  /**
+   * Header tags for `batches`. An `Int64` ordinal is tag 4 when any batch stores an absence bitmap
+   * there. Every other ordinal keeps [[SpillLayout.tag]]. A file with no absence stays tag 2 and
+   * writes no extra bytes.
+   */
+  private def columnTags(batches: Vector[ColumnBatch]): Vector[Int] =
+    val schema = batches.headOption match
+      case Some(batch) => batch.schema
+      case None => throw new IllegalArgumentException("spill needs at least one batch")
+    schema.indices.map { ordinal =>
+      val absent = batches.exists { batch =>
+        batch.columns(ordinal) match
+          case column: Int64Column => column.absence.isDefined
+          case _ => false
+      }
+      if (absent) then SpillLayout.Int64AbsentTag else SpillLayout.tag(schema(ordinal))
+    }.toVector
+
   private def preflight(batches: Vector[ColumnBatch]): Vector[LogicalType] =
     val schema = batches.headOption match
       case Some(batch) => batch.schema.toVector
@@ -323,6 +349,9 @@ private[columnar] object SpillLayout:
   val Int64Tag: Int = 2
   val Utf8Tag: Int = 3
 
+  /** An `Int64` column that also stores an outer-join absence bitmap. Version stays 2. */
+  val Int64AbsentTag: Int = 4
+
   /** Offset, length, row count, and the CRC32 of that batch. */
   val FooterEntryBytes: Int = 24
 
@@ -344,7 +373,7 @@ private[columnar] object SpillLayout:
 
   def logicalType(tag: Int): LogicalType = tag match
     case Int32Tag => LogicalType.Int32
-    case Int64Tag => LogicalType.Int64
+    case Int64Tag | Int64AbsentTag => LogicalType.Int64
     case Utf8Tag => LogicalType.Utf8Dict
     case other => throw new IllegalArgumentException(s"unknown spill column tag $other")
 
@@ -354,12 +383,12 @@ private object SpillCodec:
 
   def writeChannel(
       channel: FileChannel,
-      schema: Vector[LogicalType],
+      tags: Vector[Int],
   )(emit: SpillBatchWriter => Unit): Unit =
-    val header = headerBytes(schema, 0, 0L, 0)
+    val header = headerBytes(tags, 0, 0L, 0)
     val ignored = new CRC32
     val _ = writeFully(channel, ignored, header, checksum = false)
-    val writer = new Writer(channel, schema)
+    val writer = new Writer(channel, tags)
     emit(writer)
     writer.finish()
 
@@ -393,28 +422,42 @@ private object SpillCodec:
     val stored = readFully(channel, crcAt, 4)
     verifyFooter(footer, stored)
     val spans = readSpans(footer, parsed, headerSize)
-    new BatchIterator(channel, parsed.schema, spans)
+    new BatchIterator(channel, parsed.tags, spans)
 
-  private def writeBatch(channel: FileChannel, crc: CRC32, batch: ColumnBatch): Long =
-    batch.columns.foldLeft(0L) { (written, column) =>
-      written + writeColumn(channel, crc, column)
+  private def writeBatch(
+      channel: FileChannel,
+      crc: CRC32,
+      batch: ColumnBatch,
+      tags: Vector[Int],
+  ): Long =
+    batch.columns.zip(tags).foldLeft(0L) { case (written, (column, tag)) =>
+      written + writeColumn(channel, crc, column, tag)
     }
 
-  private def writeColumn(channel: FileChannel, crc: CRC32, column: Column): Long = column match
-    case int32: Int32Column =>
-      if (int32.absence.isDefined) then
-        throw new IllegalArgumentException("an absent column cannot be spilled")
-      writeValidity(channel, crc, int32.validity, int32.length) +
-        writeInts(channel, crc, int32.values, int32.length)
-    case int64: Int64Column =>
-      writeValidity(channel, crc, int64.validity, int64.length) +
-        writeLongs(channel, crc, int64.values, int64.length)
-    case utf8: DictUtf8Column =>
-      writeValidity(channel, crc, utf8.validity, utf8.length) +
-        writeDictionary(channel, crc, utf8.dictionary) +
-        writeInts(channel, crc, utf8.codes, utf8.length)
-    case other =>
-      throw new IllegalArgumentException(s"${other.logicalType} columns cannot be spilled")
+  private def writeColumn(channel: FileChannel, crc: CRC32, column: Column, tag: Int): Long =
+    column match
+      case int32: Int32Column =>
+        if (int32.absence.isDefined) then
+          throw new IllegalArgumentException("an absent column cannot be spilled")
+        writeValidity(channel, crc, int32.validity, int32.length) +
+          writeInts(channel, crc, int32.values, int32.length)
+      case int64: Int64Column if tag == SpillLayout.Int64AbsentTag =>
+        writeValidity(channel, crc, int64.validity, int64.length) +
+          writeLongs(channel, crc, int64.values, int64.length) +
+          writeAbsence(channel, crc, int64)
+      case int64: Int64Column =>
+        if (int64.absence.isDefined) then
+          throw new IllegalArgumentException(
+            "an absent long column cannot be spilled through a stream",
+          )
+        writeValidity(channel, crc, int64.validity, int64.length) +
+          writeLongs(channel, crc, int64.values, int64.length)
+      case utf8: DictUtf8Column =>
+        writeValidity(channel, crc, utf8.validity, utf8.length) +
+          writeDictionary(channel, crc, utf8.dictionary) +
+          writeInts(channel, crc, utf8.codes, utf8.length)
+      case other =>
+        throw new IllegalArgumentException(s"${other.logicalType} columns cannot be spilled")
 
   /**
    * Count, then each entry's UTF-16 code-unit count and code units. UTF-16 is lossless for every
@@ -477,18 +520,25 @@ private object SpillCodec:
     (0 until length).foreach(row => buffer.putLong(values(row)))
     writeFully(channel, crc, buffer.array(), checksum = true)
 
+  private def writeAbsence(channel: FileChannel, crc: CRC32, column: Int64Column): Long =
+    val bits = column.absence.getOrElse {
+      val words = (column.length + 63) >>> 6
+      Validity.fromWords(new Array[Long](words), column.length)
+    }
+    writeValidity(channel, crc, bits, column.length)
+
   private def headerBytes(
-      schema: Vector[LogicalType],
+      tags: Vector[Int],
       batchCount: Int,
       footerOffset: Long,
       footerLength: Int,
   ): Array[Byte] =
     val buffer =
-      ByteBuffer.allocate(SpillLayout.headerSize(schema.length)).order(ByteOrder.LITTLE_ENDIAN)
+      ByteBuffer.allocate(SpillLayout.headerSize(tags.length)).order(ByteOrder.LITTLE_ENDIAN)
     buffer.put(SpillLayout.magic)
     buffer.putInt(SpillLayout.Version)
-    buffer.putInt(schema.length)
-    schema.foreach(logicalType => buffer.putInt(SpillLayout.tag(logicalType)))
+    buffer.putInt(tags.length)
+    tags.foreach(tag => buffer.putInt(tag))
     buffer.putInt(batchCount)
     buffer.putLong(footerOffset)
     buffer.putInt(footerLength)
@@ -568,11 +618,12 @@ private object SpillCodec:
     columnCount
 
   private final case class ParsedHeader(
-      schema: Vector[LogicalType],
+      tags: Vector[Int],
       batchCount: Int,
       footerOffset: Long,
       footerLength: Int,
-  )
+  ):
+    def schema: Vector[LogicalType] = tags.map(SpillLayout.logicalType)
 
   private def parseHeader(bytes: Array[Byte]): ParsedHeader =
     val header = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
@@ -584,8 +635,10 @@ private object SpillCodec:
     val columnCount = header.getInt
     require(columnCount >= 0, s"column count must be >= 0, got $columnCount")
     require(bytes.length >= SpillLayout.headerSize(columnCount), "truncated spill file")
-    val schema =
-      (0 until columnCount).iterator.map(_ => SpillLayout.logicalType(header.getInt)).toVector
+    val tags = (0 until columnCount).iterator.map(_ => header.getInt).toVector
+    tags.foreach { tag =>
+      val _ = SpillLayout.logicalType(tag)
+    }
     val batchCount = header.getInt
     require(batchCount >= 0, s"batch count must be >= 0, got $batchCount")
     require(
@@ -603,7 +656,7 @@ private object SpillCodec:
       footerOffset >= SpillLayout.headerSize(columnCount).toLong,
       "spill footer starts inside the header",
     )
-    ParsedHeader(schema, batchCount, footerOffset, footerLength)
+    ParsedHeader(tags, batchCount, footerOffset, footerLength)
 
   private def verifyFooter(footer: Array[Byte], storedBytes: Array[Byte]): Unit =
     val crc = new CRC32
@@ -633,11 +686,11 @@ private object SpillCodec:
     require(packed == parsed.footerOffset, "spill payload length does not match the footer")
     spans
 
-  private def decode(bytes: Array[Byte], schema: Vector[LogicalType], rows: Int): ColumnBatch =
+  private def decode(bytes: Array[Byte], tags: Vector[Int], rows: Int): ColumnBatch =
     val cursor = new Cursor(bytes)
-    val columns = schema.map(logicalType => readColumn(cursor, logicalType, rows))
+    val columns = tags.map(tag => readColumn(cursor, tag, rows))
     require(cursor.remaining == 0, "spill batch length does not match its columns")
-    new ColumnBatch(schema, columns, rows)
+    new ColumnBatch(tags.map(SpillLayout.logicalType), columns, rows)
 
   private def concat(prefix: Array[Byte], rest: Array[Byte]): Array[Byte] =
     val all = new Array[Byte](prefix.length + rest.length)
@@ -661,9 +714,9 @@ private object SpillCodec:
     bytes
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private final class Writer(channel: FileChannel, schema: Vector[LogicalType])
-      extends SpillBatchWriter:
+  private final class Writer(channel: FileChannel, tags: Vector[Int]) extends SpillBatchWriter:
 
+    private val schema = tags.map(SpillLayout.logicalType)
     private var spans = Vector.empty[BatchSpan]
 
     def write(batch: ColumnBatch): Unit =
@@ -671,7 +724,7 @@ private object SpillCodec:
       batch.columns.foreach(SpillStore.supported)
       val crc = new CRC32
       val offset = channel.position()
-      val written = writeBatch(channel, crc, batch)
+      val written = writeBatch(channel, crc, batch, tags)
       spans = spans :+ BatchSpan(offset, written, batch.length, crc.getValue.toInt)
 
     def finish(): Unit =
@@ -687,7 +740,7 @@ private object SpillCodec:
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private final class BatchIterator(
       channel: FileChannel,
-      schema: Vector[LogicalType],
+      tags: Vector[Int],
       spans: Vector[BatchSpan],
   ) extends Iterator[ColumnBatch]
       with AutoCloseable:
@@ -712,7 +765,7 @@ private object SpillCodec:
       if (crc.getValue.toInt != span.crc) then
         close()
         throw new IllegalStateException("spill CRC32 mismatch")
-      val batch = decode(bytes, schema, span.rows)
+      val batch = decode(bytes, tags, span.rows)
       index += 1
       if (index == records.length) then close()
       batch
@@ -722,15 +775,19 @@ private object SpillCodec:
         closed = true
         channel.close()
 
-  private def readColumn(cursor: Cursor, logicalType: LogicalType, rows: Int): Column =
+  private def readColumn(cursor: Cursor, tag: Int, rows: Int): Column =
     val validity = readValidity(cursor, rows)
-    logicalType match
-      case LogicalType.Int32 => Int32Column.of(readInts(cursor, rows), validity, rows)
-      case LogicalType.Int64 => Int64Column.of(readLongs(cursor, rows), validity, rows)
-      case LogicalType.Utf8Dict =>
+    tag match
+      case SpillLayout.Int32Tag => Int32Column.of(readInts(cursor, rows), validity, rows)
+      case SpillLayout.Int64Tag => Int64Column.of(readLongs(cursor, rows), validity, rows)
+      case SpillLayout.Int64AbsentTag =>
+        val values = readLongs(cursor, rows)
+        Int64Column.withAbsence(values, validity, readValidity(cursor, rows), rows)
+      case SpillLayout.Utf8Tag =>
         val dictionary = readDictionary(cursor)
         DictUtf8Column.of(dictionary, readInts(cursor, rows), validity, rows)
-      case other => throw new IllegalArgumentException(s"$other columns cannot be spilled")
+      case other =>
+        throw new IllegalArgumentException(s"unknown spill column tag $other")
 
   private def readDictionary(cursor: Cursor): Array[String] =
     val count = cursor.getInt
