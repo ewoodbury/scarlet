@@ -16,6 +16,10 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * `HashExchange.partitionAll` at key ordinal 0, then [[HashCount.addCounts]] on each bucket. A
  * filter on a real `countByKey` lowers to `byKeySelected`. This bench does not call that path.
  *
+ * `encode` times \`BatchCodec.intPairs\` over the same survivor arrays, warm, once at one thread:
+ * the harness encode the cross-engine bench reports cold as `encode_ms`, made comparable with an
+ * action p50 that is measured after warmup.
+ *
  * Spill stays off, so the add is the in-memory branch `finish` takes when no bucket is over the
  * budget. p50 is nearest-rank `ceil(p / 100 * n)` over 40 rounds after 5 warmups, at 1 and 4
  * threads. Partition width is the shuffle default, 4. Allocation is not measured. An empty vector,
@@ -59,7 +63,7 @@ object PartialExchangeBench:
     if (status != 0) then sys.exit(status)
 
   private def run(): Unit =
-    val (keysOnly, filteredRows) = filteredKeys()
+    val (keys, values, keysOnly, filteredRows) = filteredKeys()
     val partials = accept("partial", combine(keysOnly, 1))
     val partialRows = rowCount(partials)
     if (partialRows <= 0L || partialRows >= filteredRows) then
@@ -71,7 +75,9 @@ object PartialExchangeBench:
     val counted = sumCounts(acceptWidth("addCounts", reduce(buckets, 1)))
     if (counted != filteredRows) then
       refuse(s"bucket counts $counted != filtered rows $filteredRows")
+    val encodeMs = sampleEncode(keys, values, filteredRows)
     preamble(filteredRows, partialRows, partitionedRows)
+    println(line("encode", 1, encodeMs, filteredRows, partialRows, partitionedRows))
     threadCounts.foreach { threads =>
       val partialMs = sample(combine(keysOnly, threads)) { got =>
         val produced = rowCount(accept("partial", got))
@@ -114,7 +120,7 @@ object PartialExchangeBench:
   private def reduce(buckets: Vector[ColumnBatch], threads: Int): Vector[ColumnBatch] =
     MorselScheduler.map(buckets, threads)((_, bucket) => HashCount.addCounts(bucket))
 
-  private def filteredKeys(): (Vector[ColumnBatch], Long) =
+  private def filteredKeys(): (Array[Int], Array[Int], Vector[ColumnBatch], Long) =
     val keptKeys = new Array[Int](rows)
     val keptValues = new Array[Int](rows)
     var row = 0
@@ -133,7 +139,7 @@ object PartialExchangeBench:
     val pairs = pairBatches(keys, values)
     val keysOnly = pairs.map(batch => ColumnBatches.takeColumn(batch, 0))
     if (keysOnly.isEmpty) then refuse("key filter produced no batch")
-    (keysOnly, kept.toLong)
+    (keys, values, keysOnly, kept.toLong)
 
   private def pairBatches(keys: Array[Int], values: Array[Int]): Vector[ColumnBatch] =
     val length = keys.length
@@ -175,6 +181,31 @@ object PartialExchangeBench:
       val produced = action
       val elapsed = (System.nanoTime() - started) / 1_000_000.0
       check(produced)
+      samples(round) = elapsed
+      round += 1
+    nearestP50(samples)
+
+  /**
+   * Warm p50 of the harness encode: `BatchCodec.intPairs` over the filtered survivor arrays, the
+   * same encoder and the same rows the cross-engine harness times once before warmup. Warm rounds
+   * make the number comparable with the action p50, which is measured after warmup. Encode is
+   * sequential, so it is reported once at one thread.
+   */
+  private def sampleEncode(keys: Array[Int], values: Array[Int], expectedRows: Long): Double =
+    var round = 0
+    while (round < warmup) do
+      val batch = BatchCodec.intPairs(keys, values)
+      if (batch.length.toLong != expectedRows) then
+        refuse(s"encode produced ${batch.length} rows, expected $expectedRows")
+      round += 1
+    val samples = new Array[Double](rounds)
+    round = 0
+    while (round < rounds) do
+      val started = System.nanoTime()
+      val batch = BatchCodec.intPairs(keys, values)
+      val elapsed = (System.nanoTime() - started) / 1_000_000.0
+      if (batch.length.toLong != expectedRows) then
+        refuse(s"encode produced ${batch.length} rows, expected $expectedRows")
       samples(round) = elapsed
       round += 1
     nearestP50(samples)
