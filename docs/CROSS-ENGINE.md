@@ -188,9 +188,29 @@ CROSS_ROWS=10000000 CROSS_FILTERS=2 CROSS_NULLS=false CROSS_QUERY=filter-count \
 `CROSS_ROWS` defaults to 1000000, `CROSS_FILTERS` to 2 (`1` is the key filter only), and
 `CROSS_NULLS` to false. `CROSS_WARMUP` defaults to 3 and `CROSS_ROUNDS` to 10. Set `CROSS_QUERY`
 to one of `filter-count`, `filter-sum`, `filter-groupbykey`, `filter-reducebykey`, `filter-join`,
-or `filter-sort`. Omit it to run all six in that process, dropping each query's input before the
-next. `encode_ms` is reported separately and is not subtracted from the action. The action timer
-still includes the scan encode. Spill is on for this harness only.
+`filter-sort`, or `filter-countbykey`. Omit it to run all seven in that process, dropping each
+query's input before the next. `encode_ms` is reported separately and is not subtracted from the
+action. The action timer still includes the scan encode. Spill is on for this harness only.
 
 The Python harnesses live outside the repo; the Scarlet harness is
 `modules/scarlet-tests/src/test/scala/com/ewoodbury/scarlet/execution/CrossEngineBench.scala`.
+
+### Scarlet-only `filter-countbykey`
+
+Recorded on 2026-11-10 on Linux 6.8.0-117-generic, aarch64, 4 cores (Vendor ID Apple), OpenJDK
+64-Bit Server VM 21.0.13, through `sbt -J-Xmx2g` with `Test / fork` left false. Protocol:
+`CROSS_ROWS=1000000`, `CROSS_FILTERS=2`, `CROSS_NULLS=false`, `CROSS_WARMUP=3`,
+`CROSS_ROUNDS=10`, 4 threads, batch 8192, spill on. `encode_ms` is the one-shot encode before
+warmup. It is not part of the p50, and the p50 still includes the scan encode. The harness p50
+is `samples(rounds / 2)` after sorting, the same selector as the spilled-harness tables above.
+DuckDB and Spark were not re-run for this query on this machine. Do not subtract this p50 from
+the 7.05 ms `QueryBench` figure or from the 1.46 ms DuckDB figure. `filter-join` was not
+re-run here. Its encode split remains the 2026-11-08 spilled-harness row.
+
+| Query | p50 | encode |
+| --- | ---: | ---: |
+| filter + countByKey | 12.65 ms | 9.65 ms |
+
+The printed values were 12.649646 ms and 9.649068 ms. The run published 64 column batches.
+Checksum `11147169` is the sum of `key * 31 + count` over each `countByKey` pair. That is the
+cross-engine harness formula, not the `QueryBench` per-group xor.

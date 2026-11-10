@@ -19,6 +19,7 @@ private[execution] object MaterialisationStudyReport:
       morsels: Int,
       groupedMorsels: Int,
       allocOn: Boolean,
+      sparseHash: Long,
   )
 
   private val stageNames: Vector[String] =
@@ -28,6 +29,7 @@ private[execution] object MaterialisationStudyReport:
       queries: Vector[Row],
       stages: Vector[Row],
       permuted: Vector[Row],
+      sparse: Vector[Row],
       probes: Vector[Row],
       facts: Facts,
   ): Unit =
@@ -36,6 +38,7 @@ private[execution] object MaterialisationStudyReport:
     queries.foreach(row => println(tsv(row)))
     stages.foreach(row => println(tsv(row)))
     permuted.foreach(row => println(tsv(row)))
+    sparse.foreach(row => println(tsv(row)))
     probes.foreach(row => println(tsv(row)))
     println()
     table("Queries", queries.filter(row => sameText(row.kind, "query")))
@@ -43,6 +46,7 @@ private[execution] object MaterialisationStudyReport:
     keyOrder()
     table("Grouped stages and replay", groupedTable(queries, stages))
     table("Permuted keys", permutedTable(queries, permuted))
+    table("Sparse keys", sparseTable(sparse))
     orderComparison(queries, stages, permuted)
     replayGap(queries, stages)
     table("Caller probes", probes)
@@ -69,6 +73,9 @@ private[execution] object MaterialisationStudyReport:
       s"GROUPED rows=$groupedRows groups=$groups checksum=${facts.groupedSum} " +
       "keys=row%groups " +
       s"PERMUTED seed=$permutedSeed pairs_permuted_within_morsels per_group_sums_match " +
+      s"SPARSE rows=$groupedRows groups=$groups span=${GroupedBenchCases.sparseSpan} " +
+      s"per_group_checksum=${facts.sparseHash} " +
+      "keys=1024 groups spread over 0 until span, reversed inside each morsel " +
       s"element_morsels=${facts.morsels} grouped_morsels=${facts.groupedMorsels}\n" +
       s"java=${runtime.getVmName} ${runtime.getVmVersion} args=${runtime.getInputArguments}"
 
@@ -275,7 +282,11 @@ private[execution] object MaterialisationStudyReport:
         "its pair multiset. The per-group sums match the repeating keys, and that check runs " +
         "before timing. REPLAY and REPLAY-PERM call the five stages from the harness. They are " +
         "synthetic stage replays, not query results. GROUPED p50 is the query-level result for " +
-        "the repeating keys.",
+        "the repeating keys. SPARSE spreads 1024 groups over 0 until 300000 and reverses them " +
+        "inside each morsel, the QueryBench grouped-sparse keys, on the same row count. Its " +
+        "stage rows are the same five calls. The partial stage is range+sumInt32, recorded " +
+        "beside encode. The grand total matches the repeating keys. The per-group checksum does " +
+        "not, and that checksum is checked before timing.",
     )
     println()
 
@@ -413,6 +424,13 @@ private[execution] object MaterialisationStudyReport:
   private def jsonMb(bytes: Long): String =
     if (bytes < 0L) then "null"
     else String.format(Locale.ENGLISH, "%.3f", bytes.toDouble / 1000000.0)
+
+  /** Same columns as the repeating and permuted stage tables. No replay row is added. */
+  private def sparseTable(stages: Vector[Row]): Vector[Row] =
+    stages.sortBy { row =>
+      val index = stageNames.indexOf(row.name)
+      (row.threads, if (index < 0) then stageNames.length else index)
+    }
 
   private def permutedTable(queries: Vector[Row], stages: Vector[Row]): Vector[Row] =
     val names = stageNames :+ "REPLAY-PERM"
