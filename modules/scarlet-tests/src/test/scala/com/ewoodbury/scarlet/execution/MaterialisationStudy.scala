@@ -30,7 +30,11 @@ import MaterialisationStudySupport.*
  * per-group sums are checked before timing. GROUPED p50 is the query-level result for the
  * repeating keys. REPLAY times the five stage calls as one harness action. It is a synthetic
  * stage replay, not a query result. REPLAY-PERM is that replay on the permuted pairs. Stage
- * percentiles are not added together.
+ * percentiles are not added together. SPARSE is the `grouped-sparse` key pattern from
+ * `QueryBench`: 1024 groups spread over `0` until `300000`, reversed inside each morsel, on the
+ * same 10M rows. Its encode stage and its partial stage (`range+sumInt32`) are timed with the
+ * same warmup, round count, and thread widths as the repeating and permuted patterns. The
+ * per-group checksum is checked before timing. The grand total matches the repeating keys.
  *
  * Timed F4, P5, and GROUPED fail if the planner returns `None`, so a row-path fallback is not
  * recorded as a columnar result. `tryRun` is asserted in `prepare` for the int source, F4, and P5.
@@ -87,10 +91,12 @@ object MaterialisationStudy:
       projected: DistCollection[Int],
       grouped: DistCollection[(Int, Int)],
       permuted: DistCollection[(Int, Int)],
+      sparse: DistCollection[(Int, Int)],
       fusedSum: Long,
       projectedSum: Long,
       dependentSum: Long,
       groupedSum: Long,
+      sparseHash: Long,
       morsels: Int,
       groupedMorsels: Int,
   )
@@ -148,13 +154,14 @@ object MaterialisationStudy:
     val queries = buildQueries(setup)
     val stages = Array.fill(stagePlan.length)(Array.fill(threadCounts.length)(new Series))
     val permutedStages = Array.fill(stagePlan.length)(Array.fill(threadCounts.length)(new Series))
+    val sparseStages = Array.fill(stagePlan.length)(Array.fill(threadCounts.length)(new Series))
     System.err.println("warm")
-    rounds(warmup, record = false, queries, stages, permutedStages, setup)
+    rounds(warmup, record = false, queries, stages, permutedStages, sparseStages, setup)
     System.err.println("measure")
-    rounds(measure, record = true, queries, stages, permutedStages, setup)
+    rounds(measure, record = true, queries, stages, permutedStages, sparseStages, setup)
     sampler.foreach { active =>
       System.err.println("allocate")
-      allocate(active, queries, stages, permutedStages, setup)
+      allocate(active, queries, stages, permutedStages, sparseStages, setup)
     }
     installThreads(1)
     val probes = measureProbes(sampler.map(_.bean), setup)
@@ -166,11 +173,13 @@ object MaterialisationStudy:
       setup.morsels,
       setup.groupedMorsels,
       sampler.isDefined,
+      setup.sparseHash,
     )
     MaterialisationStudyReport.printAll(
       queries.flatMap(query => threadCounts.map(threads => toQueryRow(query, threads, facts))),
       stageRows(stages, facts, "stage"),
       stageRows(permutedStages, facts, "permuted"),
+      stageRows(sparseStages, facts, "sparse"),
       probes,
       facts,
     )
@@ -186,6 +195,7 @@ object MaterialisationStudy:
     requireSameGroupSums(keys, groupValues, shuffledKeys, shuffledValues)
     val grouped = DistCollection.ofIntPairs(keys, groupValues, sourcePartitions)
     val permuted = DistCollection.ofIntPairs(shuffledKeys, shuffledValues, sourcePartitions)
+    val sparseInput = GroupedBenchCases.sparse(groupedRows, sourcePartitions, batchSize)
     val fusedSum = expectPlus(values, steps = 4)
     val projectedSum = expectPlus(values, steps = 5)
     val dependentSum = rawDependent(values, 0, values.length)
@@ -206,6 +216,24 @@ object MaterialisationStudy:
     requireSum(projected.plan, projectedSum, "P5")
     requireGrouped(grouped.plan, groupedSum)
     requireGrouped(permuted.plan, groupedSum)
+    require(
+      sparseInput.total == groupedSum,
+      s"sparse total ${sparseInput.total} != $groupedSum",
+    )
+    require(
+      sparseFirstKey(sparseInput.source) == GroupedBenchCases.sparseSpan,
+      "sparse morsel did not start at the spread span",
+    )
+    val sparseShape = ColumnarPlanner.groupedSumPeel(sparseInput.source.plan).getOrElse {
+      throw new IllegalStateException("sparse grouped sum did not peel")
+    }
+    require(sameText(sparseShape, "GroupedSum(Scan)"), sparseShape)
+    requireGrouped(sparseInput.source.plan, groupedSum)
+    val sparseFold = GroupedBenchCases.columnarFold(sparseInput.source)
+    require(
+      sparseFold.hash == sparseInput.hash && sparseFold.total == groupedSum,
+      s"sparse checksum ${sparseFold.hash} != ${sparseInput.hash}",
+    )
     requireRun(element.plan, elementRows, "source")
     requireRun(fused.plan, elementRows, "F4")
     requireRun(projected.plan, elementRows, "P5")
@@ -220,10 +248,12 @@ object MaterialisationStudy:
       projected,
       grouped,
       permuted,
+      sparseInput.source,
       fusedSum,
       projectedSum,
       dependentSum,
       groupedSum,
+      sparseFold.hash,
       morsels,
       groupedMorsels,
     )
@@ -300,6 +330,7 @@ object MaterialisationStudy:
       queries: Vector[Query],
       stages: Array[Array[Series]],
       permuted: Array[Array[Series]],
+      sparse: Array[Array[Series]],
       setup: Setup,
   ): Unit =
     var round = 0
@@ -311,6 +342,7 @@ object MaterialisationStudy:
         queries.foreach(query => runQuery(query, threads, recorded, setup.values))
         runStages(setup.grouped, threads, setup.groupedSum, recorded, stages)
         runStages(setup.permuted, threads, setup.groupedSum, recorded, permuted)
+        runStages(setup.sparse, threads, setup.groupedSum, recorded, sparse)
       }
       System.err.println(s"${if (record) then "measure" else "warm"} ${round + 1}/$count")
       round += 1
@@ -368,6 +400,7 @@ object MaterialisationStudy:
       queries: Vector[Query],
       stages: Array[Array[Series]],
       permuted: Array[Array[Series]],
+      sparse: Array[Array[Series]],
       setup: Setup,
   ): Unit =
     var sample = 0
@@ -378,6 +411,7 @@ object MaterialisationStudy:
         queries.foreach(query => allocateQuery(sampler, query, threads, at, setup.values))
         allocateStages(sampler, setup.grouped, setup.groupedSum, threads, at, stages)
         allocateStages(sampler, setup.permuted, setup.groupedSum, threads, at, permuted)
+        allocateStages(sampler, setup.sparse, setup.groupedSum, threads, at, sparse)
       }
       System.err.println(s"allocate ${at + 1}/$allocSamples")
       sample += 1
@@ -855,6 +889,22 @@ object MaterialisationStudy:
       index += 1
     }
     sums
+
+  private def sparseFirstKey(source: DistCollection[(Int, Int)]): Int =
+    source.plan match
+      case Plan.Source(partitions, _) =>
+        partitions.headOption match
+          case Some(partition) =>
+            partition.data match
+              case owned: IntPairArrays =>
+                val keys = owned.keys
+                if (keys.length == 0) then
+                  throw new IllegalStateException("sparse partition was empty")
+                else keys(0)
+              case _ =>
+                throw new IllegalStateException("sparse source was not an owned pair array")
+          case None => throw new IllegalStateException("sparse source had no partition")
+      case _ => throw new IllegalStateException("sparse plan was not a source")
 
   private def widthSlot(threads: Int): Int =
     val index = threadCounts.indexOf(threads)

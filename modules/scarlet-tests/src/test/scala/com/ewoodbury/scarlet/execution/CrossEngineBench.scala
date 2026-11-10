@@ -48,6 +48,7 @@ object CrossEngineBench:
     "filter-reducebykey",
     "filter-join",
     "filter-sort",
+    "filter-countbykey",
   )
 
   private final case class Settings(
@@ -119,6 +120,11 @@ object CrossEngineBench:
     name match
       case "filter-count" =>
         withInts(rows, filters, nulls)(_.count())
+      case "filter-countbykey" =>
+        withInts(rows, filters, nulls) { data =>
+          // Checksum: sum of (key * 31L + count) over each countByKey pair.
+          data.countByKey.collect().map { case (key, count) => key * 31L + count }.sum
+        }
       case "filter-sum" =>
         withInts(rows, filters, nulls)(_.values.sum)
       case "filter-groupbykey" =>

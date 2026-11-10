@@ -204,6 +204,42 @@ keys: one thread p50 16.207 ms, p95 16.492, max 17.802; four threads p50 4.783, 
 8.288. Shuffled keys: one thread p50 23.113, p95 26.148, max 26.675; four threads p50 6.453,
 p95 11.415, max 11.926.
 
+`grouped-sparse` stages were recorded on 2026-11-10 on Linux 6.8.0-117-generic, aarch64, 4 cores
+(Vendor ID Apple), OpenJDK 64-Bit Server VM 21.0.13, through `sbt -J-Xmx3g` with `Test / fork`
+left false. This is not the Apple M1 Pro / JDK 17 run above, and these p50s are not subtracted
+from that run or from the `QueryBench` `grouped-sparse` rows. Same study protocol as the harness:
+warmup 5, 41 measured rounds, nearest-rank percentiles (for 41 samples p50 is rank 21, p95 is
+rank 39, max is rank 41), threads 1 and 4 alternating in one JVM, 10M rows, batch 8192, two
+source partitions. The per-group checksum was `49999624077338`.
+
+Sparse keys, encode (`copiedIntPairs`): one thread p50 25.080 ms, p95 104.624, max 159.909;
+four threads p50 27.511, p95 95.114, max 129.169. Partial (`range+sumInt32`): one thread p50
+47.884 ms, p95 71.348, max 93.560; four threads p50 20.230, p95 36.049, max 45.536. In this
+same run the repeating-key encode was 14.433 ms at one thread and 29.605 ms at four, and the
+repeating-key partial was 16.934 ms and 7.926 ms. Those repeating figures stay in this
+paragraph. They do not replace the 2026-10-24 partials above.
+
+### Partial combine versus exchange
+
+Recorded on the same 2026-11-10 machine and JDK, through `sbt -J-Xmx2g` with `Test / fork` left
+false, in `PartialExchangeBench`. 1e6 int pairs, keys `row % 1024`, key filter `key % 3 != 0`
+(666016 rows kept), two source batches, batch 8192, partition width 4, spill off. Warmup 5,
+then 40 rounds. p50 is nearest-rank (rank 20 of 40). Threads 1 are measured, then threads 4,
+in that order, in one JVM. Allocation was not measured. The key filter is applied to the arrays
+and the timed calls are the dense `HashCount.byKey` phases (`PartialCombine.perBatch`,
+`HashExchange.partitionAll`, `HashCount.addCounts`). `byKeySelected`, which is what a filter on
+`countByKey` lowers to, is not called. The partial row count and the partitioned row count were
+both 1364, so the exchange shipped the combined partials.
+
+| phase | threads | p50 ms |
+| --- | ---: | ---: |
+| partial | 1 | 15.812 |
+| exchange | 1 | 0.291 |
+| addCounts | 1 | 0.013 |
+| partial | 4 | 2.304 |
+| exchange | 4 | 0.293 |
+| addCounts | 4 | 0.446 |
+
 ## Sort
 
 Recorded on the same Apple M1 Pro (8 cores), OpenJDK 64-Bit Server VM 17.0.16, through `sbt` with
