@@ -231,14 +231,26 @@ and the timed calls are the dense `HashCount.byKey` phases (`PartialCombine.perB
 `countByKey` lowers to, is not called. The partial row count and the partitioned row count were
 both 1364, so the exchange shipped the combined partials.
 
+An earlier identical run of the same binary measured the one-thread partial at 15.812 ms and the
+four-thread partial at 2.304 ms, with the same input and the same guards. The one-thread partial is
+therefore not stable across JVMs (code layout and inlining change where the loop lands), and only
+the four-thread figure, 2.3-2.9 ms, is repeatable. Quote the four-thread partial, not the
+one-thread one.
+
+`encode` is `BatchCodec.intPairs` over the same survivor arrays, timed warm (5 warmups, 40 rounds)
+rather than once before warmup. It is the fair comparison with an action p50, and it is why the
+cold `encode_ms` in the cross-engine harness is not a share of the action: 1.471 ms warm against
+9.65 ms cold for the same rows.
+
 | phase | threads | p50 ms |
 | --- | ---: | ---: |
-| partial | 1 | 15.812 |
-| exchange | 1 | 0.291 |
+| encode | 1 | 1.471 |
+| partial | 1 | 3.298 |
+| exchange | 1 | 0.306 |
 | addCounts | 1 | 0.013 |
-| partial | 4 | 2.304 |
-| exchange | 4 | 0.293 |
-| addCounts | 4 | 0.446 |
+| partial | 4 | 2.936 |
+| exchange | 4 | 0.287 |
+| addCounts | 4 | 0.436 |
 
 ## Sort
 

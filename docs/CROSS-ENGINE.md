@@ -203,7 +203,9 @@ Recorded on 2026-11-10 on Linux 6.8.0-117-generic, aarch64, 4 cores (Vendor ID A
 `CROSS_ROUNDS=10`, 4 threads, batch 8192, spill on. `encode_ms` is the one-shot encode before
 warmup. It is not part of the p50, and the p50 still includes the scan encode. The harness p50
 is `samples(rounds / 2)` after sorting, the same selector as the spilled-harness tables above.
-DuckDB and Spark were not re-run for this query on this machine. Do not subtract this p50 from
+`encode_ms` here is one cold encode, so it overstates the encode share: the same encoder over the
+same survivor rows times 1.471 ms warm in `PartialExchangeBench` (see `BENCHMARKS.md`). The 12.65 ms
+action is therefore not mostly encode, and neither figure should be subtracted from the other. Do not subtract this p50 from
 the 7.05 ms `QueryBench` figure or from the 1.46 ms DuckDB figure. `filter-join` was not
 re-run here. Its encode split remains the 2026-11-08 spilled-harness row.
 
