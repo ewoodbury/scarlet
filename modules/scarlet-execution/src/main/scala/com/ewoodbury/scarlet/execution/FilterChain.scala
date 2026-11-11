@@ -50,6 +50,10 @@ private[execution] object FilterChain:
       preserveAbsence,
       ordinals,
     )
+    // A sorted batch with a clear key bit must not reach the pair-row kernel, which drops that
+    // row. Plan admission already requires a fully present key. This is the runtime guarantee,
+    // and it does not change the kernel.
+    refuseNullSortKey(child, columns)
     columns match
       case Columns.LongCounts(_) | Columns.LongTriples(_) | Columns.StringTriples(_) |
           Columns.GroupedInts(_) | Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
@@ -108,6 +112,7 @@ private[execution] object FilterChain:
               case Columns.Outer(_, _) => None
               case _ =>
                 val batches = kindBatches(op.kind, columns)
+                refuseNullSortKey(child, columns)
                 // A pure slot stack rejects a clear bit. Publish the stored 0 before that kernel.
                 // A whole-row step is not in `steps`, so this does not run for one.
                 val ready =
@@ -240,6 +245,43 @@ private[execution] object FilterChain:
         Selection.Step.Bool(_, _) | Selection.Step.Utf8(_, _) | Selection.Step.IntPair(_) |
         Selection.Step.LongPair(_) | Selection.Step.StringPair(_) =>
       false
+
+  /**
+   * The pair-row kernel drops a clear key bit and does not call the predicate. The row path keeps
+   * that row. [[ColumnarPlanner]] admits a filter over an int sort only when the key column is
+   * fully present. A sorted batch that still arrives with a clear key bit falls back here, before
+   * that kernel, so the result is not short.
+   */
+  private def refuseNullSortKey(child: PhysicalOp, columns: Columns): Unit =
+    (child, columns) match
+      case (_: PhysicalOp.SortByIntKey, Columns.Pairs(batches)) if batches.exists(nullIntKey) =>
+        throw new ColumnarFallback("filter over sortByIntKey saw a null key the row path keeps")
+      case _ => ()
+
+  /**
+   * One bit-word pass, not a row scan: this runs on every filter over a sorted batch. Rows past
+   * `length` inside the tail word are masked off, so spare bits are not read as a null key.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def nullIntKey(batch: ColumnBatch): Boolean =
+    batch.columns.headOption match
+      case Some(keys: Int32Column) =>
+        val live = keys.length
+        val words = keys.validity.words
+        val fullWords = live >>> 6
+        val tail = live & 63
+        if words.length < fullWords + (if tail == 0 then 0 else 1) then true
+        else
+          var index = 0
+          var dense = true
+          while (index < fullWords) && dense do
+            if words(index) != -1L then dense = false
+            index += 1
+          if dense && tail != 0 then
+            val mask = (1L << tail) - 1L
+            dense = (words(fullWords) & mask) == mask
+          !dense
+      case _ => true
 
   private def opening(plan: Plan[_], op: PhysicalOp): PhysicalOp.Slot =
     PredicatePlan.openingSlot(plan, op).getOrElse(missing)

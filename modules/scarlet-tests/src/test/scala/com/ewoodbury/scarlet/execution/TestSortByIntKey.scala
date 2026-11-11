@@ -179,30 +179,98 @@ class TestSortByIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     storedInt(pair, 0) shouldBe 1
   }
 
-  it should "leave a filter above the sort, and a non-filter child, on the row path" in {
+  it should "filter one row predicate over the sort and match the row path" in {
     val source = DistCollection.ofIntPairs(Array(3, 1, 2, 2), Array(30, 10, 20, 21), 2)
     val above = source.sortByIntKey.filter((pair: (Int, Int)) => pair._2 != 20)
     val below = source.filter((pair: (Int, Int)) => pair._1 > 0).sortByIntKey
-    val mapped = source.map((pair: (Int, Int)) => (pair._1, pair._2)).sortByIntKey
-    val rewritten = source.mapValues((value: Int) => value + 1).sortByIntKey
 
-    ColumnarPlanner.partitioning(above.plan) shouldBe Option.empty[PartitioningInfo]
-    ColumnarPlanner.lower(above.plan) shouldBe Option.empty[PhysicalOp]
+    ColumnarPlanner.lower(above.plan).map(_.shape) shouldBe Some(
+      "FilterRow(SortByIntKey(Scan))",
+    )
+    ColumnarPlanner.tryTake(above.plan, 1) shouldBe None
     collect(above) shouldBe rowCollect(above)
-    // One row filter sorts the survivor index.
+    collect(above) shouldBe Seq(1 -> 10, 2 -> 21, 3 -> 30)
+    // One row filter under the sort still sorts the survivor index.
     ColumnarPlanner.lower(below.plan).map(_.shape) shouldBe Some("SortByIntKey(FilterRow(Scan))")
     collect(below) shouldBe rowCollect(below)
+  }
+
+  it should "keep a null key on the row path and not lower one filter above the sort" in {
+    val rows = Seq(
+      intPair(boxedInt(2), boxedInt(20)),
+      intPair(noInt, boxedInt(5)),
+      intPair(boxedInt(-4), boxedInt(1)),
+      intPair(boxedInt(0), boxedInt(8)),
+    )
+    val filtered =
+      DistCollection(rows, 2).sortByIntKey.filter((pair: (Int, Int)) => pair._2 < 20)
+    val row = rowCollect(filtered)
+    val keptNull = row.lift(1).getOrElse(fail("missing null-key row"))
+
+    ColumnarPlanner.lower(filtered.plan) shouldBe None
+    ColumnarPlanner.partitioning(filtered.plan) shouldBe None
+    collect(filtered) shouldBe row
+    row shouldBe Seq(
+      intPair(boxedInt(-4), boxedInt(1)),
+      intPair(noInt, boxedInt(5)),
+      intPair(boxedInt(0), boxedInt(8)),
+    )
+    effectiveKeys(row) shouldBe Seq(-4, 0, 0)
+    present(keptNull, 0) shouldBe false
+    storedInt(keptNull, 1) shouldBe 5
+  }
+
+  it should "leave other parents of the sort, and a second filter, on the row path" in {
+    val source = DistCollection.ofIntPairs(Array(3, 1, 2, 2), Array(30, 10, 20, 21), 2)
+    val sorted = source.sortByIntKey
+    val mapped = source.map((pair: (Int, Int)) => (pair._1, pair._2)).sortByIntKey
+    val rewritten = source.mapValues((value: Int) => value + 1).sortByIntKey
+    val twice = sorted
+      .filter((pair: (Int, Int)) => pair._2 != 20)
+      .filter((pair: (Int, Int)) => pair._1 > 0)
+    val longs = DistCollection
+      .ofLongPairs(Array(3L, 1L, 2L), Array(30L, 10L, 20L), 2)
+      .sortByLongKey
+      .filter((pair: (Long, Long)) => pair._2 != 20L)
+    val strings = DistCollection(Seq("b" -> 2, "a" -> 1), 2)
+      .sortByStringKey
+      .filter((pair: (String, Int)) => pair._2 != 1)
+
     ColumnarPlanner.partitioning(mapped.plan) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.partitioning(rewritten.plan) shouldBe Option.empty[PartitioningInfo]
-    ColumnarPlanner.partitioning(source.sortByIntKey.keys.plan) shouldBe
+    ColumnarPlanner.partitioning(sorted.keys.plan) shouldBe Option.empty[PartitioningInfo]
+    ColumnarPlanner.partitioning(sorted.values.plan) shouldBe Option.empty[PartitioningInfo]
+    ColumnarPlanner.partitioning(
+      sorted.reduceByKey((left: Int, right: Int) => left + right).plan,
+    ) shouldBe Option.empty[PartitioningInfo]
+    ColumnarPlanner.partitioning(sorted.join(source).plan) shouldBe Option.empty[PartitioningInfo]
+    ColumnarPlanner.partitioning(sorted.groupByKey[Int, Int].plan) shouldBe
       Option.empty[PartitioningInfo]
-    ColumnarPlanner.partitioning(source.sortByIntKey.values.plan) shouldBe
+    ColumnarPlanner.partitioning(sorted.mapValues((value: Int) => value + 1).plan) shouldBe
+      Option.empty[PartitioningInfo]
+    ColumnarPlanner.partitioning(sorted.filterKeys[Int, Int]((key: Int) => key > 0).plan) shouldBe
       Option.empty[PartitioningInfo]
     ColumnarPlanner.partitioning(
-      source.sortByIntKey.reduceByKey((left: Int, right: Int) => left + right).plan,
+      sorted.filterValues[Int, Int]((value: Int) => value > 0).plan,
     ) shouldBe Option.empty[PartitioningInfo]
-    ColumnarPlanner.partitioning(source.sortByIntKey.join(source).plan) shouldBe
-      Option.empty[PartitioningInfo]
+    ColumnarPlanner.partitioning(twice.plan) shouldBe Option.empty[PartitioningInfo]
+    ColumnarPlanner.partitioning(longs.plan) shouldBe Option.empty[PartitioningInfo]
+    ColumnarPlanner.partitioning(strings.plan) shouldBe Option.empty[PartitioningInfo]
+  }
+
+  it should "write no spill file for a filter that drops rows over an in-budget sort" in {
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(saved.copy(columnarExecution = true, spillEnabled = true))
+      RankSplitRuns.resetForTest()
+      val source = DistCollection.ofIntPairs(Array(3, 1, 2), Array(30, 10, 20), 2)
+      val filtered = source.sortByIntKey.filter((pair: (Int, Int)) => pair._2 != 20)
+      collect(filtered) shouldBe Seq(1 -> 10, 3 -> 30)
+      // Zero files does not prove the filter ran after the sort.
+      RankSplitRuns.filesWrittenForTest shouldBe 0L
+    finally
+      RankSplitRuns.resetForTest()
+      ScarletConf.set(saved)
   }
 
   "RankSplit" should "keep cross-partition ties in input order and place ranks by r * partitions / rows" in {
