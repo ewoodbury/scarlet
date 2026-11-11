@@ -36,41 +36,42 @@ object ColumnarPlanner:
   /**
    * The physical tree for `plan`, without running it. `None` means the row path, including an
    * element chain whose project does not declare the column's type. An int join lowers when its
-   * hint is absent, shuffle-hash, or broadcast. A `(Long, Long)` inner join lowers only for an
-   * absent hint or a shuffle-hash hint, to [[PhysicalOp.LongHashJoin]]. A null value on that join
-   * stays a clear validity bit and [[tryRun]] keeps the matched row. It is not an absence bit. A
-   * long outer join lowers for an absent hint, shuffle-hash, broadcast, or sort-merge. Long inner
-   * broadcast and long inner sort-merge stay on the row path. A `(String, Int)` inner join lowers
-   * only for an absent hint or a shuffle-hash hint, to [[PhysicalOp.StringHashJoin]]. A null key
-   * is dropped. A null value stays a clear validity bit and [[tryRun]] keeps the matched row. It
-   * is not an absence bit. A key or value filter on either side, including a stack of one,
-   * scatters that side's survivor index and does not compact. An over-budget build bucket spills
-   * when `spillEnabled` is on; the estimate includes the dictionary. At or under the budget, and
-   * whenever spill is off, the join stays in memory. A string outer join lowers for an absent
-   * hint, shuffle-hash, broadcast, or sort-merge, to the `String*Outer` ops. Hash and broadcast do
-   * not spill. Sort-merge runs in memory and throws instead of spilling. String inner broadcast
-   * and string inner sort-merge stay on the row path. The layout is [[Layout.StringTriple]]. An
-   * explicit sort-merge hint on int pairs lowers to [[PhysicalOp.SortMergeJoin]]. A left, right,
-   * or full outer sort-merge hint lowers to the matching node. Any other sort-merge returns
-   * `None`. A left, right, or full outer join on int pairs lowers for a broadcast, shuffle-hash,
-   * absent, or sort-merge hint. An absent hint uses the shuffle-hash op. On a right outer join the
-   * left input is the build and the right input is the probe. A null value on an int shuffle-hash
-   * left outer join stays a clear validity bit and [[tryRun]] keeps the row. A null value on a
-   * right outer, full outer, broadcast outer, or sort-merge outer join makes [[tryRun]] return
-   * `None`. [[SortLowering]] accepts an int, long, or string key sort of a scan, or of filters
-   * over that scan. A map, aggregate, or join under the sort stays on the row path. One filter
-   * above an int sort lowers to [[PhysicalOp.Filter]] on [[PhysicalOp.Slot.Row]] around
-   * [[PhysicalOp.SortByIntKey]], and only for a fully present key column: the pair-row filter atom
-   * drops a null key while the row path keeps it. The sort is [[SortLowering.lowerInt]].
-   * [[SortLowering.acceptsAsChild]] stays false, so a null key, a second filter, a long or string
-   * sort, and every other parent stay on the row path. A slot filter sorts the survivor index.
-   * Over the budget, with spill on, that index is spilled. A long-pair row filter and a whole-row
-   * string filter sort that index too. A long sort spills when `spillEnabled` is on and the
-   * retained estimate exceeds `spillBudgetBytes`. The physical op stays `SortByLongKey`. A string
-   * sort spills on that same budget. The physical op stays `SortByStringKey`. At or under the
-   * budget, and whenever spill is off, the split stays in memory and writes nothing.
-   * [[partitioning]] and [[tryRun]] follow a refusal. They also drop a lowered tree whose layout
-   * is invalid.
+   * hint is absent, shuffle-hash, or broadcast. A `(Long, Long)` inner join lowers for an absent
+   * hint or a shuffle-hash hint to [[PhysicalOp.LongHashJoin]], and for an explicit broadcast hint
+   * to [[PhysicalOp.LongBroadcastJoin]]. That node builds the right side and probes the left in
+   * place. A null key is dropped. A null value stays a clear validity bit and [[tryRun]] keeps the
+   * matched row. It is not an absence bit. An over-budget broadcast build throws. A long outer
+   * join lowers for an absent hint, shuffle-hash, broadcast, or sort-merge. Long inner sort-merge
+   * stays on the row path. A `(String, Int)` inner join lowers only for an absent hint or a
+   * shuffle-hash hint, to [[PhysicalOp.StringHashJoin]]. A null key is dropped. A null value stays
+   * a clear validity bit and [[tryRun]] keeps the matched row. It is not an absence bit. A key or
+   * value filter on either side, including a stack of one, scatters that side's survivor index and
+   * does not compact. An over-budget build bucket spills when `spillEnabled` is on; the estimate
+   * includes the dictionary. At or under the budget, and whenever spill is off, the join stays in
+   * memory. A string outer join lowers for an absent hint, shuffle-hash, broadcast, or sort-merge,
+   * to the `String*Outer` ops. Hash and broadcast do not spill. Sort-merge runs in memory and
+   * throws instead of spilling. String inner broadcast and string inner sort-merge stay on the row
+   * path. The layout is [[Layout.StringTriple]]. An explicit sort-merge hint on int pairs lowers
+   * to [[PhysicalOp.SortMergeJoin]]. A left, right, or full outer sort-merge hint lowers to the
+   * matching node. Any other sort-merge returns `None`. A left, right, or full outer join on int
+   * pairs lowers for a broadcast, shuffle-hash, absent, or sort-merge hint. An absent hint uses
+   * the shuffle-hash op. On a right outer join the left input is the build and the right input is
+   * the probe. A null value on an int shuffle-hash left outer join stays a clear validity bit and
+   * [[tryRun]] keeps the row. A null value on a right outer, full outer, broadcast outer, or
+   * sort-merge outer join makes [[tryRun]] return `None`. [[SortLowering]] accepts an int, long,
+   * or string key sort of a scan, or of filters over that scan. A map, aggregate, or join under
+   * the sort stays on the row path. One filter above an int sort lowers to [[PhysicalOp.Filter]]
+   * on [[PhysicalOp.Slot.Row]] around [[PhysicalOp.SortByIntKey]], and only for a fully present
+   * key column: the pair-row filter atom drops a null key while the row path keeps it. The sort is
+   * [[SortLowering.lowerInt]]. [[SortLowering.acceptsAsChild]] stays false, so a null key, a
+   * second filter, a long or string sort, and every other parent stay on the row path. A slot
+   * filter sorts the survivor index. Over the budget, with spill on, that index is spilled. A
+   * long-pair row filter and a whole-row string filter sort that index too. A long sort spills
+   * when `spillEnabled` is on and the retained estimate exceeds `spillBudgetBytes`. The physical
+   * op stays `SortByLongKey`. A string sort spills on that same budget. The physical op stays
+   * `SortByStringKey`. At or under the budget, and whenever spill is off, the split stays in
+   * memory and writes nothing. [[partitioning]] and [[tryRun]] follow a refusal. They also drop a
+   * lowered tree whose layout is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -935,10 +936,7 @@ object ColumnarPlanner:
       SortLowering.info(shuffleWidth, layoutOf(PhysicalOp.Kind.Pairs))
     case _: PhysicalOp.SortByStringKey =>
       SortLowering.info(shuffleWidth, layoutOf(PhysicalOp.Kind.StringPairs))
-    case _: PhysicalOp.HashAggregate | _: PhysicalOp.LongHashAggregate | _: PhysicalOp.HashJoin |
-        _: PhysicalOp.SortMergeJoin | _: PhysicalOp.SortMergeLeftOuter |
-        _: PhysicalOp.SortMergeRightOuter | _: PhysicalOp.SortMergeFullOuter |
-        _: PhysicalOp.HashLeftOuter | _: PhysicalOp.HashRightOuter | _: PhysicalOp.HashFullOuter =>
+    case _: PhysicalOp.HashAggregate | _: PhysicalOp.LongHashAggregate =>
       hashed(PhysicalOp.Kind.Pairs)
     case _: PhysicalOp.StringHashAggregate =>
       hashed(PhysicalOp.Kind.StringPairs)
@@ -946,42 +944,12 @@ object ColumnarPlanner:
       hashed(group.kind)
     case count: PhysicalOp.CountByKey =>
       hashed(count.kind)
-    case _: PhysicalOp.LongHashJoin =>
-      hashed(PhysicalOp.Kind.LongPairs)
-    case _: PhysicalOp.StringHashJoin =>
-      hashed(PhysicalOp.Kind.StringTriples)
-    case _: PhysicalOp.LongHashLeftOuter | _: PhysicalOp.LongHashRightOuter |
-        _: PhysicalOp.LongHashFullOuter | _: PhysicalOp.LongSortMergeLeftOuter |
-        _: PhysicalOp.LongSortMergeRightOuter | _: PhysicalOp.LongSortMergeFullOuter =>
-      hashed(PhysicalOp.Kind.LongOuter)
-    case PhysicalOp.LongBroadcastLeftOuter(left, _) =>
-      infoOf(left).copy(layout = layoutOf(PhysicalOp.Kind.LongOuter))
-    case PhysicalOp.LongBroadcastRightOuter(_, right) =>
-      infoOf(right).copy(layout = layoutOf(PhysicalOp.Kind.LongOuter))
-    case PhysicalOp.LongBroadcastFullOuter(left, _) =>
-      infoOf(left).copy(layout = layoutOf(PhysicalOp.Kind.LongOuter))
-    case _: PhysicalOp.StringHashLeftOuter | _: PhysicalOp.StringHashRightOuter |
-        _: PhysicalOp.StringHashFullOuter | _: PhysicalOp.StringSortMergeLeftOuter |
-        _: PhysicalOp.StringSortMergeRightOuter | _: PhysicalOp.StringSortMergeFullOuter =>
-      hashed(PhysicalOp.Kind.StringOuter)
-    case PhysicalOp.StringBroadcastLeftOuter(left, _) =>
-      infoOf(left).copy(layout = layoutOf(PhysicalOp.Kind.StringOuter))
-    case PhysicalOp.StringBroadcastRightOuter(_, right) =>
-      infoOf(right).copy(layout = layoutOf(PhysicalOp.Kind.StringOuter))
-    case PhysicalOp.StringBroadcastFullOuter(left, _) =>
-      infoOf(left).copy(layout = layoutOf(PhysicalOp.Kind.StringOuter))
-    case PhysicalOp.BroadcastJoin(left, right, buildSide) =>
-      broadcastInfo(left, right, buildSide)
-    case PhysicalOp.BroadcastLeftOuter(left, _) =>
-      infoOf(left).copy(layout = layoutOf(PhysicalOp.Kind.Triples))
-    case PhysicalOp.BroadcastRightOuter(_, right) =>
-      infoOf(right).copy(layout = layoutOf(PhysicalOp.Kind.Triples))
-    case PhysicalOp.BroadcastFullOuter(left, _) =>
-      infoOf(left).copy(layout = layoutOf(PhysicalOp.Kind.Triples))
     case PhysicalOp.Exchange(_) =>
       throw new IllegalStateException("exchange is only a child of aggregate or join")
     case PhysicalOp.Scan(kind, partitions) =>
       narrow(Distribution.Unknown(partitions.length), layoutOf(kind))
+    case join =>
+      JoinLowering.info(join, infoOf, layoutOf, hashed)
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private[execution] def stringResult(value: Any): String = value match
@@ -991,16 +959,6 @@ object ColumnarPlanner:
       throw new ColumnarFallback(
         s"columnar string map expected a String, found ${other.getClass.getName}",
       )
-
-  private def broadcastInfo(
-      left: PhysicalOp,
-      right: PhysicalOp,
-      buildSide: PhysicalOp.BuildSide,
-  ): PartitioningInfo =
-    val probe = buildSide match
-      case PhysicalOp.BuildSide.Right => left
-      case PhysicalOp.BuildSide.Left => right
-    infoOf(probe).copy(layout = layoutOf(PhysicalOp.Kind.Triples))
 
   private def narrow(distribution: Distribution, chosen: Layout): PartitioningInfo =
     PartitioningInfo(distribution, OrderingTag.Unsorted, chosen)

@@ -30,17 +30,18 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 206 accepted fixtures. The filter over sortByIntKey stays accepted: pairSource keys are
-    // fully present. 205 + 1 = 206.
-    accepted.size shouldBe 206
-    // 35 exclusions. 206 + 35 = 241. That filter is not excluded, because the fixture has no
+    // 207 accepted fixtures. The filter over sortByIntKey stays accepted: pairSource keys are
+    // fully present. 205 + 1 = 206. Explicit long inner broadcast is a new accepted fixture, so
+    // 206 + 1 = 207.
+    accepted.size shouldBe 207
+    // 35 exclusions. 207 + 35 = 242. That filter is not excluded, because the fixture has no
     // null key. A null key refuses the shape and is not one of these exclusions.
-    // Long inner broadcast and long inner sort-merge stay on the row path. Long outer joins are
+    // Long inner sort-merge stays on the row path. Long outer joins are
     // covered by execution tests, not contract fixtures, because the contract does not track the
     // int refusals either. String outer joins are covered by execution tests, not contract
     // fixtures.
     excluded.size shouldBe 35
-    (accepted.size + excluded.size) shouldBe 241
+    (accepted.size + excluded.size) shouldBe 242
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -587,6 +588,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         Some("LongHashJoin(Exchange(Scan), Exchange(Scan))"),
       ),
       AcceptedCase(
+        "explicit broadcast long join",
+        DistCollection(longPairSource).broadcastJoin(DistCollection(longPairSource)).plan,
+        narrowInfo(2, layout),
+        Some("LongBroadcastJoin(Scan, Scan)"),
+      ),
+      AcceptedCase(
         "join with string keys",
         DistCollection(stringKeySource).join(DistCollection(stringKeySource)).plan,
         hashedInfo(stringTripleLayout),
@@ -955,6 +962,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.SortMergeRightOuter(_, _) | PhysicalOp.SortMergeFullOuter(_, _) |
         PhysicalOp.HashLeftOuter(_, _) | PhysicalOp.HashRightOuter(_, _) |
         PhysicalOp.HashFullOuter(_, _) | PhysicalOp.BroadcastJoin(_, _, _) |
+        PhysicalOp.LongBroadcastJoin(_, _, _) |
         PhysicalOp.BroadcastLeftOuter(_, _) | PhysicalOp.BroadcastRightOuter(_, _) |
         PhysicalOp.BroadcastFullOuter(_, _) | PhysicalOp.SortByIntKey(_) |
         PhysicalOp.SortByLongKey(_) | PhysicalOp.SortByStringKey(_) | PhysicalOp.Union(_, _) |

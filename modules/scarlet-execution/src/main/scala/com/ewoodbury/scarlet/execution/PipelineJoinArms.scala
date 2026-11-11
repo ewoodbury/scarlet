@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{AbsentSide, ColumnBatch, ColumnPipeline, ColumnarFallback}
+import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 
 import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
@@ -91,6 +91,51 @@ private[execution] object PipelineJoinArms:
       case PhysicalOp.BuildSide.Right => joined
       case PhysicalOp.BuildSide.Left => swapValueColumns(joined)
     Columns.Triples(ordered)
+
+  def broadcastInnerLong(
+      left: Plan[_],
+      right: Plan[_],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      buildSide: PhysicalOp.BuildSide,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): Columns =
+    val leftBatches = longPairsOf(
+      interpretAt(left, leftOp, selectedPartition, preserveAbsence, ordinals),
+    )
+    val rightBatches = longPairsOf(
+      interpretAt(right, rightOp, selectedPartition, preserveAbsence, ordinals),
+    )
+    val (probe, build) = buildSide match
+      case PhysicalOp.BuildSide.Right => (leftBatches, rightBatches)
+      case PhysicalOp.BuildSide.Left => (rightBatches, leftBatches)
+    val joined =
+      if (probe.isEmpty) then Vector.empty[ColumnBatch]
+      else
+        val rows = build.iterator.map(_.length.toLong).sum
+        if (rows > 0L) then
+          require(rows <= Int.MaxValue.toLong, s"build side has $rows rows")
+          val count = rows.toInt
+          val estimate = LongHashJoin.retainedBuildBytes(count)
+          val budget = ScarletConf.get.broadcastBuildBudgetBytes
+          if (estimate > budget) then
+            throw new IllegalStateException(
+              s"broadcast build table retains about $estimate bytes for $count rows, above the budget of $budget bytes",
+            )
+        val buildBatch = ColumnBatches.concat(build)
+        val table = HashJoin.JoinSide(buildBatch, key = 0, value = 1)
+        probe.map { batch =>
+          LongHashJoin.innerInt64(table, HashJoin.JoinSide(batch, key = 0, value = 1))
+        }
+    // innerInt64 writes (key, build value, probe value). The int broadcast kernel writes
+    // (key, probe value, build value), so this swap is the other way around: building the
+    // right child publishes (key, right, left) and has to be swapped back to (key, left, right).
+    val ordered = buildSide match
+      case PhysicalOp.BuildSide.Right => swapValueColumns(joined)
+      case PhysicalOp.BuildSide.Left => joined
+    Columns.LongTriples(ordered)
 
   def broadcastLeft(
       left: Plan[_],

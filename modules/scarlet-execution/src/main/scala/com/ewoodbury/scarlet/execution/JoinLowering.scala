@@ -6,9 +6,10 @@ import com.ewoodbury.scarlet.core.Plan
  * Lowers inner and outer joins for the pair kinds the columnar kernels accept.
  *
  * An int inner join accepts no hint, shuffle-hash, broadcast, and sort-merge. A long inner join
- * and a string inner join accept no hint and shuffle-hash. Outer joins on int pairs, on
- * `(Long, Long)` pairs, and on `(String, Int)` pairs accept broadcast, shuffle-hash, an absent
- * hint, and sort-merge. Any other join stays on the row path.
+ * accepts no hint, shuffle-hash, and broadcast. A string inner join accepts no hint and
+ * shuffle-hash. Outer joins on int pairs, on `(Long, Long)` pairs, and on `(String, Int)` pairs
+ * accept broadcast, shuffle-hash, an absent hint, and sort-merge. Any other join stays on the row
+ * path.
  */
 @SuppressWarnings(
   Array(
@@ -35,14 +36,25 @@ private[execution] object JoinLowering:
           (leftOp.kind, rightOp.kind) match
             case (PhysicalOp.Kind.Pairs, PhysicalOp.Kind.Pairs) =>
               Some(joinOf(strategy, leftOp, rightOp))
-            case (PhysicalOp.Kind.LongPairs, PhysicalOp.Kind.LongPairs)
-                if acceptsShuffleHash(strategy) =>
-              Some(
-                PhysicalOp.LongHashJoin(
-                  PhysicalOp.Exchange(leftOp),
-                  PhysicalOp.Exchange(rightOp),
-                ),
-              )
+            case (PhysicalOp.Kind.LongPairs, PhysicalOp.Kind.LongPairs) =>
+              strategy match
+                case Some(Plan.JoinStrategy.Broadcast) =>
+                  Some(
+                    PhysicalOp.LongBroadcastJoin(
+                      leftOp,
+                      rightOp,
+                      PhysicalOp.BuildSide.Right,
+                    ),
+                  )
+                case None | Some(Plan.JoinStrategy.ShuffleHash) =>
+                  Some(
+                    PhysicalOp.LongHashJoin(
+                      PhysicalOp.Exchange(leftOp),
+                      PhysicalOp.Exchange(rightOp),
+                    ),
+                  )
+                case Some(Plan.JoinStrategy.SortMerge) =>
+                  throw new IllegalStateException("sort-merge is lowered by sortMergeJoinOf")
             case (PhysicalOp.Kind.StringPairs, PhysicalOp.Kind.StringPairs)
                 if acceptsShuffleHash(strategy) =>
               Some(
@@ -323,3 +335,68 @@ private[execution] object JoinLowering:
             Some(node(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)))
           case _ => None
       case _ => None
+
+  /**
+   * Layout of a join. Aggregates, scans, and exchanges stay in [[ColumnarPlanner.infoOf]]. A
+   * broadcast join keeps the probe side's distribution and replaces the layout. Moved here so
+   * [[ColumnarPlanner]] stays inside its line cap.
+   */
+  private[execution] def info(
+      op: PhysicalOp,
+      child: PhysicalOp => PartitioningInfo,
+      layout: PhysicalOp.Kind => Layout,
+      hashed: PhysicalOp.Kind => PartitioningInfo,
+  ): PartitioningInfo = op match
+    case _: PhysicalOp.HashJoin | _: PhysicalOp.SortMergeJoin | _: PhysicalOp.SortMergeLeftOuter |
+        _: PhysicalOp.SortMergeRightOuter | _: PhysicalOp.SortMergeFullOuter |
+        _: PhysicalOp.HashLeftOuter | _: PhysicalOp.HashRightOuter | _: PhysicalOp.HashFullOuter =>
+      hashed(PhysicalOp.Kind.Pairs)
+    case _: PhysicalOp.LongHashJoin =>
+      hashed(PhysicalOp.Kind.LongPairs)
+    case _: PhysicalOp.StringHashJoin =>
+      hashed(PhysicalOp.Kind.StringTriples)
+    case _: PhysicalOp.LongHashLeftOuter | _: PhysicalOp.LongHashRightOuter |
+        _: PhysicalOp.LongHashFullOuter | _: PhysicalOp.LongSortMergeLeftOuter |
+        _: PhysicalOp.LongSortMergeRightOuter | _: PhysicalOp.LongSortMergeFullOuter =>
+      hashed(PhysicalOp.Kind.LongOuter)
+    case PhysicalOp.LongBroadcastLeftOuter(left, _) =>
+      child(left).copy(layout = layout(PhysicalOp.Kind.LongOuter))
+    case PhysicalOp.LongBroadcastRightOuter(_, right) =>
+      child(right).copy(layout = layout(PhysicalOp.Kind.LongOuter))
+    case PhysicalOp.LongBroadcastFullOuter(left, _) =>
+      child(left).copy(layout = layout(PhysicalOp.Kind.LongOuter))
+    case _: PhysicalOp.StringHashLeftOuter | _: PhysicalOp.StringHashRightOuter |
+        _: PhysicalOp.StringHashFullOuter | _: PhysicalOp.StringSortMergeLeftOuter |
+        _: PhysicalOp.StringSortMergeRightOuter | _: PhysicalOp.StringSortMergeFullOuter =>
+      hashed(PhysicalOp.Kind.StringOuter)
+    case PhysicalOp.StringBroadcastLeftOuter(left, _) =>
+      child(left).copy(layout = layout(PhysicalOp.Kind.StringOuter))
+    case PhysicalOp.StringBroadcastRightOuter(_, right) =>
+      child(right).copy(layout = layout(PhysicalOp.Kind.StringOuter))
+    case PhysicalOp.StringBroadcastFullOuter(left, _) =>
+      child(left).copy(layout = layout(PhysicalOp.Kind.StringOuter))
+    case PhysicalOp.BroadcastJoin(left, right, buildSide) =>
+      broadcastProbe(left, right, buildSide, PhysicalOp.Kind.Triples, child, layout)
+    case PhysicalOp.LongBroadcastJoin(left, right, buildSide) =>
+      broadcastProbe(left, right, buildSide, PhysicalOp.Kind.LongTriples, child, layout)
+    case PhysicalOp.BroadcastLeftOuter(left, _) =>
+      child(left).copy(layout = layout(PhysicalOp.Kind.Triples))
+    case PhysicalOp.BroadcastRightOuter(_, right) =>
+      child(right).copy(layout = layout(PhysicalOp.Kind.Triples))
+    case PhysicalOp.BroadcastFullOuter(left, _) =>
+      child(left).copy(layout = layout(PhysicalOp.Kind.Triples))
+    case other =>
+      throw new IllegalStateException(s"${other.shape} is not a join layout")
+
+  private def broadcastProbe(
+      left: PhysicalOp,
+      right: PhysicalOp,
+      buildSide: PhysicalOp.BuildSide,
+      kind: PhysicalOp.Kind,
+      child: PhysicalOp => PartitioningInfo,
+      layout: PhysicalOp.Kind => Layout,
+  ): PartitioningInfo =
+    val probe = buildSide match
+      case PhysicalOp.BuildSide.Right => left
+      case PhysicalOp.BuildSide.Left => right
+    child(probe).copy(layout = layout(kind))

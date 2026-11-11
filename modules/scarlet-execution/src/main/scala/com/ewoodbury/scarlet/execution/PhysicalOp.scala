@@ -18,15 +18,16 @@ import com.ewoodbury.scarlet.core.Partition
  * [[PhysicalOp.SortMergeLeftOuter]], [[PhysicalOp.SortMergeRightOuter]],
  * [[PhysicalOp.SortMergeFullOuter]], [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]],
  * and [[PhysicalOp.HashFullOuter]]. Those kernels perform the shuffle. Interpreting the boundary
- * on its own does not. [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.BroadcastLeftOuter]],
- * [[PhysicalOp.BroadcastRightOuter]], and [[PhysicalOp.BroadcastFullOuter]] have no exchange.
- * [[PhysicalOp.BuildSide]] chooses which logical child of an inner broadcast join is built. The
- * planner records the right child. A later cost-based pass may choose the left child. The other
- * child is probed in place. A hash or broadcast left outer join always builds the right input. The
- * left input is the probe side. A hash or broadcast right outer join always builds the left input
- * and probes the right. A probe-side row with no partner sets the build value's absence bit. A
- * null value is not absence. A sort-merge outer join has no build table. Long outer joins are the
- * `LongHash*Outer`, `LongBroadcast*Outer`, and `LongSortMerge*Outer` nodes. Their kind is
+ * on its own does not. [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.LongBroadcastJoin]],
+ * [[PhysicalOp.BroadcastLeftOuter]], [[PhysicalOp.BroadcastRightOuter]], and
+ * [[PhysicalOp.BroadcastFullOuter]] have no exchange. [[PhysicalOp.BuildSide]] chooses which
+ * logical child of an inner broadcast join is built. The planner records the right child. A later
+ * cost-based pass may choose the left child. The other child is probed in place. A hash or
+ * broadcast left outer join always builds the right input. The left input is the probe side. A
+ * hash or broadcast right outer join always builds the left input and probes the right. A
+ * probe-side row with no partner sets the build value's absence bit. A null value is not absence.
+ * A sort-merge outer join has no build table. Long outer joins are the `LongHash*Outer`,
+ * `LongBroadcast*Outer`, and `LongSortMerge*Outer` nodes. Their kind is
  * [[PhysicalOp.Kind.LongOuter]]. String outer joins are the `StringHash*Outer`,
  * `StringBroadcast*Outer`, and `StringSortMerge*Outer` nodes. Their kind is
  * [[PhysicalOp.Kind.StringOuter]]. Hash and broadcast do not spill. Sort-merge runs in memory and
@@ -92,6 +93,14 @@ enum PhysicalOp:
    * keys do not use this node. Output kind is [[PhysicalOp.Kind.LongTriples]].
    */
   case LongHashJoin(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * Inner join of `(Long, Long)` pairs with no exchange. Build the right side. Probe the left in
+   * place. A null key is dropped. A null value stays columnar. Output is `(key, left, right)`.
+   * [[BuildSide]] records which child fills the table. The planner records [[BuildSide.Right]].
+   * Output kind is [[PhysicalOp.Kind.LongTriples]].
+   */
+  case LongBroadcastJoin(left: PhysicalOp, right: PhysicalOp, buildSide: PhysicalOp.BuildSide)
 
   /**
    * Shuffle-hash inner join of `(String, Int)` pairs. `left` and `right` are exchanges with the
@@ -451,7 +460,7 @@ enum PhysicalOp:
             s"countByKey column is $other, expected int, long, or string pairs",
           )
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
-    case LongHashJoin(_, _) => PhysicalOp.Kind.LongTriples
+    case LongHashJoin(_, _) | LongBroadcastJoin(_, _, _) => PhysicalOp.Kind.LongTriples
     case StringHashJoin(_, _) => PhysicalOp.Kind.StringTriples
     case SortMergeJoin(_, _) => PhysicalOp.Kind.Triples
     case SortMergeLeftOuter(_, _) => PhysicalOp.Kind.Triples
@@ -530,6 +539,8 @@ enum PhysicalOp:
     case CountByKey(child) => s"CountByKey(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
     case LongHashJoin(left, right) => s"LongHashJoin(${left.shape}, ${right.shape})"
+    case LongBroadcastJoin(left, right, _) =>
+      s"LongBroadcastJoin(${left.shape}, ${right.shape})"
     case StringHashJoin(left, right) => s"StringHashJoin(${left.shape}, ${right.shape})"
     case SortMergeJoin(left, right) => s"SortMergeJoin(${left.shape}, ${right.shape})"
     case SortMergeLeftOuter(left, right) => s"SortMergeLeftOuter(${left.shape}, ${right.shape})"

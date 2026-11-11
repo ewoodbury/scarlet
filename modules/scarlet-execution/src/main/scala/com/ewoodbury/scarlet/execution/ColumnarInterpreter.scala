@@ -569,6 +569,22 @@ private[execution] object ColumnarInterpreter:
         ordinals,
       )
     case (
+          Plan.JoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
+          PhysicalOp.LongBroadcastJoin(leftOp, rightOp, buildSide),
+        ) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      PipelineJoinArms.broadcastInnerLong(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        buildSide,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
+      )
+    case (
           Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
           PhysicalOp.BroadcastLeftOuter(leftOp, rightOp),
         ) =>
