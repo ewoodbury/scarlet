@@ -8,10 +8,10 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
 /**
  * Joins that call [[ColumnPipeline]] and return [[ColumnarInterpreter.Columns]].
  *
- * Long inner, sort-merge inner, broadcast inner, and the outer joins live here. Int and string
- * shuffle-hash stay in [[JoinArms]] and [[StringJoinArms]]. The string-hash case stays in
- * [[ColumnarInterpreter]]. An outer arm forces `preserveAbsence` on and does not read the flag the
- * caller passed.
+ * Long inner, sort-merge inner, broadcast inner, string inner broadcast, and the outer joins live
+ * here. Int and string shuffle-hash stay in [[JoinArms]] and [[StringJoinArms]]. The string-hash
+ * case stays in [[ColumnarInterpreter]]. An outer arm forces `preserveAbsence` on and does not
+ * read the flag the caller passed.
  */
 private[execution] object PipelineJoinArms:
 
@@ -136,6 +136,49 @@ private[execution] object PipelineJoinArms:
       case PhysicalOp.BuildSide.Right => swapValueColumns(joined)
       case PhysicalOp.BuildSide.Left => joined
     Columns.LongTriples(ordered)
+
+  def broadcastInnerString(
+      left: Plan[_],
+      right: Plan[_],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      buildSide: PhysicalOp.BuildSide,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): Columns =
+    val leftBatches = StringPairWalk.batches(
+      interpretAt(left, leftOp, selectedPartition, preserveAbsence, ordinals),
+    )
+    val rightBatches = StringPairWalk.batches(
+      interpretAt(right, rightOp, selectedPartition, preserveAbsence, ordinals),
+    )
+    val (probe, build) = buildSide match
+      case PhysicalOp.BuildSide.Right => (leftBatches, rightBatches)
+      case PhysicalOp.BuildSide.Left => (rightBatches, leftBatches)
+    val joined =
+      if (probe.isEmpty) then Vector.empty[ColumnBatch]
+      else
+        val buildBatch = ColumnBatches.concat(build)
+        val rows = buildBatch.length
+        if (rows > 0) then
+          val estimate = StringHashJoinSpill.retainedBytes(
+            rows,
+            StringHashJoinSpill.dictionaryEntries(buildBatch),
+            StringHashJoinSpill.dictionaryBytes(buildBatch),
+          )
+          val budget = ScarletConf.get.broadcastBuildBudgetBytes
+          if (estimate > budget) then
+            throw new IllegalStateException(
+              s"broadcast build table retains about $estimate bytes for $rows rows, above the budget of $budget bytes",
+            )
+        probe.map(batch => StringHashJoin.joinBucket(buildBatch, batch))
+    // joinBucket writes (key, build value, probe value). Building the right child publishes
+    // (key, right, left), so the value columns are swapped back to (key, left, right).
+    val ordered = buildSide match
+      case PhysicalOp.BuildSide.Right => swapValueColumns(joined)
+      case PhysicalOp.BuildSide.Left => joined
+    Columns.StringTriples(ordered)
 
   def broadcastLeft(
       left: Plan[_],

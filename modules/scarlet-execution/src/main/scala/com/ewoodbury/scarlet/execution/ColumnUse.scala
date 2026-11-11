@@ -157,6 +157,8 @@ private[execution] object ColumnUse:
         pair(left, right, leftOp, rightOp)
       case (Plan.JoinOp(left, right, _), PhysicalOp.LongBroadcastJoin(leftOp, rightOp, _)) =>
         pair(left, right, leftOp, rightOp)
+      case (Plan.JoinOp(left, right, _), PhysicalOp.StringBroadcastJoin(leftOp, rightOp, _)) =>
+        pair(left, right, leftOp, rightOp)
       case (Plan.LeftOuterJoinOp(left, right, _), PhysicalOp.HashLeftOuter(leftOp, rightOp)) =>
         pair(left, right, leftOp, rightOp)
       case (

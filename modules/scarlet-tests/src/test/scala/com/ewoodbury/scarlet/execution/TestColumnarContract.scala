@@ -30,18 +30,18 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 207 accepted fixtures. The filter over sortByIntKey stays accepted: pairSource keys are
+    // 208 accepted fixtures. The filter over sortByIntKey stays accepted: pairSource keys are
     // fully present. 205 + 1 = 206. Explicit long inner broadcast is a new accepted fixture, so
-    // 206 + 1 = 207.
-    accepted.size shouldBe 207
-    // 35 exclusions. 207 + 35 = 242. That filter is not excluded, because the fixture has no
+    // 206 + 1 = 207. Explicit string inner broadcast is a new accepted fixture, so 207 + 1 = 208.
+    accepted.size shouldBe 208
+    // 35 exclusions. 208 + 35 = 243. That filter is not excluded, because the fixture has no
     // null key. A null key refuses the shape and is not one of these exclusions.
     // Long inner sort-merge stays on the row path. Long outer joins are
     // covered by execution tests, not contract fixtures, because the contract does not track the
     // int refusals either. String outer joins are covered by execution tests, not contract
     // fixtures.
     excluded.size shouldBe 35
-    (accepted.size + excluded.size) shouldBe 242
+    (accepted.size + excluded.size) shouldBe 243
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -599,6 +599,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         hashedInfo(stringTripleLayout),
         Some("StringHashJoin(Exchange(Scan), Exchange(Scan))"),
       ),
+      AcceptedCase(
+        "explicit broadcast string join",
+        DistCollection(stringKeySource).broadcastJoin(DistCollection(stringKeySource)).plan,
+        narrowInfo(1, stringTripleLayout),
+        Some("StringBroadcastJoin(Scan, Scan)"),
+      ),
       AcceptedCase("filtered int reduceByKey", reducedAfterFilter, hashedInfo(layout), Some("HashAggregate(Exchange(FilterValue(Scan)))")),
       AcceptedCase("mapValues int reduceByKey", reducedAfterMapValues, hashedInfo(layout), Some("HashAggregate(Exchange(MapValue(Scan)))")),
       AcceptedCase("nested int reduceByKey", reducedTwice, hashedInfo(layout), Some("HashAggregate(Exchange(HashAggregate(Exchange(Scan))))")),
@@ -962,7 +968,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.SortMergeRightOuter(_, _) | PhysicalOp.SortMergeFullOuter(_, _) |
         PhysicalOp.HashLeftOuter(_, _) | PhysicalOp.HashRightOuter(_, _) |
         PhysicalOp.HashFullOuter(_, _) | PhysicalOp.BroadcastJoin(_, _, _) |
-        PhysicalOp.LongBroadcastJoin(_, _, _) |
+        PhysicalOp.LongBroadcastJoin(_, _, _) | PhysicalOp.StringBroadcastJoin(_, _, _) |
         PhysicalOp.BroadcastLeftOuter(_, _) | PhysicalOp.BroadcastRightOuter(_, _) |
         PhysicalOp.BroadcastFullOuter(_, _) | PhysicalOp.SortByIntKey(_) |
         PhysicalOp.SortByLongKey(_) | PhysicalOp.SortByStringKey(_) | PhysicalOp.Union(_, _) |
