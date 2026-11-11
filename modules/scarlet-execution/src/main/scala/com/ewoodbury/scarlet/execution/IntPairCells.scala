@@ -16,6 +16,14 @@ private[execution] object IntPairCells:
       nullableInt(pair.productElement(0)) && nullableInt(pair.productElement(1))
     case _ => false
 
+  /** True when the key cell is an `Int`. A null key, or a non-pair, is false. */
+  def presentKey(row: Any): Boolean = row match
+    case pair: Tuple2[?, ?] =>
+      pair.productElement(0) match
+        case _: Int => true
+        case _ => false
+    case _ => false
+
   private def nullableInt(cell: Any): Boolean = cell match
     case null => true
     case _: Int => true

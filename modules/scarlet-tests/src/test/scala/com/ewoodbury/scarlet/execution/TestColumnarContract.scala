@@ -30,15 +30,17 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 205 accepted fixtures. String countByKey is new. 204 + 1 = 205.
-    accepted.size shouldBe 205
-    // 35 exclusions. 205 + 35 = 240. String countByKey was not excluded.
+    // 206 accepted fixtures. The filter over sortByIntKey stays accepted: pairSource keys are
+    // fully present. 205 + 1 = 206.
+    accepted.size shouldBe 206
+    // 35 exclusions. 206 + 35 = 241. That filter is not excluded, because the fixture has no
+    // null key. A null key refuses the shape and is not one of these exclusions.
     // Long inner broadcast and long inner sort-merge stay on the row path. Long outer joins are
     // covered by execution tests, not contract fixtures, because the contract does not track the
     // int refusals either. String outer joins are covered by execution tests, not contract
     // fixtures.
     excluded.size shouldBe 35
-    (accepted.size + excluded.size) shouldBe 240
+    (accepted.size + excluded.size) shouldBe 241
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -447,6 +449,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         Plan.SortByIntKeyOp(pairSource),
         rangeSortedInfo(layout),
         Some("SortByIntKey(Scan)"),
+      ),
+      AcceptedCase(
+        "filter over sortByIntKey",
+        Plan.FilterOp(Plan.SortByIntKeyOp(pairSource), (pair: (Int, Int)) => pair._2 > 0),
+        rangeSortedInfo(layout),
+        Some("FilterRow(SortByIntKey(Scan))"),
       ),
       AcceptedCase(
         "long sortByLongKey",
