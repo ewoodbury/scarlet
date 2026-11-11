@@ -302,13 +302,15 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
     selectionOf(build.plan) shouldBe defined
   }
 
-  it should "keep inner broadcast and inner sort-merge on the row path" in {
+  it should "lower a broadcast hint through a filter and keep sort-merge on the row path" in {
     val left = buildPairs.filterKeys((key: String) => keepKey(key)).filterValues((_: Int) => true)
     val right = probePairs
     val filtered = "Exchange(FilterValue(FilterKey(Scan)))"
     val scan = "Exchange(Scan)"
+    val broadcast = left.broadcastJoin(right)
 
-    refuse(left.broadcastJoin(right))
+    shape(broadcast) shouldBe "StringBroadcastJoin(FilterValue(FilterKey(Scan)), Scan)"
+    broadcast.collect().toList should contain theSameElementsAs row(broadcast.collect().toList)
     refuse(left.sortMergeJoin(right))
     Seq(
       (left.leftOuterJoin(right), s"StringHashLeftOuter($filtered, $scan)"),

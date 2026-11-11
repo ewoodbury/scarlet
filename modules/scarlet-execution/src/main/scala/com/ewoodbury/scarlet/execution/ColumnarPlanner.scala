@@ -42,17 +42,17 @@ object ColumnarPlanner:
    * place. A null key is dropped. A null value stays a clear validity bit and [[tryRun]] keeps the
    * matched row. It is not an absence bit. An over-budget broadcast build throws. A long outer
    * join lowers for an absent hint, shuffle-hash, broadcast, or sort-merge. Long inner sort-merge
-   * stays on the row path. A `(String, Int)` inner join lowers only for an absent hint or a
-   * shuffle-hash hint, to [[PhysicalOp.StringHashJoin]]. A null key is dropped. A null value stays
-   * a clear validity bit and [[tryRun]] keeps the matched row. It is not an absence bit. A key or
-   * value filter on either side, including a stack of one, scatters that side's survivor index and
-   * does not compact. An over-budget build bucket spills when `spillEnabled` is on; the estimate
-   * includes the dictionary. At or under the budget, and whenever spill is off, the join stays in
-   * memory. A string outer join lowers for an absent hint, shuffle-hash, broadcast, or sort-merge,
-   * to the `String*Outer` ops. Hash and broadcast do not spill. Sort-merge runs in memory and
-   * throws instead of spilling. String inner broadcast and string inner sort-merge stay on the row
-   * path. The layout is [[Layout.StringTriple]]. An explicit sort-merge hint on int pairs lowers
-   * to [[PhysicalOp.SortMergeJoin]]. A left, right, or full outer sort-merge hint lowers to the
+   * stays on the row path. A `(String, Int)` inner join lowers for an absent or shuffle-hash hint
+   * to [[PhysicalOp.StringHashJoin]], and for broadcast to [[PhysicalOp.StringBroadcastJoin]].
+   * That node builds the right side and probes the left in place. A null key is dropped. A null
+   * value stays a clear validity bit and [[tryRun]] keeps the matched row. It is not an absence
+   * bit. A shuffle-hash key or value filter scatters the survivor index and does not compact. An
+   * over-budget shuffle bucket spills when `spillEnabled` is on. The estimate includes the
+   * dictionary. An over-budget broadcast build throws and writes nothing. String outer joins lower
+   * for an absent hint, shuffle-hash, broadcast, or sort-merge. Hash and broadcast do not spill.
+   * Sort-merge throws instead of spilling. String inner sort-merge stays on the row path. Layout
+   * is [[Layout.StringTriple]]. An explicit sort-merge hint on int pairs lowers to
+   * [[PhysicalOp.SortMergeJoin]]. A left, right, or full outer sort-merge hint lowers to the
    * matching node. Any other sort-merge returns `None`. A left, right, or full outer join on int
    * pairs lowers for a broadcast, shuffle-hash, absent, or sort-merge hint. An absent hint uses
    * the shuffle-hash op. On a right outer join the left input is the build and the right input is

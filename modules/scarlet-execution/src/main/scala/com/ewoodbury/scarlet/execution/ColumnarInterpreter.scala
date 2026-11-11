@@ -20,14 +20,14 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * chosen. A null value on a long inner hash join stays columnar. A clear validity bit is a null
  * value, not an absence bit. A selected null on an int inner join, and a null on the dense side of
  * a mixed int hash join, stay a clear validity bit. That bit is not absence. A null on a dropped
- * row is not a decline. A null value on a string inner hash join stays columnar. String
- * `reduceByKey` and string `groupByKey` with a live null value are that fallback. Outer joins
- * still decline. A string-pair filter keeps the null int. A value projection that kept a null int
- * is that fallback too. With spill off, an over-budget int, long, or string `countByKey` throws
- * `ClosedKernelRefusal`, which does not extend `ClassCastException`, so the action fails instead
- * of rerunning on rows. With spill on, an over-budget post-exchange bucket spills. A count table
- * that still does not fit throws `ClosedKernelRefusal`. The long estimate charges 8-byte keys. The
- * string estimate charges dictionary bytes. The running partial is `O(distinct keys)`.
+ * row is not a decline. A null value on a string inner hash or broadcast join stays columnar.
+ * String `reduceByKey` and string `groupByKey` with a live null value are that fallback. Outer
+ * joins still decline. A string-pair filter keeps the null int. A value projection that kept a
+ * null int is that fallback too. With spill off, an over-budget int, long, or string `countByKey`
+ * throws `ClosedKernelRefusal`, which does not extend `ClassCastException`, so the action fails
+ * instead of rerunning on rows. With spill on, an over-budget post-exchange bucket spills. A count
+ * table that still does not fit throws `ClosedKernelRefusal`. The long estimate charges 8-byte
+ * keys. The string estimate charges dictionary bytes. The running partial is `O(distinct keys)`.
  */
 @SuppressWarnings(
   Array(
@@ -196,9 +196,9 @@ private[execution] object ColumnarInterpreter:
    * Long triples are only a long inner join and use
    * [[BatchCodec.decodeLongTriplesPreservingAbsence]]. A clear validity bit is a null value, not
    * an absence bit. A fully present batch still decodes to the same longs. String triples are a
-   * string inner hash join and use [[BatchCodec.decodeStringJoinKeepingNulls]]. A clear value bit
-   * is a null int, not an absence bit. A clear key bit is still an error. A fully present batch
-   * still decodes to the same strings and ints.
+   * string inner hash or broadcast join and use [[BatchCodec.decodeStringJoinKeepingNulls]]. A
+   * clear value bit is a null int, not an absence bit. A clear key bit is still an error. A fully
+   * present batch still decodes to the same strings and ints.
    */
   private[execution] def decodeFor(columns: Columns, op: PhysicalOp): Seq[Partition[_]] =
     decodeWith(columns, intPairDecoder(op), longDecoder(op), tripleDecoder(op))
@@ -575,6 +575,22 @@ private[execution] object ColumnarInterpreter:
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       PipelineJoinArms.broadcastInnerLong(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        buildSide,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
+      )
+    case (
+          Plan.JoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
+          PhysicalOp.StringBroadcastJoin(leftOp, rightOp, buildSide),
+        ) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      PipelineJoinArms.broadcastInnerString(
         left,
         right,
         leftOp,

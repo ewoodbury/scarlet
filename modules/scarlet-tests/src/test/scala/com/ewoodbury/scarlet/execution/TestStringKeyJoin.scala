@@ -14,7 +14,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  *
  * The row path is the oracle. The two sides keep independent dictionaries and match by string
  * equality. A null key is dropped. `""` matches `""`. A null value stays a clear validity bit.
- * String inner broadcast and string inner sort-merge stay on the row path. Outer joins lower.
+ * An explicit broadcast hint lowers to `StringBroadcastJoin`. String inner sort-merge stays on the
+ * row path. Outer joins lower. A key or value filter is applied before the probe, so this hint
+ * reads dense batches.
  */
 class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -185,11 +187,148 @@ class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     agree(byValue, Seq("a" -> ((1, 5))))
   }
 
-  it should "keep inner broadcast and inner sort-merge on the row path" in {
+  it should "match the row path for an explicit broadcast hint" in {
+    Seq(1, 4).foreach { width =>
+      // An empty iterable has no witness and stays on the row path. A filter that keeps nothing
+      // is an empty side that still lowers.
+      val present = DistCollection(Seq("a" -> 2, "b" -> 5, "" -> 7), width)
+      val empty = present.filterKeys((_: String) => false)
+      val noRows = Seq.empty[(String, (Int, Int))]
+      broadcastAgrees(empty.broadcastJoin(present), noRows, width)
+      broadcastAgrees(present.broadcastJoin(empty), noRows, width)
+      broadcastAgrees(empty.broadcastJoin(empty), noRows, width)
+
+      val left = DistCollection(Seq("a" -> 10, "a" -> 11, "b" -> 20), width)
+      val right = DistCollection(Seq("a" -> 100, "a" -> 101, "c" -> 30), width)
+      val duplicates = Seq(
+        "a" -> ((10, 100)),
+        "a" -> ((10, 101)),
+        "a" -> ((11, 100)),
+        "a" -> ((11, 101)),
+      )
+      broadcastAgrees(left.broadcastJoin(right), duplicates, width)
+
+      val nullKeysLeft = DistCollection(Seq("a" -> 10, nullKey(99), "d" -> 40), width)
+      val nullKeysRight = DistCollection(Seq("a" -> 100, nullKey(7), "d" -> 8), width)
+      broadcastAgrees(
+        nullKeysLeft.broadcastJoin(nullKeysRight),
+        Seq("a" -> ((10, 100)), "d" -> ((40, 8))),
+        width,
+      )
+
+      broadcastAgrees(
+        DistCollection(Seq("" -> 1, nullKey(9)), width).broadcastJoin(
+          DistCollection(Seq("" -> 10, nullKey(8)), width),
+        ),
+        Seq("" -> ((1, 10))),
+        width,
+      )
+      accent should not be decomposed
+      broadcastAgrees(
+        DistCollection(Seq(accent -> 1), width).broadcastJoin(
+          DistCollection(Seq(decomposed -> 10), width),
+        ),
+        Seq.empty,
+        width,
+      )
+      broadcastAgrees(
+        DistCollection(Seq(accent -> 1, decomposed -> 2), width).broadcastJoin(
+          DistCollection(Seq(accent -> 10, decomposed -> 20), width),
+        ),
+        Seq(accent -> ((1, 10)), decomposed -> ((2, 20))),
+        width,
+      )
+
+      val nullValuesLeft = DistCollection(
+        Plan.Source(Seq(Partition(Seq("red" -> 10, erasedNullValue("blue"))))),
+      )
+      val nullValuesRight = DistCollection(
+        Plan.Source(Seq(Partition(Seq(erasedNullValue("red"), "blue" -> 20)))),
+      )
+      val joined = nullValuesLeft.broadcastJoin(nullValuesRight)
+      val collected = joined.collect().toList
+      val nullValues = Seq("red,10,null", "blue,null,20")
+      shown(collected) should contain theSameElementsAs nullValues
+      shown(collected) should contain theSameElementsAs shown(row(joined.collect().toList))
+      stringTripleBatches(joined.plan).length shouldBe 1
+    }
+  }
+
+  it should "lower an explicit broadcast hint to a scan join and an absent hint to a shuffle" in {
+    val left = DistCollection(Seq("a" -> 1, "b" -> 2), 4)
+    val right = DistCollection(Seq("a" -> 10, "c" -> 3), 4)
+    val broadcast = left.broadcastJoin(right)
+    val plain = left.join(right)
+
+    ColumnarPlanner.lower(broadcast.plan).map(_.shape) shouldBe Some(
+      "StringBroadcastJoin(Scan, Scan)",
+    )
+    ColumnarPlanner.lower(plain.plan).map(_.shape) shouldBe Some(
+      "StringHashJoin(Exchange(Scan), Exchange(Scan))",
+    )
+    val lowered =
+      ColumnarPlanner.lower(broadcast.plan).getOrElse(fail("broadcast was refused"))
+    lowered.shape should not include "Exchange"
+    PartitionPreserving.of(lowered) shouldBe Option.empty[Int]
+    ColumnarPlanner.tryTake(broadcast.plan, 1) shouldBe Option.empty[Seq[(String, (Int, Int))]]
+  }
+
+  it should "fail an over-budget broadcast build without a columnar fallback or a spill file" in {
+    val left = DistCollection(Seq("a" -> 10, "b" -> 20), 1)
+    val right = DistCollection(Seq("a" -> 100, "a" -> 101, "c" -> 30), 1)
+    val rightOp =
+      ColumnarPlanner.lower(right.plan).getOrElse(fail("right scan did not lower"))
+    val batches = ColumnarInterpreter.interpret(right.plan, rightOp) match
+      case ColumnarInterpreter.Columns.StringPairs(parts) => parts
+      case other => fail(s"expected string pairs, got $other")
+    val buildBatch = ColumnBatches.concat(batches)
+    val rows = buildBatch.length
+    val estimate = StringHashJoinSpill.retainedBytes(
+      rows,
+      StringHashJoinSpill.dictionaryEntries(buildBatch),
+      StringHashJoinSpill.dictionaryBytes(buildBatch),
+    )
+    estimate should be > 1L
+    StringHashJoinSpill.resetForTest()
+    ScarletConf.set(ScarletConf.get.copy(broadcastBuildBudgetBytes = estimate - 1L))
+    val plan = left.broadcastJoin(right).plan
+    val thrown = intercept[IllegalStateException] {
+      val _ = ColumnarPlanner.tryRun(plan)
+    }
+    thrown should not be a[ColumnarFallback]
+    thrown.getMessage shouldBe
+      s"broadcast build table retains about $estimate bytes for $rows rows, " +
+        s"above the budget of ${estimate - 1L} bytes"
+    StringHashJoinSpill.filesWrittenForTest shouldBe 0L
+    an[IllegalStateException] should be thrownBy left.broadcastJoin(right).collect()
+    StringHashJoinSpill.filesWrittenForTest shouldBe 0L
+  }
+
+  it should "keep a broadcast hint on a string outer join on the same nodes" in {
+    val left = DistCollection(Seq("a" -> 1, "b" -> 2), 4)
+    val right = DistCollection(Seq("a" -> 10, "c" -> 3), 4)
+    val hint = Some(Plan.JoinStrategy.Broadcast)
+    val leftOuter = DistCollection(Plan.LeftOuterJoinOp(left.plan, right.plan, hint))
+    val rightOuter = DistCollection(Plan.RightOuterJoinOp(left.plan, right.plan, hint))
+    val fullOuter = DistCollection(Plan.FullOuterJoinOp(left.plan, right.plan, hint))
+    ColumnarPlanner.lower(leftOuter.plan).map(_.shape) shouldBe Some(
+      "StringBroadcastLeftOuter(Scan, Scan)",
+    )
+    ColumnarPlanner.lower(rightOuter.plan).map(_.shape) shouldBe Some(
+      "StringBroadcastRightOuter(Scan, Scan)",
+    )
+    ColumnarPlanner.lower(fullOuter.plan).map(_.shape) shouldBe Some(
+      "StringBroadcastFullOuter(Scan, Scan)",
+    )
+    leftOuter.collect().toList should contain theSameElementsAs row(leftOuter.collect().toList)
+    rightOuter.collect().toList should contain theSameElementsAs row(rightOuter.collect().toList)
+    fullOuter.collect().toList should contain theSameElementsAs row(fullOuter.collect().toList)
+  }
+
+  it should "keep inner sort-merge on the row path" in {
     val left = DistCollection(Seq("a" -> 1, "b" -> 2), 2)
     val right = DistCollection(Seq("a" -> 10, "c" -> 3), 2)
 
-    refuse(left.broadcastJoin(right))
     refuse(left.sortMergeJoin(right))
 
     val leftOuter = left.leftOuterJoin(right)
@@ -255,6 +394,16 @@ class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       nullOnLeft = false,
     )
   }
+
+  private def broadcastAgrees(
+      joined: DistCollection[(String, (Int, Int))],
+      expected: Seq[(String, (Int, Int))],
+      width: Int,
+  ): Unit =
+    val columnar = joined.collect().toList
+    columnar should contain theSameElementsAs expected
+    columnar should contain theSameElementsAs row(joined.collect().toList)
+    stringTripleBatches(joined.plan).length shouldBe width
 
   private def refuse[A](collection: DistCollection[A]): Unit =
     ColumnarPlanner.lower(collection.plan) shouldBe Option.empty[PhysicalOp]

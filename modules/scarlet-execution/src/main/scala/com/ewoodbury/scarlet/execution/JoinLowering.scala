@@ -6,8 +6,8 @@ import com.ewoodbury.scarlet.core.Plan
  * Lowers inner and outer joins for the pair kinds the columnar kernels accept.
  *
  * An int inner join accepts no hint, shuffle-hash, broadcast, and sort-merge. A long inner join
- * accepts no hint, shuffle-hash, and broadcast. A string inner join accepts no hint and
- * shuffle-hash. Outer joins on int pairs, on `(Long, Long)` pairs, and on `(String, Int)` pairs
+ * accepts no hint, shuffle-hash, and broadcast. A string inner join accepts no hint, shuffle-hash,
+ * and broadcast. Outer joins on int pairs, on `(Long, Long)` pairs, and on `(String, Int)` pairs
  * accept broadcast, shuffle-hash, an absent hint, and sort-merge. Any other join stays on the row
  * path.
  */
@@ -55,14 +55,25 @@ private[execution] object JoinLowering:
                   )
                 case Some(Plan.JoinStrategy.SortMerge) =>
                   throw new IllegalStateException("sort-merge is lowered by sortMergeJoinOf")
-            case (PhysicalOp.Kind.StringPairs, PhysicalOp.Kind.StringPairs)
-                if acceptsShuffleHash(strategy) =>
-              Some(
-                PhysicalOp.StringHashJoin(
-                  PhysicalOp.Exchange(leftOp),
-                  PhysicalOp.Exchange(rightOp),
-                ),
-              )
+            case (PhysicalOp.Kind.StringPairs, PhysicalOp.Kind.StringPairs) =>
+              strategy match
+                case Some(Plan.JoinStrategy.Broadcast) =>
+                  Some(
+                    PhysicalOp.StringBroadcastJoin(
+                      leftOp,
+                      rightOp,
+                      PhysicalOp.BuildSide.Right,
+                    ),
+                  )
+                case None | Some(Plan.JoinStrategy.ShuffleHash) =>
+                  Some(
+                    PhysicalOp.StringHashJoin(
+                      PhysicalOp.Exchange(leftOp),
+                      PhysicalOp.Exchange(rightOp),
+                    ),
+                  )
+                case Some(Plan.JoinStrategy.SortMerge) =>
+                  throw new IllegalStateException("sort-merge is lowered by sortMergeJoinOf")
             case _ => None
         case _ => None
 
@@ -379,6 +390,8 @@ private[execution] object JoinLowering:
       broadcastProbe(left, right, buildSide, PhysicalOp.Kind.Triples, child, layout)
     case PhysicalOp.LongBroadcastJoin(left, right, buildSide) =>
       broadcastProbe(left, right, buildSide, PhysicalOp.Kind.LongTriples, child, layout)
+    case PhysicalOp.StringBroadcastJoin(left, right, buildSide) =>
+      broadcastProbe(left, right, buildSide, PhysicalOp.Kind.StringTriples, child, layout)
     case PhysicalOp.BroadcastLeftOuter(left, _) =>
       child(left).copy(layout = layout(PhysicalOp.Kind.Triples))
     case PhysicalOp.BroadcastRightOuter(_, right) =>
