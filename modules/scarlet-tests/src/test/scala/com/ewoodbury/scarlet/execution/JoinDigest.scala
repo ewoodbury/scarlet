@@ -20,7 +20,7 @@ import scala.collection.mutable
     "org.wartremover.warts.MutableDataStructures",
   ),
 )
-private[execution] object JoinDigest:
+private[scarlet] object JoinDigest:
 
   /** One key's pair count. `None` is the null key. */
   final case class KeyCount(key: Option[Int], count: Long)

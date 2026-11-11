@@ -735,8 +735,9 @@ object BatchCodec:
    * [[AbsentSide.Left]] returns `(key, (Option[Int], Int))`. [[AbsentSide.Right]] returns
    * `(key, (Int, Option[Int]))`. [[AbsentSide.Both]] returns `(key, (Option[Int], Option[Int]))`.
    * An absence bit on an optional column is `None`. A clear bit on the key, or on a column that is
-   * not optional, stays null. A null value is not absence. [[optionalInt]] is the only `Option`
-   * construction. `maxRows` limits the prefix the same way as [[decodeIntTriples]].
+   * not optional, stays null. A clear bit on an optional column is `Some(null)`. [[optionalInt]]
+   * is the only `Option` construction. `maxRows` limits the prefix the same way as
+   * [[decodeIntTriples]].
    */
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
   def decodeOuter(batch: ColumnBatch, absent: AbsentSide): Seq[Any] =
@@ -771,16 +772,15 @@ object BatchCodec:
         )
 
   /**
-   * Absence is `None` even at payload `0`. A set bit is the stored `Int`. A clear bit with no
-   * absence mark is a null, not a missing partner. This is the only `Option` site.
+   * Absence is `None` even at payload `0`. A set bit is `Some` of the stored int. A clear bit with
+   * no absence mark is `Some(null)`. The `Some` payload stays `java.lang.Integer`. A `scala.Int`
+   * payload unboxes that null to `0`. This is the only `Option` site.
    */
-  private def optionalInt(column: Int32Column, row: Int): Option[Int] =
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def optionalInt(column: Int32Column, row: Int): Option[java.lang.Integer] =
     if (column.isAbsent(row)) then None
-    else if (column.isValid(row)) then Some(column.values(row))
-    else
-      throw new IllegalArgumentException(
-        s"null Int32 at row $row on an optional outer column",
-      )
+    else if (column.isValid(row)) then Some(java.lang.Integer.valueOf(column.values(row)))
+    else Some(null: java.lang.Integer)
 
   /** A clear bit stays null. A set bit is the stored `Int`. */
   @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
