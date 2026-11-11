@@ -5,7 +5,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.{BatchCodec, ColumnBatch, Int64Column, LogicalType}
+import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -196,10 +196,138 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     collected should contain theSameElementsAs row(joined.collect().toList)
   }
 
-  it should "keep long inner broadcast and sort-merge on the row path" in {
+  it should "match the row path for an explicit broadcast hint" in {
+    Seq(1, 4).foreach { width =>
+      val empty = DistCollection.ofLongPairs(Array.empty[Long], Array.empty[Long], width)
+      val present =
+        DistCollection.ofLongPairs(Array(1L, -4L, Long.MinValue), Array(2L, 5L, 7L), width)
+      val noRows = Seq.empty[(Long, (Long, Long))]
+      broadcastAgrees(empty.broadcastJoin(present), noRows, width)
+      broadcastAgrees(present.broadcastJoin(empty), noRows, width)
+      broadcastAgrees(empty.broadcastJoin(empty), noRows, width)
+
+      val left = DistCollection.ofLongPairs(Array(1L, 1L, 2L), Array(10L, 11L, 20L), width)
+      val right = DistCollection.ofLongPairs(Array(1L, 1L, 3L), Array(100L, 101L, 30L), width)
+      val duplicates = Seq(
+        (1L, (10L, 100L)),
+        (1L, (10L, 101L)),
+        (1L, (11L, 100L)),
+        (1L, (11L, 101L)),
+      )
+      broadcastAgrees(left.broadcastJoin(right), duplicates, width)
+
+      val nullKeysLeft = DistCollection(
+        Seq(
+          pair(longRef(1L), longRef(10L)),
+          pair(absent, longRef(99L)),
+          pair(longRef(4L), longRef(40L)),
+        ),
+        width,
+      )
+      val nullKeysRight = DistCollection(
+        Seq(
+          pair(longRef(1L), longRef(100L)),
+          pair(absent, longRef(7L)),
+          pair(longRef(4L), longRef(8L)),
+        ),
+        width,
+      )
+      broadcastAgrees(
+        nullKeysLeft.broadcastJoin(nullKeysRight),
+        Seq((1L, (10L, 100L)), (4L, (40L, 8L))),
+        width,
+      )
+
+      val nullValuesLeft = DistCollection(
+        Seq(
+          pair(longRef(1L), longRef(10L)),
+          pair(longRef(2L), absent),
+        ),
+        width,
+      )
+      val nullValuesRight = DistCollection(
+        Seq(
+          pair(longRef(2L), longRef(20L)),
+          pair(longRef(1L), absent),
+        ),
+        width,
+      )
+      val nullValues = Seq(
+        (1L, pair(longRef(10L), absent)),
+        (2L, pair(absent, longRef(20L))),
+      )
+      val joined = nullValuesLeft.broadcastJoin(nullValuesRight)
+      val collected = joined.collect().toList
+      collected should contain theSameElementsAs nullValues
+      collected should contain theSameElementsAs row(joined.collect().toList)
+      longTripleBatches(joined.plan).length shouldBe width
+    }
+  }
+
+  it should "lower an explicit broadcast hint to a scan join and an absent hint to a shuffle" in {
     val left = DistCollection.ofLongPairs(Array(1L, 2L), Array(10L, 20L), 4)
     val right = DistCollection.ofLongPairs(Array(1L, 3L), Array(100L, 30L), 4)
-    refuse(left.broadcastJoin(right))
+    val broadcast = left.broadcastJoin(right)
+    val plain = left.join(right)
+
+    ColumnarPlanner.lower(broadcast.plan).map(_.shape) shouldBe Some(
+      "LongBroadcastJoin(Scan, Scan)",
+    )
+    ColumnarPlanner.lower(plain.plan).map(_.shape) shouldBe Some(
+      "LongHashJoin(Exchange(Scan), Exchange(Scan))",
+    )
+    val lowered =
+      ColumnarPlanner.lower(broadcast.plan).getOrElse(fail("broadcast was refused"))
+    lowered.shape should not include "Exchange"
+    PartitionPreserving.of(lowered) shouldBe Option.empty[Int]
+    ColumnarPlanner.tryTake(broadcast.plan, 1) shouldBe None
+  }
+
+  it should "fail an over-budget broadcast build without a columnar fallback or a spill file" in {
+    val left = DistCollection.ofLongPairs(Array(1L, 2L), Array(10L, 20L), 1)
+    val right = DistCollection.ofLongPairs(Array(1L, 1L, 3L), Array(100L, 101L, 30L), 1)
+    val rows = 3
+    val estimate = LongHashJoin.retainedBuildBytes(rows)
+    estimate should be > 1L
+    LongHashJoinSpill.resetForTest()
+    ScarletConf.set(ScarletConf.get.copy(broadcastBuildBudgetBytes = estimate - 1L))
+    val plan = left.broadcastJoin(right).plan
+    val thrown = intercept[IllegalStateException] {
+      val _ = ColumnarPlanner.tryRun(plan)
+    }
+    thrown should not be a[ColumnarFallback]
+    thrown.getMessage shouldBe
+      s"broadcast build table retains about $estimate bytes for $rows rows, " +
+        s"above the budget of ${estimate - 1L} bytes"
+    LongHashJoinSpill.filesWrittenForTest shouldBe 0L
+    an[IllegalStateException] should be thrownBy left.broadcastJoin(right).collect()
+    LongHashJoinSpill.filesWrittenForTest shouldBe 0L
+  }
+
+  it should "keep a broadcast hint on a long outer join on the same nodes" in {
+    val left = DistCollection.ofLongPairs(Array(1L, 2L), Array(10L, 20L), 4)
+    val right = DistCollection.ofLongPairs(Array(1L, 3L), Array(100L, 30L), 4)
+    val hint = Some(Plan.JoinStrategy.Broadcast)
+    val leftOuter = DistCollection(Plan.LeftOuterJoinOp(left.plan, right.plan, hint))
+    val rightOuter = DistCollection(Plan.RightOuterJoinOp(left.plan, right.plan, hint))
+    val fullOuter = DistCollection(Plan.FullOuterJoinOp(left.plan, right.plan, hint))
+    ColumnarPlanner.lower(leftOuter.plan).map(_.shape) shouldBe Some(
+      "LongBroadcastLeftOuter(Scan, Scan)",
+    )
+    ColumnarPlanner.lower(rightOuter.plan).map(_.shape) shouldBe Some(
+      "LongBroadcastRightOuter(Scan, Scan)",
+    )
+    ColumnarPlanner.lower(fullOuter.plan).map(_.shape) shouldBe Some(
+      "LongBroadcastFullOuter(Scan, Scan)",
+    )
+    leftOuter.collect().toList should contain theSameElementsAs row(leftOuter.collect().toList)
+    rightOuter.collect().toList should contain theSameElementsAs row(rightOuter.collect().toList)
+    fullOuter.collect().toList should contain theSameElementsAs row(fullOuter.collect().toList)
+  }
+
+  it should "keep long inner sort-merge on the row path" in {
+    val left = DistCollection.ofLongPairs(Array(1L, 2L), Array(10L, 20L), 4)
+    val right = DistCollection.ofLongPairs(Array(1L, 3L), Array(100L, 30L), 4)
     refuse(left.sortMergeJoin(right))
     val leftOuter = left.leftOuterJoin(right)
     val rightOuter = left.rightOuterJoin(right)
@@ -227,6 +355,16 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     ColumnarPlanner.partitioning(collection.plan) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.tryTake(collection.plan, 1) shouldBe Option.empty[Seq[A]]
     collection.collect().toList should contain theSameElementsAs row(collection.collect().toList)
+
+  private def broadcastAgrees(
+      joined: DistCollection[(Long, (Long, Long))],
+      expected: Seq[(Long, (Long, Long))],
+      width: Int,
+  ): Unit =
+    val columnar = joined.collect().toList
+    columnar should contain theSameElementsAs expected
+    columnar should contain theSameElementsAs row(joined.collect().toList)
+    longTripleBatches(joined.plan).length shouldBe width
 
   private def agree(
       joined: DistCollection[(Long, (Long, Long))],
