@@ -144,17 +144,10 @@ private[execution] object PipelineJoinArms:
     val build = pairsOf(
       interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
     )
-    // Validity words are already on the columns. A null value is not a probe-side row with no
-    // partner, and this path cannot represent one, so the kernel is not chosen.
-    val valuesPresent =
-      ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
-    if (!valuesPresent) then
-      throw new ColumnarFallback(
-        "a null value on a left outer join stays on the row path",
-      )
-    // The kernel writes (key, probe value, build value). The probe side is the left input, so
-    // the batch is already (key, left, right). The build value's absence bit is set and its
-    // validity bit stays clear.
+    // A null value is a clear validity bit. The kernel copies it and writes
+    // (key, probe value, build value). The probe side is the left input, so the batch is already
+    // (key, left, right). The build value's absence bit is set only for a missing partner, and
+    // its validity bit stays clear.
     val joined = ColumnPipeline.hashLeftOuterJoin(
       probe,
       build,

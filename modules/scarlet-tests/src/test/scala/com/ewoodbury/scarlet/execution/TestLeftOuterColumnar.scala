@@ -306,32 +306,79 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     canonical(collect(emptyProbe, columnar = false)) shouldBe empty
   }
 
-  it should "stay on the row path when a value is null" in {
-    val nullBuild = shufflePlan(
-      Seq(Seq(1 -> 10), Seq(2 -> 20), Seq.empty[(Int, Int)], Seq.empty[(Int, Int)]),
-      Seq(
-        Seq(pair(Some(2), Some(200))),
-        Seq(pair(Some(1), None)),
-        Seq.empty[(Int, Int)],
-        Seq.empty[(Int, Int)],
+  it should "keep a null value columnar and match the row path" in {
+    val noRows = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 4).plan
+    // A present pair comes first, so the source still witnesses int pairs. The null value is later.
+    val nullProbe = source(
+      Seq(Seq(pair(Some(2), Some(0)), pair(Some(1), None), pair(None, Some(7)))),
+    )
+    val nullBuild = source(Seq(Seq(pair(Some(0), Some(0)), pair(Some(1), None))))
+    val hints = Seq(
+      "shuffle-hash" -> Some(Plan.JoinStrategy.ShuffleHash),
+      "absent hint" -> Option.empty[Plan.JoinStrategy],
+    )
+    val cases = Seq(
+      "null probe value" -> (
+        Seq(Seq(pair(Some(2), Some(20)), pair(Some(1), None))),
+        Seq(Seq(1 -> 100, 2 -> 200)),
+      ),
+      "null build value" -> (
+        Seq(Seq(1 -> 10, 2 -> 20)),
+        Seq(Seq(pair(Some(2), Some(200)), pair(Some(1), None))),
+      ),
+      "missing partner" -> (
+        Seq(Seq(1 -> 10, 2 -> 20)),
+        Seq(Seq(1 -> 100)),
+      ),
+      "null probe key and dropped null build key" -> (
+        Seq(Seq(pair(Some(1), Some(10)), pair(None, Some(7)), 0 -> 5)),
+        Seq(Seq(pair(Some(1), Some(100)), pair(None, Some(99)), 0 -> 50)),
+      ),
+      "real zero" -> (
+        Seq(Seq(pair(Some(1), Some(0)), pair(Some(3), Some(0)))),
+        Seq(Seq(pair(Some(1), Some(0)))),
+      ),
+      "duplicate key with a null probe value" -> (
+        Seq(Seq(1 -> 10, pair(Some(1), None))),
+        Seq(Seq(1 -> 100, 1 -> 101)),
       ),
     )
-    val nullProbe = shufflePlan(
-      Seq(
-        Seq(pair(Some(2), Some(20))),
-        Seq(pair(Some(1), None)),
-        Seq.empty[(Int, Int)],
-        Seq.empty[(Int, Int)],
-      ),
-      Seq(Seq(1 -> 100), Seq(2 -> 200), Seq.empty[(Int, Int)], Seq.empty[(Int, Int)]),
-    )
-    Seq(nullBuild, nullProbe).foreach { plan =>
-      ScarletConf.set(shuffledConf)
-      ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
-        "HashLeftOuter(Exchange(Scan), Exchange(Scan))",
-      )
-      ColumnarPlanner.tryRun(plan) shouldBe None
-      sameRows(collect(plan, columnar = true), collect(plan, columnar = false))
+    hints.foreach { case (hint, strategy) =>
+      cases.foreach { case (label, (leftParts, rightParts)) =>
+        withClue(s"$hint $label: ") {
+          ScarletConf.set(shuffledConf)
+          val plan = Plan.LeftOuterJoinOp(source(leftParts), source(rightParts), strategy)
+          ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
+            "HashLeftOuter(Exchange(Scan), Exchange(Scan))",
+          )
+          ColumnarPlanner.tryRun(plan).isDefined shouldBe true
+          val columnar = collect(plan, columnar = true)
+          val row = collect(plan, columnar = false)
+          agree(columnar, row)
+          if (label.contains("dropped null build")) then
+            containsInt(columnar, 99) shouldBe false
+        }
+      }
+      withClue(s"$hint empty build keeps a null probe value: ") {
+        ScarletConf.set(shuffledConf)
+        val plan = Plan.LeftOuterJoinOp(nullProbe, noRows, strategy)
+        ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
+          "HashLeftOuter(Exchange(Scan), Exchange(Scan))",
+        )
+        ColumnarPlanner.tryRun(plan).isDefined shouldBe true
+        agree(collect(plan, columnar = true), collect(plan, columnar = false))
+      }
+      withClue(s"$hint empty probe drops a null build value: ") {
+        ScarletConf.set(shuffledConf)
+        val plan = Plan.LeftOuterJoinOp(noRows, nullBuild, strategy)
+        ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
+          "HashLeftOuter(Exchange(Scan), Exchange(Scan))",
+        )
+        ColumnarPlanner.tryRun(plan).isDefined shouldBe true
+        val row = collect(plan, columnar = false)
+        agree(collect(plan, columnar = true), row)
+        JoinDigest.fromOuter(row).total shouldBe 0L
+      }
     }
   }
 
@@ -393,20 +440,93 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     )
   }
 
-  it should "refuse a null value before the shuffle kernel runs" in {
-    val probe = BatchCodec.nullableIntPairs(Seq((Some(1), Some(10)), (Some(2), None)))
-    val build = BatchCodec.nullableIntPairs(Seq((Some(1), Some(100))))
-    val refused = intercept[IllegalArgumentException] {
-      ColumnPipeline.hashLeftOuterJoin(
-        Vector(probe),
-        Vector(build),
-        numPartitions = 4,
-        parallelism = 1,
-        batchSize = 8,
-        ScarletConf.get.broadcastBuildBudgetBytes,
-      )
+  it should "publish a null value as a clear bit and a missing partner as absence" in {
+    val probe = BatchCodec.nullableIntPairs(
+      Seq(
+        (Some(1), None),
+        (Some(2), Some(20)),
+        (Some(3), Some(30)),
+        (None, Some(7)),
+        (Some(0), Some(0)),
+        (Some(4), Some(40)),
+        (Some(5), Some(0)),
+      ),
+    )
+    val build = BatchCodec.nullableIntPairs(
+      Seq(
+        (Some(1), Some(100)),
+        (Some(2), None),
+        (None, Some(99)),
+        (Some(0), Some(0)),
+        (Some(4), Some(0)),
+        (Some(8), Some(80)),
+      ),
+    )
+    val parts = hashLeft(Vector(probe), Vector(build))
+    val marks = parts.flatMap(bitMarks)
+    marks should contain theSameElementsAs Seq(
+      "key=1 left=null right=present:100",
+      "key=2 left=present:20 right=null",
+      "key=3 left=present:30 right=absent",
+      "key=null left=present:7 right=absent",
+      "key=0 left=present:0 right=present:0",
+      "key=4 left=present:40 right=present:0",
+      "key=5 left=present:0 right=absent",
+    )
+    agree(decodedRight(parts), expectedNullBits)
+
+    val emptyProbe = hashLeft(Vector(BatchCodec.nullableIntPairs(Seq.empty)), Vector(build))
+    emptyProbe.map(_.length).sum shouldBe 0
+    JoinDigest.fromOuter(decodedRight(emptyProbe)).total shouldBe 0L
+
+    val emptyBuild = hashLeft(
+      Vector(
+        BatchCodec.nullableIntPairs(
+          Seq((Some(1), None), (Some(2), Some(0)), (None, Some(7))),
+        ),
+      ),
+      Vector(BatchCodec.nullableIntPairs(Seq.empty)),
+    )
+    emptyBuild.flatMap(bitMarks) should contain theSameElementsAs Seq(
+      "key=1 left=null right=absent",
+      "key=2 left=present:0 right=absent",
+      "key=null left=present:7 right=absent",
+    )
+  }
+
+  "outer arms other than shuffle-hash left" should "decline a null value and match the row path" in {
+    val left = source(Seq(Seq(1 -> 10, pair(Some(2), None))))
+    val right = source(Seq(Seq(1 -> 100)))
+    val plans = Seq(
+      (
+        "right outer",
+        Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.ShuffleHash)),
+        "HashRightOuter(Exchange(Scan), Exchange(Scan))",
+      ),
+      (
+        "full outer",
+        Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.ShuffleHash)),
+        "HashFullOuter(Exchange(Scan), Exchange(Scan))",
+      ),
+      (
+        "broadcast left",
+        Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
+        "BroadcastLeftOuter(Scan, Scan)",
+      ),
+      (
+        "sort-merge left",
+        Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
+        "SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))",
+      ),
+    )
+    plans.foreach { case (label, plan, shape) =>
+      withClue(s"$label: ") {
+        ScarletConf.set(shuffledConf)
+        ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(shape)
+        ColumnarPlanner.tryRun(plan) shouldBe None
+        agree(collect(plan, columnar = true), collect(plan, columnar = false))
+      }
     }
-    refused.getMessage should include("fully present")
   }
 
   it should "bound each partition build table by the broadcast budget" in {
@@ -581,22 +701,114 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
   ): Plan[(Int, (Int, Option[Int]))] =
     Plan.LeftOuterJoinOp(source(leftParts), source(rightParts), Some(Plan.JoinStrategy.Broadcast))
 
-  private def shufflePlan(
-      leftParts: Seq[Seq[(Int, Int)]],
-      rightParts: Seq[Seq[(Int, Int)]],
-  ): Plan[(Int, (Int, Option[Int]))] =
-    Plan.LeftOuterJoinOp(
-      source(leftParts),
-      source(rightParts),
-      Some(Plan.JoinStrategy.ShuffleHash),
-    )
-
   private def source(parts: Seq[Seq[(Int, Int)]]): Plan[(Int, Int)] =
     Plan.Source(parts.map(rows => Partition(rows)))
 
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
   private def sameRows(actual: Seq[Any], expected: Seq[Any]): org.scalatest.Assertion =
     actual should contain theSameElementsAs expected
+
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def agree(actual: Seq[Any], expected: Seq[Any]): org.scalatest.Assertion =
+    val left = JoinDigest.fromOuter(actual)
+    val right = JoinDigest.fromOuter(expected)
+    withClue(JoinDigest.difference(left, right)) {
+      JoinDigest.agrees(left, right) shouldBe true
+    }
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Product",
+    ),
+  )
+  private def containsInt(rows: Seq[Any], value: Int): Boolean =
+    rows.exists { row =>
+      val values = row.asInstanceOf[Product].productElement(1).asInstanceOf[Product]
+      (0 until values.productArity).exists { ordinal =>
+        values.productElement(ordinal) match
+          case number: Int => number == value
+          case Some(number: Int) => number == value
+          case _ => false
+      }
+    }
+
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def decodedRight(parts: Vector[ColumnBatch]): Seq[Any] =
+    parts.flatMap(batch => BatchCodec.decodeOuter(batch, AbsentSide.Right))
+
+  private def hashLeft(
+      probe: Vector[ColumnBatch],
+      build: Vector[ColumnBatch],
+  ): Vector[ColumnBatch] =
+    ColumnPipeline.hashLeftOuterJoin(
+      probe,
+      build,
+      numPartitions = 4,
+      parallelism = 1,
+      batchSize = 8,
+      ScarletConf.get.broadcastBuildBudgetBytes,
+    )
+
+  private def bitMarks(batch: ColumnBatch): Seq[String] =
+    val keys = BatchColumns.int32(batch, 0)
+    val left = BatchColumns.int32(batch, 1)
+    val right = BatchColumns.int32(batch, 2)
+    (0 until batch.length).map { row =>
+      keys.isAbsent(row) shouldBe false
+      val key = if (keys.isValid(row)) keys.values(row).toString else "null"
+      s"key=$key left=${mark(left, row)} right=${mark(right, row)}"
+    }
+
+  /** A present `0` is not null and not absence. A clear bit with no absence mark is null. */
+  private def mark(column: Int32Column, row: Int): String =
+    val valid = column.isValid(row)
+    val absent = column.isAbsent(row)
+    if (absent && valid) then fail(s"row $row is absent and present")
+    else if (absent) then
+      column.values(row) shouldBe 0
+      "absent"
+    else if (valid) then s"present:${column.values(row)}"
+    else
+      column.values(row) shouldBe 0
+      "null"
+
+  /**
+   * Hand-built rows for the kernel bit case. A null value is a bare null, which [[JoinDigest]]
+   * classifies the same way as `Some(null)` from [[BatchCodec.optionalInt]]. A missing partner is
+   * `None`. A present `0` stays boxed so it is not that null. Tuple `==` would unbox the null.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def expectedNullBits: Seq[Any] =
+    Seq(
+      outerRow(Some(1), null, Int.box(100)),
+      outerRow(Some(2), Int.box(20), null),
+      outerRow(Some(3), Int.box(30), None),
+      outerRow(None, Int.box(7), None),
+      outerRow(Some(0), Int.box(0), Int.box(0)),
+      outerRow(Some(4), Int.box(40), Int.box(0)),
+      outerRow(Some(5), Int.box(0), None),
+    )
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def outerRow(key: Option[Int], left: Any, right: Any): Any =
+    val boxedKey: AnyRef = key match
+      case Some(present) => Int.box(present)
+      case None => null
+    Tuple2(boxedKey, Tuple2(left.asInstanceOf[AnyRef], right.asInstanceOf[AnyRef]))
 
   /**
    * True when a collected outer row has a null at `ordinal` of the value pair. Ordinal 0 is the

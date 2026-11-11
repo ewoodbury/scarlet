@@ -142,7 +142,8 @@ object SortMergeOuterFixture extends Assertions with Matchers:
 
   /**
    * An absence bit is a missing partner, and that cell stores no int. A clear validity bit with
-   * no absence mark is a null value, which an outer join does not publish.
+   * no absence mark is a null value. Callers are the outer arms that still decline one, so a
+   * clear bit fails here.
    */
   private def valueBit(column: Int32Column, row: Int): Option[Int] =
     if (column.isAbsent(row)) then

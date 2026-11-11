@@ -151,7 +151,7 @@ enum PhysicalOp:
    * and its exchange drops a null key, so a null build key is not inserted. Each partition builds
    * one table and probes with the left-outer kernel. Output columns are `(key, left, right)`.
    * Absence is a probe-side row with no partner, and the right value's absence bit is set. A null
-   * value is not absence and stays on the row path. The build table uses the same budget as a
+   * value is a clear validity bit and stays columnar. The build table uses the same budget as a
    * broadcast join. This is a different node from [[HashJoin]], so the inner join does not carry
    * null keys.
    */
