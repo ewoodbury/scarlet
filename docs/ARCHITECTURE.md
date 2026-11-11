@@ -108,7 +108,7 @@ null. A null string key orders as `""` and stays null. Shape strings are exact.
 | Explicit sort-merge full outer int join. Both exchanges carry a null key to partition 0. A group on only one side is emitted. An empty side emits every row of the other side. Either value's absence bit is a missing partner. A null value stays on the row path | `Columnar` | `SortMergeFullOuter(Exchange(Scan), Exchange(Scan))` |
 | Explicit broadcast int join. The planner builds the right input. A later pass may build the left. Neither side is exchanged. Order is unspecified | `Columnar` | `BroadcastJoin(Scan, Scan)` |
 | Broadcast left outer int join. The planner builds the right input. The left input is the probe side, and the op records no left build. Absence is a probe-side row with no partner: the right value's absence bit is set. A null value is not absence and stays on the row path | `Columnar` | `BroadcastLeftOuter(Scan, Scan)` |
-| Shuffle-hash left outer int join, including an absent hint. The left input is the probe side. Its exchange carries a null key to partition 0. The right exchange drops a null key. Each partition builds one table under the broadcast budget. A null value stays on the row path | `Columnar` | `HashLeftOuter(Exchange(Scan), Exchange(Scan))` |
+| Shuffle-hash left outer int join, including an absent hint. The left input is the probe side. Its exchange carries a null key to partition 0. The right exchange drops a null key. Each partition builds one table under the broadcast budget. A null value stays a clear validity bit. A missing partner is the right value's absence bit | `Columnar` | `HashLeftOuter(Exchange(Scan), Exchange(Scan))` |
 | Broadcast right outer int join. The planner builds the left input and probes the right. The left-outer kernel runs, then the value columns are swapped back to `(key, left, right)`. Absence is the left value's absence bit. A null value stays on the row path | `Columnar` | `BroadcastRightOuter(Scan, Scan)` |
 | Shuffle-hash right outer int join, including an absent hint. The right input is the probe side. Its exchange carries a null key to partition 0. The left exchange drops a null key. Each partition builds the left bucket, probes, and swaps the value columns. A null value stays on the row path | `Columnar` | `HashRightOuter(Exchange(Scan), Exchange(Scan))` |
 | Broadcast full outer int join. The right input is built. The left input is probed in place. Each probe thread keeps its own matched-row bitmap, and the bitmaps are OR'd after the probes join. A clear matched bit emits that build row with the left value absent. Null build keys are carried outside the table and emitted once. An empty probe still emits every build row. A null value stays on the row path. The bitmaps are not part of `broadcastBuildBudgetBytes` | `Columnar` | `BroadcastFullOuter(Scan, Scan)` |
@@ -282,7 +282,7 @@ Output distribution follows that probe side. A sort-merge join is
 `SortMergeJoin(Exchange, Exchange)`. Outer sort-merge is `SortMergeLeftOuter(Exchange, Exchange)`,
 `SortMergeRightOuter(Exchange, Exchange)`, or `SortMergeFullOuter(Exchange, Exchange)`.
 Distribution follows the key hash on both sides. A preserved side carries a null key to
-partition 0. Absence is an absence bit on that value column. A null value stays on the row path.
+partition 0. Absence is an absence bit on that value column. A null value on sort-merge stays on the row path.
 When columnar execution is off, the row-path sort-merge task still groups by key.
 Output columns stay `(key, left, right)`. Multiplicity, values, and null semantics match the
 shuffle-hash join. Order is unspecified. The broadcast build table is estimated before it is
@@ -392,14 +392,16 @@ and the row path runs instead. A `ClassCastException` from a filter, or from a s
 declares `String` and returns another value, is also a fallback, and that function may already
 have run. An `IllegalStateException` from a physical/logical mismatch or a broadcast build table
 above `broadcastBuildBudgetBytes` is not a fallback, and neither is the `IllegalArgumentException`
-from a partition-selector `require`. A null value on a left, right, or full outer join is a
-`ColumnarFallback`. A null value on a long inner hash join stays columnar. A clear validity bit
-is a null value, not an absence bit. A selected null and a null on the dense side of a mixed
-int hash join stay columnar. A null on a dropped row stays columnar. The absence bit is only a
-missing partner. A null value on a string inner hash join stays columnar. String `reduceByKey`
-and string `groupByKey` with a live null value are that fallback. Outer joins still decline. A
-value projection that kept a null int is that fallback too. A string-pair filter keeps the null
-int. With spill off, an over-budget int `countByKey` throws `ClosedKernelRefusal` and the action
+from a partition-selector `require`. A null value on an int shuffle-hash left outer join stays
+columnar. A null value on a right outer join, a full outer join, a broadcast outer join, a
+sort-merge outer join, or a long or string outer join is a `ColumnarFallback`. A null value on a
+long inner hash join stays columnar. A clear validity bit is a null value, not an absence bit. A
+selected null and a null on the dense side of a mixed int hash join stay columnar. A null on a
+dropped row stays columnar. The absence bit is only a missing partner. A null value on a string
+inner hash join stays columnar. String `reduceByKey` and string `groupByKey` with a live null
+value are that fallback. A value projection that kept a null int is that fallback too. A
+string-pair filter keeps the null int. With spill off, an over-budget int `countByKey` throws
+`ClosedKernelRefusal` and the action
 fails. With spill on, an over-budget post-exchange bucket spills, and a count table that still
 does not fit throws `ClosedKernelRefusal`. With spill off, an over-budget long `countByKey`
 throws `ClosedKernelRefusal` before a table and the action fails. The estimate charges 8-byte
@@ -433,9 +435,9 @@ That exception does not extend `ClassCastException`, so a refusal does not rerun
 ## Outer joins
 
 An outer join marks an absent side by setting that value column's absence bit. The validity bit
-stays clear because no int is stored. A clear validity bit is a null value, which this path does
-not publish. Absence is never a sentinel key or value, so a real `0` and a real null stay
-distinguishable from "no partner".
+stays clear because no int is stored. A clear validity bit is a null value. An int shuffle-hash
+left outer join publishes that bit. Every other outer arm declines it. Absence is never a
+sentinel key or value, so a real `0` and a real null stay distinguishable from "no partner".
 
 The rules that hold for every kind:
 
@@ -443,9 +445,10 @@ The rules that hold for every kind:
   with the other side absent. A null key on the other side is dropped, because no row can match
   it. Inside the shuffle, the preserved side's exchange carries a null key to partition 0 so the
   row survives to the task; every other exchange keeps dropping null keys.
-- **Values.** A null *value* is not absence and the columnar outer path cannot represent it yet.
-  A plan whose probe or build value column contains a null stays on the row path, for all three
-  kinds.
+- **Values.** A null *value* is not absence. An int shuffle-hash left outer join keeps a null
+  value on the probe side or the build side. A missing partner stays the absence bit. A right
+  outer join, a full outer join, a broadcast outer join, a sort-merge outer join, and a long or
+  string outer join stay on the row path when a value is null.
 - **Layout.** The published batch is always `(key, left, right)`. Left outer leaves the right
   column absent, right outer leaves the left column absent, and full outer can leave either or
   both. A right outer over a left-built table swaps the two value columns back before publishing.
@@ -568,14 +571,17 @@ Still open inside the set, and therefore not a promise of this commit:
 - The long inner hash join spills an over-budget build bucket when `spillEnabled` is on. A piece
   still over the budget throws. The string inner hash join spills an over-budget build bucket when
   `spillEnabled` is on. A piece still over the budget throws.
-- A null value on an outer join is a `ColumnarFallback`. A null value on a long inner hash join
-  stays columnar. A selected null and a null on the dense side of a mixed int hash join stay
-  columnar. A null on a dropped row stays columnar. A null value on a string inner hash join stays
+- A null value on an int shuffle-hash left outer join stays columnar. A null value on a right
+  outer join, a full outer join, a broadcast outer join, a sort-merge outer join, or a long or
+  string outer join is a `ColumnarFallback`. A null value on a long inner hash join stays
+  columnar. A selected null and a null on the dense side of a mixed int hash join stay columnar.
+  A null on a dropped row stays columnar. A null value on a string inner hash join stays
   columnar. String `reduceByKey` and string `groupByKey` with a live null value are a
-  `ColumnarFallback`. Outer joins still decline. A value projection that kept a null int is the
-  same decline. A string-pair filter keeps that null int. An inner sort-merge keeps a null value.
-  The absence bit is only a missing partner. A clear validity bit is a null value, which an outer
-  join does not publish, so a null value cannot use the absence bit.
+  `ColumnarFallback`. A value projection that kept a null int is the same decline. A string-pair
+  filter keeps that null int. An inner sort-merge keeps a null value. The absence bit is only a
+  missing partner. A clear validity bit is a null value. An int shuffle-hash left outer join
+  publishes it. The other outer arms do not, so a null value on those arms cannot use the absence
+  bit.
 - An int, long, or string sort of one or more filters, including a row filter, sorts the survivor
   index. Over the budget, with spill on, that index is spilled. Dropped rows are not written.
 - `groupByKey`, `distinct`, and `union` already have a columnar path and are not part of the closed

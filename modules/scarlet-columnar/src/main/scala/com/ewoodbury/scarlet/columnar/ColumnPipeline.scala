@@ -33,12 +33,13 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * null key on the probe side only, and builds one table per partition. A right outer join calls
  * those same entry points with the right input as the probe and the left input as the build, then
  * swaps the value columns back to `(key, left, right)`. A probe-side row with no partner is kept,
- * and the build value's absence bit is set. A null value is not absence. Match order is a kernel
- * detail. The published multiset is multiplicity, values, and null semantics. A full outer join
- * probes the left input and also emits build rows no probe matched. Broadcast gives each probe
- * thread its own bitmap and ORs them after the probes join. Shuffle keeps one bitmap per partition
- * and finishes that partition immediately. Null build keys are carried outside the table and
- * emitted once. Those bitmaps are not part of the build budget.
+ * and the build value's absence bit is set. A null value is not absence. [[hashLeftOuterJoin]]
+ * keeps one. The other outer methods in this file still require every value to be present. Match
+ * order is a kernel detail. The published multiset is multiplicity, values, and null semantics. A
+ * full outer join probes the left input and also emits build rows no probe matched. Broadcast
+ * gives each probe thread its own bitmap and ORs them after the probes join. Shuffle keeps one
+ * bitmap per partition and finishes that partition immediately. Null build keys are carried
+ * outside the table and emitted once. Those bitmaps are not part of the build budget.
  */
 object ColumnPipeline:
 
@@ -493,12 +494,11 @@ object ColumnPipeline:
    * Shuffle-hash left outer join. `probe` is the left input. `build` is the right input. The probe
    * exchange carries a null key to partition 0. The build exchange drops a null key, so it is not
    * inserted and does not match probe key 0. Each partition builds one table and probes with the
-   * same left-outer kernel as [[broadcastLeftOuterJoin]]. Call this only when both value columns
-   * are fully valid. [[valuesFullyPresent]] reads the validity words encoding already wrote.
-   * Output columns are `(key, probe value, build value)`. An empty probe bucket emits nothing. An
-   * empty build bucket emits every probe row in that partition with the build value absent.
-   * `buildBudgetBytes` is the same per-table budget as [[broadcastLeftOuterJoin]], applied to each
-   * partition's build table.
+   * same left-outer kernel as [[broadcastLeftOuterJoin]]. A null value is a clear validity bit on
+   * the probe column or the build column. It is not an absence bit. Output columns are
+   * `(key, probe value, build value)`. An empty probe bucket emits nothing. An empty build bucket
+   * emits every probe row in that partition with the build value absent. `buildBudgetBytes` is the
+   * same per-table budget as [[broadcastLeftOuterJoin]], applied to each partition's build table.
    */
   def hashLeftOuterJoin(
       probe: Vector[ColumnBatch],
@@ -508,10 +508,6 @@ object ColumnPipeline:
       batchSize: Int,
       buildBudgetBytes: Long,
   ): Vector[ColumnBatch] =
-    require(
-      valuesFullyPresent(probe) && valuesFullyPresent(build),
-      "a left outer join needs fully present value columns",
-    )
     val probeBuckets = HashExchange.partitionAll(
       sliceAll(probe, batchSize),
       keyOrdinal = 0,

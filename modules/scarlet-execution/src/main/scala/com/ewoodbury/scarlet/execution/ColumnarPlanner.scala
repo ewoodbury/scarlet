@@ -51,28 +51,26 @@ object ColumnarPlanner:
    * not spill. Sort-merge runs in memory and throws instead of spilling. String inner broadcast
    * and string inner sort-merge stay on the row path. The layout is [[Layout.StringTriple]]. An
    * explicit sort-merge hint on int pairs lowers to [[PhysicalOp.SortMergeJoin]]. A left, right,
-   * or full outer sort-merge hint on int pairs lowers to the matching node. Any other sort-merge
-   * returns `None`. A left outer join on int pairs lowers for a broadcast hint, a shuffle-hash
-   * hint, an absent hint, or a sort-merge hint. An absent hint uses the shuffle-hash op, matching
-   * an inner join. A right outer join on int pairs lowers for a broadcast hint, a shuffle-hash
-   * hint, an absent hint, or a sort-merge hint. An absent hint uses the shuffle-hash op. The left
-   * input is the build side and the right input is the probe side. A full outer join on int pairs
-   * lowers for a broadcast hint, a shuffle-hash hint, an absent hint, or a sort-merge hint. An
-   * absent hint uses the shuffle-hash op. A null value does not change that shape: [[tryRun]]
-   * reads the value columns and returns `None`, and the row path runs. [[SortLowering]] accepts an
-   * int, long, or string key sort of a scan, or of filters over that scan. A map, aggregate, or
-   * join under the sort stays on the row path. One filter above an int sort lowers to
-   * [[PhysicalOp.Filter]] on [[PhysicalOp.Slot.Row]] around [[PhysicalOp.SortByIntKey]], and only
-   * for a fully present key column: the pair-row filter atom drops a null key while the row path
-   * keeps it. The sort is [[SortLowering.lowerInt]]. [[SortLowering.acceptsAsChild]] stays false,
-   * so a null key, a second filter, a long or string sort, and every other parent stay on the row
-   * path. A slot filter sorts the survivor index. Over the budget, with spill on, that index is
-   * spilled. A long-pair row filter and a whole-row string filter sort that index too. A long sort
-   * spills when `spillEnabled` is on and the retained estimate exceeds `spillBudgetBytes`. The
-   * physical op stays `SortByLongKey`. A string sort spills on that same budget. The physical op
-   * stays `SortByStringKey`. At or under the budget, and whenever spill is off, the split stays in
-   * memory and writes nothing. [[partitioning]] and [[tryRun]] follow a refusal. They also drop a
-   * lowered tree whose layout is invalid.
+   * or full outer sort-merge hint lowers to the matching node. Any other sort-merge returns
+   * `None`. A left, right, or full outer join on int pairs lowers for a broadcast, shuffle-hash,
+   * absent, or sort-merge hint. An absent hint uses the shuffle-hash op. On a right outer join the
+   * left input is the build and the right input is the probe. A null value on an int shuffle-hash
+   * left outer join stays a clear validity bit and [[tryRun]] keeps the row. A null value on a
+   * right outer, full outer, broadcast outer, or sort-merge outer join makes [[tryRun]] return
+   * `None`. [[SortLowering]] accepts an int, long, or string key sort of a scan, or of filters
+   * over that scan. A map, aggregate, or join under the sort stays on the row path. One filter
+   * above an int sort lowers to [[PhysicalOp.Filter]] on [[PhysicalOp.Slot.Row]] around
+   * [[PhysicalOp.SortByIntKey]], and only for a fully present key column: the pair-row filter atom
+   * drops a null key while the row path keeps it. The sort is [[SortLowering.lowerInt]].
+   * [[SortLowering.acceptsAsChild]] stays false, so a null key, a second filter, a long or string
+   * sort, and every other parent stay on the row path. A slot filter sorts the survivor index.
+   * Over the budget, with spill on, that index is spilled. A long-pair row filter and a whole-row
+   * string filter sort that index too. A long sort spills when `spillEnabled` is on and the
+   * retained estimate exceeds `spillBudgetBytes`. The physical op stays `SortByLongKey`. A string
+   * sort spills on that same budget. The physical op stays `SortByStringKey`. At or under the
+   * budget, and whenever spill is off, the split stays in memory and writes nothing.
+   * [[partitioning]] and [[tryRun]] follow a refusal. They also drop a lowered tree whose layout
+   * is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     if (!ScarletConf.get.columnarExecution) then None
