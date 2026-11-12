@@ -243,22 +243,47 @@ object Int32Pipeline:
     )
 
   def sumFP(batch: ColumnBatch, first: Int32Predicate, second: Int32Map): Long =
-    sumFP(singleInt(batch), 0, batch.length, first, second)
+    sumFP(
+      singleInt(batch),
+      0,
+      batch.length,
+      value => first(value),
+      value => second(value),
+    )
 
+  /**
+   * Filter then project, added in place. `keep` and `project` are copied once before the row loop
+   * and called directly. Same null rule as [[sumInt32]]: a null slot is skipped and neither
+   * function runs. A failing filter does not call the map.
+   */
   private[scarlet] def sumFP(
       column: Int32Column,
       start: Int,
       length: Int,
-      first: Int32Predicate,
-      second: Int32Map,
+      first: Int => Boolean,
+      second: Int => Int,
   ): Long =
-    sumInt32(
-      column,
-      start,
-      length,
-      true,
-      value => if (first(value)) then accepted(second(value)) else 0L,
-    )
+    val keep = first
+    val project = second
+    val end = start + length
+    val values = column.values
+    var total = 0L
+    var row = start
+    if (Validity.rangePresent(column.validity, start, length)) then
+      while (row < end) {
+        val value = values(row)
+        if (keep(value)) then total += project(value).toLong
+        row += 1
+      }
+    else
+      val words = column.validity.words
+      while (row < end) {
+        if (Validity.isSet(words, row)) then
+          val value = values(row)
+          if (keep(value)) then total += project(value).toLong
+        row += 1
+      }
+    total
 
   def sumPF(batch: ColumnBatch, first: Int32Map, second: Int32Predicate): Long =
     sumPF(singleInt(batch), 0, batch.length, first, second)

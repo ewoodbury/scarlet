@@ -241,6 +241,15 @@ private[scarlet] object Selection:
           countEachChecked(start, length, stack, keyValues, keyWords, valueValues, valueWords)
         else countEachDense(start, length, stack, keyValues, valueValues)
 
+  /**
+   * The `Int => Boolean` a pair filter already holds. [[countTwoInt32Dense]] calls `call` instead
+   * of the trait adapter wrapped around it. Other kernels still use
+   * [[ColumnKernel.Int32Predicate.apply]].
+   */
+  private[scarlet] final class Int32Function(val call: Int => Boolean)
+      extends ColumnKernel.Int32Predicate:
+    def apply(value: Int): Boolean = call(value)
+
   private def countTwoInt32Dense(
       start: Int,
       length: Int,
@@ -251,16 +260,26 @@ private[scarlet] object Selection:
       keyValues: Array[Int],
       valueValues: Array[Int],
   ): Long =
+    val keepLeft = capturedInt(leftKeep)
+    val keepRight = capturedInt(rightKeep)
     val leftValues = if (leftOrdinal == 0) keyValues else valueValues
     val rightValues = if (rightOrdinal == 0) keyValues else valueValues
     val end = start + length
     var row = start
     var total = 0L
     while (row < end) {
-      if (leftKeep(leftValues(row)) && rightKeep(rightValues(row))) then total += 1L
+      if (keepLeft(leftValues(row)) && keepRight(rightValues(row))) then total += 1L
       row += 1
     }
     total
+
+  /** One function for the row loop. A bare trait is wrapped once here, not once per row. */
+  private def capturedInt(predicate: ColumnKernel.Int32Predicate): Int => Boolean =
+    predicate match
+      case direct: Int32Function => direct.call
+      case other =>
+        val fallback = other
+        value => fallback(value)
 
   private def countTwoInt32Checked(
       start: Int,

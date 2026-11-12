@@ -289,6 +289,23 @@ Reproduce:
 sbt -J-Xmx2g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.PhaseBench"
 ```
 
+### Element chain, after the unroll
+
+Same machine, same protocol, `QueryBench`, 1e6 rows, checksums unchanged on both sides. Baseline and
+after were taken in one session on the same branch, so the pair is comparable; the absolute values
+are higher than the older table because this container's timings drift between runs.
+
+| query | width | before | after |
+| --- | --- | ---: | ---: |
+| long-chain | 1 | 20.824 ms | 10.288 ms |
+| long-chain | 4 | 13.959 ms | 9.844 ms |
+| int-narrow | 1 | 9.031 ms | 6.038 ms |
+| int-narrow | 4 | 7.397 ms | 6.141 ms |
+
+The long chain is the win: four `+ 1` maps cost 2.0x less at one thread once the per-row `Step`
+match is gone and the arity is unrolled the way the int sum already was. The int pair-count moved
+less, which is expected: its loop was already monomorphic, and only the predicate adapter changed.
+
 The phase split above is what redirected the keyed work. `FoldedCount` now applies the filter steps
 inside the key scan, so the survivor index and the caller-side id copy are gone for an int slot
 stack. `filter-countbykey` on the same machine and protocol, checksum `10821571` both times:

@@ -9,8 +9,9 @@ import com.ewoodbury.scarlet.columnar.*
  * A chain longer than four stays in that fold: five int maps call [[Int32Pipeline.sumPPPPP]], and
  * any other longer int chain walks its steps. [[countLonger]] counts two or more steps the same
  * way. [[countMapped]] counts one trailing int project. Survivors use [[Int32Pipeline.encoded]].
- * [[sumLongs]] and [[countLongs]] are the long arms of that fold: one encoded walk, no output
- * column, including a chain of five or six steps.
+ * [[sumLongs]] unrolls the same arities as the int sums and does not match a step per row.
+ * [[countLongs]] stays one walk. Neither writes the column, including a chain of five or six
+ * steps.
  */
 @SuppressWarnings(
   Array(
@@ -37,7 +38,12 @@ private[execution] object ElementSum:
       case List(Project(a), Filter(b)) =>
         Int32Pipeline.sumPF(column, start, length, proj(a), pred(b))
       case List(Filter(a), Project(b)) =>
-        Int32Pipeline.sumFP(column, start, length, pred(a), proj(b))
+        /* Named erasure boundary. `lower` stored the specialized `Int => Boolean` and `Int =>
+         * Int`. */
+        // A mistyped function throws ClassCastException when this morsel runs.
+        val keep = a.asInstanceOf[Int => Boolean]
+        val project = b.asInstanceOf[Int => Int]
+        Int32Pipeline.sumFP(column, start, length, keep, project)
       case List(Project(a), Project(b)) =>
         Int32Pipeline.sumPP(column, start, length, proj(a), proj(b))
       case List(Filter(a), Filter(b), Filter(c)) =>
@@ -183,7 +189,7 @@ private[execution] object ElementSum:
         if ((encoded & 1L) == 0L) then 0L
         else runSteps(rest, (encoded >> 1).toInt)
 
-  /** Wrapping long sum. Does not write the chain. Any length uses the same walk. */
+  /** Wrapping long sum. Does not write the chain. Specialized lengths unroll; the rest walk. */
   def sumLongs(morsel: Morsel, steps: List[ColumnarPlanner.ElementStep]): Long =
     val column = Int64Pipeline.single(morsel.batch)
     Int64Pipeline.sum(column, morsel.start, morsel.length, longSteps(steps))
