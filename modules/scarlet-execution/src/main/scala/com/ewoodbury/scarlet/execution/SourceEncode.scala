@@ -166,10 +166,20 @@ private[execution] object SourceEncode:
           encodeBoxed(rows)
     }.toVector
 
+  /**
+   * An owned [[com.ewoodbury.scarlet.core.StringArrays]] has no nulls. It is dictionary-coded with
+   * [[BatchCodec.allValidStrings]]. Any other partition stays on [[BatchCodec.strings]], which
+   * still packs a presence bitmap.
+   */
   private[execution] def encodeStrings(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+    import com.ewoodbury.scarlet.core.StringArrays
+
     partitions.map { partition =>
-      // Named erasure boundary. Classification already selected string elements.
-      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
-      val rows = partition.data.asInstanceOf[Iterable[String]]
-      BatchCodec.strings(rows)
+      partition.data match
+        case owned: StringArrays => BatchCodec.allValidStrings(owned.values)
+        case other =>
+          // Named erasure boundary. Classification already selected string elements.
+          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+          val rows = other.asInstanceOf[Iterable[String]]
+          BatchCodec.strings(rows)
     }.toVector

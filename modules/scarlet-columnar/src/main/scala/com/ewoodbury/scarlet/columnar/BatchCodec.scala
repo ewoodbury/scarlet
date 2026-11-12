@@ -82,17 +82,31 @@ object BatchCodec:
   private def boolBatch(bytes: Array[Byte]): ColumnBatch =
     batch(BoolColumn.of(bytes, Validity.allValid(bytes.length), bytes.length))
 
-  /** Copies `values` into a new byte buffer. The boolean array is not retained. */
+  /** Writes `0` or `1` into a new byte buffer. The boolean array is not retained. */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def boolBytes(values: Array[Boolean]): Array[Byte] =
-    Array.tabulate(values.length) { row =>
-      if (values(row)) 1.toByte else 0.toByte
+    val count = values.length
+    val bytes = new Array[Byte](count)
+    var row = 0
+    while (row < count) {
+      bytes(row) = if (values(row)) 1.toByte else 0.toByte
+      row += 1
     }
+    bytes
 
   def nullableBools(values: Seq[Option[Boolean]]): ColumnBatch =
     batch(BoolColumn.fromNullable(values))
 
+  /** Iterable encode. A null element is an empty slot. An owned array is [[allValidStrings]]. */
   def strings(values: Iterable[String]): ColumnBatch =
     batch(DictUtf8Column.fromIterable(values))
+
+  /**
+   * Dictionary-codes an owned array. Every element is present, including `""`. The column does not
+   * retain `values`. Nullable input stays on [[strings]].
+   */
+  private[scarlet] def allValidStrings(values: Array[String]): ColumnBatch =
+    batch(DictUtf8Column.allValid(values))
 
   def nullableStrings(values: Seq[Option[String]]): ColumnBatch =
     batch(DictUtf8Column.fromNullable(values))

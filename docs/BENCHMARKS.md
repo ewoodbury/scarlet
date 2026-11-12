@@ -289,6 +289,27 @@ Reproduce:
 sbt -J-Xmx2g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.PhaseBench"
 ```
 
+### All-valid string and boolean encode
+
+Owned string and boolean sources are all-valid, but their encoders took the nullable path: strings
+built a presence array and ran `Validity.pack` row by row, booleans built a byte array with
+`Array.tabulate`. `DictUtf8Column.allValid` now fills codes from the owned array with the same
+`Words` intern and `Validity.allValid`, and `copiedBools` fills bytes in a loop.
+
+Same machine, same session, `QueryBench`, 1e6 rows, checksums unchanged:
+
+| query | width | before | after | alloc before | alloc after |
+| --- | --- | ---: | ---: | ---: | ---: |
+| string | 1 | 9.648 ms | 5.140 ms | 21.278 MB | 4.282 MB |
+| string | 4 | 9.625 ms | 4.861 ms | 21.278 MB | 4.282 MB |
+| boolean | 1 | 6.243 ms | 1.789 ms | 18.903 MB | 2.921 MB |
+| boolean | 4 | 6.650 ms | 2.166 ms | 17.856 MB | 2.828 MB |
+
+The allocation drop is the point: the presence array and the per-row `pack` were most of the
+string action's garbage, and the tabulate closure plus its byte array were the boolean's. Boolean
+is still slower at four threads than at one (2.166 against 1.789), so the remaining defect there is
+the schedule, not the encode.
+
 ### Element chain, after the unroll
 
 Same machine, same protocol, `QueryBench`, 1e6 rows, checksums unchanged on both sides. Baseline and

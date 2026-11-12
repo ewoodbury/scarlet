@@ -264,6 +264,27 @@ object DictUtf8Column:
   def fromIterable(values: Iterable[String]): DictUtf8Column =
     encode(values.size, values.iterator)
 
+  /**
+   * Dictionary-codes an owned array. Every element is present, including `""`. First-seen order
+   * uses the same [[Words]] table as [[fromIterable]]. There is no presence array and no
+   * [[Validity.pack]]. The column does not retain `values`. Nullable input stays on
+   * [[fromIterable]] and [[fromNullable]].
+   */
+  def allValid(values: Array[String]): DictUtf8Column =
+    val codes = new Array[Int](values.length)
+    val words = Words.empty
+    fillPresent(values, words, codes)
+    of(words.toArray, codes, Validity.allValid(values.length), values.length)
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def fillPresent(values: Array[String], words: Words, codes: Array[Int]): Unit =
+    val count = values.length
+    var row = 0
+    while (row < count) {
+      codes(row) = words.intern(values(row))
+      row += 1
+    }
+
   private def encode(count: Int, cells: Iterator[String]): DictUtf8Column =
     val codes = new Array[Int](count)
     val present = new Array[Boolean](count)
