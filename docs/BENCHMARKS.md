@@ -289,6 +289,19 @@ Reproduce:
 sbt -J-Xmx2g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.PhaseBench"
 ```
 
+The phase split above is what redirected the keyed work. `FoldedCount` now applies the filter steps
+inside the key scan, so the survivor index and the caller-side id copy are gone for an int slot
+stack. `filter-countbykey` on the same machine and protocol, checksum `10821571` both times:
+
+| width | before the fold | after the fold | allocation |
+| --- | ---: | ---: | --- |
+| 1 thread | 12.791 ms | 9.501 ms | 39.350 MB |
+| 4 threads | 11.340 ms | 5.317 ms | 16.660 MB |
+
+The before figure was measured in the same session as the after figure; the older table's 7.05 ms
+was recorded on different hardware, so do not mix the two. The folded path only admits a stack of
+int key or value slot atoms; every other shape keeps the index path.
+
 ## Sort
 
 Recorded on the same Apple M1 Pro (8 cores), OpenJDK 64-Bit Server VM 17.0.16, through `sbt` with

@@ -29,6 +29,7 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       ),
     )
     ScarletRuntime.get.shuffle.clear()
+    FoldedCount.resetPassesForTest()
 
   override def afterEach(): Unit =
     ScarletRuntime.get.shuffle.clear()
@@ -112,6 +113,161 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val found = countsOf(counted.collect())
     found shouldBe countsOf(row(counted.collect()))
     found shouldBe Map(1 -> 2)
+  }
+
+  it should "fold one filter and a two-filter stack in the hash path's key order" in {
+    val source = DistCollection.ofIntPairs(
+      Array(5, 5, 6, 1, 5, 7, 6, 1, 8, 5),
+      Array(1, -2, 3, 4, 0, -5, 6, 7, 8, 9),
+      2,
+    )
+    assertFolded(
+      source.filterKeys((key: Int) => key % 2 != 0),
+      Map(5 -> 4, 1 -> 2, 7 -> 1),
+    )
+    assertFolded(
+      source
+        .filterKeys((key: Int) => key % 2 != 0)
+        .filterValues((value: Int) => value >= 0),
+      Map(5 -> 3, 1 -> 2),
+    )
+  }
+
+  it should "fold duplicate keys, both partitions, nulls, and an empty source" in {
+    val duplicates = DistCollection.ofIntPairs(Array(4, 4, 4, 9), Array(1, 2, 3, 4), 1)
+    assertFolded(duplicates.filterValues((value: Int) => value > 0), Map(4 -> 3, 9 -> 1))
+
+    // Length 3 and two partitions: key 5 is on both, and the batch size cuts each side into morsels.
+    val both = DistCollection.ofIntPairs(Array(5, 6, 5, 6, 7, 5), Array(1, -1, 2, 3, 0, 4), 2)
+    assertFolded(
+      both.filterKeys((key: Int) => key != 7).filterValues((value: Int) => value >= 0),
+      Map(5 -> 3, 6 -> 1),
+    )
+
+    val empty = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 1)
+    assertFolded(empty.filterKeys((key: Int) => key > 0), Map.empty)
+
+    FoldedCount.resetPassesForTest()
+    // tryRun and collect each count the same int-slot filter, so the fold is entered twice.
+    lateNullOneFilterCounts() shouldBe Map(1 -> 2)
+    FoldedCount.passesForTest shouldBe 2
+
+    nullKeyCounts() shouldBe Map(1 -> 2, 2 -> 1)
+  }
+
+  it should "choose the folded path only for an int slot stack" in {
+    val ints = DistCollection.ofIntPairs(Array(1, 2, 3, 1, 3), Array(1, -1, 4, 5, 0), 2)
+    val two = ints
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+      .countByKey
+    foldsOf(two.plan) shouldBe true
+    FoldedCount.resetPassesForTest()
+    countsOf(two.collect()) shouldBe Map(1 -> 2)
+    FoldedCount.passesForTest shouldBe 1
+
+    val plain = ints.countByKey
+    foldsOf(plain.plan) shouldBe false
+    FoldedCount.resetPassesForTest()
+    plain.collect()
+    FoldedCount.passesForTest shouldBe 0
+
+    val strings = DistCollection(
+      Plan.Source(Seq(Partition(Seq("a" -> 1, "b" -> 2)), Partition(Seq("a" -> 3)))),
+    )
+    val wholeRow = strings.filter((pair: (String, Int)) => pair._1 != "b").countByKey
+    foldsOf(wholeRow.plan) shouldBe false
+    FoldedCount.resetPassesForTest()
+    countsOf(wholeRow.collect()) shouldBe Map("a" -> 2)
+    FoldedCount.passesForTest shouldBe 0
+
+    val mapped = ints.mapValues((value: Int) => value + 1).filterKeys((key: Int) => key > 0).countByKey
+    foldsOf(mapped.plan) shouldBe false
+    FoldedCount.resetPassesForTest()
+    countsOf(mapped.collect()) shouldBe countsOf(row(mapped.collect()))
+    FoldedCount.passesForTest shouldBe 0
+  }
+
+  it should "pin the filter-countbykey checksum" in {
+    val rows = 1000000
+    val groups = 1024
+    val values = benchValues(rows)
+    val keys = Array.tabulate(rows)(row => row % groups)
+    FilterCountChecksum.expected(keys, values, groups) shouldBe 10821571L
+    ScarletConf.set(
+      ScarletConf.get.copy(columnarBatchSize = 8192, threadPoolSize = 4, defaultShufflePartitions = 4),
+    )
+    val counted = DistCollection
+      .ofIntPairs(keys, values, 2)
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+      .countByKey
+    foldsOf(counted.plan) shouldBe true
+    FoldedCount.resetPassesForTest()
+    FilterCountChecksum.collected(counted.collect(), groups) shouldBe 10821571L
+    FoldedCount.passesForTest shouldBe 1
+  }
+
+  "FoldedCount" should "match the survivor index, including nulls, and refuse what it cannot walk" in {
+    val keepKey: ColumnKernel.Int32Predicate = key => key % 2 != 0
+    val keepValue: ColumnKernel.Int32Predicate = value => value >= 0
+    val one = List(Selection.Step.Int32(0, keepKey))
+    val two = List(Selection.Step.Int32(0, keepKey), Selection.Step.Int32(1, keepValue))
+    val three = List(
+      Selection.Step.Int32(0, keepKey),
+      Selection.Step.Int32(1, keepValue),
+      Selection.Step.Int32(0, keepKey),
+    )
+    val batch = intPairs(
+      Array(1, 2, 3, 1, 4, 5, 1, 7, 8, 9),
+      Array(1, -1, 2, 3, 0, -4, 5, 6, 7, -2),
+      keyPresent = row => row != 2,
+      valuePresent = row => row != 6,
+    )
+    List(one, two, three).foreach { steps =>
+      assertSameOrder(Vector(batch), steps, partitions = 2, batchSize = 4)
+    }
+
+    val valueOnly = List(Selection.Step.Int32(1, keepValue))
+    assertSameOrder(Vector(batch), valueOnly, partitions = 1, batchSize = 4)
+    kernelCounts(folded(Vector(batch), valueOnly, 1, 4)) shouldBe Map(1 -> 2, 4 -> 1, 7 -> 1, 8 -> 1)
+
+    FoldedCount.admits(Nil) shouldBe false
+    FoldedCount.count(Vector(batch), Nil, 1, 1, 8) shouldBe None
+    val wholeRow: PairKernel.IntPairPredicate = (key, value) => key > value
+    val rowStep = List(Selection.Step.IntPair(wholeRow))
+    FoldedCount.admits(rowStep) shouldBe false
+    FoldedCount.count(Vector(batch), rowStep, 1, 1, 8) shouldBe None
+
+    val empty = FoldedCount.count(Vector.empty, one, numPartitions = 4, parallelism = 1, batchSize = 8)
+    empty.map(_.length) shouldBe Some(4)
+    empty.map(_.map(_.length)) shouldBe Some(Seq(0, 0, 0, 0))
+
+    ScarletConf.set(ScarletConf.get.copy(spillEnabled = false, spillBudgetBytes = FoldedCount.chargedBytes(4) - 1L))
+    FoldedCount.count(Vector(batch), one, 1, 1, 8) shouldBe None
+    ScarletConf.set(ScarletConf.get.copy(spillEnabled = false, spillBudgetBytes = FoldedCount.chargedBytes(batch.length.toLong)))
+    FoldedCount.count(Vector(batch), one, 1, 1, 8).nonEmpty shouldBe true
+  }
+
+  it should "keep the index path when survivors fit and the source estimate does not" in {
+    val rows = 20
+    val keys = Array.tabulate(rows)(row => row)
+    val values = Array.tabulate(rows)(row => if ((row & 1) == 0) then 1 else -1)
+    val counted = DistCollection
+      .ofIntPairs(keys, values, 1)
+      .filterValues((value: Int) => value >= 0)
+      .countByKey
+    val survivors = rows / 2
+    ScarletConf.set(
+      ScarletConf.get.copy(
+        spillEnabled = false,
+        spillBudgetBytes = FoldedCount.chargedBytes(survivors.toLong),
+      ),
+    )
+    FoldedCount.resetPassesForTest()
+    countsOf(counted.collect()) shouldBe (0 until rows by 2).map(key => key -> 1).toMap
+    FoldedCount.passesForTest shouldBe 0
+    countsOf(row(counted.collect())) shouldBe (0 until rows by 2).map(key => key -> 1).toMap
   }
 
   it should "lower string keys and match the row path" in {
@@ -322,6 +478,149 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       refused.bytes should be > refused.budget
     }
   }
+
+  private def assertFolded(
+      filtered: DistCollection[(Int, Int)],
+      expected: Map[Int, Int],
+  ): Unit =
+    val counted = filtered.countByKey
+    foldsOf(counted.plan) shouldBe true
+    FoldedCount.resetPassesForTest()
+    val found = counted.collect().toList
+    FoldedCount.passesForTest shouldBe 1
+    found shouldBe hashCounted(counted)
+    countsOf(found) shouldBe expected
+    countsOf(found) shouldBe countsOf(row(counted.collect()))
+
+  private def foldsOf(plan: Plan[_]): Boolean =
+    ColumnarPlanner.lower(plan) match
+      case Some(op) =>
+        (plan, op) match
+          case (
+                Plan.CountByKeyOp(source),
+                PhysicalOp.CountByKey(PhysicalOp.Exchange(child)),
+              ) =>
+            CountByKeyArms.folds(source, child, ColumnUse.ordinals(plan, op))
+          case _ => false
+      case None => false
+
+  private def hashCounted(counted: DistCollection[(Int, Int)]): List[(Int, Int)] =
+    val plan = counted.plan
+    val op = ColumnarPlanner.lower(plan).getOrElse(fail("countByKey did not lower"))
+    val (source, child) = (plan, op) match
+      case (
+            Plan.CountByKeyOp(source),
+            PhysicalOp.CountByKey(PhysicalOp.Exchange(child)),
+          ) =>
+        (source, child)
+      case _ => fail(s"countByKey lowered to ${op.shape}")
+    val ordinals = ColumnUse.ordinals(plan, op)
+    val selected = FilterChain
+      .selected(source, child, None, preserveAbsence = false, ordinals)
+      .getOrElse(fail("filter stack did not select"))
+    val conf = ScarletConf.get
+    decoded(
+      HashCount.byKeySelected(
+        selected,
+        conf.defaultShufflePartitions,
+        conf.threadPoolSize,
+        conf.columnarBatchSize,
+      ),
+    )
+
+  private def assertSameOrder(
+      batches: Vector[ColumnBatch],
+      steps: List[Selection.Step],
+      partitions: Int,
+      batchSize: Int,
+  ): Unit =
+    val viaFold = folded(batches, steps, partitions, batchSize)
+    val selected = batches.map(batch => assembled(batch, steps, batchSize))
+    val viaHash = HashCount.byKeySelected(selected, partitions, parallelism = 2, batchSize)
+    decoded(viaFold) shouldBe decoded(viaHash)
+
+  private def folded(
+      batches: Vector[ColumnBatch],
+      steps: List[Selection.Step],
+      partitions: Int,
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    FoldedCount
+      .count(batches, steps, partitions, parallelism = 2, batchSize)
+      .getOrElse(fail("folded count declined"))
+
+  private def assembled(
+      batch: ColumnBatch,
+      steps: List[Selection.Step],
+      batchSize: Int,
+  ): Selected =
+    val morsels = Morsels.of(batch, batchSize).map { morsel =>
+      Selection.applySelected(morsel.batch, morsel.start, morsel.length, steps)
+    }
+    val rows = new Array[Int](batch.length)
+    val total = morsels.foldLeft(0) { (written, morsel) =>
+      System.arraycopy(morsel.rows, 0, rows, written, morsel.count)
+      written + morsel.count
+    }
+    Selected(batch, rows, total)
+
+  private def decoded(batches: Vector[ColumnBatch]): List[(Int, Int)] =
+    batches.flatMap(batch => BatchCodec.decodeIntPairs(batch)).toList
+
+  /** The `QueryBench` generator. The pinned checksum is `(key * 31) xor count`, folded in key order. */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def benchValues(rows: Int): Array[Int] =
+    val values = new Array[Int](rows)
+    var index = 0
+    var state = 0x12345678
+    while (index < rows) {
+      state = state * 1664525 + 1013904223
+      val mixed = state & 0x7fffffff
+      values(index) = (mixed % 2000001) - 1000000
+      index += 1
+    }
+    values
+
+  private def nonNegative(value: Any): Boolean = value match
+    case found: Int => found >= 0
+    case _ => false
+
+  /**
+   * Named erasure boundary. A present pair witnesses the column, and a later null key stays
+   * absent. `countByKey` drops that key.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def nullKeySource(): DistCollection[(Any, Any)] =
+    def cell(key: Any, value: Any): (Any, Any) = (key, value)
+    DistCollection(
+      Plan.Source(
+        Seq(
+          Partition(Seq(cell(1, 4), cell(null, 9), cell(1, 5), cell(2, -1))),
+          Partition(Seq(cell(2, 6), cell(null, 8))),
+        ),
+      ),
+    )
+
+  /**
+   * A present pair witnesses the column. Later null keys stay absent and are dropped. The value
+   * filter keeps non-negative ints.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def nullKeyCounts(): Map[Int, Int] =
+    val nullable = nullKeySource().filterValues(nonNegative).countByKey
+    val found = anyCounts(nullable.collect())
+    found shouldBe anyCounts(row(nullable.collect()))
+    found
+
+  /** Named erasure boundary. The boxed key is an `Int` once the null keys have been dropped. */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Any"))
+  private def anyCounts(rows: Iterable[(Any, Int)]): Map[Int, Int] =
+    countsOf(rows.map { case (key, count) => (key.asInstanceOf[Int], count) })
 
   private def assertInt(source: DistCollection[(Int, Int)], expected: Map[Int, Int]): Unit =
     val counted = source.countByKey
