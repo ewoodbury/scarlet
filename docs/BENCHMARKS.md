@@ -252,6 +252,43 @@ cold `encode_ms` in the cross-engine harness is not a share of the action: 1.471
 | exchange | 4 | 0.287 |
 | addCounts | 4 | 0.436 |
 
+## Phase split
+
+Recorded on 2026-11-11 on Linux 6.8.0-117-generic, aarch64, 4 cores (Vendor ID Apple), OpenJDK
+21.0.13, through `sbt -J-Xmx2g` with `Test / fork` false, in `PhaseBench`. Same input as
+`QueryBench`: 1e6 rows, two source partitions, batch 8192, spill off, warmup 5, 40 rounds,
+nearest-rank p50. The arrays exist before the timer; each row times one phase only. Phases are not
+subtracted from each other or from an action total.
+
+| query | phase | threads | p50 ms |
+| --- | --- | ---: | ---: |
+| int-narrow | lower | 1 | 0.025 |
+| filter-countbykey | lower | 1 | 0.012 |
+| int-narrow | encode | 1 | 0.345 |
+| filter-countbykey | encode | 1 | 0.582 |
+| filter-countbykey | selection | 1 | 5.373 |
+| filter-countbykey | selection | 4 | 2.449 |
+| filter-countbykey | assemble | 1 | 0.247 |
+| filter-countbykey | dispatch | 4 | 0.525 |
+| filter-countbykey | count | 1 | 2.960 |
+| filter-countbykey | count | 4 | 1.180 |
+| countbykey | int32 | 1 | 3.734 |
+| countbykey | int32 | 4 | 8.415 |
+| filter-countbykey | int32Selected | 1 | 1.545 |
+| filter-countbykey | int32Selected | 4 | 0.756 |
+
+Plan lowering and the caller-side encode are not the gap. The survivor index is: `selection` costs
+5.373 ms at one thread and 2.449 ms at four, against a 7.05 ms action. The selection is what a
+folded predicate would remove. `int32` on dense morsels gets slower at four threads than at one
+(8.415 against 3.734), which is the per-morsel `Table` allocation and the thread generation, not
+the probe.
+
+Reproduce:
+
+```shell
+sbt -J-Xmx2g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.PhaseBench"
+```
+
 ## Sort
 
 Recorded on the same Apple M1 Pro (8 cores), OpenJDK 64-Bit Server VM 17.0.16, through `sbt` with
