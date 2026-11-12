@@ -103,6 +103,55 @@ class TestColumnReduce extends AnyFlatSpec with Matchers:
     calls.get() shouldBe present.length
   }
 
+  "unrolled long sum" should "match a scalar fold for every specialized shape" in {
+    val denseRows = Vector(Some(5L), Some(2L), Some(-3L), Some(4L), Some(0L))
+    val sparseRows = Vector(Some(5L), None, Some(2L), Some(-3L), Some(4L), Some(0L))
+    val dense = BatchCodec.longs(denseRows.flatten)
+    val sparse = withNullPayload(BatchCodec.nullableLongs(sparseRows), Seq(1 -> Long.MinValue))
+    longShapes.foreach { shape =>
+      checkLongShape(shape, denseRows, dense)
+      checkLongShape(shape, sparseRows, sparse)
+    }
+  }
+
+  private def longShapes: Vector[String] =
+    def widen(width: Int): Vector[String] =
+      if width == 0 then Vector("")
+      else
+        val shorter = widen(width - 1)
+        shorter.flatMap(prefix => Vector(prefix + "F", prefix + "P"))
+    (1 to 4).flatMap(widen).toVector ++ Vector("PPPPP", "FPPPP", "PPPPPP")
+
+  private def checkLongShape(shape: String, rows: Vector[Option[Long]], batch: ColumnBatch): Unit =
+    val calls = Array.fill(shape.length)(new AtomicInteger)
+    val steps = shape.zipWithIndex.toList.map { (op, index) =>
+      if op == 'F' then
+        Step.Filter(countedPredicate(calls(index), value => value > index.toLong))
+      else Step.Project(countedMap(calls(index), value => value * 10L + (index + 1L)))
+    }
+    val (expected, expectedCalls) = scalarLong(rows, shape)
+    withClue(shape) {
+      Int64Pipeline.sum(batch, steps) shouldBe expected
+      calls.map(_.get()).toSeq shouldBe expectedCalls
+    }
+
+  private def scalarLong(rows: Vector[Option[Long]], shape: String): (Long, Seq[Int]) =
+    val counts = Array.fill(shape.length)(0)
+    val total = rows.foldLeft(0L) { (sum, cell) =>
+      cell match
+        case None => sum
+        case Some(start) =>
+          val (value, kept) = shape.zipWithIndex.foldLeft((start, true)) {
+            case ((current, true), (op, index)) =>
+              counts(index) += 1
+              if op == 'F' then (current, current > index.toLong)
+              else (current * 10L + (index + 1L), true)
+            case (state, _) => state
+          }
+          if kept then sum + value else sum
+    }
+    (total, counts.toSeq)
+
   private def batch(column: Column): ColumnBatch =
     new ColumnBatch(Vector(column.logicalType), Vector(column), column.length)
 
@@ -116,6 +165,24 @@ class TestColumnReduce extends AnyFlatSpec with Matchers:
     }
     Validity.livePresent(column.validity, column.length) shouldBe false
     batch
+
+  /**
+   * Counts one call and rejects only the planted null payload. A real projection of these rows can
+   * be `42` or `99`, which [[rejectNulls]] treats as poison for the older tests.
+   */
+  private def countedMap(calls: AtomicInteger, accept: Long => Long): Int64Map =
+    value =>
+      calls.incrementAndGet()
+      if value == Long.MinValue then
+        throw new IllegalStateException(s"mapper saw null payload $value")
+      accept(value)
+
+  private def countedPredicate(calls: AtomicInteger, accept: Long => Boolean): Int64Predicate =
+    value =>
+      calls.incrementAndGet()
+      if value == Long.MinValue then
+        throw new IllegalStateException(s"predicate saw null payload $value")
+      accept(value)
 
   private def rejectNulls(calls: AtomicInteger, accept: Long => Long): Int64Map =
     value =>

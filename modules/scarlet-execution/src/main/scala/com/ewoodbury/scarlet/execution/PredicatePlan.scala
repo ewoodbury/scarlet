@@ -401,14 +401,13 @@ private[execution] object PredicatePlan:
 
   private def pairKey(predicate: Any): Atom =
     // The cast succeeds for any `Function1`. A long function throws when the kernel calls it.
+    // The function is stored directly so a dense count calls it, not a trait adapter around it.
     val keep = predicate.asInstanceOf[Int => Boolean]
-    val adapted: ColumnKernel.Int32Predicate = value => keep(value)
-    Atom.PairKey(adapted)
+    Atom.PairKey(new Selection.Int32Function(keep))
 
   private def pairValue(predicate: Any): Atom =
     val keep = predicate.asInstanceOf[Int => Boolean]
-    val adapted: ColumnKernel.Int32Predicate = value => keep(value)
-    Atom.PairValue(1, adapted)
+    Atom.PairValue(1, new Selection.Int32Function(keep))
 
   private def pairRow(predicate: Any): Atom =
     // `(Int, Int) => Boolean` boxes the pair. The adapter is built once, not per row.
