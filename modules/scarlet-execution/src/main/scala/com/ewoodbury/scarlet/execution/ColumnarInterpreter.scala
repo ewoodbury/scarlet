@@ -15,19 +15,21 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
  * or a sort fails a `require` guard with `IllegalArgumentException`, and that is not a fallback
  * either. A `ClassCastException` from a filter, or from a string map that declares `String` and
  * returns another value, is still a fallback, and that function may already have run.
- * [[ColumnarFallback]] is the named form of a deliberate decline, including a null value on a
- * left, right, or full outer join: the value columns are already encoded, and the kernel is not
- * chosen. A null value on a long inner hash join stays columnar. A clear validity bit is a null
+ * [[ColumnarFallback]] is the named form of a deliberate decline, including a null value on an
+ * outer join that still refuses one: the value columns are already encoded, and the kernel is not
+ * chosen. An int shuffle-hash left or right outer join and an int broadcast right outer join keep
+ * the null. A null value on a long inner hash join stays columnar. A clear validity bit is a null
  * value, not an absence bit. A selected null on an int inner join, and a null on the dense side of
  * a mixed int hash join, stay a clear validity bit. That bit is not absence. A null on a dropped
  * row is not a decline. A null value on a string inner hash or broadcast join stays columnar.
- * String `reduceByKey` and string `groupByKey` with a live null value are that fallback. Outer
- * joins still decline. A string-pair filter keeps the null int. A value projection that kept a
- * null int is that fallback too. With spill off, an over-budget int, long, or string `countByKey`
- * throws `ClosedKernelRefusal`, which does not extend `ClassCastException`, so the action fails
- * instead of rerunning on rows. With spill on, an over-budget post-exchange bucket spills. A count
- * table that still does not fit throws `ClosedKernelRefusal`. The long estimate charges 8-byte
- * keys. The string estimate charges dictionary bytes. The running partial is `O(distinct keys)`.
+ * String `reduceByKey` and string `groupByKey` with a live null value are that fallback. A string
+ * outer join still declines a null value. A string-pair filter keeps the null int. A value
+ * projection that kept a null int is that fallback too. With spill off, an over-budget int, long,
+ * or string `countByKey` throws `ClosedKernelRefusal`, which does not extend `ClassCastException`,
+ * so the action fails instead of rerunning on rows. With spill on, an over-budget post-exchange
+ * bucket spills. A count table that still does not fit throws `ClosedKernelRefusal`. The long
+ * estimate charges 8-byte keys. The string estimate charges dictionary bytes. The running partial
+ * is `O(distinct keys)`.
  */
 @SuppressWarnings(
   Array(

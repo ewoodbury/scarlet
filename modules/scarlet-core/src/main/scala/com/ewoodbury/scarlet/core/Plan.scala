@@ -389,7 +389,7 @@ object Plan {
    *   Stored with the plan. The row executor ignores it and always runs shuffle-hash. The columnar
    *   planner accepts a broadcast hint, a shuffle-hash hint, or an absent hint for int pairs. The
    *   right input is the probe side. An absent hint uses the shuffle-hash op, matching an inner
-   *   join. A null value on shuffle-hash stays columnar. Broadcast and sort-merge keep a null
+   *   join. A null value on shuffle-hash or broadcast stays columnar. Sort-merge keeps a null
    *   value on the row path. An explicit sort-merge hint on int pairs lowers to
    *   `SortMergeRightOuter`. `(Long, Long)` pairs lower to `LongHashRightOuter`,
    *   `LongBroadcastRightOuter`, or `LongSortMergeRightOuter` for the same hints. `(String, Int)`
