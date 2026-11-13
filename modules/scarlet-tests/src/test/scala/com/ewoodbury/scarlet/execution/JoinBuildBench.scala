@@ -1123,7 +1123,7 @@ object JoinBuildBench:
           throw thrown
 
     private def watch(): Unit =
-      probeId = Thread.currentThread().threadId()
+      probeId = Thread.currentThread().getId
       while (running) {
         observe(setBaseline = false)
         LockSupport.parkNanos(20000L)
