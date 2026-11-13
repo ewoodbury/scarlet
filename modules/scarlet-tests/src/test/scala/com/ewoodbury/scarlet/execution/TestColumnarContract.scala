@@ -30,18 +30,19 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 208 accepted fixtures. The filter over sortByIntKey stays accepted: pairSource keys are
+    // 209 accepted fixtures. The filter over sortByIntKey stays accepted: pairSource keys are
     // fully present. 205 + 1 = 206. Explicit long inner broadcast is a new accepted fixture, so
     // 206 + 1 = 207. Explicit string inner broadcast is a new accepted fixture, so 207 + 1 = 208.
-    accepted.size shouldBe 208
-    // 35 exclusions. 208 + 35 = 243. That filter is not excluded, because the fixture has no
+    // Int keys of groupByKey is a new accepted fixture, so 208 + 1 = 209.
+    accepted.size shouldBe 209
+    // 35 exclusions. 209 + 35 = 244. That filter is not excluded, because the fixture has no
     // null key. A null key refuses the shape and is not one of these exclusions.
     // Long inner sort-merge stays on the row path. Long outer joins are
     // covered by execution tests, not contract fixtures, because the contract does not track the
     // int refusals either. String outer joins are covered by execution tests, not contract
     // fixtures.
     excluded.size shouldBe 35
-    (accepted.size + excluded.size) shouldBe 243
+    (accepted.size + excluded.size) shouldBe 244
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -532,6 +533,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         Plan.GroupByKeyOp(pairSource),
         hashedInfo(Layout.GroupedInt(ScarletConf.get.columnarBatchSize)),
         Some("GroupByKey(Exchange(Scan))"),
+      ),
+      AcceptedCase(
+        "keys of int groupByKey",
+        Plan.KeysOp(Plan.GroupByKeyOp(pairSource)),
+        narrowInfo(ScarletConf.get.defaultShufflePartitions, layout),
+        Some("Key(CountByKey(Exchange(Scan)))"),
       ),
       AcceptedCase(
         "countByKey int",

@@ -87,7 +87,7 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     grouped.count() shouldBe 3L
   }
 
-  it should "lower a filterValues child and refuse projections above the group" in {
+  it should "lower a filterValues child and int keys, and refuse values, take, and a map" in {
     val source = DistCollection.ofIntPairs(keys, values, 4)
     val filtered = source.filterValues((value: Int) => value > 10).groupByKey
     val grouped = source.groupByKey
@@ -97,7 +97,10 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     )
     valuesByKey(filtered.collect()) shouldBe valuesByKey(row(filtered.collect()))
     valuesByKey(filtered.collect())(1) shouldBe Seq(11, 12)
-    ColumnarPlanner.lower(grouped.keys.plan) shouldBe None
+    ColumnarPlanner.lower(grouped.keys.plan).map(_.shape) shouldBe Some(
+      "Key(CountByKey(Exchange(Scan)))",
+    )
+    ColumnarPlanner.partitioning(grouped.values.plan) shouldBe None
     ColumnarPlanner.lower(grouped.values.plan) shouldBe None
     ColumnarPlanner.lower(grouped.map((row: (Int, Iterable[Int])) => row._1).plan) shouldBe None
     ColumnarPlanner.tryTake(grouped.plan, 1) shouldBe None

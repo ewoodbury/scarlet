@@ -390,6 +390,14 @@ object ColumnarPlanner:
         batch =>
           ColumnReduce.sumMappedInt32(batch, ordinal = 1, value => fn(value))
       }
+    case (
+          Plan.KeysOp(Plan.GroupByKeyOp(_)),
+          PhysicalOp.Column(_: PhysicalOp.CountByKey, 0),
+        ) =>
+      // The child kind is Pairs, but the kernel publishes distinct keys, not pair batches.
+      ColumnReduce.sumInt32(
+        ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op)),
+      )
     case (Plan.KeysOp(source), PhysicalOp.Column(child, 0)) =>
       sumPairColumn(source, child, ordinal = 0)
     case (Plan.ValuesOp(source), PhysicalOp.Column(child, 1))
@@ -737,6 +745,8 @@ object ColumnarPlanner:
       columnFilter(source, PhysicalOp.Slot.Key)
     case Plan.FilterValuesOp(source, _) =>
       columnFilter(source, PhysicalOp.Slot.Value)
+    case Plan.KeysOp(Plan.GroupByKeyOp(source)) =>
+      lowerGroupKeys(source)
     case Plan.KeysOp(source) =>
       pairColumn(source, ordinal = 0)
     case Plan.ValuesOp(source) =>
@@ -877,6 +887,19 @@ object ColumnarPlanner:
   private def presentLiteral(value: String): Boolean = value match
     case null => false
     case _ => true
+
+  /**
+   * Int `keys` of `groupByKey`. [[CountByKeyLowering]] is the typed witness: the key column of
+   * that shape is [[PhysicalOp.Kind.Ints]]. The interpreter does not run the count kernel. String
+   * and long groups stay on the row path.
+   */
+  private def lowerGroupKeys(source: Plan[_]): Option[PhysicalOp] =
+    lowerChild(source).flatMap { child =>
+      child.kind match
+        case PhysicalOp.Kind.Pairs =>
+          CountByKeyLowering(child).map(counted => PhysicalOp.Column(counted, 0))
+        case _ => None
+    }
 
   private def pairColumn(source: Plan[_], ordinal: Int): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>

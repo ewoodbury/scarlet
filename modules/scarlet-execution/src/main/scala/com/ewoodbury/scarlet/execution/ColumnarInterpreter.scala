@@ -411,6 +411,22 @@ private[execution] object ColumnarInterpreter:
       project(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals), mapper)
     case (logical, PhysicalOp.Pipeline(child, length)) =>
       interpretPipeline(logical, child, length, selectedPartition, preserveAbsence, ordinals)
+    case (
+          Plan.KeysOp(Plan.GroupByKeyOp(source)),
+          PhysicalOp.Column(PhysicalOp.CountByKey(PhysicalOp.Exchange(child)), 0),
+        ) =>
+      // Boundary guard: take refuses an aggregate, so a selector never reaches this arm.
+      // The count node is the typed witness. This arm publishes distinct keys, not counts.
+      require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
+      Columns.Ints(
+        GroupByKeyKeysArms.columns(
+          source,
+          child,
+          selectedPartition,
+          preserveAbsence,
+          ordinals,
+        ),
+      )
     case (Plan.KeysOp(source), PhysicalOp.Column(child, 0)) =>
       pairProjection(
         source,
