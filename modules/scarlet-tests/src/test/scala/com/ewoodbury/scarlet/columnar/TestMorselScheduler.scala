@@ -369,7 +369,11 @@ class TestMorselScheduler extends AnyFlatSpec with Matchers with BeforeAndAfterE
           val _ = release.await(5, TimeUnit.SECONDS)
           index
         else
+          // Park briefly so a worker cannot sprint through the queue in the window between the
+          // throw and the scheduler recording it. Without this the count depends on how fast the
+          // pool can churn, and the bound below is unmeetable on a fast machine.
           val _ = late.incrementAndGet()
+          LockSupport.parkNanos(2_000_000L)
           index
       }
     }
