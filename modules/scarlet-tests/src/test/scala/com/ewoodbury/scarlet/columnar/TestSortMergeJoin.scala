@@ -228,7 +228,9 @@ class TestSortMergeJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       "StringSortMergeFullOuter(Exchange(Scan), Exchange(Scan))",
     )
 
-    ColumnarPlanner.lower(strings.plan) shouldBe None
+    ColumnarPlanner.lower(strings.plan).map(_.shape) shouldBe Some(
+      "StringSortMergeJoin(Exchange(Scan), Exchange(Scan))",
+    )
     ColumnarPlanner.lower(doubles.plan) shouldBe None
     stringOuters.zip(stringShapes).foreach { (plan, shape) =>
       ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(shape)

@@ -50,8 +50,11 @@ object ColumnarPlanner:
    * over-budget shuffle bucket spills when `spillEnabled` is on. The estimate includes the
    * dictionary. An over-budget broadcast build throws and writes nothing. String outer joins lower
    * for an absent hint, shuffle-hash, broadcast, or sort-merge. Hash and broadcast do not spill.
-   * Sort-merge throws instead of spilling. String inner sort-merge stays on the row path. Layout
-   * is [[Layout.StringTriple]]. An explicit sort-merge hint on int pairs lowers to
+   * Sort-merge throws instead of spilling. An explicit string inner sort-merge lowers to
+   * [[PhysicalOp.StringSortMergeJoin]]. A null key is dropped. A null value stays a clear validity
+   * bit. The join runs in memory. With spill on, a partition whose present-key estimate, including
+   * the dictionary, is above `spillBudgetBytes` throws and writes nothing. Layout is
+   * [[Layout.StringTriple]]. An explicit sort-merge hint on int pairs lowers to
    * [[PhysicalOp.SortMergeJoin]]. A left, right, or full outer sort-merge hint lowers to the
    * matching node. Any other sort-merge returns `None`. A left, right, or full outer join on int
    * pairs lowers for a broadcast, shuffle-hash, absent, or sort-merge hint. An absent hint uses

@@ -196,9 +196,10 @@ private[execution] object ColumnarInterpreter:
    * Long triples are only a long inner join and use
    * [[BatchCodec.decodeLongTriplesPreservingAbsence]]. A clear validity bit is a null value, not
    * an absence bit. A fully present batch still decodes to the same longs. String triples are a
-   * string inner hash or broadcast join and use [[BatchCodec.decodeStringJoinKeepingNulls]]. A
-   * clear value bit is a null int, not an absence bit. A clear key bit is still an error. A fully
-   * present batch still decodes to the same strings and ints.
+   * string inner hash, broadcast, or sort-merge join and use
+   * [[BatchCodec.decodeStringJoinKeepingNulls]]. A clear value bit is a null int, not an absence
+   * bit. A clear key bit is still an error. A fully present batch still decodes to the same
+   * strings and ints.
    */
   private[execution] def decodeFor(columns: Columns, op: PhysicalOp): Seq[Partition[_]] =
     decodeWith(columns, intPairDecoder(op), longDecoder(op), tripleDecoder(op))
@@ -544,6 +545,24 @@ private[execution] object ColumnarInterpreter:
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       PipelineJoinArms.sortMergeInner(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
+      )
+    case (
+          Plan.JoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
+          PhysicalOp.StringSortMergeJoin(
+            PhysicalOp.Exchange(leftOp),
+            PhysicalOp.Exchange(rightOp),
+          ),
+        ) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      PipelineJoinArms.stringSortMerge(
         left,
         right,
         leftOp,
