@@ -263,6 +263,14 @@ private[execution] object PipelineJoinArms:
     val probe = pairsOf(
       interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
     )
+    // Validity words are already on the columns. A null value is not absence, and this path
+    // cannot represent one, so the kernel is not chosen.
+    val valuesPresent =
+      ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
+    if (!valuesPresent) then
+      throw new ColumnarFallback(
+        "a null value on a right outer join stays on the row path",
+      )
     rightOuter(probe, build) { (probeBatches, buildBatches) =>
       ColumnPipeline.broadcastLeftOuterJoin(
         probeBatches,
@@ -289,6 +297,10 @@ private[execution] object PipelineJoinArms:
     val probe = pairsOf(
       interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
     )
+    // A null value is a clear validity bit. The kernel copies it and writes
+    // (key, probe value, build value). The probe is the right input and the build is the left,
+    // so the columns arrive as (right, left). The swap restores (key, left, right). Absence is
+    // the left value's absence bit, set only for a missing partner. Its validity bit stays clear.
     rightOuter(probe, build) { (probeBatches, buildBatches) =>
       ColumnPipeline.hashLeftOuterJoin(
         probeBatches,
@@ -451,18 +463,12 @@ private[execution] object PipelineJoinArms:
    * Run the left-outer kernel with `probe` as the right input and `build` as the left input, then
    * restore `(key, left, right)`. The kernel writes `(key, probe value, build value)`, so the
    * value columns arrive as `(right, left)`. The build value's absence bit moves with the left
-   * column. A null value is not absence, and this path cannot represent one.
+   * column. A null value is a clear validity bit. Broadcast refuses one before calling this.
    */
   private def rightOuter(
       probe: Vector[ColumnBatch],
       build: Vector[ColumnBatch],
   )(join: (Vector[ColumnBatch], Vector[ColumnBatch]) => Vector[ColumnBatch]): Columns =
-    val valuesPresent =
-      ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
-    if (!valuesPresent) then
-      throw new ColumnarFallback(
-        "a null value on a right outer join stays on the row path",
-      )
     Columns.Outer(swapValueColumns(join(probe, build)), AbsentSide.Left)
 
   /**

@@ -180,8 +180,8 @@ enum PhysicalOp:
    * side, and its exchange carries a null key to partition 0. The left input is the build side,
    * and its exchange drops a null key, so a null build key is not inserted. Each partition builds
    * one table and probes with the left-outer kernel, then swaps the value columns back to
-   * `(key, left, right)`. Absence is the left value's absence bit. A null value is not absence and
-   * stays on the row path. The build table uses the same budget as a broadcast join.
+   * `(key, left, right)`. Absence is the left value's absence bit. A null value is a clear
+   * validity bit and stays columnar. The build table uses the same budget as a broadcast join.
    */
   case HashRightOuter(left: PhysicalOp, right: PhysicalOp)
 
