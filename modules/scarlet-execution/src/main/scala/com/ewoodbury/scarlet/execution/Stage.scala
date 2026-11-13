@@ -1,5 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
+import com.ewoodbury.scarlet.columnar.GroupByKey
 import com.ewoodbury.scarlet.core.Partition
 
 /**
@@ -117,7 +118,9 @@ object Stage {
    */
   def groupByKeyLocal[K, V]: Stage[(K, V), (K, Iterable[V])] = {
     SingleOpStage { p =>
-      Partition(NullKeys.drop(p.data).groupMap(_._1)(_._2).toSeq)
+      val grouped = NullKeys.drop(p.data).groupMap(_._1)(_._2).toSeq
+      GroupByKey.noteValueLists(grouped.size)
+      Partition(grouped)
     }
   }
 

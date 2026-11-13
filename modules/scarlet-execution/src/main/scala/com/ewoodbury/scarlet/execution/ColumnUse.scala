@@ -57,6 +57,13 @@ private[execution] object ColumnUse:
       walk(source, child, parent union Set(0, 1))
     case (Plan.GroupByKeyOp(source), PhysicalOp.GroupByKey(child)) =>
       walk(source, child, parent union Set(0, 1))
+    case (
+          Plan.GroupByKeyOp(source),
+          PhysicalOp.CountByKey(PhysicalOp.Exchange(child)),
+        ) =>
+      // Keys of the group read the key column only. Skip the exchange's pair demand so a bare
+      // scan does not encode values. A value filter below still unions ordinal 1.
+      walk(source, child, parent union Set(0))
     case (Plan.CountByKeyOp(source), PhysicalOp.CountByKey(child)) =>
       walk(source, child, parent union Set(0, 1))
     case (Plan.SortByIntKeyOp(source), PhysicalOp.SortByIntKey(child)) =>

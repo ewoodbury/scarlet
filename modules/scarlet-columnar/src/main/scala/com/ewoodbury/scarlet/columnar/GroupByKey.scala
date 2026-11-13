@@ -1,6 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
 import java.util.Arrays
+import java.util.concurrent.atomic.AtomicLong
 
 import com.ewoodbury.scarlet.core.ScarletConf
 
@@ -36,6 +37,20 @@ import com.ewoodbury.scarlet.core.ScarletConf
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object GroupByKey:
+
+  private val builtValueLists = new AtomicLong
+
+  /** Groups whose value arrays were allocated since [[resetValueListsBuilt]]. */
+  private[scarlet] def valueListsBuilt: Long = builtValueLists.get()
+
+  /** Clears [[valueListsBuilt]]. */
+  private[scarlet] def resetValueListsBuilt(): Unit = builtValueLists.set(0L)
+
+  /** Counts one materialised group. A zero-group batch adds nothing. */
+  private[scarlet] def noteValueLists(groups: Int): Unit =
+    if (groups > 0) then
+      builtValueLists.addAndGet(groups.toLong)
+      ()
 
   def int32(
       batches: Vector[ColumnBatch],
@@ -244,6 +259,7 @@ object GroupByKey:
     val groups = table.groups
     if (groups == 0) then GroupedIntBatch.empty
     else
+      noteValueLists(groups)
       val offsets = new Array[Int](groups + 1)
       var cursor = 0
       var group = 0
@@ -304,6 +320,7 @@ object GroupByKey:
     val groups = table.groups
     if (groups == 0) then GroupedStringBatch.empty
     else
+      noteValueLists(groups)
       val offsets = new Array[Int](groups + 1)
       var cursor = 0
       var group = 0
@@ -364,6 +381,7 @@ object GroupByKey:
     val groups = table.groups
     if (groups == 0) then GroupedLongBatch.empty
     else
+      noteValueLists(groups)
       val offsets = new Array[Int](groups + 1)
       var cursor = 0
       var group = 0
