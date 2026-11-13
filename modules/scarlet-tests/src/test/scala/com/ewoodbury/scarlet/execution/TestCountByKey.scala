@@ -48,7 +48,8 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   it should "match the row path for duplicate keys in one partition" in {
     assertInt(
-      DistCollection.ofIntPairs(Array(5, 5, 6, Int.MinValue, Int.MinValue), Array(1, 2, 3, 4, 5), 1),
+      DistCollection
+        .ofIntPairs(Array(5, 5, 6, Int.MinValue, Int.MinValue), Array(1, 2, 3, 4, 5), 1),
       Map(5 -> 2, 6 -> 1, Int.MinValue -> 2),
     )
   }
@@ -137,7 +138,8 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val duplicates = DistCollection.ofIntPairs(Array(4, 4, 4, 9), Array(1, 2, 3, 4), 1)
     assertFolded(duplicates.filterValues((value: Int) => value > 0), Map(4 -> 3, 9 -> 1))
 
-    // Length 3 and two partitions: key 5 is on both, and the batch size cuts each side into morsels.
+    /* Length 3 and two partitions: key 5 is on both, and the batch size cuts each side into
+     * morsels. */
     val both = DistCollection.ofIntPairs(Array(5, 6, 5, 6, 7, 5), Array(1, -1, 2, 3, 0, 4), 2)
     assertFolded(
       both.filterKeys((key: Int) => key != 7).filterValues((value: Int) => value >= 0),
@@ -181,11 +183,95 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     countsOf(wholeRow.collect()) shouldBe Map("a" -> 2)
     FoldedCount.passesForTest shouldBe 0
 
-    val mapped = ints.mapValues((value: Int) => value + 1).filterKeys((key: Int) => key > 0).countByKey
+    // A value filter above mapValues sees the mapped value, so the fold must not read the source.
+    val mapped = ints
+      .mapValues((value: Int) => value + 1)
+      .filterValues((value: Int) => value > 0)
+      .countByKey
     foldsOf(mapped.plan) shouldBe false
     FoldedCount.resetPassesForTest()
+    countsOf(mapped.collect()) shouldBe Map(1 -> 2, 3 -> 2)
     countsOf(mapped.collect()) shouldBe countsOf(row(mapped.collect()))
     FoldedCount.passesForTest shouldBe 0
+  }
+
+  it should "fold one mapValues and still match the row path" in {
+    val calls = new java.util.concurrent.atomic.AtomicInteger
+    val plus: Int => Int = (value: Int) => {
+      val _ = calls.incrementAndGet()
+      value + 1
+    }
+
+    List(1, 4).foreach { parts =>
+      val source = DistCollection.ofIntPairs(Array(5, 5, 6, 7, 5), Array(1, 2, 3, 4, 5), parts)
+      val once = source.mapValues(plus).countByKey
+      foldsOf(once.plan) shouldBe true
+      calls.set(0)
+      FoldedCount.resetPassesForTest()
+      countsOf(once.collect()) shouldBe Map(5 -> 3, 6 -> 1, 7 -> 1)
+      calls.get shouldBe 0
+      FoldedCount.passesForTest shouldBe 1
+      countsOf(once.collect()) shouldBe countsOf(row(once.collect()))
+
+      val twice = source.mapValues(plus).mapValues(plus).countByKey
+      foldsOf(twice.plan) shouldBe false
+      FoldedCount.resetPassesForTest()
+      countsOf(twice.collect()) shouldBe Map(5 -> 3, 6 -> 1, 7 -> 1)
+      FoldedCount.passesForTest shouldBe 0
+      countsOf(twice.collect()) shouldBe countsOf(row(twice.collect()))
+
+      val keyed = source.mapValues(plus).filterKeys((key: Int) => key != 6).countByKey
+      foldsOf(keyed.plan) shouldBe true
+      calls.set(0)
+      FoldedCount.resetPassesForTest()
+      countsOf(keyed.collect()) shouldBe Map(5 -> 3, 7 -> 1)
+      calls.get shouldBe 0
+      FoldedCount.passesForTest shouldBe 1
+    }
+
+    val duplicates = DistCollection.ofIntPairs(Array(4, 4, 4, 9), Array(1, 2, 3, 4), 1)
+    val folded = duplicates.mapValues((value: Int) => value + 1).countByKey
+    foldsOf(folded.plan) shouldBe true
+    FoldedCount.resetPassesForTest()
+    countsOf(folded.collect()) shouldBe Map(4 -> 3, 9 -> 1)
+    FoldedCount.passesForTest shouldBe 1
+
+    val under = DistCollection
+      .ofIntPairs(Array(1, 1, 2), Array(0, 5, -1), 1)
+      .filterValues((value: Int) => value > 0)
+      .mapValues(plus)
+      .countByKey
+    foldsOf(under.plan) shouldBe true
+    calls.set(0)
+    FoldedCount.resetPassesForTest()
+    countsOf(under.collect()) shouldBe Map(1 -> 1)
+    calls.get shouldBe 0
+    FoldedCount.passesForTest shouldBe 1
+    countsOf(under.collect()) shouldBe countsOf(row(under.collect()))
+
+    val nullable = nullIntKeySource().mapValues(plus).countByKey
+    foldsOf(nullable.plan) shouldBe true
+    calls.set(0)
+    FoldedCount.resetPassesForTest()
+    countsOf(nullable.collect()) shouldBe Map(1 -> 2, 2 -> 2)
+    calls.get shouldBe 0
+    FoldedCount.passesForTest shouldBe 1
+    countsOf(nullable.collect()) shouldBe countsOf(row(nullable.collect()))
+  }
+
+  it should "keep a key-changing map on the row path" in {
+    val source = DistCollection.ofIntPairs(Array(1, 2, 1, 3), Array(10, 20, 30, 40), 4)
+    val changed = source.map((pair: (Int, Int)) => (pair._1 + 1, pair._2)).countByKey
+    ColumnarPlanner.partitioning(changed.plan) shouldBe None
+    countsOf(changed.collect()) shouldBe Map(2 -> 2, 3 -> 1, 4 -> 1)
+    countsOf(changed.collect()) shouldBe countsOf(row(changed.collect()))
+
+    // The plan node is MapOp. A function that happens to keep the key is still not folded.
+    val sameKey = source.map((pair: (Int, Int)) => (pair._1, pair._2 + 1)).countByKey
+    ColumnarPlanner.partitioning(sameKey.plan) shouldBe None
+    foldsOf(sameKey.plan) shouldBe false
+    countsOf(sameKey.collect()) shouldBe Map(1 -> 2, 2 -> 1, 3 -> 1)
+    countsOf(sameKey.collect()) shouldBe countsOf(row(sameKey.collect()))
   }
 
   it should "pin the filter-countbykey checksum" in {
@@ -195,7 +281,8 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val keys = Array.tabulate(rows)(row => row % groups)
     FilterCountChecksum.expected(keys, values, groups) shouldBe 10821571L
     ScarletConf.set(
-      ScarletConf.get.copy(columnarBatchSize = 8192, threadPoolSize = 4, defaultShufflePartitions = 4),
+      ScarletConf.get
+        .copy(columnarBatchSize = 8192, threadPoolSize = 4, defaultShufflePartitions = 4),
     )
     val counted = DistCollection
       .ofIntPairs(keys, values, 2)
@@ -230,22 +317,41 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
     val valueOnly = List(Selection.Step.Int32(1, keepValue))
     assertSameOrder(Vector(batch), valueOnly, partitions = 1, batchSize = 4)
-    kernelCounts(folded(Vector(batch), valueOnly, 1, 4)) shouldBe Map(1 -> 2, 4 -> 1, 7 -> 1, 8 -> 1)
+    kernelCounts(folded(Vector(batch), valueOnly, 1, 4)) shouldBe Map(
+      1 -> 2,
+      4 -> 1,
+      7 -> 1,
+      8 -> 1,
+    )
 
     FoldedCount.admits(Nil) shouldBe false
+    FoldedCount.admitsUnmapped(Nil) shouldBe true
     FoldedCount.count(Vector(batch), Nil, 1, 1, 8) shouldBe None
+    val unmapped = FoldedCount.countUnmapped(Vector(batch), Nil, 2, 1, 4)
+    kernelCounts(unmapped.getOrElse(fail("unmapped count declined"))) shouldBe kernelCounts(
+      HashCount.byKey(Vector(batch), 2, 1, 4),
+    )
     val wholeRow: PairKernel.IntPairPredicate = (key, value) => key > value
     val rowStep = List(Selection.Step.IntPair(wholeRow))
     FoldedCount.admits(rowStep) shouldBe false
     FoldedCount.count(Vector(batch), rowStep, 1, 1, 8) shouldBe None
 
-    val empty = FoldedCount.count(Vector.empty, one, numPartitions = 4, parallelism = 1, batchSize = 8)
+    val empty =
+      FoldedCount.count(Vector.empty, one, numPartitions = 4, parallelism = 1, batchSize = 8)
     empty.map(_.length) shouldBe Some(4)
     empty.map(_.map(_.length)) shouldBe Some(Seq(0, 0, 0, 0))
 
-    ScarletConf.set(ScarletConf.get.copy(spillEnabled = false, spillBudgetBytes = FoldedCount.chargedBytes(4) - 1L))
+    ScarletConf.set(
+      ScarletConf.get
+        .copy(spillEnabled = false, spillBudgetBytes = FoldedCount.chargedBytes(4) - 1L),
+    )
     FoldedCount.count(Vector(batch), one, 1, 1, 8) shouldBe None
-    ScarletConf.set(ScarletConf.get.copy(spillEnabled = false, spillBudgetBytes = FoldedCount.chargedBytes(batch.length.toLong)))
+    ScarletConf.set(
+      ScarletConf.get.copy(
+        spillEnabled = false,
+        spillBudgetBytes = FoldedCount.chargedBytes(batch.length.toLong),
+      ),
+    )
     FoldedCount.count(Vector(batch), one, 1, 1, 8).nonEmpty shouldBe true
   }
 
@@ -468,7 +574,8 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val source = DistCollection.ofIntPairs(Array(1, 1, 2), Array(4, 5, 6), 2)
     List(false, true).foreach { enabled =>
       ScarletConf.set(
-        ScarletConf.get.copy(columnarExecution = true, spillEnabled = enabled, spillBudgetBytes = 1L),
+        ScarletConf.get
+          .copy(columnarExecution = true, spillEnabled = enabled, spillBudgetBytes = 1L),
       )
       ScarletRuntime.get.shuffle.clear()
       // The row path would count these keys. The action must fail before that map is produced.
@@ -567,7 +674,10 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   private def decoded(batches: Vector[ColumnBatch]): List[(Int, Int)] =
     batches.flatMap(batch => BatchCodec.decodeIntPairs(batch)).toList
 
-  /** The `QueryBench` generator. The pinned checksum is `(key * 31) xor count`, folded in key order. */
+  /**
+   * The `QueryBench` generator. The pinned checksum is `(key * 31) xor count`, folded in key
+   * order.
+   */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def benchValues(rows: Int): Array[Int] =
     val values = new Array[Int](rows)
@@ -739,9 +849,12 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.AsInstanceOf"))
   private def lateNullRowCounts(): Map[Int, Int] =
-    lateNullSource().countByKey.collect().map { case (key, value) =>
-      (key.asInstanceOf[Int], value)
-    }.toMap
+    lateNullSource().countByKey
+      .collect()
+      .map { case (key, value) =>
+        (key.asInstanceOf[Int], value)
+      }
+      .toMap
 
   /** Named erasure boundary. `Tuple2` keeps a null `Integer`; `(String, Int)` would unbox it. */
   @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
@@ -764,6 +877,29 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def nullValue(key: Int): (Int, String) = key -> (null: String)
+
+  /**
+   * A present pair witnesses the column. A later null key stays absent and `countByKey` drops it.
+   * The value is a present int, so `mapValues` can declare `Int => Int`.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def nullIntKeySource(): DistCollection[(Int, Int)] =
+    def cell(key: Any, value: Int): (Int, Int) =
+      Tuple2(key, Int.box(value)).asInstanceOf[(Int, Int)]
+    DistCollection(
+      Plan.Source(
+        Seq(
+          Partition(Seq(cell(1, 4), cell(null, 9), cell(1, 5), cell(2, -1))),
+          Partition(Seq(cell(2, 6), cell(null, 8))),
+        ),
+      ),
+    )
 
   private def row[A](body: => A): A =
     val saved = ScarletConf.get

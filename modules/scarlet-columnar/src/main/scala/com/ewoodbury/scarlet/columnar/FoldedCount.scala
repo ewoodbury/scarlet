@@ -18,7 +18,9 @@ import com.ewoodbury.scarlet.core.ScarletConf
  *
  * [[count]] returns `None` before any table when `steps` is empty or is not a stack of
  * [[Selection.Step.Int32]] slot atoms, and when the source-row estimate does not fit the budget.
- * Survivor rows are not known until the scan, so that estimate is an upper bound on the charge
+ * [[countUnmapped]] is that scan after one key-preserving `mapValues` was skipped. An empty stack
+ * there counts every present key and still does not read the value column. Survivor rows are not
+ * known until the scan, so that estimate is an upper bound on the charge
  * [[HashCount.byKeySelected]] uses. The caller keeps the index path, which still refuses or spills
  * from the survivor count. A folded partial that does fit is exchanged like [[HashCount]], and an
  * over-budget post-exchange bucket still finishes in [[HashCountSpill]].
@@ -32,13 +34,14 @@ private[scarlet] object FoldedCount:
    * True when every step is an int key or value slot. Empty, whole-row, and string steps are not.
    */
   def admits(steps: Seq[Selection.Step]): Boolean =
-    steps.nonEmpty && steps.forall {
-      case Selection.Step.Int32(column, _) => column == 0 || column == 1
-      case Selection.Step.Int64(_, _) | Selection.Step.Float64(_, _) | Selection.Step.Bool(_, _) |
-          Selection.Step.Utf8(_, _) | Selection.Step.IntPair(_) | Selection.Step.LongPair(_) |
-          Selection.Step.StringPair(_) | Selection.Step.IntTriple(_, _) =>
-        false
-    }
+    steps.nonEmpty && slotSteps(steps)
+
+  /**
+   * True when `steps` can run on the source key column after a key-preserving `mapValues`. Empty
+   * is allowed and counts every present key. A whole-row or string step is not.
+   */
+  def admitsUnmapped(steps: Seq[Selection.Step]): Boolean =
+    slotSteps(steps)
 
   /**
    * True when a batch key is missing, is not an int, or has a null inside its live prefix. Spare
@@ -51,7 +54,7 @@ private[scarlet] object FoldedCount:
         case _ => true
     }
 
-  /** Accepted [[count]] calls since the last [[resetPassesForTest]]. */
+  /** Accepted [[count]] and [[countUnmapped]] calls since the last [[resetPassesForTest]]. */
   def passesForTest: Int = passes.get
 
   /** Clears [[passesForTest]]. */
@@ -76,7 +79,31 @@ private[scarlet] object FoldedCount:
   ): Option[Vector[ColumnBatch]] =
     requirePositive(numPartitions, parallelism, batchSize)
     if (!admits(steps)) then None
-    else if (batches.isEmpty) then
+    else counted(batches, steps, numPartitions, parallelism, batchSize)
+
+  /**
+   * [[count]] for a source whose value function was not applied. `steps` may be empty. A non-empty
+   * stack must be int slots. The key column is the source key column.
+   */
+  def countUnmapped(
+      batches: Vector[ColumnBatch],
+      steps: List[Selection.Step],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    requirePositive(numPartitions, parallelism, batchSize)
+    if (!admitsUnmapped(steps)) then None
+    else counted(batches, steps, numPartitions, parallelism, batchSize)
+
+  private def counted(
+      batches: Vector[ColumnBatch],
+      steps: List[Selection.Step],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    if (batches.isEmpty) then
       notePass()
       Some(Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs))
     else
@@ -85,6 +112,16 @@ private[scarlet] object FoldedCount:
       else
         notePass()
         Some(execute(batches, steps, numPartitions, parallelism, batchSize))
+
+  /** Int key or value slots, including none. A whole-row or string step is false. */
+  private def slotSteps(steps: Seq[Selection.Step]): Boolean =
+    steps.forall {
+      case Selection.Step.Int32(column, _) => column == 0 || column == 1
+      case Selection.Step.Int64(_, _) | Selection.Step.Float64(_, _) | Selection.Step.Bool(_, _) |
+          Selection.Step.Utf8(_, _) | Selection.Step.IntPair(_) | Selection.Step.LongPair(_) |
+          Selection.Step.StringPair(_) | Selection.Step.IntTriple(_, _) =>
+        false
+    }
 
   private def execute(
       batches: Vector[ColumnBatch],
