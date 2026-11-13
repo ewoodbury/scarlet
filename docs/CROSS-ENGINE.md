@@ -1,9 +1,48 @@
 # Cross-engine checks: DuckDB and Spark
 
-One-time comparison, 2026-11-07. Not a CI gate. The CI gate is `PerfCheck`, which compares the
-columnar path with the row path in the same run.
+Not a CI gate. The CI gate is `PerfCheck`, which compares the columnar path with the row path in
+the same run. The decision table is the 2026-11-13 devbox section. The Apple M1 Pro table is
+history from 2026-11-07. It is not comparable with the container or the devbox.
+
+## 2026-11-13 — devbox, both engines, one machine
+
+Decision table. Both engines on one machine.
+
+- Machine: `nixos`, x86_64, 32 cores, 62 GB, OpenJDK 21.0.13, sbt 2.
+- Protocol: 1e6 rows, 4 threads, warmup 3, rounds 10. DuckDB 2.0.0 in memory. Scarlet with spill
+  enabled by its harness.
+- All seven checksums matched on both engines.
+
+| query | DuckDB | Scarlet | ratio |
+| --- | ---: | ---: | ---: |
+| filter + count | 1.021 ms | 2.456 ms | 2.4x behind |
+| filter + sum | 0.966 ms | 2.529 ms | 2.6x behind |
+| filter + countByKey | 1.574 ms | 4.790 ms | 3.0x behind |
+| filter + reduceByKey | 2.070 ms | 9.888 ms | 4.8x behind |
+| filter + join | 4.640 ms | 27.039 ms | 5.8x behind |
+| filter + sort | 69.832 ms | 61.706 ms | 1.13x ahead |
+
+Scarlet's harness enables spill while DuckDB is in memory. Neither engine is tuned to its best
+configuration. The ratio is like-for-like on the query, not on the deployment.
+
+```shell
+# DuckDB side (nix python needs libstdc++ from the nix store)
+ssh nixos 'LD_LIBRARY_PATH=$(ls -d /nix/store/*gcc-15.3.0-lib/lib | head -1) \
+  ~/ce/bin/python ~/cross_engine_duckdb.py --rows 1000000 --threads 4 --rounds 10'
+
+# Scarlet side
+ssh nixos 'cd ~/scarlet && CROSS_ROWS=1000000 CROSS_FILTERS=2 CROSS_NULLS=false \
+  CROSS_WARMUP=3 CROSS_ROUNDS=10 \
+  sbt -batch -J-Xmx8g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.CrossEngineBench"'
+```
 
 ## Setup
+
+Historical Apple M1 Pro setup for the 2026-11-07 table below. That table is not comparable with
+the container or the devbox. Its ratios are history. Current ratios are in
+"2026-11-13 — devbox, both engines, one machine".
+
+One-time comparison, 2026-11-07.
 
 - Machine: Apple M1 Pro, 8 cores, 16 GB.
 - DuckDB 2.0.0, in-memory, `PRAGMA threads=4`.
@@ -15,6 +54,9 @@ columnar path with the row path in the same run.
   are outside it.
 
 ## Queries at 1M rows
+
+Historical Apple M1 Pro table, 2026-11-07. Not comparable with the container or the devbox.
+Current ratios are in "2026-11-13 — devbox, both engines, one machine".
 
 Measured again after the scan-path work (2026-11-07, `main` @ `05d1faf`). DuckDB and Spark columns
 are unchanged from the original run. The `countByKey` row was added on 2026-11-08 (`main` @
@@ -31,9 +73,11 @@ the Scarlet column is `QueryBench`'s `filter-countbykey` at four threads, p50 of
 | filter + join | 4.52 ms | 78.71 ms | 20.97 ms |
 | filter + sort | 54.96 ms | 680.65 ms | 42.69 ms |
 
-All seven checksums match on all three engines. Against DuckDB, Scarlet is 1.9x slower on the sum,
-2.6x on the count, 4.8x on the count per key, 3.3-4.8x on the reduce, 4.6x on the join, and 0.78x
-on the sort.
+All seven checksums match on all three engines. These ratios are the 2026-11-07 M1 Pro history,
+not the decision table: Scarlet was 1.9x slower on the sum, 2.6x on the count, 4.8x on the count
+per key, 3.3-4.8x on the reduce, 4.6x on the join, and 0.78x on the sort. Current ratios are in
+"2026-11-13 — devbox, both engines, one machine": count 2.4x behind, sum 2.6x behind, countByKey
+3.0x behind, reduceByKey 4.8x behind, join 5.8x behind, sort 1.13x ahead.
 
 **The `groupByKey` row is not the same query on the two sides, and the `countByKey` row is.**
 DuckDB runs `SELECT k, count(*) ... GROUP BY k` and never materialises the values. For the
@@ -65,7 +109,7 @@ The Scarlet 10M run did not complete under the old harness's heap; the sort and 
 filter collection together exceeded the budget. That is a harness limit, not an engine failure.
 The Spark sort is the interesting number there: it grows from 681 ms at 1M to 9.2 s at 10M, which
 is the shuffle and spill path showing up. A later Scarlet run with one query per process did
-finish. Its numbers are in the next section. They do not replace the 1M table above.
+finish. Its numbers are in the next section. They do not replace the historical M1 1M table above.
 
 ## Scarlet spilled harness, 2026-11-08
 
@@ -146,9 +190,12 @@ not show that the null was kept.
 
 ## Reading
 
-The remaining 2-5x gap to DuckDB on scans, aggregates and joins is the scalar JVM kernel plus the
-source encode, not representation. Two measured spikes killed the earlier explanations: a 10-bit
-packed column scans slower than a raw int array at this size (1.91 vs 0.84 ns/row), and the Panama
+The 2-5x gap here is the 2026-11-07 M1 Pro history (count 2.6x, sum 1.9x, countByKey 4.8x, reduce
+3.3-4.8x, join 4.6x, sort 0.78x), not the decision table. Current ratios are in
+"2026-11-13 — devbox, both engines, one machine". On that M1 run the gap to DuckDB on scans,
+aggregates and joins was the scalar JVM kernel plus the source encode, not representation. Two
+measured spikes killed the earlier explanations: a 10-bit packed column scans slower than a raw
+int array at this size (1.91 vs 0.84 ns/row), and the Panama
 Vector API loses to the scalar loop on JDK 17 (4.95 vs 2.61 ns/row, and 1.48 vs 0.63 on a
 compare-only predicate) because the preferred species is 128-bit and `div` is not native. What did
 move the numbers was removing work: `count` and `sum` now walk the filter stack in place instead of
