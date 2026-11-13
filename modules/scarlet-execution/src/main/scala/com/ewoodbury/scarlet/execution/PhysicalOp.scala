@@ -11,7 +11,9 @@ import com.ewoodbury.scarlet.core.Partition
  * Other filters and projects remain one node per step. [[PhysicalOp.Project]] and `Pipeline` keep
  * the child kind. [[PhysicalOp.Column]] narrows an int or long pair to one column and shares its
  * arrays. [[PhysicalOp.MapValue]] rewrites an int or long value and keeps the pair.
- * [[PhysicalOp.Exchange]] sits under [[PhysicalOp.HashAggregate]],
+ * [[PhysicalOp.GroupedDecode]] is one map directly above [[PhysicalOp.GroupByKey]]. The function
+ * stays on the logical plan. Execution decodes the grouped batch once and applies it to each
+ * `(K, Iterable[V])`. [[PhysicalOp.Exchange]] sits under [[PhysicalOp.HashAggregate]],
  * [[PhysicalOp.LongHashAggregate]], [[PhysicalOp.StringHashAggregate]], [[PhysicalOp.GroupByKey]],
  * and [[PhysicalOp.CountByKey]], and on each side of [[PhysicalOp.HashJoin]],
  * [[PhysicalOp.LongHashJoin]], [[PhysicalOp.StringHashJoin]], [[PhysicalOp.SortMergeJoin]],
@@ -367,6 +369,15 @@ enum PhysicalOp:
   case GroupByKey(child: PhysicalOp)
 
   /**
+   * One map directly above [[GroupByKey]]. `child` is that group. The user function stays on the
+   * logical plan. Execution decodes `child` once through
+   * [[com.ewoodbury.scarlet.execution.ColumnarInterpreter.decodeFor]] and runs the function on
+   * each `(K, Iterable[V])`. The function is not a columnar map and is not inspected. Output kind
+   * stays the grouped kind of `child`. `keys`, `values`, and `take` do not use this node.
+   */
+  case GroupedDecode(child: PhysicalOp)
+
+  /**
    * `countByKey`. The child is an [[PhysicalOp.Exchange]]. The kernel shuffles. A null key is
    * dropped. The value column is not read, so a null value still counts. One `(key, count)` row is
    * published per distinct key, including an empty bucket. Output kind is
@@ -459,6 +470,7 @@ enum PhysicalOp:
           throw new IllegalStateException(
             s"groupByKey column is $other, expected int, long, or string pairs",
           )
+    case GroupedDecode(child) => child.kind
     case CountByKey(child) =>
       child.kind match
         case PhysicalOp.Kind.Pairs => PhysicalOp.Kind.Pairs
@@ -545,6 +557,7 @@ enum PhysicalOp:
     case LongHashAggregate(child) => s"LongHashAggregate(${child.shape})"
     case StringHashAggregate(child) => s"StringHashAggregate(${child.shape})"
     case GroupByKey(child) => s"GroupByKey(${child.shape})"
+    case GroupedDecode(child) => s"GroupedDecode(${child.shape})"
     case CountByKey(child) => s"CountByKey(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
     case LongHashJoin(left, right) => s"LongHashJoin(${left.shape}, ${right.shape})"

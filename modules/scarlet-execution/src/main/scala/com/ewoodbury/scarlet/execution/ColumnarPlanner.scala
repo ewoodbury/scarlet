@@ -70,8 +70,12 @@ object ColumnarPlanner:
    * when `spillEnabled` is on and the retained estimate exceeds `spillBudgetBytes`. The physical
    * op stays `SortByLongKey`. A string sort spills on that same budget. The physical op stays
    * `SortByStringKey`. At or under the budget, and whenever spill is off, the split stays in
-   * memory and writes nothing. [[partitioning]] and [[tryRun]] follow a refusal. They also drop a
-   * lowered tree whose layout is invalid.
+   * memory and writes nothing. One map directly above an int, string, or long `groupByKey` lowers
+   * to [[PhysicalOp.GroupedDecode]]. The group runs once. [[ColumnarInterpreter.decodeFor]] yields
+   * `(K, Iterable[V])` and the logical function runs on those rows. The function is not inspected.
+   * `keys`, `values`, `take`, a second map, and a filter above that map stay on the row path.
+   * [[partitioning]] and [[tryRun]] follow a refusal. They also drop a lowered tree whose layout
+   * is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -100,22 +104,28 @@ object ColumnarPlanner:
    */
   private[execution] def runLowered[A](plan: Plan[A], op: PhysicalOp): Option[Seq[Partition[A]]] =
     try
-      val decoded = FilterChain.selected(
-        plan,
-        op,
-        selectedPartition = None,
-        preserveAbsence = false,
-        ordinals = ColumnUse.ordinals(plan, op),
-      ) match
-        case Some(parts) =>
-          parts.map { selected =>
-            Partition(decodeSelected(selected, selected.count, op))
-          }
-        case None =>
-          ColumnarInterpreter.decodeFor(ColumnarInterpreter.interpret(plan, op), op)
+      val decoded = op match
+        case PhysicalOp.GroupedDecode(child) => GroupedDecode.partitions(plan, child)
+        case _ => decodeAccepted(plan, op)
       Some(decoded.asInstanceOf[Seq[Partition[A]]])
     // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
     catch case _: ClassCastException => None
+
+  /** Decode an accepted tree that is not a grouped map. Selection stacks are not gathered. */
+  private def decodeAccepted(plan: Plan[_], op: PhysicalOp): Seq[Partition[_]] =
+    FilterChain.selected(
+      plan,
+      op,
+      selectedPartition = None,
+      preserveAbsence = false,
+      ordinals = ColumnUse.ordinals(plan, op),
+    ) match
+      case Some(parts) =>
+        parts.map { selected =>
+          Partition(decodeSelected(selected, selected.count, op))
+        }
+      case None =>
+        ColumnarInterpreter.decodeFor(ColumnarInterpreter.interpret(plan, op), op)
 
   /**
    * Run an accepted plan until its first `n` results are available. Partition-preserving plans
@@ -280,6 +290,8 @@ object ColumnarPlanner:
 
   private def finishedCount(plan: Plan[_], op: PhysicalOp): Option[Long] =
     op match
+      case PhysicalOp.GroupedDecode(child) =>
+        Some(GroupedDecode.count(plan, child))
       case _: PhysicalOp.GroupByKey =>
         Some(ColumnarInterpreter.groupCount(ColumnarInterpreter.interpret(plan, op)))
       case _ =>
@@ -667,6 +679,8 @@ object ColumnarPlanner:
       case Nil => lowerPlanNode(base)
       case List(ElementStep.Filter(_)) =>
         filterOverIntSort(base).orElse(lowerSteps(base, steps))
+      case List(ElementStep.Project(_)) =>
+        GroupedDecode.lower(base, lowerPlanNode).orElse(lowerSteps(base, steps))
       case _ => lowerSteps(base, steps)
 
   /**
@@ -942,6 +956,7 @@ object ColumnarPlanner:
       hashed(PhysicalOp.Kind.StringPairs)
     case group: PhysicalOp.GroupByKey =>
       hashed(group.kind)
+    case PhysicalOp.GroupedDecode(child) => infoOf(child)
     case count: PhysicalOp.CountByKey =>
       hashed(count.kind)
     case PhysicalOp.Exchange(_) =>

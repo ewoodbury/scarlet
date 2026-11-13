@@ -87,7 +87,7 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     grouped.count() shouldBe 3L
   }
 
-  it should "lower a filterValues child and refuse projections above the group" in {
+  it should "lower a filterValues child, decode a map, and refuse keys, values, and take" in {
     val source = DistCollection.ofIntPairs(keys, values, 4)
     val filtered = source.filterValues((value: Int) => value > 10).groupByKey
     val grouped = source.groupByKey
@@ -99,7 +99,9 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     valuesByKey(filtered.collect())(1) shouldBe Seq(11, 12)
     ColumnarPlanner.lower(grouped.keys.plan) shouldBe None
     ColumnarPlanner.lower(grouped.values.plan) shouldBe None
-    ColumnarPlanner.lower(grouped.map((row: (Int, Iterable[Int])) => row._1).plan) shouldBe None
+    ColumnarPlanner
+      .lower(grouped.map((row: (Int, Iterable[Int])) => row._1).plan)
+      .map(_.shape) shouldBe Some("GroupedDecode(GroupByKey(Exchange(Scan)))")
     ColumnarPlanner.tryTake(grouped.plan, 1) shouldBe None
     grouped.take(2) shouldBe row(grouped.take(2))
   }
@@ -232,7 +234,7 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     ColumnarPlanner.tryCount(grouped.plan) shouldBe Some(0L)
   }
 
-  it should "lower a filterValues child and refuse projections above the group" in {
+  it should "lower a filterValues child, decode a map, and refuse keys, values, and take" in {
     val filtered = stringSource.filterValues((value: Int) => value > 4).groupByKey
     val grouped = stringSource.groupByKey
 
@@ -249,7 +251,9 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     )
     ColumnarPlanner.lower(grouped.keys.plan) shouldBe None
     ColumnarPlanner.lower(grouped.values.plan) shouldBe None
-    ColumnarPlanner.lower(grouped.map((row: (String, Iterable[Int])) => row._1).plan) shouldBe None
+    ColumnarPlanner
+      .lower(grouped.map((row: (String, Iterable[Int])) => row._1).plan)
+      .map(_.shape) shouldBe Some("GroupedDecode(GroupByKey(Exchange(Scan)))")
     ColumnarPlanner.tryTake(grouped.plan, 1) shouldBe None
     grouped.take(2) shouldBe row(grouped.take(2))
   }
@@ -349,7 +353,7 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     grouped.count() shouldBe 2L
   }
 
-  it should "lower a whole-row filter and a slot filter, and refuse projections" in {
+  it should "lower a whole-row filter and a slot filter, decode a map, and refuse projections" in {
     val source = DistCollection.ofLongPairs(longKeys, longPayloads, 4)
     val filtered = source.filter((pair: (Long, Long)) => pair._2 > 10L).groupByKey
     val keyed = source.filterKeys[Long, Long](_ > 0L).groupByKey
@@ -371,7 +375,9 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     longByKey(valued.collect()) shouldBe longByKey(row(valued.collect()))
     ColumnarPlanner.lower(grouped.keys.plan) shouldBe None
     ColumnarPlanner.lower(grouped.values.plan) shouldBe None
-    ColumnarPlanner.lower(grouped.map((row: (Long, Iterable[Long])) => row._1).plan) shouldBe None
+    ColumnarPlanner
+      .lower(grouped.map((row: (Long, Iterable[Long])) => row._1).plan)
+      .map(_.shape) shouldBe Some("GroupedDecode(GroupByKey(Exchange(Scan)))")
     ColumnarPlanner.tryTake(grouped.plan, 1) shouldBe None
     grouped.take(2) shouldBe row(grouped.take(2))
   }
