@@ -65,7 +65,7 @@ asserts both `partitioning` and the exact `PhysicalOp.shape`; this table mirrors
 
 ### Columnar completion contract
 
-The following 208 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. The excluded list has 35 shapes, for 243 covered in total. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
+The following 209 accepted physical-plan fixtures report the stated layout and lower to the stated physical shape. The excluded list has 35 shapes, for 244 covered in total. All 28 filter/map orderings of lengths 2–4 are covered for int, long, double, and string. Boolean is not in that product.
 `Unknown(2)` denotes the two source partitions in the small contract fixtures. Aggregate and join
 outputs use `Hash(defaultShufflePartitions, RowKeyOrdinals)`. `sortByIntKey`, `sortByLongKey`, and
 `sortByStringKey` use `Range(defaultShufflePartitions, Seq(0))` and `Sorted(Seq(0), Seq(true))`.
@@ -100,7 +100,8 @@ null. A null string key orders as `""` and stays null. Shape strings are exact.
 | String `countByKey` on `(String, Int)`. The exchange drops a null key and keeps `""`. A dictionary code of `0` is not a null. The value column is never read, so a null int still counts. The stored count is an `Int` and wraps on overflow. Output kind is `StringPairs` and the layout is `StringPair`. A string-pair filter stack partial-counts a survivor index. The estimate charges dictionary bytes. With spill off, an input-row estimate over `spillBudgetBytes` throws `ClosedKernelRefusal` before any table and the action fails. With spill on, one over-budget post-exchange bucket spills. A count table that still does not fit throws `ClosedKernelRefusal`. The running partial is `O(distinct keys)` | `StringPair` | `CountByKey(Exchange(Scan))` |
 | String `distinct`. One copy of each string, including one null and one empty string. Equal strings share a hash bucket. Order is unspecified | `Utf8Dict` | `Dedupe(Exchange(Scan))` |
 | Automatic or explicit shuffle-hash int join | `Columnar` | `HashJoin(Exchange(Scan), Exchange(Scan))` |
-| Automatic or explicit shuffle-hash long join. Both sides are exchanged on `Long.hashCode`. A null key is dropped. A null value stays columnar. A build bucket over `spillBudgetBytes`, when `spillEnabled` is on, is sub-partitioned by the quotient of `Long.hashCode` and the parent width. Each non-empty build piece is one spill file. One piece is joined at a time. A piece still over the budget throws. At or under the budget, and whenever spill is off, the bucket stays in memory and writes nothing. Long inner sort-merge stays on the row path. A long outer join is a separate shape, covered below | `Columnar` | `LongHashJoin(Exchange(Scan), Exchange(Scan))` |
+| Automatic or explicit shuffle-hash long join. Both sides are exchanged on `Long.hashCode`. A null key is dropped. A null value stays columnar. A build bucket over `spillBudgetBytes`, when `spillEnabled` is on, is sub-partitioned by the quotient of `Long.hashCode` and the parent width. Each non-empty build piece is one spill file. One piece is joined at a time. A piece still over the budget throws. At or under the budget, and whenever spill is off, the bucket stays in memory and writes nothing. A long outer join is a separate shape, covered below | `Columnar` | `LongHashJoin(Exchange(Scan), Exchange(Scan))` |
+| Explicit sort-merge long join. Both sides are hash-partitioned on `Long.hashCode`, sorted inside each partition, and merged. A null key is dropped before the sort. A null value stays columnar. Equal keys keep input order. The merge emits `(key, left, right)` for equal keys, in match multiplicity order. The join runs in memory. With spill on, a partition whose present-key estimate is above `spillBudgetBytes` throws and writes nothing. At or under the budget, and whenever spill is off, the partition stays in memory | `Columnar` | `LongSortMergeJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit broadcast long join. The planner builds the right input and probes the left in place. Neither side is exchanged. A null key is dropped. A null value stays columnar. Output is `(key, left, right)`. An over-budget build throws and writes nothing. Order is unspecified | `Columnar` | `LongBroadcastJoin(Scan, Scan)` |
 | Automatic or explicit shuffle-hash string join. Both sides are exchanged on `String.hashCode`. A null key is dropped. `""` matches `""`. A null value stays columnar. The two sides keep independent dictionaries and match by string equality. `"é"` and `"e\u0301"` do not match. A key or value filter on either side, including a stack of one, scatters the survivor index and does not compact. A build bucket over `spillBudgetBytes` spills when `spillEnabled` is on. The estimate includes the dictionary. At or under the budget, and when spill is off, the bucket stays in memory. String inner sort-merge stays on the row path. A string outer join lowers for an absent hint, shuffle-hash, broadcast, or sort-merge. Hash and broadcast outer do not spill. Sort-merge outer runs in memory and throws instead of spilling. Output columns are `(key, left, right)` and the key is the probe row | `StringTriple` | `StringHashJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit broadcast string join. The planner builds the right input and probes the left in place. Neither side is exchanged. A null key is dropped. A null value stays columnar. `""` matches `""`. `"é"` and `"e\u0301"` do not match. Output is `(key, left, right)`. An over-budget build throws and writes nothing. Order is unspecified | `StringTriple` | `StringBroadcastJoin(Scan, Scan)` |
@@ -196,7 +197,7 @@ first string, and an empty iterable has no witness and stays on the row path.
 `groupedSum` is columnar for an `(Int, Int)` source. A `(Long, Long)` scan, `reduceByKey` on
 that scan, an inner shuffle-hash join of that scan, and `sortByLongKey` of that scan are columnar.
 `groupedSum` of a long pair stays on the row path. An explicit long inner broadcast lowers to
-`LongBroadcastJoin(Scan, Scan)`. Long inner sort-merge stays on the row path. Long outer joins lower. A long sort spills over the budget the same way an int sort does.
+`LongBroadcastJoin(Scan, Scan)`. An explicit long inner sort-merge lowers to `LongSortMergeJoin(Exchange(Scan), Exchange(Scan))`. It runs in memory and throws, writing nothing, when spill is on and the present-key estimate is over the budget. Long outer joins lower. A long sort spills over the budget the same way an int sort does.
 String `reduceByKey` is columnar: `StringHashAggregate(Exchange(Scan))` drops a null key, keeps
 `""`, and hashes each dictionary string once. Int `groupByKey` is columnar:
 `GroupByKey(Exchange(Scan))`, layout `GroupedInt`, and `count` is the number of groups. String
@@ -229,8 +230,8 @@ double keys, `mapValues` to string or double, double-pair `keys`, `values`,
 single-precision `Float` sources and maps, all-null strings, an empty int source without
 a witness, and element maps that do not preserve the column type (`boolean` to `boolean`, `int`
 to `long`, `string`, or a pair, `long` to `int` or `string`, and `double` to `int`).
-That is 35 exclusions, and 205 accepted, for 240 covered shapes. String `groupByKey` moved from the excluded list, so 36 - 1 = 35 excluded. Long `groupByKey` is a new accepted fixture, so 199 + 1 = 200 and 234 + 1 = 235. Long `filterKeys` and `filterValues` are new accepted fixtures, so 200 + 2 = 202 and 235 + 2 = 237. Int `countByKey` is a new accepted fixture that adds no exclusion, so 202 + 1 = 203 and 237 + 1 = 238. Long `countByKey` is a new accepted fixture that adds no exclusion, so 203 + 1 = 204 and 238 + 1 = 239. String `countByKey` is a new accepted fixture that adds no exclusion, so 204 + 1 = 205 and 239 + 1 = 240. A filter over `sortByIntKey` stays accepted because that fixture's int key column is fully present, so it adds no exclusion: 205 + 1 = 206 and 240 + 1 = 241. A null key on that shape is refused and is not one of the 35 exclusions. Explicit long inner broadcast is a new accepted fixture, so 206 + 1 = 207 and 241 + 1 = 242. Explicit string inner broadcast is a new accepted fixture, so 207 + 1 = 208 and 242 + 1 = 243. Excluded stays 35.
-Long inner sort-merge stays on the row path. Long outer joins are covered
+That is 35 exclusions, and 205 accepted, for 240 covered shapes. String `groupByKey` moved from the excluded list, so 36 - 1 = 35 excluded. Long `groupByKey` is a new accepted fixture, so 199 + 1 = 200 and 234 + 1 = 235. Long `filterKeys` and `filterValues` are new accepted fixtures, so 200 + 2 = 202 and 235 + 2 = 237. Int `countByKey` is a new accepted fixture that adds no exclusion, so 202 + 1 = 203 and 237 + 1 = 238. Long `countByKey` is a new accepted fixture that adds no exclusion, so 203 + 1 = 204 and 238 + 1 = 239. String `countByKey` is a new accepted fixture that adds no exclusion, so 204 + 1 = 205 and 239 + 1 = 240. A filter over `sortByIntKey` stays accepted because that fixture's int key column is fully present, so it adds no exclusion: 205 + 1 = 206 and 240 + 1 = 241. A null key on that shape is refused and is not one of the 35 exclusions. Explicit long inner broadcast is a new accepted fixture, so 206 + 1 = 207 and 241 + 1 = 242. Explicit string inner broadcast is a new accepted fixture, so 207 + 1 = 208 and 242 + 1 = 243. Explicit long inner sort-merge is a new accepted fixture, so 208 + 1 = 209 and 243 + 1 = 244. Excluded stays 35.
+Long outer joins are covered
 by execution tests, not contract fixtures, because the contract does not track the int refusals either.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then
 `toString`, and a type-changing map inside a three-step chain), a `Long` mapped to `Int` or
@@ -251,7 +252,7 @@ the plan is accepted: `lower` returns a physical tree and that tree's layout is 
 A join of int pairs lowers when its hint is absent, shuffle-hash, broadcast, or sort-merge. An inner
 sort-merge of int pairs is accepted: `lower` returns a physical tree and `partitioning` reports
 a layout. A left, right, or full outer sort-merge of int pairs is accepted the same way.
-An inner sort-merge on a non-int key is refused. That plan makes
+An inner sort-merge on a key other than int or long is refused. That plan makes
 `lower` return `None`, and `partitioning` reports no layout. A long outer sort-merge lowers. For int pairs, the absent hint and
 shuffle-hash stay the columnar hash join above. A `(Long, Long)` inner join with an absent hint
 or an explicit shuffle-hash hint lowers to `LongHashJoin(Exchange, Exchange)`. Both sides are
@@ -262,8 +263,12 @@ Each non-empty build piece is one spill file. One piece is joined at a time. A p
 the budget throws. At or under the budget, and whenever spill is off, the bucket stays in memory
 and writes nothing. An explicit broadcast hint lowers to `LongBroadcastJoin` with no exchange.
 The right side is built and the left side is probed in place. A null key is dropped. A null value
-stays columnar. An over-budget build throws and writes nothing. Long inner sort-merge stays on the
-row path. A long outer join lowers for an absent hint, shuffle-hash, broadcast, or sort-merge. Hash and broadcast
+stays columnar. An over-budget build throws and writes nothing. An explicit long inner sort-merge
+lowers to `LongSortMergeJoin(Exchange, Exchange)`. Both sides are exchanged on `Long.hashCode`.
+A null key is dropped. A null value stays columnar. Output columns are `(key, left, right)`.
+The join runs in memory. With spill on, a partition whose present-key estimate is above
+`spillBudgetBytes` throws and writes nothing. At or under the budget, and whenever spill is off,
+the partition stays in memory. A long outer join lowers for an absent hint, shuffle-hash, broadcast, or sort-merge. Hash and broadcast
 outer do not spill. Sort-merge outer runs in memory and throws, writing nothing, when spill is on
 and the present-key estimate is over the budget. Those plans are covered by execution
 tests, not contract fixtures, because the contract does not track the int refusals either.
@@ -527,7 +532,7 @@ A long shuffle-hash build bucket over `spillBudgetBytes` is sub-partitioned by t
 `Long.hashCode` and the parent width. Each non-empty build piece is one spill file of long pairs.
 One piece is joined at a time. A piece still over the budget throws. At or under the budget, and
 whenever spill is off, that bucket stays in memory and writes nothing. The probe is not spilled.
-An explicit long inner broadcast builds one table under `broadcastBuildBudgetBytes` and does not spill. Over that budget it throws and writes nothing. Long inner sort-merge stays on the row path. A long outer hash or
+An explicit long inner broadcast builds one table under `broadcastBuildBudgetBytes` and does not spill. Over that budget it throws and writes nothing. A long inner sort-merge runs in memory and throws, writing nothing, when spill is on and the present-key estimate is over the budget. A long outer hash or
 broadcast join does not spill. A long outer sort-merge runs in memory and throws, writing nothing,
 when spill is on and the present-key estimate is over the budget.
 

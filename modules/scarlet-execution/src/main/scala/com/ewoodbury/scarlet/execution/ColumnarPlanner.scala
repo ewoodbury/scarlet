@@ -37,39 +37,42 @@ object ColumnarPlanner:
    * The physical tree for `plan`, without running it. `None` means the row path, including an
    * element chain whose project does not declare the column's type. An int join lowers when its
    * hint is absent, shuffle-hash, or broadcast. A `(Long, Long)` inner join lowers for an absent
-   * hint or a shuffle-hash hint to [[PhysicalOp.LongHashJoin]], and for an explicit broadcast hint
-   * to [[PhysicalOp.LongBroadcastJoin]]. That node builds the right side and probes the left in
+   * hint or a shuffle-hash hint to [[PhysicalOp.LongHashJoin]], for an explicit broadcast hint to
+   * [[PhysicalOp.LongBroadcastJoin]], and for an explicit sort-merge hint to
+   * [[PhysicalOp.LongSortMergeJoin]]. The broadcast node builds the right side and probes the left
+   * in place. A null key is dropped. A null value stays a clear validity bit and [[tryRun]] keeps
+   * the matched row. It is not an absence bit. An over-budget broadcast build throws. The
+   * sort-merge node runs in memory. With spill on, a partition whose present-key estimate is above
+   * `spillBudgetBytes` throws and writes nothing. A long outer join lowers for an absent hint,
+   * shuffle-hash, broadcast, or sort-merge. A `(String, Int)` inner join lowers for an absent or
+   * shuffle-hash hint to [[PhysicalOp.StringHashJoin]], and for broadcast to
+   * [[PhysicalOp.StringBroadcastJoin]]. That node builds the right side and probes the left in
    * place. A null key is dropped. A null value stays a clear validity bit and [[tryRun]] keeps the
-   * matched row. It is not an absence bit. An over-budget broadcast build throws. A long outer
-   * join lowers for an absent hint, shuffle-hash, broadcast, or sort-merge. Long inner sort-merge
-   * stays on the row path. A `(String, Int)` inner join lowers for an absent or shuffle-hash hint
-   * to [[PhysicalOp.StringHashJoin]], and for broadcast to [[PhysicalOp.StringBroadcastJoin]].
-   * That node builds the right side and probes the left in place. A null key is dropped. A null
-   * value stays a clear validity bit and [[tryRun]] keeps the matched row. It is not an absence
-   * bit. A shuffle-hash key or value filter scatters the survivor index and does not compact. An
-   * over-budget shuffle bucket spills when `spillEnabled` is on. The estimate includes the
-   * dictionary. An over-budget broadcast build throws and writes nothing. String outer joins lower
-   * for an absent hint, shuffle-hash, broadcast, or sort-merge. Hash and broadcast do not spill.
-   * Sort-merge throws instead of spilling. String inner sort-merge stays on the row path. Layout
-   * is [[Layout.StringTriple]]. An explicit sort-merge hint on int pairs lowers to
-   * [[PhysicalOp.SortMergeJoin]]. A left, right, or full outer sort-merge hint lowers to the
-   * matching node. Any other sort-merge returns `None`. A left, right, or full outer join on int
-   * pairs lowers for a broadcast, shuffle-hash, absent, or sort-merge hint. An absent hint uses
-   * the shuffle-hash op. On a right outer join the left input is the build and the right input is
-   * the probe. A null value on an int shuffle-hash left outer join stays a clear validity bit and
-   * [[tryRun]] keeps the row. A null value on a right outer, full outer, broadcast outer, or
-   * sort-merge outer join makes [[tryRun]] return `None`. [[SortLowering]] accepts an int, long,
-   * or string key sort of a scan, or of filters over that scan. A map, aggregate, or join under
-   * the sort stays on the row path. One filter above an int sort lowers to [[PhysicalOp.Filter]]
-   * on [[PhysicalOp.Slot.Row]] around [[PhysicalOp.SortByIntKey]], and only for a fully present
-   * key column: the pair-row filter atom drops a null key while the row path keeps it. The sort is
-   * [[SortLowering.lowerInt]]. [[SortLowering.acceptsAsChild]] stays false, so a null key, a
-   * second filter, a long or string sort, and every other parent stay on the row path. A slot
-   * filter sorts the survivor index. Over the budget, with spill on, that index is spilled. A
-   * long-pair row filter and a whole-row string filter sort that index too. A long sort spills
-   * when `spillEnabled` is on and the retained estimate exceeds `spillBudgetBytes`. The physical
-   * op stays `SortByLongKey`. A string sort spills on that same budget. The physical op stays
-   * `SortByStringKey`. At or under the budget, and whenever spill is off, the split stays in
+   * matched row. It is not an absence bit. A shuffle-hash key or value filter scatters the
+   * survivor index and does not compact. An over-budget shuffle bucket spills when `spillEnabled`
+   * is on. The estimate includes the dictionary. An over-budget broadcast build throws and writes
+   * nothing. String outer joins lower for an absent hint, shuffle-hash, broadcast, or sort-merge.
+   * Hash and broadcast do not spill. Sort-merge throws instead of spilling. String inner
+   * sort-merge stays on the row path. Layout is [[Layout.StringTriple]]. An explicit sort-merge
+   * hint on int pairs lowers to [[PhysicalOp.SortMergeJoin]]. The same hint on long pairs lowers
+   * to [[PhysicalOp.LongSortMergeJoin]]. A left, right, or full outer sort-merge hint lowers to
+   * the matching node. Any other sort-merge returns `None`. A left, right, or full outer join on
+   * int pairs lowers for a broadcast, shuffle-hash, absent, or sort-merge hint. An absent hint
+   * uses the shuffle-hash op. On a right outer join the left input is the build and the right
+   * input is the probe. A null value on an int shuffle-hash left outer join stays a clear validity
+   * bit and [[tryRun]] keeps the row. A null value on a right outer, full outer, broadcast outer,
+   * or sort-merge outer join makes [[tryRun]] return `None`. [[SortLowering]] accepts an int,
+   * long, or string key sort of a scan, or of filters over that scan. A map, aggregate, or join
+   * under the sort stays on the row path. One filter above an int sort lowers to
+   * [[PhysicalOp.Filter]] on [[PhysicalOp.Slot.Row]] around [[PhysicalOp.SortByIntKey]], and only
+   * for a fully present key column: the pair-row filter atom drops a null key while the row path
+   * keeps it. The sort is [[SortLowering.lowerInt]]. [[SortLowering.acceptsAsChild]] stays false,
+   * so a null key, a second filter, a long or string sort, and every other parent stay on the row
+   * path. A slot filter sorts the survivor index. Over the budget, with spill on, that index is
+   * spilled. A long-pair row filter and a whole-row string filter sort that index too. A long sort
+   * spills when `spillEnabled` is on and the retained estimate exceeds `spillBudgetBytes`. The
+   * physical op stays `SortByLongKey`. A string sort spills on that same budget. The physical op
+   * stays `SortByStringKey`. At or under the budget, and whenever spill is off, the split stays in
    * memory and writes nothing. [[partitioning]] and [[tryRun]] follow a refusal. They also drop a
    * lowered tree whose layout is invalid.
    */

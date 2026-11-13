@@ -41,6 +41,27 @@ private[execution] object PipelineJoinArms:
       ),
     )
 
+  def longSortMerge(
+      left: Plan[_],
+      right: Plan[_],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): Columns =
+    // A clear validity bit is a null value, not an absence bit. The matched row is kept.
+    // Over the budget, with spill on, the pipeline throws and writes nothing.
+    Columns.LongTriples(
+      LongOuterPipeline.sortMergeInnerJoin(
+        longPairsOf(interpretAt(left, leftOp, selectedPartition, preserveAbsence, ordinals)),
+        longPairsOf(interpretAt(right, rightOp, selectedPartition, preserveAbsence, ordinals)),
+        ColumnarPlanner.shuffleWidth,
+        ColumnarPlanner.parallelism,
+        ColumnarPlanner.batchSize,
+      ),
+    )
+
   def sortMergeInner(
       left: Plan[_],
       right: Plan[_],

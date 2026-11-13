@@ -193,7 +193,7 @@ private[execution] object ColumnarInterpreter:
    * [[PhysicalOp.SortMergeJoin]]. A map or that join may keep a null component. A filter or other
    * triple op uses [[BatchCodec.decodeIntTriples]], which rejects a clear bit. A whole-row filter
    * drops those rows before decode. Outer joins are [[Columns.Outer]] and do not use this decoder.
-   * Long triples are only a long inner join and use
+   * Long triples are a long inner hash, broadcast, or sort-merge join and use
    * [[BatchCodec.decodeLongTriplesPreservingAbsence]]. A clear validity bit is a null value, not
    * an absence bit. A fully present batch still decodes to the same longs. String triples are a
    * string inner hash or broadcast join and use [[BatchCodec.decodeStringJoinKeepingNulls]]. A
@@ -544,6 +544,24 @@ private[execution] object ColumnarInterpreter:
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       PipelineJoinArms.sortMergeInner(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
+      )
+    case (
+          Plan.JoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
+          PhysicalOp.LongSortMergeJoin(
+            PhysicalOp.Exchange(leftOp),
+            PhysicalOp.Exchange(rightOp),
+          ),
+        ) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      PipelineJoinArms.longSortMerge(
         left,
         right,
         leftOp,

@@ -14,11 +14,12 @@ import com.ewoodbury.scarlet.core.Partition
  * [[PhysicalOp.Exchange]] sits under [[PhysicalOp.HashAggregate]],
  * [[PhysicalOp.LongHashAggregate]], [[PhysicalOp.StringHashAggregate]], [[PhysicalOp.GroupByKey]],
  * and [[PhysicalOp.CountByKey]], and on each side of [[PhysicalOp.HashJoin]],
- * [[PhysicalOp.LongHashJoin]], [[PhysicalOp.StringHashJoin]], [[PhysicalOp.SortMergeJoin]],
- * [[PhysicalOp.SortMergeLeftOuter]], [[PhysicalOp.SortMergeRightOuter]],
- * [[PhysicalOp.SortMergeFullOuter]], [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]],
- * and [[PhysicalOp.HashFullOuter]]. Those kernels perform the shuffle. Interpreting the boundary
- * on its own does not. [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.LongBroadcastJoin]],
+ * [[PhysicalOp.LongHashJoin]], [[PhysicalOp.LongSortMergeJoin]], [[PhysicalOp.StringHashJoin]],
+ * [[PhysicalOp.SortMergeJoin]], [[PhysicalOp.SortMergeLeftOuter]],
+ * [[PhysicalOp.SortMergeRightOuter]], [[PhysicalOp.SortMergeFullOuter]],
+ * [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]], and [[PhysicalOp.HashFullOuter]].
+ * Those kernels perform the shuffle. Interpreting the boundary on its own does not.
+ * [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.LongBroadcastJoin]],
  * [[PhysicalOp.StringBroadcastJoin]], [[PhysicalOp.BroadcastLeftOuter]],
  * [[PhysicalOp.BroadcastRightOuter]], and [[PhysicalOp.BroadcastFullOuter]] have no exchange.
  * [[PhysicalOp.BuildSide]] chooses which logical child of an inner broadcast join is built. The
@@ -90,7 +91,8 @@ enum PhysicalOp:
    * and the parent width. Each non-empty build piece is one spill file. One piece is probed at a
    * time. A piece still over the budget throws. At or under the budget, and whenever spill is off,
    * the bucket stays in memory and writes nothing. Broadcast, sort-merge, and outer joins on long
-   * keys do not use this node. Output kind is [[PhysicalOp.Kind.LongTriples]].
+   * keys do not use this node. Sort-merge is [[LongSortMergeJoin]]. Output kind is
+   * [[PhysicalOp.Kind.LongTriples]].
    */
   case LongHashJoin(left: PhysicalOp, right: PhysicalOp)
 
@@ -101,6 +103,18 @@ enum PhysicalOp:
    * Output kind is [[PhysicalOp.Kind.LongTriples]].
    */
   case LongBroadcastJoin(left: PhysicalOp, right: PhysicalOp, buildSide: PhysicalOp.BuildSide)
+
+  /**
+   * In-memory sort-merge inner join of `(Long, Long)` pairs. `left` and `right` are exchanges with
+   * the same partition count. Each partition is sorted by present key and merged. A null key is
+   * dropped on both sides before the sort, so a null payload of `0` does not match key `0`. A
+   * clear validity bit is a null value and is copied with the matched row. It is not an absence
+   * bit. Equal keys keep input order. Output columns are `(key, left, right)`. One batch per
+   * partition. This node does not spill. With spill on, a partition whose present-key estimate is
+   * above `spillBudgetBytes` throws and writes nothing. At or under the budget, and whenever spill
+   * is off, the partition stays in memory. Output kind is [[PhysicalOp.Kind.LongTriples]].
+   */
+  case LongSortMergeJoin(left: PhysicalOp, right: PhysicalOp)
 
   /**
    * Shuffle-hash inner join of `(String, Int)` pairs. `left` and `right` are exchanges with the
@@ -469,7 +483,8 @@ enum PhysicalOp:
             s"countByKey column is $other, expected int, long, or string pairs",
           )
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
-    case LongHashJoin(_, _) | LongBroadcastJoin(_, _, _) => PhysicalOp.Kind.LongTriples
+    case LongHashJoin(_, _) | LongBroadcastJoin(_, _, _) | LongSortMergeJoin(_, _) =>
+      PhysicalOp.Kind.LongTriples
     case StringHashJoin(_, _) | StringBroadcastJoin(_, _, _) => PhysicalOp.Kind.StringTriples
     case SortMergeJoin(_, _) => PhysicalOp.Kind.Triples
     case SortMergeLeftOuter(_, _) => PhysicalOp.Kind.Triples
@@ -550,6 +565,8 @@ enum PhysicalOp:
     case LongHashJoin(left, right) => s"LongHashJoin(${left.shape}, ${right.shape})"
     case LongBroadcastJoin(left, right, _) =>
       s"LongBroadcastJoin(${left.shape}, ${right.shape})"
+    case LongSortMergeJoin(left, right) =>
+      s"LongSortMergeJoin(${left.shape}, ${right.shape})"
     case StringHashJoin(left, right) => s"StringHashJoin(${left.shape}, ${right.shape})"
     case StringBroadcastJoin(left, right, _) =>
       s"StringBroadcastJoin(${left.shape}, ${right.shape})"
