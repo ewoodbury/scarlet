@@ -494,15 +494,10 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     )
   }
 
-  "outer arms other than shuffle-hash left" should "decline a null value and match the row path" in {
+  "full outer, broadcast left, and sort-merge left" should "decline a null value and match the row path" in {
     val left = source(Seq(Seq(1 -> 10, pair(Some(2), None))))
     val right = source(Seq(Seq(1 -> 100)))
     val plans = Seq(
-      (
-        "right outer",
-        Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.ShuffleHash)),
-        "HashRightOuter(Exchange(Scan), Exchange(Scan))",
-      ),
       (
         "full outer",
         Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.ShuffleHash)),
