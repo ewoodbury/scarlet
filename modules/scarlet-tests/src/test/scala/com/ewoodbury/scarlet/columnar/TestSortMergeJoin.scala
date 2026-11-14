@@ -201,7 +201,7 @@ class TestSortMergeJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     largest should be > smallest
   }
 
-  it should "accept int sort-merge and string outer sort-merge" in {
+  it should "accept int sort-merge, string inner sort-merge, and string outer sort-merge" in {
     val strings = DistCollection(Seq("a" -> 1), 1).sortMergeJoin(DistCollection(Seq("a" -> 2), 1))
     val doubles = DistCollection(Seq(1.0 -> 1), 1).sortMergeJoin(DistCollection(Seq(1.0 -> 2), 1))
     val pairs = DistCollection.ofIntPairs(Array(1), Array(2), 1).plan
@@ -228,7 +228,9 @@ class TestSortMergeJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       "StringSortMergeFullOuter(Exchange(Scan), Exchange(Scan))",
     )
 
-    ColumnarPlanner.lower(strings.plan) shouldBe None
+    ColumnarPlanner.lower(strings.plan).map(_.shape) shouldBe Some(
+      "StringSortMergeJoin(Exchange(Scan), Exchange(Scan))",
+    )
     ColumnarPlanner.lower(doubles.plan) shouldBe None
     stringOuters.zip(stringShapes).foreach { (plan, shape) =>
       ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(shape)

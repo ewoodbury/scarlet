@@ -302,7 +302,7 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
     selectionOf(build.plan) shouldBe defined
   }
 
-  it should "lower a broadcast hint through a filter and keep sort-merge on the row path" in {
+  it should "lower a broadcast hint and a sort-merge hint through a filter" in {
     val left = buildPairs.filterKeys((key: String) => keepKey(key)).filterValues((_: Int) => true)
     val right = probePairs
     val filtered = "Exchange(FilterValue(FilterKey(Scan)))"
@@ -311,7 +311,10 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
 
     shape(broadcast) shouldBe "StringBroadcastJoin(FilterValue(FilterKey(Scan)), Scan)"
     broadcast.collect().toList should contain theSameElementsAs row(broadcast.collect().toList)
-    refuse(left.sortMergeJoin(right))
+    val merged = left.sortMergeJoin(right)
+    shape(merged) shouldBe
+      "StringSortMergeJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(Scan))"
+    merged.collect().toList should contain theSameElementsAs row(merged.collect().toList)
     Seq(
       (left.leftOuterJoin(right), s"StringHashLeftOuter($filtered, $scan)"),
       (left.rightOuterJoin(right), s"StringHashRightOuter($filtered, $scan)"),
@@ -473,10 +476,6 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
     ColumnarPlanner.lower(plan) match
       case Some(op) => FilterChain.selected(plan, op, None, false, Set(0, 1))
       case None => fail("expected a columnar plan")
-
-  private def refuse[A](collection: DistCollection[A]): Unit =
-    ColumnarPlanner.lower(collection.plan) shouldBe Option.empty[PhysicalOp]
-    collection.collect().toList should contain theSameElementsAs row(collection.collect().toList)
 
   /**
    * The dense baseline compacts the filter, then joins. The selection collect skips that compact.

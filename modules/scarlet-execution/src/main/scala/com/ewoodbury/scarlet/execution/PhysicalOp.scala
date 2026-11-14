@@ -15,11 +15,11 @@ import com.ewoodbury.scarlet.core.Partition
  * [[PhysicalOp.LongHashAggregate]], [[PhysicalOp.StringHashAggregate]], [[PhysicalOp.GroupByKey]],
  * and [[PhysicalOp.CountByKey]], and on each side of [[PhysicalOp.HashJoin]],
  * [[PhysicalOp.LongHashJoin]], [[PhysicalOp.LongSortMergeJoin]], [[PhysicalOp.StringHashJoin]],
- * [[PhysicalOp.SortMergeJoin]], [[PhysicalOp.SortMergeLeftOuter]],
- * [[PhysicalOp.SortMergeRightOuter]], [[PhysicalOp.SortMergeFullOuter]],
- * [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]], and [[PhysicalOp.HashFullOuter]].
- * Those kernels perform the shuffle. Interpreting the boundary on its own does not.
- * [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.LongBroadcastJoin]],
+ * [[PhysicalOp.StringSortMergeJoin]], [[PhysicalOp.SortMergeJoin]],
+ * [[PhysicalOp.SortMergeLeftOuter]], [[PhysicalOp.SortMergeRightOuter]],
+ * [[PhysicalOp.SortMergeFullOuter]], [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]],
+ * and [[PhysicalOp.HashFullOuter]]. Those kernels perform the shuffle. Interpreting the boundary
+ * on its own does not. [[PhysicalOp.BroadcastJoin]], [[PhysicalOp.LongBroadcastJoin]],
  * [[PhysicalOp.StringBroadcastJoin]], [[PhysicalOp.BroadcastLeftOuter]],
  * [[PhysicalOp.BroadcastRightOuter]], and [[PhysicalOp.BroadcastFullOuter]] have no exchange.
  * [[PhysicalOp.BuildSide]] chooses which logical child of an inner broadcast join is built. The
@@ -139,6 +139,20 @@ enum PhysicalOp:
    * kind is [[PhysicalOp.Kind.StringTriples]].
    */
   case StringBroadcastJoin(left: PhysicalOp, right: PhysicalOp, buildSide: PhysicalOp.BuildSide)
+
+  /**
+   * In-memory sort-merge inner join of `(String, Int)` pairs. `left` and `right` are exchanges
+   * with the same partition count. Each partition is sorted by the dictionary-decoded key and
+   * merged. Comparison is `String.compareTo`. Dictionary codes are not compared. A null key is
+   * dropped on both sides before the sort, so a null key does not match `""`. A clear validity bit
+   * is a null value and is copied with the matched row. It is not an absence bit. `""` matches
+   * `""`. `"é"` and `"e\u0301"` do not match. Equal keys keep input order. Output columns are
+   * `(key, left, right)`. One batch per partition. This node does not spill. With spill on, a
+   * partition whose present-key estimate, including the dictionary, is above `spillBudgetBytes`
+   * throws and writes nothing. At or under the budget, and whenever spill is off, the partition
+   * stays in memory. Output kind is [[PhysicalOp.Kind.StringTriples]].
+   */
+  case StringSortMergeJoin(left: PhysicalOp, right: PhysicalOp)
 
   /**
    * In-memory sort-merge inner join of int pairs. `left` and `right` are exchanges with the same
@@ -485,7 +499,8 @@ enum PhysicalOp:
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
     case LongHashJoin(_, _) | LongBroadcastJoin(_, _, _) | LongSortMergeJoin(_, _) =>
       PhysicalOp.Kind.LongTriples
-    case StringHashJoin(_, _) | StringBroadcastJoin(_, _, _) => PhysicalOp.Kind.StringTriples
+    case StringHashJoin(_, _) | StringBroadcastJoin(_, _, _) | StringSortMergeJoin(_, _) =>
+      PhysicalOp.Kind.StringTriples
     case SortMergeJoin(_, _) => PhysicalOp.Kind.Triples
     case SortMergeLeftOuter(_, _) => PhysicalOp.Kind.Triples
     case SortMergeRightOuter(_, _) => PhysicalOp.Kind.Triples
@@ -570,6 +585,8 @@ enum PhysicalOp:
     case StringHashJoin(left, right) => s"StringHashJoin(${left.shape}, ${right.shape})"
     case StringBroadcastJoin(left, right, _) =>
       s"StringBroadcastJoin(${left.shape}, ${right.shape})"
+    case StringSortMergeJoin(left, right) =>
+      s"StringSortMergeJoin(${left.shape}, ${right.shape})"
     case SortMergeJoin(left, right) => s"SortMergeJoin(${left.shape}, ${right.shape})"
     case SortMergeLeftOuter(left, right) => s"SortMergeLeftOuter(${left.shape}, ${right.shape})"
     case SortMergeRightOuter(left, right) => s"SortMergeRightOuter(${left.shape}, ${right.shape})"

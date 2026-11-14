@@ -30,19 +30,20 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 210 accepted fixtures. The filter over sortByIntKey stays accepted: pairSource keys are
+    // 211 accepted fixtures. The filter over sortByIntKey stays accepted: pairSource keys are
     // fully present. 205 + 1 = 206. Explicit long inner broadcast is a new accepted fixture, so
     // 206 + 1 = 207. Explicit string inner broadcast is a new accepted fixture, so 207 + 1 = 208.
     // Int keys of groupByKey is a new accepted fixture, so 208 + 1 = 209.
     // Explicit long inner sort-merge is a new accepted fixture, so 209 + 1 = 210.
-    accepted.size shouldBe 210
-    // 35 exclusions. 210 + 35 = 245. That filter is not excluded, because the fixture has no
+    // Explicit string inner sort-merge is a new accepted fixture, so 210 + 1 = 211.
+    accepted.size shouldBe 211
+    // 35 exclusions. 211 + 35 = 246. That filter is not excluded, because the fixture has no
     // null key. A null key refuses the shape and is not one of these exclusions.
     // Long outer joins are covered by execution tests, not contract fixtures, because the
     // contract does not track the int refusals either. String outer joins are covered by
     // execution tests, not contract fixtures.
     excluded.size shouldBe 35
-    (accepted.size + excluded.size) shouldBe 245
+    (accepted.size + excluded.size) shouldBe 246
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -618,6 +619,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         narrowInfo(1, stringTripleLayout),
         Some("StringBroadcastJoin(Scan, Scan)"),
       ),
+      AcceptedCase(
+        "explicit sort-merge string join",
+        DistCollection(stringKeySource).sortMergeJoin(DistCollection(stringKeySource)).plan,
+        hashedInfo(stringTripleLayout),
+        Some("StringSortMergeJoin(Exchange(Scan), Exchange(Scan))"),
+      ),
       AcceptedCase("filtered int reduceByKey", reducedAfterFilter, hashedInfo(layout), Some("HashAggregate(Exchange(FilterValue(Scan)))")),
       AcceptedCase("mapValues int reduceByKey", reducedAfterMapValues, hashedInfo(layout), Some("HashAggregate(Exchange(MapValue(Scan)))")),
       AcceptedCase("nested int reduceByKey", reducedTwice, hashedInfo(layout), Some("HashAggregate(Exchange(HashAggregate(Exchange(Scan))))")),
@@ -902,7 +909,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     )
 
   /**
-   * `lower` and the action gates share one decision. A refused plan, including a string or double
+   * `lower` and the action gates share one decision. A refused plan, including a double
    * sort-merge and a type-changing pair map, makes every gate return `None`. An accepted plan
    * runs `tryRun` and `tryCount`. `tryTake` runs when the physical tree keeps input partitions,
    * and for an int-key, long-key, or string-key sort, which runs the whole sort and then decodes
@@ -977,7 +984,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.StringHashAggregate(_) | PhysicalOp.GroupByKey(_) | PhysicalOp.CountByKey(_) |
         PhysicalOp.HashJoin(_, _) |
         PhysicalOp.LongHashJoin(_, _) | PhysicalOp.LongSortMergeJoin(_, _) |
-        PhysicalOp.StringHashJoin(_, _) |
+        PhysicalOp.StringHashJoin(_, _) | PhysicalOp.StringSortMergeJoin(_, _) |
         PhysicalOp.SortMergeJoin(_, _) | PhysicalOp.SortMergeLeftOuter(_, _) |
         PhysicalOp.SortMergeRightOuter(_, _) | PhysicalOp.SortMergeFullOuter(_, _) |
         PhysicalOp.HashLeftOuter(_, _) | PhysicalOp.HashRightOuter(_, _) |

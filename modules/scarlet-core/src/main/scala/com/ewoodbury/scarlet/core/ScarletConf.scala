@@ -52,15 +52,17 @@ final case class ScarletConf(
      * each stays in memory. Outer hash and broadcast joins do not read this flag. An int outer
      * sort-merge does and writes runs. A long outer sort-merge reads the flag and throws when the
      * present-key estimate is over the budget, and it writes nothing. A long inner sort-merge does
-     * the same. A spilled int, long, or string `reduceByKey` bucket may change first-seen output
-     * order; compare it as a map. An int, long, or string `countByKey` with this flag off still
-     * throws `ClosedKernelRefusal` before a table. The long estimate charges 8-byte keys. The
-     * string estimate charges dictionary bytes. With the flag on, an over-budget post-exchange
-     * bucket spills. A count table that still does not fit throws `ClosedKernelRefusal`. An int,
-     * long, or string `groupByKey` bucket over the budget spills when this flag is on: the
-     * post-exchange bucket is sliced in input order and grouped one morsel at a time. Spill off
-     * keeps the in-memory groups and writes nothing. A morsel whose group table does not fit
-     * throws `ClosedKernelRefusal`. The appended groups are not bounded by the budget.
+     * the same. A string inner sort-merge reads the flag and throws when the present-key estimate,
+     * including the dictionary, is over the budget, and it writes nothing. A spilled int, long, or
+     * string `reduceByKey` bucket may change first-seen output order; compare it as a map. An int,
+     * long, or string `countByKey` with this flag off still throws `ClosedKernelRefusal` before a
+     * table. The long estimate charges 8-byte keys. The string estimate charges dictionary bytes.
+     * With the flag on, an over-budget post-exchange bucket spills. A count table that still does
+     * not fit throws `ClosedKernelRefusal`. An int, long, or string `groupByKey` bucket over the
+     * budget spills when this flag is on: the post-exchange bucket is sliced in input order and
+     * grouped one morsel at a time. Spill off keeps the in-memory groups and writes nothing. A
+     * morsel whose group table does not fit throws `ClosedKernelRefusal`. The appended groups are
+     * not bounded by the budget.
      */
     spillEnabled: Boolean = false,
     /**
@@ -75,10 +77,11 @@ final case class ScarletConf(
      * sub-partitioned by the quotient of its hash and the parent width. The estimate includes the
      * dictionary. A piece that is still over it throws. A sort-merge partition over it is written
      * as sorted runs and merged `spillFanIn` at a time. One equal-key group that is still over it
-     * throws. A long inner sort-merge and a long outer sort-merge throw instead of writing runs.
-     * An int-pair sort over it writes one sorted run per input partition and merges `spillFanIn`
-     * runs at a time. A long-pair sort and a string-pair sort do the same for their pairs. One
-     * input partition is still sorted in memory. An int `reduceByKey` bucket over it is
+     * throws. A long inner sort-merge, a long outer sort-merge, a string inner sort-merge, and a
+     * string outer sort-merge throw instead of writing runs. The string estimate includes the
+     * dictionary. An int-pair sort over it writes one sorted run per input partition and merges
+     * `spillFanIn` runs at a time. A long-pair sort and a string-pair sort do the same for their
+     * pairs. One input partition is still sorted in memory. An int `reduceByKey` bucket over it is
      * sub-partitioned and folded one morsel at a time. A long `reduceByKey` bucket and a string
      * `reduceByKey` bucket over it are sub-partitioned and folded the same way. A spilled string
      * bucket may change first-seen output order. An int, long, or string `countByKey` bucket over
