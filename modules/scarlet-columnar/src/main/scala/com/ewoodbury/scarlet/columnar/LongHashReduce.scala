@@ -206,8 +206,9 @@ object LongHashReduce:
       finally releaseWorkers()
 
   /**
-   * Exchange combined partials and reduce each bucket. Shared by [[byKey]], [[byKeySelected]], and
-   * the filtered fold. An empty input is `numPartitions` empty long-pair batches.
+   * Exchange combined partials and reduce each bucket. Called by the folded long reduce; [[byKey]]
+   * and [[byKeySelected]] go through `reduceExchanged` instead. An empty input is `numPartitions`
+   * empty long-pair batches.
    */
   private[columnar] def exchangeReduced(
       combined: Vector[ColumnBatch],
