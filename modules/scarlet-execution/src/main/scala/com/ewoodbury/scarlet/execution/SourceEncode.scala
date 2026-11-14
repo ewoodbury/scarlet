@@ -129,18 +129,27 @@ private[execution] object SourceEncode:
           BatchCodec.longPairSide(rows, ordinal)
     }.toVector
 
+  /**
+   * One batch per partition, in partition order. Two or more partitions run on the morsel pool. A
+   * single partition, and a pool width of one, stay on the caller. The copy itself does not depend
+   * on the pool; scheduling it is what keeps the scan off one thread when the action is wide.
+   */
   private def encodeLongPairPartitions(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+    val parts = partitions.toVector
+    val workers = ColumnarPlanner.parallelism
+    if (parts.length <= 1 || workers <= 1) then parts.map(encodeOneLongPartition)
+    else MorselScheduler.map(parts, workers)((_, partition) => encodeOneLongPartition(partition))
+
+  private def encodeOneLongPartition(partition: Partition[_]): ColumnBatch =
     import com.ewoodbury.scarlet.core.LongPairArrays
 
-    partitions.map { partition =>
-      partition.data match
-        case pairs: LongPairArrays => BatchCodec.copiedLongPairs(pairs.keys, pairs.values)
-        case other =>
-          // Named erasure boundary. Classification already selected `(Long, Long)` elements.
-          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
-          val rows = other.asInstanceOf[Iterable[(Long, Long)]]
-          BatchCodec.longPairs(rows)
-    }.toVector
+    partition.data match
+      case pairs: LongPairArrays => BatchCodec.copiedLongPairs(pairs.keys, pairs.values)
+      case other =>
+        // Named erasure boundary. Classification already selected `(Long, Long)` elements.
+        @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+        val rows = other.asInstanceOf[Iterable[(Long, Long)]]
+        BatchCodec.longPairs(rows)
 
   /**
    * Pair encode for grouped sum. Both columns are kept, including when a caller demanded one
