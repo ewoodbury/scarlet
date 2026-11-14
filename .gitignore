@@ -32,3 +32,4 @@ project/plugins/project/
 
 # Review artifacts
 .audit/
+.pr-body.md
