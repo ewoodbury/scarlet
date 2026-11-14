@@ -25,9 +25,10 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * [[int64Selected]] scans a survivor index with that same null rule. [[int64FilteredGroup]]
  * applies long key, value, or row steps during the insert, so a filtered scan does not build that
  * index. Several ranges of one batch share the table and compact once: a low-cardinality key is
- * inserted on the first range and updated after that. The table grows when a later range might not
- * fit. A step drops a null it reads. A null key is still dropped when no step reads the key. A
- * null value on a kept key stays missing until another value arrives. [[byKeySelected]]
+ * inserted on the first range and updated after that. The table starts large enough for the
+ * longest range. A later range does not reserve a slot per row; a new key doubles the table when
+ * it does not fit. A step drops a null it reads. A null key is still dropped when no step reads
+ * the key. A null value on a kept key stays missing until another value arrives. [[byKeySelected]]
  * partial-reduces the index, then exchanges and spills the dense partials the same way [[byKey]]
  * does. The filtered fold uses that same exchange. The exchange does not see the source rows.
  * Spill charges the dense partial, not the survivor count.
@@ -88,9 +89,10 @@ object LongHashReduce:
    * Fold each start and length through `steps` into one table and compact once. `dense` means both
    * columns are fully present, so the scan skips the bit test. An empty range is skipped and does
    * not call a predicate. A group of only empty ranges publishes an empty long-pair batch. The
-   * table starts large enough for the longest range and grows when a later range could not fit
-   * beside the keys already inserted. Callers keep ranges in source order so first-seen order
-   * matches a single scan.
+   * table starts large enough for the longest range. A later range does not reserve a slot per
+   * row: those rows repeat keys already inserted, and that reservation doubled a table that was
+   * already past the distinct-key count. A new key still doubles the table when it does not fit.
+   * Callers keep ranges in source order so first-seen order matches a single scan.
    */
   private[columnar] def int64FilteredGroup(
       batch: ColumnBatch,
@@ -123,7 +125,6 @@ object LongHashReduce:
         if (length > 0) then
           val start = starts(cursor)
           Ranges.check(start, length, keys.length)
-          table.reserve(length)
           val end = start + length
           if (dense) then table.scanDenseSteps(keys.values, values.values, start, end, steps)
           else
@@ -301,17 +302,6 @@ object LongHashReduce:
     @SuppressWarnings(Array("org.wartremover.warts.Equals"))
     def accepts(need: Int, bin: LongBinOp): Boolean =
       capacity >= need && (op eq bin)
-
-    /**
-     * Makes room so `incoming` new keys could be inserted beside the ones already present. A range
-     * whose keys are already in the table does not fill that room. Growing keeps first-seen order.
-     */
-    def reserve(incoming: Int): Unit =
-      val need = occupied.toLong + incoming.toLong
-      while (need > limit.toLong) do
-        if (capacity >= ColumnHash.MaxCapacity) then
-          throw new IllegalStateException(s"hash reduce table is full at $occupied groups")
-        grow()
 
     /**
      * Drops every group this morsel inserted. The arrays stay, so the next morsel does not zero
@@ -531,7 +521,7 @@ object LongHashReduce:
       keep
 
     private def addPresent(key: Long, value: Long): Unit =
-      val slot = locate(key)
+      val slot = locateForInsert(key)
       val mark = state(slot)
       if (mark == empty) then occupy(slot, key, value, present)
       else if (mark == present) then values(slot) = op(values(slot), value)
@@ -540,13 +530,26 @@ object LongHashReduce:
         state(slot) = present
 
     private def addMissing(key: Long): Unit =
-      val slot = locate(key)
+      val slot = locateForInsert(key)
       val mark = state(slot)
       if (mark == empty) then occupy(slot, key, zero, missing)
       else if (mark == present) then values(slot) = op(values(slot), zero)
       else
         values(slot) = op(zero, zero)
         state(slot) = present
+
+    /**
+     * Slot for `key`. A new key at the load limit doubles the table and is located again. An
+     * existing key does not grow it. [[grow]] reinserts occupied groups in first-seen order, and
+     * one doubling leaves room for this key. A table built for its row count stays under the
+     * limit, so a single batch still does not rehash.
+     */
+    private def locateForInsert(key: Long): Int =
+      val slot = locate(key)
+      if (state(slot) == empty && occupied >= limit) then
+        grow()
+        locate(key)
+      else slot
 
     private def occupy(slot: Int, key: Long, value: Long, mark: Byte): Unit =
       if (occupied >= limit) then
