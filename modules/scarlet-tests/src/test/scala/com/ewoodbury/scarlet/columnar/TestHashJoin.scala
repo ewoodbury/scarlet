@@ -102,6 +102,63 @@ class TestHashJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     }
   }
 
+  it should "copy ten present matches at one and four partitions" in {
+    val build = (0 until 40).flatMap { key =>
+      (0 until 10).map(copy => (Some(key), Some(copy)))
+    }
+    val probe = (0 until 40).flatMap { key =>
+      Seq((Some(key), Some(100)), (Some(key), Some(101)))
+    }
+    val expected = rowJoin(build, probe)
+    val once = join(pairs(build), pairs(probe))
+
+    sorted(once) shouldBe expected
+    inOrder(join(pairs(build), pairs(Seq((Some(0), Some(5)), (Some(0), Some(6)))))).map(_._2) shouldBe
+      (9 to 0 by -1).map(Some(_)) ++ (9 to 0 by -1).map(Some(_))
+    Seq(0, 1, 2).foreach { ordinal =>
+      int32(once, ordinal).values.length shouldBe once.length
+    }
+    Seq(1, 4).foreach { parts =>
+      val joined = ColumnPipeline.innerJoin(
+        Vector(pairs(build)),
+        Vector(pairs(probe)),
+        numPartitions = parts,
+        parallelism = 2,
+        batchSize = 16,
+      )
+      sortedBatches(joined) shouldBe expected
+    }
+  }
+
+  it should "double a dense chain and keep the grown capacity" in {
+    val count = 80
+    val slots = new JoinSlots(count, Long.MaxValue)
+    (0 until count).foreach(row => slots.insert(1, row))
+    val written = JoinWrite.writeGrouped(
+      slots,
+      Array.tabulate(count)(identity),
+      Int32Column.of(Array(1), Validity.allValid(1), 1),
+      Int32Column.of(Array(7), Validity.allValid(1), 1),
+      reserved = 8,
+    )
+
+    written.length shouldBe count
+    Seq(0, 1, 2).foreach { ordinal =>
+      val column = int32(written, ordinal)
+      column.values.length shouldBe 128
+      column.validity.capacity shouldBe 128
+      column.validity.isValid(count) shouldBe false
+      column.isValid(0) shouldBe true
+    }
+    inOrder(written).map(_._2) shouldBe (count - 1 to 0 by -1).map(Some(_))
+    inOrder(written).map(_._3).distinct shouldBe Seq(Some(7))
+  }
+
+  it should "emit nothing when duplicate build keys miss the probe" in {
+    val build = pairs(Seq((Some(1), Some(10)), (Some(1), Some(11))))
+    join(build, pairs(Seq((Some(2), Some(3))))).length shouldBe 0
+  }
+
   it should "return an empty batch when a side is empty or nothing matches" in {
     val build = pairs(Seq((Some(1), Some(1))))
     val probe = pairs(Seq((Some(2), Some(2))))
