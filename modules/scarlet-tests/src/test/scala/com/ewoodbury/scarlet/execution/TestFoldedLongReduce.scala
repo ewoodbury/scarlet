@@ -57,6 +57,23 @@ class TestFoldedLongReduce extends AnyFlatSpec with Matchers with BeforeAndAfter
       Seq((3L, 5L), (1L, 3L), (2L, 8L))
   }
 
+  it should "keep first-seen order when the partial table grows past its minimum" in {
+    // A range of three rows sizes a 16-slot table (limit 8). Twelve distinct keys double it.
+    // Key 8 is first seen with a null value, which is the insert that crosses the limit.
+    val count = 24
+    val keys = Array.tabulate(count)(row => (row % 12).toLong)
+    val values = Array.tabulate(count)(row => (row + 1).toLong)
+    val valuePresent = Array.tabulate(count)(row => row != 8)
+    val batch = sparse(keys, Array.fill(count)(true), values, valuePresent)
+    val order = List(Selection.Step.Int64(0, keepAll))
+    val selected = index(batch, order)
+
+    decode(fold(Vector(batch), order, numPartitions = 1, parallelism = 1, batchSize = 3)) shouldBe
+      decode(viaIndex(Vector(selected), numPartitions = 1, parallelism = 1, batchSize = 3))
+    decode(fold(Vector(batch), order, numPartitions = 4, parallelism = 4, batchSize = 3)) shouldBe
+      decode(viaIndex(Vector(selected), numPartitions = 4, parallelism = 4, batchSize = 3))
+  }
+
   it should "drop a null key, keep one null value, and unbox a second null" in {
     val batch = sparse(
       Array(1L, 7L, 1L, 2L, 3L, 2L),
