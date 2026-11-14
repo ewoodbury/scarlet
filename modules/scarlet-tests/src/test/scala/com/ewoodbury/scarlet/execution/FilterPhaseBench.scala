@@ -6,6 +6,7 @@ import java.util.{Arrays, Locale}
 import scala.util.control.NonFatal
 
 import cats.effect.unsafe.implicits.global
+import com.sun.management.ThreadMXBean
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
@@ -15,21 +16,25 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
  * Phase split for a real `filter.count` and `filter.values.sum`. Not a test, and not part of
- * `make test`. No kernel change.
+ * `make test`.
  *
  * The input matches [[CrossEngineBench]]: 1e6 int pairs, keys `row % 1024`, the same LCG values,
  * two source partitions, batch 8192, two filters (`key % 3 != 0`, `value >= 0`), spill on. The
- * pool is 4 threads. `CROSS_WARMUP` and `CROSS_ROUNDS` default to 5 and 30. p50 is the upper
- * median, index `n/2` after sorting, the same pick as [[CrossEngineBench]].
+ * pool width is `CROSS_THREADS`, default 4. `CROSS_WARMUP` and `CROSS_ROUNDS` default to 5 and
+ * 30. p50 is the upper median, index `n/2` after sorting, the same pick as [[CrossEngineBench]].
+ * Allocation is a later pass, five rounds, summed across live threads, and is not inside those
+ * samples. `filter-countbykey` is timed as a guard action.
  *
  * [[PhaseBench]] times [[Selection.applySelected]] and an id-copy assemble. Those are not this
- * action. `tryCount` and `trySumInt` encode the scan once, then [[ColumnarPlanner.foldMorsels]]
- * runs [[Selection.count]] or [[Selection.sumInt32]]. The filters and the accumulate are that one
- * walk. Nothing builds a survivor index.
+ * action. `tryCount` and `trySumInt` fold the source columns in [[FusedPairFold]] and do not
+ * encode. The encode, filter, and kernel phases below still time the old pieces:
+ * [[SourceEncode]] and [[Selection.count]] or [[Selection.sumInt32]]. Nothing builds a survivor
+ * index.
  *
  * Each line is its own p50. Phases are not subtracted from each other or from the action.
  *
- *   - `action` is `count()` or `values.sum()`, including encode. A row fallback fails the run.
+ *   - `action` is `count()` or `values.sum()`. It folds the source and publishes no batch. A row
+ *     fallback fails the run.
  *   - `lower` is [[ColumnarPlanner.lower]] on that action's plan.
  *   - `compile` rebuilds the two selection steps the action compiles on every call.
  *   - `encode` is the scan copy that call pays. Count uses [[SourceEncode.encodePairs]]. Sum uses
@@ -44,8 +49,9 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  *     partial sum. It is the body of the action after encode, not a second kernel.
  *   - `assemble` is the caller sum of morsel partials. There is no index copy.
  *
- * A checksum other than the cross-engine pair, a decoded row, or an encode that is not one batch
- * per source partition fails the process.
+ * A checksum other than the cross-engine pair, or a decoded row, fails the process. The action
+ * publishes no batch and does not encode. The encode phase still expects one batch per source
+ * partition.
  *
  * {{{
  * CROSS_WARMUP=5 CROSS_ROUNDS=30 \
@@ -59,10 +65,11 @@ object FilterPhaseBench:
   private val groups = 1024
   private val batchSize = 8192
   private val sourcePartitions = 2
-  private val width = 4
+  private val width = envInt("CROSS_THREADS", 4)
   private val lcgSeed = 0x12345678
   private val countChecksum = 333036L
   private val sumChecksum = 166553391274L
+  private val countByKeyChecksum = 10821571L
   private val countShape = "FilterValue(FilterKey(Scan))"
   private val sumShape = "Value(FilterValue(FilterKey(Scan)))"
 
@@ -85,6 +92,8 @@ object FilterPhaseBench:
 
   private final case class Reading(query: String, phase: String, threads: Int, p50Ms: Double)
 
+  private final case class Alloc(query: String, threads: Int, p50Mb: Double)
+
   def main(args: Array[String]): Unit =
     val warmup = envInt("CROSS_WARMUP", 5)
     val rounds = envInt("CROSS_ROUNDS", 30)
@@ -93,13 +102,17 @@ object FilterPhaseBench:
     val scheduler = new LocalTaskScheduler(width)
     var status = 0
     try
-      if (warmup < 0 || rounds <= 0) then refuse("warmup must be >= 0 and rounds must be > 0")
+      if (warmup < 0 || rounds <= 0 || width < 1) then
+        refuse("warmup must be >= 0, rounds must be > 0, and threads must be >= 1")
       configure(savedConf)
       ScarletRuntime.set(savedRuntime.copy(scheduler = scheduler))
       val prepared = prepare()
       preamble(warmup, rounds, prepared)
       val readings = prepared.flatMap(one => timeAll(one, warmup, rounds))
-      System.err.println(table(readings))
+      val guard = timeGuard(warmup, rounds)
+      val allocs = measureAlloc()
+      System.err.println(table(readings ++ guard))
+      System.err.println(allocTable(allocs))
     catch
       case _: HarnessRefusal => status = 1
       case NonFatal(thrown) =>
@@ -401,10 +414,10 @@ object FilterPhaseBench:
 
   private def acceptActionNotes(name: String, sink: CountingSink, morsels: Int): Unit =
     if (sink.decodedValueCount != 0L) then refuse(s"$name decoded ${sink.decodedValueCount} rows")
-    if (sink.primitiveEncodeCount != sourcePartitions.toLong) then
-      refuse(s"$name encoded ${sink.primitiveEncodeCount} batches, expected $sourcePartitions")
-    if (sink.batchCount != sourcePartitions.toLong) then
-      refuse(s"$name published ${sink.batchCount} batches, expected $sourcePartitions")
+    if (sink.primitiveEncodeCount != 0L) then
+      refuse(s"$name encoded ${sink.primitiveEncodeCount} batches, expected 0")
+    if (sink.batchCount != 0L) then
+      refuse(s"$name published ${sink.batchCount} batches, expected 0")
     acceptVisits(name, "action", sink, morsels)
 
   private def acceptEncodeNotes(name: String, sink: CountingSink): Unit =
@@ -528,10 +541,150 @@ object FilterPhaseBench:
       s""""p50_ms":${millis(reading.p50Ms)},""" +
       s""""checksum":${checksum(query)}}"""
 
+  /** Same two filters as the phase queries. Built outside the timer. */
+  private def filteredPairs(): DistCollection[(Int, Int)] =
+    val values = lcgValues(rows)
+    val keys = Array.tabulate(rows)(row => row % groups)
+    DistCollection
+      .ofIntPairs(keys, values, sourcePartitions)
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+
+  private def timeGuard(warmup: Int, rounds: Int): Vector[Reading] =
+    val filtered = filteredPairs()
+    Vector(
+      time("filter-countbykey", "action", width, warmup, rounds)(clearShuffle()) {
+        FilterCountChecksum.collected(filtered.countByKey.collect(), groups)
+      } { (got, _) =>
+        if (got != countByKeyChecksum) then
+          refuse(s"filter-countbykey $got != $countByKeyChecksum")
+      },
+    )
+
+  private def measureAlloc(): Vector[Alloc] =
+    val bean = threadBean.getOrElse(refuse("thread allocation counter is unavailable"))
+    bean.setThreadAllocatedMemoryEnabled(true)
+    if (!bean.isThreadAllocatedMemoryEnabled) then
+      refuse("thread allocation counter did not enable")
+    val filtered = filteredPairs()
+    Vector(
+      sampleAlloc("filter-count", countChecksum, bean)(filtered.count()),
+      sampleAlloc("filter-sum", sumChecksum, bean)(filtered.values.sum),
+      sampleAlloc("filter-countbykey", countByKeyChecksum, bean) {
+        FilterCountChecksum.collected(filtered.countByKey.collect(), groups)
+      },
+    )
+
+  private def sampleAlloc(query: String, expected: Long, bean: ThreadMXBean)(
+      body: => Long,
+  ): Alloc =
+    var warm = 0
+    while (warm < 2) {
+      clearShuffle()
+      val got = body
+      if (got != expected) then refuse(s"$query alloc warmup $got != $expected")
+      warm += 1
+    }
+    val samples = new Array[Double](allocRounds)
+    var round = 0
+    while (round < allocRounds) {
+      clearShuffle()
+      val (got, bytes) = accounted(bean)(body)
+      if (got != expected) then refuse(s"$query alloc $got != $expected")
+      samples(round) = bytes.toDouble / 1000000.0
+      round += 1
+    }
+    val reading = Alloc(query, width, median(samples))
+    println(allocLine(reading))
+    System.err.println(s"alloc $query threads=$width p50_mb=${millis(reading.p50Mb)}")
+    reading
+
+  private def accounted[A](bean: ThreadMXBean)(body: => A): (A, Long) =
+    val beforeIds = new Array[Long](allocSlots)
+    val beforeBytes = new Array[Long](allocSlots)
+    val before = snapshot(bean, beforeIds, beforeBytes)
+    val value = body
+    val afterIds = new Array[Long](allocSlots)
+    val afterBytes = new Array[Long](allocSlots)
+    val after = snapshot(bean, afterIds, afterBytes)
+    (value, byteDelta(before, beforeIds, beforeBytes, after, afterIds, afterBytes))
+
+  private def snapshot(bean: ThreadMXBean, ids: Array[Long], bytes: Array[Long]): Int =
+    val live = bean.getAllThreadIds
+    if (live.length > ids.length) then
+      refuse(s"alloc probe saw ${live.length} threads, capacity ${ids.length}")
+    var index = 0
+    while (index < live.length) {
+      ids(index) = live(index)
+      bytes(index) = bean.getThreadAllocatedBytes(live(index))
+      index += 1
+    }
+    live.length
+
+  private def byteDelta(
+      before: Int,
+      beforeIds: Array[Long],
+      beforeBytes: Array[Long],
+      after: Int,
+      afterIds: Array[Long],
+      afterBytes: Array[Long],
+  ): Long =
+    var total = 0L
+    var index = 0
+    while (index < after) {
+      val grew = afterBytes(index) - baselineBytes(afterIds(index), before, beforeIds, beforeBytes)
+      if (grew > 0L) then total += grew
+      index += 1
+    }
+    total
+
+  private def baselineBytes(
+      id: Long,
+      count: Int,
+      ids: Array[Long],
+      bytes: Array[Long],
+  ): Long =
+    var index = 0
+    var found = 0L
+    while (index < count) {
+      if (ids(index) == id) then found = bytes(index)
+      index += 1
+    }
+    found
+
+  private def threadBean: Option[ThreadMXBean] =
+    ManagementFactory.getThreadMXBean match
+      case bean: ThreadMXBean => Some(bean)
+      case _ => None
+
+  private def allocTable(allocs: Vector[Alloc]): String =
+    val header = Vector(
+      "",
+      "| query | threads | p50 alloc MB |",
+      "| --- | ---: | ---: |",
+    )
+    val body = allocs.map { alloc =>
+      s"| ${alloc.query} | ${alloc.threads} | ${millis(alloc.p50Mb)} |"
+    }
+    (header ++ body).mkString("\n")
+
+  private def allocLine(alloc: Alloc): String =
+    "{" +
+      """"schema":"filter-phase-alloc-1",""" +
+      s""""query":"${alloc.query}",""" +
+      s""""threads":${alloc.threads},""" +
+      s""""rows":$rows,""" +
+      s""""p50_alloc_mb":${millis(alloc.p50Mb)},""" +
+      s""""checksum":${checksum(alloc.query)}}"""
+
+  private val allocRounds = 5
+  private val allocSlots = 512
+
   private def checksum(query: String): Long =
     query match
       case "filter-count" => countChecksum
       case "filter-sum" => sumChecksum
+      case "filter-countbykey" => countByKeyChecksum
       case other => refuse(s"no checksum for $other")
 
   private def millis(value: Double): String =

@@ -241,10 +241,10 @@ object ColumnarPlanner:
    * Row count of a columnar plan. `None` means the row path. This does not decode a column.
    * [[PhysicalOp.GroupedDecode]] is the exception: the count is the mapped rows after one decode.
    * [[TrailingProject.count]] folds an int, long, or dictionary-literal string chain without
-   * writing it. A filter stack over an int-pair scan counts in [[Selection.count]] and does not
-   * build a survivor index or a gathered batch. Any other accepted plan reads finished batch
-   * lengths. A string shape that is not the literal chain is that second strategy. The catch is
-   * the row-path fallback. [[ColumnarFallback]] is its named form.
+   * writing it. A filter stack over an int-pair scan counts the source columns in
+   * [[FusedPairFold]] and does not build a survivor index or a gathered batch. Any other accepted
+   * plan reads finished batch lengths. A string shape that is not the literal chain is that second
+   * strategy. The catch is the row-path fallback. [[ColumnarFallback]] is its named form.
    */
   def tryCount(plan: Plan[_]): Option[Long] =
     accepted(plan) match
@@ -279,7 +279,13 @@ object ColumnarPlanner:
         Selection.Step.StringPair(_) =>
       false
 
-  /** Counts the admitted stack in place. The source scan is encoded once and not filtered. */
+  /**
+   * Counts the admitted stack over the source columns. A count does not read a copied batch, so
+   * the scan is not encoded. Owned arrays are sliced like morsels and folded in parallel. A boxed
+   * partition is one pass that keeps a null absent and does not retain a batch. `encoded` is a
+   * no-op while the pair filter still demands both columns, so the steps stay on those logical
+   * ordinals.
+   */
   private def countFilteredPairs(plan: Plan[_], op: PhysicalOp): Long =
     val compiled = PredicatePlan.compile(plan, op).getOrElse(missingPairCount)
     val ordinals = ColumnUse.ordinals(plan, op)
@@ -287,13 +293,10 @@ object ColumnarPlanner:
       .selectionSteps(PredicatePlan.encoded(compiled, ordinals))
       .getOrElse(missingPairCount)
       .toList
-    val batches = PredicatePlan.childOf(plan, op) match
-      case (_, PhysicalOp.Scan(PhysicalOp.Kind.Pairs, partitions)) =>
-        SourceEncode.encodePairs(partitions, ordinals)
+    val partitions = PredicatePlan.childOf(plan, op) match
+      case (_, PhysicalOp.Scan(PhysicalOp.Kind.Pairs, scanned)) => scanned
       case _ => missingPairCount
-    foldMorsels(batches) { morsel =>
-      Selection.count(morsel.batch, morsel.start, morsel.length, steps)
-    }
+    FusedPairFold.count(partitions, steps, batchSize, parallelism)
 
   private def missingPairCount: Nothing =
     throw new IllegalStateException("pair filter count lost its scan")
@@ -579,7 +582,7 @@ object ColumnarPlanner:
 
   /**
    * Sum one int column of a pair plan. `ordinal` is 0 for keys and 1 for values. A filter stack
-   * over an int-pair scan adds in [[Selection.sumInt32]] and does not build a survivor index or a
+   * over an int-pair scan adds in [[FusedPairFold]] and does not build a survivor index or a
    * gathered batch. The stack is the one [[countsFilteredPairs]] admits, and only when the encoded
    * columns include that ordinal. Any other shape still interprets and sums the projected column.
    */
@@ -601,10 +604,11 @@ object ColumnarPlanner:
       ColumnUse.ordinals(plan, op).contains(ordinal)
 
   /**
-   * Sums the admitted stack in place. The source scan is encoded once, both columns, and not
-   * filtered. A null component stays absent, so a null measure adds nothing and a null filter slot
-   * still fails the row. Steps keep the logical ordinals of that two-column batch. A shape that
-   * admission rejects returns `None`, so the caller falls back rather than throwing.
+   * Sums the admitted stack over the source columns. The total is a `Long` and nothing downstream
+   * reads a copied batch, so the scan is not encoded. A null component stays absent, so a null
+   * measure adds nothing and a null filter slot still fails the row. Steps keep the logical
+   * ordinals of the two source columns. A shape that admission rejects returns `None`, so the
+   * caller falls back rather than throwing.
    */
   private def sumFilteredPairs(plan: Plan[_], op: PhysicalOp, ordinal: Int): Option[Long] =
     if (!sumsFilteredPairs(plan, op, ordinal)) then None
@@ -615,11 +619,7 @@ object ColumnarPlanner:
         partitions <- PredicatePlan.childOf(plan, op) match
           case (_, PhysicalOp.Scan(PhysicalOp.Kind.Pairs, scanned)) => Some(scanned)
           case _ => None
-      yield
-        val batches = SourceEncode.encodeGroupedPairs(partitions)
-        foldMorsels(batches) { morsel =>
-          Selection.sumInt32(morsel.batch, morsel.start, morsel.length, steps, ordinal)
-        }
+      yield FusedPairFold.sum(partitions, steps, ordinal, batchSize, parallelism)
 
   /**
    * Fold `fn` over morsels of the batches `op` produces. Each batch is cut with [[Morsels.of]] and
