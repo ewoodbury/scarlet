@@ -325,10 +325,21 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     fullOuter.collect().toList should contain theSameElementsAs row(fullOuter.collect().toList)
   }
 
-  it should "keep long inner sort-merge on the row path" in {
+  it should "lower long inner sort-merge and keep an unhinted outer join on the hash node" in {
     val left = DistCollection.ofLongPairs(Array(1L, 2L), Array(10L, 20L), 4)
     val right = DistCollection.ofLongPairs(Array(1L, 3L), Array(100L, 30L), 4)
-    refuse(left.sortMergeJoin(right))
+    ColumnarPlanner.lower(left.sortMergeJoin(right).plan).map(_.shape) shouldBe Some(
+      "LongSortMergeJoin(Exchange(Scan), Exchange(Scan))",
+    )
+    ColumnarPlanner.lower(left.join(right).plan).map(_.shape) shouldBe Some(
+      "LongHashJoin(Exchange(Scan), Exchange(Scan))",
+    )
+    ColumnarPlanner.lower(left.broadcastJoin(right).plan).map(_.shape) shouldBe Some(
+      "LongBroadcastJoin(Scan, Scan)",
+    )
+    ColumnarPlanner.lower(left.shuffleHashJoin(right).plan).map(_.shape) shouldBe Some(
+      "LongHashJoin(Exchange(Scan), Exchange(Scan))",
+    )
     val leftOuter = left.leftOuterJoin(right)
     val rightOuter = left.rightOuterJoin(right)
     val fullOuter = left.fullOuterJoin(right)
@@ -349,12 +360,6 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     rightOuter.collect().toList should contain theSameElementsAs row(rightOuter.collect().toList)
     fullOuter.collect().toList should contain theSameElementsAs row(fullOuter.collect().toList)
   }
-
-  private def refuse[A](collection: DistCollection[A]): Unit =
-    ColumnarPlanner.lower(collection.plan) shouldBe Option.empty[PhysicalOp]
-    ColumnarPlanner.partitioning(collection.plan) shouldBe Option.empty[PartitioningInfo]
-    ColumnarPlanner.tryTake(collection.plan, 1) shouldBe Option.empty[Seq[A]]
-    collection.collect().toList should contain theSameElementsAs row(collection.collect().toList)
 
   private def broadcastAgrees(
       joined: DistCollection[(Long, (Long, Long))],

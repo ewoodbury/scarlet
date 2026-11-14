@@ -25,7 +25,21 @@ private[scarlet] object JoinDigest:
   /** One key's pair count. `None` is the null key. */
   final case class KeyCount(key: Option[Int], count: Long)
 
+  /** One long key's pair count. `None` is the null key. */
+  final case class LongKeyCount(key: Option[Long], count: Long)
+
   final case class Digest(checksum: Long, total: Long, counts: Vector[KeyCount])
+
+  /**
+   * Long-key digest. `nullCells` counts null values, left as 1 and right as 2, so a null value
+   * stays distinct from the long that shares the null-value mix.
+   */
+  final case class LongDigest(
+      checksum: Long,
+      nullCells: Long,
+      total: Long,
+      counts: Vector[LongKeyCount],
+  )
 
   val empty: Digest = Digest(0L, 0L, Vector.empty)
 
@@ -39,6 +53,13 @@ private[scarlet] object JoinDigest:
    */
   def fromOuter(rows: Iterable[Any]): Digest =
     accumulate(rows, outer = true)
+
+  /**
+   * Inner-join rows of `(Long, (Long, Long))`. A null key stays null. A null value stays a null
+   * value. Any other cell fails the run.
+   */
+  def fromLong(rows: Iterable[Any]): LongDigest =
+    accumulateLong(rows)
 
   private def accumulate(rows: Iterable[Any], outer: Boolean): Digest =
     val counts = mutable.HashMap.empty[Option[Int], Long]
@@ -56,11 +77,27 @@ private[scarlet] object JoinDigest:
   def agrees(left: Digest, right: Digest): Boolean =
     left.checksum == right.checksum && left.total == right.total && sameCounts(left.counts, right.counts)
 
+  def agrees(left: LongDigest, right: LongDigest): Boolean =
+    left.checksum == right.checksum && left.nullCells == right.nullCells &&
+      left.total == right.total && sameLongCounts(left.counts, right.counts)
+
   /** First disagreement, for a failed run. `equal` when [[agrees]] is true. */
   def difference(left: Digest, right: Digest): String =
     if (left.total != right.total) then s"pairs ${left.total} != ${right.total}"
     else
       firstCountGap(left.counts, right.counts).getOrElse {
+        if (left.checksum != right.checksum) then
+          s"checksum ${left.checksum} != ${right.checksum}"
+        else "equal"
+      }
+
+  /** First disagreement, for a failed long-key run. `equal` when [[agrees]] is true. */
+  def difference(left: LongDigest, right: LongDigest): String =
+    if (left.total != right.total) then s"pairs ${left.total} != ${right.total}"
+    else if (left.nullCells != right.nullCells) then
+      s"null cells ${left.nullCells} != ${right.nullCells}"
+    else
+      firstLongCountGap(left.counts, right.counts).getOrElse {
         if (left.checksum != right.checksum) then
           s"checksum ${left.checksum} != ${right.checksum}"
         else "equal"
@@ -184,6 +221,113 @@ private[scarlet] object JoinDigest:
   private def showKey(key: Option[Int]): String = key match
     case Some(present) => present.toString
     case None => "null"
+
+  private def accumulateLong(rows: Iterable[Any]): LongDigest =
+    val counts = mutable.HashMap.empty[Option[Long], Long]
+    var checksum = 0L
+    var nullCells = 0L
+    var total = 0L
+    rows.foreach { row =>
+      val (key, left, right) = readLongInner(row)
+      total += 1L
+      checksum += mixLong(key, left, right)
+      nullCells += nullMark(left, right)
+      val count = counts.getOrElse(key, 0L) + 1L
+      counts.update(key, count)
+    }
+    LongDigest(checksum, nullCells, total, orderedLong(counts))
+
+  private def readLongInner(row: Any): (Option[Long], LongCell, LongCell) =
+    val product = pairOf(row, "join row")
+    val nested = pairOf(product.productElement(1), "join value")
+    (
+      readLongKey(product.productElement(0)),
+      readLongCell(nested.productElement(0)),
+      readLongCell(nested.productElement(1)),
+    )
+
+  private def readLongKey(cell: Any): Option[Long] = cell match
+    case null => None
+    case number: Long => Some(number)
+    case _ => throw new IllegalStateException("join key was not a long")
+
+  private def readLongCell(cell: Any): LongCell = cell match
+    case null => LongCell.NullValue
+    case number: Long => LongCell.Present(number)
+    case _ => throw new IllegalStateException("join value was not a long")
+
+  private def mixLong(key: Option[Long], left: LongCell, right: LongCell): Long =
+    var hash = mixLongKey(key)
+    hash ^= longCellBits(left, leftFactor)
+    hash ^= longCellBits(right, rightFactor)
+    hash
+
+  private def mixLongKey(key: Option[Long]): Long =
+    val mixedKey = key match
+      case Some(present) => present
+      case None => nullKeyBits
+    mixedKey * keyFactor
+
+  private def longCellBits(cell: LongCell, factor: Long): Long = cell match
+    case LongCell.Present(value) => value * factor
+    case LongCell.NullValue => factor * nullValueMultiplier
+
+  /** Left null adds 1. Right null adds 2. A present long, including `0`, adds nothing. */
+  private def nullMark(left: LongCell, right: LongCell): Long =
+    val leftMark = left match
+      case LongCell.NullValue => 1L
+      case LongCell.Present(_) => 0L
+    val rightMark = right match
+      case LongCell.NullValue => 2L
+      case LongCell.Present(_) => 0L
+    leftMark + rightMark
+
+  private def orderedLong(counts: mutable.HashMap[Option[Long], Long]): Vector[LongKeyCount] =
+    counts.toVector
+      .map { case (key, count) => LongKeyCount(key, count) }
+      .sortWith(longBefore)
+
+  private def longBefore(left: LongKeyCount, right: LongKeyCount): Boolean =
+    longKeyBefore(left.key, right.key)
+
+  private def firstLongCountGap(
+      left: Vector[LongKeyCount],
+      right: Vector[LongKeyCount],
+  ): Option[String] =
+    val keys = (left.map(_.key) ++ right.map(_.key)).distinct.sortWith(longKeyBefore)
+    keys.iterator.map { key =>
+      val leftCount = longCountAt(left, key)
+      val rightCount = longCountAt(right, key)
+      if (leftCount == rightCount) then None
+      else Some(s"key ${showLongKey(key)} pairs $leftCount != $rightCount")
+    }.collectFirst { case Some(text) => text }
+
+  private def longKeyBefore(left: Option[Long], right: Option[Long]): Boolean = (left, right) match
+    case (None, Some(_)) => true
+    case (Some(_), None) => false
+    case (Some(leftKey), Some(rightKey)) => leftKey < rightKey
+    case (None, None) => false
+
+  private def longCountAt(counts: Vector[LongKeyCount], key: Option[Long]): Long =
+    counts.find(count => sameLongKey(count.key, key)).fold(0L)(_.count)
+
+  private def sameLongCounts(left: Vector[LongKeyCount], right: Vector[LongKeyCount]): Boolean =
+    left.length == right.length && left.zip(right).forall { case (leftCount, rightCount) =>
+      sameLongKey(leftCount.key, rightCount.key) && leftCount.count == rightCount.count
+    }
+
+  private def sameLongKey(left: Option[Long], right: Option[Long]): Boolean = (left, right) match
+    case (Some(leftKey), Some(rightKey)) => leftKey == rightKey
+    case (None, None) => true
+    case _ => false
+
+  private def showLongKey(key: Option[Long]): String = key match
+    case Some(present) => present.toString
+    case None => "null"
+
+  private enum LongCell:
+    case Present(value: Long)
+    case NullValue
 
   private val keyFactor: Long = 0x9e3779b97f4a7c15L
   private val leftFactor: Long = 0xbf58476d1ce4e5b9L

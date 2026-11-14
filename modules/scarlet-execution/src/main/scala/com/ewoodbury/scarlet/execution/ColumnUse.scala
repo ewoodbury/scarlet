@@ -156,6 +156,8 @@ private[execution] object ColumnUse:
         pair(left, right, leftOp, rightOp)
       case (Plan.JoinOp(left, right, _), PhysicalOp.LongHashJoin(leftOp, rightOp)) =>
         pair(left, right, leftOp, rightOp)
+      case (Plan.JoinOp(left, right, _), PhysicalOp.LongSortMergeJoin(leftOp, rightOp)) =>
+        pair(left, right, leftOp, rightOp)
       case (Plan.JoinOp(left, right, _), PhysicalOp.StringHashJoin(leftOp, rightOp)) =>
         pair(left, right, leftOp, rightOp)
       case (Plan.JoinOp(left, right, _), PhysicalOp.SortMergeJoin(leftOp, rightOp)) =>
