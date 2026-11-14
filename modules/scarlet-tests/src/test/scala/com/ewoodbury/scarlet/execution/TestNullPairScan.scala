@@ -34,13 +34,13 @@ class TestNullPairScan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ScarletConf.set(original)
     ()
 
-  "count" should "include a null value the key filter keeps and publish a column batch" in {
+  "count" should "include a null value the key filter keeps and publish no batch" in {
     val kept = source.filterKeys((key: Int) => key > 0)
     val (counted, batches, encodes) = measured(kept.count())
 
     counted shouldBe 5L
     ColumnarPlanner.tryCount(kept.plan) shouldBe Some(5L)
-    batches should be > 0L
+    batches shouldBe 0L
     encodes shouldBe 0L
     nullValueKept(kept) shouldBe true
   }
@@ -118,13 +118,13 @@ class TestNullPairScan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     thrown.getMessage should include("clear value bit")
   }
 
-  "an owned array" should "still note a primitive encode" in {
+  "an owned array" should "fold a filtered count without a primitive encode" in {
     val owned = DistCollection.ofIntPairs(Array(1, 2), Array(10, 20), 1)
     val (counted, batches, encodes) = measured(owned.filterKeys((key: Int) => key > 0).count())
 
     counted shouldBe 2L
-    batches should be > 0L
-    encodes should be > 0L
+    batches shouldBe 0L
+    encodes shouldBe 0L
   }
 
   private def source: DistCollection[(Int, Int)] =
