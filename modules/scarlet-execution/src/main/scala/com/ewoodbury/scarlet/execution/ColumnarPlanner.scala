@@ -51,20 +51,24 @@ object ColumnarPlanner:
    * matched row. It is not an absence bit. A shuffle-hash key or value filter scatters the
    * survivor index and does not compact. An over-budget shuffle bucket spills when `spillEnabled`
    * is on. The estimate includes the dictionary. An over-budget broadcast build throws and writes
+   * nothing. An explicit sort-merge hint lowers to [[PhysicalOp.StringSortMergeJoin]]. Both sides
+   * are exchanged on `String.hashCode`. A null key is dropped. Comparison is `String.compareTo` on
+   * the dictionary-decoded key. The join runs in memory. With spill on, a partition whose
+   * present-key estimate, including the dictionary, is above `spillBudgetBytes` throws and writes
    * nothing. String outer joins lower for an absent hint, shuffle-hash, broadcast, or sort-merge.
-   * Hash and broadcast do not spill. Sort-merge throws instead of spilling. String inner
-   * sort-merge stays on the row path. Layout is [[Layout.StringTriple]]. An explicit sort-merge
-   * hint on int pairs lowers to [[PhysicalOp.SortMergeJoin]]. The same hint on long pairs lowers
-   * to [[PhysicalOp.LongSortMergeJoin]]. A left, right, or full outer sort-merge hint lowers to
-   * the matching node. Any other sort-merge returns `None`. A left, right, or full outer join on
-   * int pairs lowers for a broadcast, shuffle-hash, absent, or sort-merge hint. An absent hint
-   * uses the shuffle-hash op. On a right outer join the left input is the build and the right
-   * input is the probe. A null value on an int shuffle-hash left or right outer join, or an int
-   * broadcast right outer join, stays a clear validity bit and [[tryRun]] keeps the row. A null
-   * value on a full outer join, a broadcast left outer join, or a sort-merge outer join makes
-   * [[tryRun]] return `None`. [[SortLowering]] accepts an int, long, or string key sort of a scan,
-   * or of filters over that scan. A map, aggregate, or join under the sort stays on the row path.
-   * One filter above an int sort lowers to [[PhysicalOp.Filter]] on [[PhysicalOp.Slot.Row]] around
+   * Hash and broadcast do not spill. Sort-merge throws instead of spilling. Layout is
+   * [[Layout.StringTriple]]. An explicit sort-merge hint on int pairs lowers to
+   * [[PhysicalOp.SortMergeJoin]]. The same hint on long pairs lowers to
+   * [[PhysicalOp.LongSortMergeJoin]]. A left, right, or full outer sort-merge hint lowers to the
+   * matching node. Any other sort-merge returns `None`. A left, right, or full outer join on int
+   * pairs lowers for a broadcast, shuffle-hash, absent, or sort-merge hint. An absent hint uses
+   * the shuffle-hash op. On a right outer join the left input is the build and the right input is
+   * the probe. A null value on an int shuffle-hash left or right outer join, or an int broadcast
+   * right outer join, stays a clear validity bit and [[tryRun]] keeps the row. A null value on a
+   * full outer join, a broadcast left outer join, or a sort-merge outer join makes [[tryRun]]
+   * return `None`. [[SortLowering]] accepts an int, long, or string key sort of a scan, or of
+   * filters over that scan. A map, aggregate, or join under the sort stays on the row path. One
+   * filter above an int sort lowers to [[PhysicalOp.Filter]] on [[PhysicalOp.Slot.Row]] around
    * [[PhysicalOp.SortByIntKey]], and only for a fully present key column: the pair-row filter atom
    * drops a null key while the row path keeps it. The sort is [[SortLowering.lowerInt]].
    * [[SortLowering.acceptsAsChild]] stays false, so a null key, a second filter, a long or string

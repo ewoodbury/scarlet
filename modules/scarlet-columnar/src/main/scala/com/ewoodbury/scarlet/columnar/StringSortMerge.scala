@@ -1,18 +1,26 @@
 package com.ewoodbury.scarlet.columnar
 
 /**
- * In-memory sort-merge outer join of one co-located `(String, Int)` partition.
+ * In-memory sort-merge join of one co-located `(String, Int)` partition.
  *
- * A null key is not sorted and does not match `""` or `dictionary(0)`. A preserved null key is
- * emitted with a clear bit and is not interned. The other value's absence bit is set, and its
- * validity bit stays clear. A null value is not absence, so both value columns must be fully
- * present. [[leftOuter]], [[rightOuter]], and [[fullOuter]] fail when a value is null, rather than
- * publishing that null as absence. [[rightOuter]] is [[leftOuter]] on swapped inputs, with the
- * value columns swapped back. [[fullOuter]] emits a group that exists on only one side, and emits
- * both sides when one of them is empty.
+ * [[inner]] drops a null key before the sort, so a null key does not match `""` or
+ * `dictionary(0)`. A null value stays a clear validity bit and is copied with the matched row. It
+ * is not an absence bit. Equal keys keep input order. The cartesian product of one equal-key group
+ * is written before either cursor moves on. Comparison is `String.compareTo` on the
+ * dictionary-decoded key. Dictionary codes are not compared, so the two sides may use different
+ * dictionaries.
  *
- * Equal keys keep input order. Comparison is `String.compareTo`. This file has no inner join. It
- * does not spill and does not open a directory. The caller decides whether the partition fits.
+ * A null key is not sorted and does not match `""` or `dictionary(0)`. A preserved null key on an
+ * outer join is emitted with a clear bit and is not interned. The other value's absence bit is
+ * set, and its validity bit stays clear. A null value is not absence, so both value columns must
+ * be fully present for an outer join. [[leftOuter]], [[rightOuter]], and [[fullOuter]] fail when a
+ * value is null, rather than publishing that null as absence. [[rightOuter]] is [[leftOuter]] on
+ * swapped inputs, with the value columns swapped back. [[fullOuter]] emits a group that exists on
+ * only one side, and emits both sides when one of them is empty.
+ *
+ * Both walks reuse [[sortedSide]], the stable index sort. Equal keys keep input order. Comparison
+ * is `String.compareTo`. This file does not spill and does not open a directory. The caller
+ * decides whether the partition fits. Over the budget, the caller throws and writes nothing.
  */
 @SuppressWarnings(
   Array(
@@ -21,6 +29,21 @@ package com.ewoodbury.scarlet.columnar
   ),
 )
 object StringSortMerge:
+
+  /**
+   * Inner join of one co-located partition. Null keys are dropped before the sort. A null value is
+   * copied. Equal keys keep input order, and each left row of a group is paired with every right
+   * row of that group before the next left row. An empty side, or no shared key, returns an empty
+   * join batch. This does not spill.
+   */
+  def inner(left: ColumnBatch, right: ColumnBatch): ColumnBatch =
+    val leftSide = sortedSide(left)
+    val rightSide = sortedSide(right)
+    if (leftSide.length == 0 || rightSide.length == 0) then ColumnBatches.emptyStringJoin
+    else
+      val rows = matchCount(leftSide, rightSide)
+      if (rows == 0) then ColumnBatches.emptyStringJoin
+      else writeInner(leftSide, rightSide, rows)
 
   /**
    * Left outer join of one co-located partition. A null key does not match. Each left row whose
@@ -232,6 +255,68 @@ object StringSortMerge:
         DictUtf8Column.of(words.toArray, codes, Validity.fromWords(keyWords, rows), rows),
         outerValue(leftValues, leftWords, leftAbsence, rows),
         outerValue(rightValues, rightWords, rightAbsence, rows),
+      ),
+      rows,
+    )
+
+  /** Equal-key groups only. An unmatched group adds nothing. */
+  private def matchCount(left: SortedSide, right: SortedSide): Int =
+    var leftAt = 0
+    var rightAt = 0
+    var total = 0
+    while (leftAt < left.length && rightAt < right.length) {
+      val order = left.keys(leftAt).compareTo(right.keys(rightAt))
+      if (order < 0) then leftAt = groupEnd(left.keys, leftAt, left.length)
+      else if (order > 0) then rightAt = groupEnd(right.keys, rightAt, right.length)
+      else
+        val leftEnd = groupEnd(left.keys, leftAt, left.length)
+        val rightEnd = groupEnd(right.keys, rightAt, right.length)
+        total = addMatches(total, leftEnd - leftAt, rightEnd - rightAt)
+        leftAt = leftEnd
+        rightAt = rightEnd
+    }
+    total
+
+  private def writeInner(left: SortedSide, right: SortedSide, rows: Int): ColumnBatch =
+    val words = DictUtf8Column.Words.empty
+    val codes = new Array[Int](rows)
+    val leftValues = new Array[Int](rows)
+    val rightValues = new Array[Int](rows)
+    val leftWords = Validity.allocate(rows)
+    val rightWords = Validity.allocate(rows)
+    var leftAt = 0
+    var rightAt = 0
+    var filled = 0
+    while (leftAt < left.length && rightAt < right.length) {
+      val order = left.keys(leftAt).compareTo(right.keys(rightAt))
+      if (order < 0) then leftAt = groupEnd(left.keys, leftAt, left.length)
+      else if (order > 0) then rightAt = groupEnd(right.keys, rightAt, right.length)
+      else
+        val leftEnd = groupEnd(left.keys, leftAt, left.length)
+        val rightEnd = groupEnd(right.keys, rightAt, right.length)
+        val code = words.intern(left.keys(leftAt))
+        var leftRow = leftAt
+        while (leftRow < leftEnd) {
+          var rightRow = rightAt
+          while (rightRow < rightEnd) {
+            codes(filled) = code
+            copyPresent(left.values, left.valueWords, leftRow, leftValues, leftWords, filled)
+            copyPresent(right.values, right.valueWords, rightRow, rightValues, rightWords, filled)
+            filled += 1
+            rightRow += 1
+          }
+          leftRow += 1
+        }
+        leftAt = leftEnd
+        rightAt = rightEnd
+    }
+    require(filled == rows, s"sort-merge wrote $filled rows and counted $rows")
+    new ColumnBatch(
+      joinSchema,
+      Vector(
+        DictUtf8Column.of(words.toArray, codes, Validity.allValid(rows), rows),
+        Int32Column.of(leftValues, Validity.fromWords(leftWords, rows), rows),
+        Int32Column.of(rightValues, Validity.fromWords(rightWords, rows), rows),
       ),
       rows,
     )

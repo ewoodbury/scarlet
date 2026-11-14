@@ -589,6 +589,24 @@ private[execution] object ColumnarInterpreter:
         ordinals,
       )
     case (
+          Plan.JoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
+          PhysicalOp.StringSortMergeJoin(
+            PhysicalOp.Exchange(leftOp),
+            PhysicalOp.Exchange(rightOp),
+          ),
+        ) =>
+      // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+      PipelineJoinArms.stringSortMerge(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
+      )
+    case (
           Plan.JoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
           PhysicalOp.BroadcastJoin(leftOp, rightOp, buildSide),
         ) =>
