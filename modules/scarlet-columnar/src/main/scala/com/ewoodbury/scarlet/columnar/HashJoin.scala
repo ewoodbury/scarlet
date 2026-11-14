@@ -202,6 +202,13 @@ object HashJoin:
           keepMisses = false,
         )
       if (reserved == 0) then ColumnBatches.emptyIntJoin
+      else if (
+          slots.maxChain > 1 && probeRows <= JoinWrite.MaxProbeRows &&
+          JoinWrite.dense(probeKeys, probeValues, buildValues)
+        )
+      then
+        // One walk of each chain, then a copy per hit. A null stays on the loop below.
+        JoinWrite.writeGrouped(slots, buildValueValues, probeKeys, probeValues, reserved)
       else
         var outCapacity = reserved
         var filled = 0
