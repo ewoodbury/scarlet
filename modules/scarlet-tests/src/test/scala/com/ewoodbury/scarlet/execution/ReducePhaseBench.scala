@@ -20,7 +20,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * `ceil(p / 100 * n)` over 40 rounds after 5 warmups. A [[CountingSink]] is installed around the
  * timed call the way [[CrossEngineBench]] installs it.
  *
- *   - `encode` is [[BatchCodec.copiedLongPairs]] on each owned partition, the scan copy.
+ *   - `encode` is [[BatchCodec.copiedLongPairs]] on each owned partition, the scan copy. One
+ *     thread copies the partitions in order. More than one thread schedules that copy.
  *   - `selection` is [[MorselScheduler.map]] of [[Selection.applySelected]] over source morsels.
  *   - `assemble` is the caller-side id copy in `FilterChain.assemble`.
  *   - `partial` is [[LongHashReduce.int64Selected]] on survivor spans. It does not merge.
@@ -31,6 +32,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  *   - `decode` is [[BatchCodec.decodeLongPairs]] on the reduced buckets, the collect write.
  *   - `checksum` is the bench fold `key * 31 + value` over that decoded seq.
  *   - `kernel` is [[LongHashReduce.byKeySelected]], partials through buckets.
+ *   - `fused` is [[FoldedLongReduce.reduce]] on the encoded batches: filter and insert in one
+ *     pass, then the same merge and exchange. It does not build a survivor index.
  *   - `action` is the real `reduceByKey.collect` checksum, including encode and decode.
  *   - `tree` is a pairwise merge of the same partials. It is not the product path.
  *
@@ -102,7 +105,7 @@ object ReducePhaseBench:
     val keys = Array.tabulate(rows)(row => (row % groups).toLong)
     val oracle = oracleOf(values)
     val owned = ownedPartitions(keys, values)
-    val batches = encode(owned)
+    val batches = encode(owned, threads = 1)
     val morsels = batches.flatMap(batch => Morsels.of(batch, batchSize))
     val morselHits = groupHits(batches, selectMorsels(morsels, width))
     val assembled = morselHits.zip(batches).map { (hits, batch) =>
@@ -143,7 +146,7 @@ object ReducePhaseBench:
 
   private def timeAll(saved: ScarletConf, prepared: Prepared, threads: Int): Vector[Reading] =
     Vector(
-      time(saved, "encode", threads)(encode(prepared.owned)) { batches =>
+      time(saved, "encode", threads)(encode(prepared.owned, threads)) { batches =>
         acceptBatches(batches, rows)
       },
       time(saved, "selection", threads) {
@@ -191,6 +194,11 @@ object ReducePhaseBench:
         if (total != prepared.oracle.distinct) then
           refuse(s"kernel reduced $total keys, expected ${prepared.oracle.distinct}")
       },
+      time(saved, "fused", threads)(fused(prepared.batches, threads)) { batches =>
+        val total = batches.foldLeft(0)((sum, batch) => sum + batch.length)
+        if (total != prepared.oracle.distinct) then
+          refuse(s"fused reduced $total keys, expected ${prepared.oracle.distinct}")
+      },
       time(saved, "action", threads)(prepared.action()) { got =>
         if (got != prepared.oracle.checksum) then
           refuse(s"action $got != ${prepared.oracle.checksum}")
@@ -227,8 +235,13 @@ object ReducePhaseBench:
       round += 1
     nearestP50(samples)
 
-  private def encode(owned: Vector[Owned]): Vector[ColumnBatch] =
-    owned.map(part => BatchCodec.copiedLongPairs(part.keys, part.values))
+  private def encode(owned: Vector[Owned], threads: Int): Vector[ColumnBatch] =
+    if (threads <= 1 || owned.length <= 1) then
+      owned.map(part => BatchCodec.copiedLongPairs(part.keys, part.values))
+    else
+      MorselScheduler.map(owned, threads) { (_, part) =>
+        BatchCodec.copiedLongPairs(part.keys, part.values)
+      }
 
   private def selectMorsels(morsels: Vector[Morsel], threads: Int): Vector[Selected] =
     MorselScheduler.map(morsels, threads) { (_, morsel) =>
@@ -301,6 +314,9 @@ object ReducePhaseBench:
 
   private def kernel(selected: Vector[Selected], threads: Int): Vector[ColumnBatch] =
     LongHashReduce.byKeySelected(selected, width, threads, batchSize, plus)
+
+  private def fused(batches: Vector[ColumnBatch], threads: Int): Vector[ColumnBatch] =
+    FoldedLongReduce.reduce(batches, steps, width, threads, batchSize, plus)
 
   private def decode(batches: Vector[ColumnBatch]): Seq[(Long, Long)] =
     batches.flatMap(batch => BatchCodec.decodeLongPairs(batch))
