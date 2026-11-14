@@ -131,6 +131,117 @@ class TestHashJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     inOrder(join(build, probe)).map(_._2) shouldBe Seq(Some(11), Some(10))
   }
 
+  it should "match a row join at one and four partitions, including ten matches" in {
+    val build = (0 until 40).flatMap { key =>
+      (0 until 10).map(copy => (Some(key), Some(copy)))
+    } ++ Seq((None, Some(1)), (Some(1), None))
+    val probe = (0 until 40).map(key => (Some(key), Some(1000 + key))) ++ Seq(
+      (None, Some(7)),
+      (Some(99), Some(8)),
+      (Some(1), None),
+    )
+    val expected = rowJoin(build, probe)
+
+    sorted(join(pairs(build), pairs(probe))) shouldBe expected
+    Seq(1, 4).foreach { parts =>
+      val joined = ColumnPipeline.innerJoin(
+        Vector(pairs(build)),
+        Vector(pairs(probe)),
+        numPartitions = parts,
+        parallelism = 2,
+        batchSize = 16,
+      )
+      sortedBatches(joined) shouldBe expected
+    }
+    // Ten build copies of key 0, plus the extra null value on key 1 only.
+    expected.count(_._1 == 0) shouldBe 10
+  }
+
+  it should "return an empty batch for an empty side at one and four partitions" in {
+    val build = pairs(Seq((Some(1), Some(1))))
+    val empty = pairs(Seq.empty)
+    Seq(1, 4).foreach { parts =>
+      val noBuild = ColumnPipeline.innerJoin(
+        Vector(empty),
+        Vector(build),
+        numPartitions = parts,
+        parallelism = 1,
+        batchSize = 8,
+      )
+      val noProbe = ColumnPipeline.innerJoin(
+        Vector(build),
+        Vector(empty),
+        numPartitions = parts,
+        parallelism = 1,
+        batchSize = 8,
+      )
+      noBuild.map(_.length).sum shouldBe 0
+      noProbe.map(_.length).sum shouldBe 0
+    }
+  }
+
+  it should "rehash once the distinct keys pass the initial capacity" in {
+    val lead = Seq((Some(7), Some(10)), (Some(7), Some(11)), (Some(7), Some(12)))
+    val rest = (0 until 2049).filterNot(_ == 7).map(key => (Some(key), Some(key)))
+    val buildRows = lead ++ rest
+    val probeRows = Seq((Some(7), Some(100))) ++ rest.map { case (key, _) => (key, Some(-1)) }
+    val build = pairs(buildRows)
+    val probe = pairs(probeRows)
+
+    sorted(join(build, probe)) shouldBe rowJoin(buildRows, probeRows)
+    inOrder(join(build, pairs(Seq((Some(7), Some(100)))))) shouldBe Seq(
+      (7, Some(12), Some(100)),
+      (7, Some(11), Some(100)),
+      (7, Some(10), Some(100)),
+    )
+    val slots = HashJoin.innerSlotCount(HashJoin.JoinSide(build, key = 0, value = 1))
+    slots should be > HashJoin.InitialBuildSlots
+    slots shouldBe ColumnHash.tableSize(buildRows.size)
+  }
+
+  it should "keep a duplicate-heavy build near its distinct keys" in {
+    val rows = 50000
+    val distinct = 40
+    val build = pairs((0 until rows).map(row => (Some(row % distinct), Some(row))))
+    val side = HashJoin.JoinSide(build, key = 0, value = 1)
+    val slots = HashJoin.innerSlotCount(side)
+
+    slots shouldBe HashJoin.InitialBuildSlots
+    slots should be < rows / 10
+    slots should be < ColumnHash.tableSize(rows) / 8
+
+    val estimate = HashJoin.retainedBuildBytes(rows)
+    HashJoin.retainedAt(rows, slots) should be < estimate
+    val refused = intercept[IllegalStateException] {
+      HashJoin.openInt32(Vector(side), estimate - 1L)
+    }
+    refused.getMessage shouldBe
+      s"broadcast build table retains about $estimate bytes for $rows rows, above the budget of ${estimate - 1} bytes"
+
+    val table = HashJoin.openInt32(Vector(side), estimate)
+    table.slotCount shouldBe slots
+    table.buildRows shouldBe rows
+  }
+
+  it should "accept a unique build that grows up to the row-count budget" in {
+    val rows = 3000
+    val build = pairs((0 until rows).map(row => (Some(row), Some(row))))
+    val side = HashJoin.JoinSide(build, key = 0, value = 1)
+    val estimate = HashJoin.retainedBuildBytes(rows)
+    val table = HashJoin.openInt32(Vector(side), estimate)
+
+    table.slotCount shouldBe ColumnHash.tableSize(rows)
+    table.slotCount should be > HashJoin.InitialBuildSlots
+    table.buildRows shouldBe rows
+  }
+
+  it should "keep a tiny unique build at the pre-sized table" in {
+    val rows = 10
+    val build = pairs((0 until rows).map(row => (Some(row), Some(row))))
+    HashJoin.innerSlotCount(HashJoin.JoinSide(build, key = 0, value = 1)) shouldBe
+      ColumnHash.tableSize(rows)
+  }
+
   it should "reject a bad ordinal or a non-int key" in {
     val batch = pairs(Seq((Some(1), Some(1))))
 
@@ -157,6 +268,27 @@ class TestHashJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       )
     }
   }
+
+  private def rowJoin(
+      build: Seq[(Option[Int], Option[Int])],
+      probe: Seq[(Option[Int], Option[Int])],
+  ): Seq[(Int, Option[Int], Option[Int])] =
+    val present = build.collect { case (Some(key), value) => (key, value) }
+    val matched = probe.flatMap { case (key, probeValue) =>
+      key match
+        case None => Seq.empty[(Int, Option[Int], Option[Int])]
+        case Some(probeKey) =>
+          present.collect {
+            case (buildKey, buildValue) if buildKey == probeKey =>
+              (probeKey, buildValue, probeValue)
+          }
+    }
+    matched.sorted
+
+  private def sortedBatches(
+      batches: Vector[ColumnBatch],
+  ): Seq[(Int, Option[Int], Option[Int])] =
+    batches.flatMap(inOrder).sorted
 
   private def join(build: ColumnBatch, probe: ColumnBatch): ColumnBatch =
     HashJoin.innerInt32(

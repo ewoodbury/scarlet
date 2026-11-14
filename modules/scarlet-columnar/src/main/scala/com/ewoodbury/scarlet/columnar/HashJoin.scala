@@ -1,6 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
 import java.util.Arrays
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Inner hash join of `Int32` keys. Null keys are dropped on both sides. A null value is preserved
@@ -18,6 +19,12 @@ import java.util.Arrays
  * this table. A non-empty build is estimated before the table is allocated. The estimate covers
  * that table only. An estimate above `buildBudgetBytes` throws `IllegalStateException`.
  *
+ * Both tables start at [[InitialBuildSlots]], or at [[ColumnHash.tableSize]] when that is smaller,
+ * and double when a new key would push occupied slots above half the capacity. A duplicate key
+ * does not grow the table. [[retainedBuildBytes]] still prices `tableSize` slots, so a build that
+ * refuses today still refuses. A growth step checks that same price and throws before allocating
+ * when the step would exceed the budget.
+ *
  * Each side names its key and value ordinals. The probe writes matches directly, with the row
  * index in a `var`, so the hot loop stays allocation-free like `ColumnKernel`. Output columns keep
  * the grown capacity and `length` is the match count, so the result is not copied down to size.
@@ -29,6 +36,23 @@ import java.util.Arrays
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object HashJoin:
+
+  /** Slots allocated by build tables since the last [[resetBuiltSlots]]. */
+  private val builtSlots = new AtomicLong
+
+  private[scarlet] def resetBuiltSlots(): Unit =
+    builtSlots.set(0L)
+
+  private[scarlet] def builtSlotsTotal: Long = builtSlots.get()
+
+  private def noteSlots(slots: Int): Unit =
+    val _ = builtSlots.addAndGet(slots.toLong)
+
+  /**
+   * First open-addressed capacity. A build whose ideal table is smaller starts at that size and
+   * does not grow. A larger build starts here.
+   */
+  private[scarlet] val InitialBuildSlots: Int = 4096
 
   /** One side of the join. `key` and `value` are column ordinals in `batch`. */
   final case class JoinSide(batch: ColumnBatch, key: Int, value: Int)
@@ -60,7 +84,7 @@ object HashJoin:
       if (estimate > buildBudgetBytes) then refuseBuild(total, estimate, buildBudgetBytes)
       else
         val flat = copyBuild(checked, total)
-        val table = Int32Build(flat)
+        val table = Int32Build(flat, buildBudgetBytes)
         table.insert()
         table
 
@@ -73,12 +97,21 @@ object HashJoin:
    * bitmaps are allocated beside the table and are not included.
    */
   private[scarlet] def retainedBuildBytes(rows: Int): Long =
-    val slots = ColumnHash.tableSize(rows).toLong
+    retainedAt(rows, ColumnHash.tableSize(rows))
+
+  /**
+   * [[retainedBuildBytes]] with an explicit slot count. The per-slot chain-length array is not
+   * included, so a growth check prices the same bytes as the upfront refusal.
+   */
+  private[columnar] def retainedAt(rows: Int, slots: Int): Long =
     val rowBytes = 4L + 4L + 1L
     val slotBytes = 4L + 4L
     val chainBytes = 4L
     val headers = 256L
-    rows.toLong * rowBytes + slots * slotBytes + rows.toLong * chainBytes + headers
+    rows.toLong * rowBytes + slots.toLong * slotBytes + rows.toLong * chainBytes + headers
+
+  private[columnar] def refuseSized(rows: Int, estimate: Long, budget: Long): Nothing =
+    refuseBuild(rows, estimate, budget)
 
   private def refuseBuild(rows: Int, estimate: Long, budget: Long): Nothing =
     throw new IllegalStateException(
@@ -128,48 +161,30 @@ object HashJoin:
     table.insert()
     table
 
+  /** Slot count of one shuffle-hash build. An empty side reports zero. */
+  private[scarlet] def innerSlotCount(build: JoinSide): Int =
+    val keys = ColumnHash.int32At(build.batch, build.key)
+    val values = ColumnHash.int32At(build.batch, build.value)
+    require(keys.length == values.length, "build key and value columns differ in length")
+    if (keys.length == 0) then 0 else indexed(keys, values).slotCount
+
   private final class BuildTable(buildKeys: Int32Column, buildValues: Int32Column):
     private val rows: Int = buildKeys.length
-    private val slotCapacity: Int = ColumnHash.tableSize(rows)
-    private val mask: Int = slotCapacity - 1
-    private val slotKey: Array[Int] = new Array[Int](slotCapacity)
-    private val head: Array[Int] = new Array[Int](slotCapacity)
-    private val next: Array[Int] = new Array[Int](rows)
+    private val slots = new JoinSlots(rows, Long.MaxValue)
     private val buildKeyValues: Array[Int] = buildKeys.values
     private val keyWords: Array[Long] = buildKeys.validity.words
-
-    Arrays.fill(head, -1)
-    Arrays.fill(next, -1)
 
     def insert(): Unit =
       var row = 0
       while (row < rows) {
-        if (Validity.isSet(keyWords, row)) then
-          val key = buildKeyValues(row)
-          var slot = ColumnHash.mix(key) & mask
-          var placed = false
-          while (!placed) {
-            if (head(slot) == -1) then
-              head(slot) = row
-              slotKey(slot) = key
-              placed = true
-            else if (slotKey(slot) == key) then
-              next(row) = head(slot)
-              head(slot) = row
-              placed = true
-            else slot = (slot + 1) & mask
-          }
+        if (Validity.isSet(keyWords, row)) then slots.insert(buildKeyValues(row), row)
         row += 1
       }
+      noteSlots(slots.slots)
+
+    def slotCount: Int = slots.slots
 
     def write(probeKeys: Int32Column, probeValues: Int32Column): ColumnBatch =
-      var outCapacity = math.max(16, probeKeys.length)
-      var filled = 0
-      var outKeys = new Array[Int](outCapacity)
-      var outBuild = new Array[Int](outCapacity)
-      var outProbe = new Array[Int](outCapacity)
-      var buildWords = Validity.allocate(outCapacity)
-      var probeWords = Validity.allocate(outCapacity)
       val buildValueValues = buildValues.values
       val buildValueWords = buildValues.validity.words
       val probeValueValues = probeValues.values
@@ -177,16 +192,31 @@ object HashJoin:
       val probeKeyValues = probeKeys.values
       val probeKeyWords = probeKeys.validity.words
       val probeRows = probeKeys.length
-      var row = 0
-      while (row < probeRows) {
-        if (Validity.isSet(probeKeyWords, row)) then
-          val key = probeKeyValues(row)
-          var slot = ColumnHash.mix(key) & mask
-          var resolved = false
-          while (!resolved) {
-            if (head(slot) == -1) then resolved = true
-            else if (slotKey(slot) == key) then
-              var buildRow = head(slot)
+      val reserved =
+        matchReserve(
+          Some(slots),
+          probeKeyValues,
+          probeKeyWords,
+          probeRows,
+          rows,
+          keepMisses = false,
+        )
+      if (reserved == 0) then ColumnBatches.emptyIntJoin
+      else
+        var outCapacity = reserved
+        var filled = 0
+        var outKeys = new Array[Int](outCapacity)
+        var outBuild = new Array[Int](outCapacity)
+        var outProbe = new Array[Int](outCapacity)
+        var buildWords = Validity.allocate(outCapacity)
+        var probeWords = Validity.allocate(outCapacity)
+        var row = 0
+        while (row < probeRows) {
+          if (Validity.isSet(probeKeyWords, row)) then
+            val key = probeKeyValues(row)
+            val slot = slots.locate(key)
+            if (slot >= 0) then
+              var buildRow = slots.headRow(slot)
               while (buildRow != -1) {
                 if (filled == outCapacity) then
                   outCapacity = doubled(outCapacity)
@@ -203,15 +233,12 @@ object HashJoin:
                   outProbe(filled) = probeValueValues(row)
                   Validity.setBit(probeWords, filled)
                 filled += 1
-                buildRow = next(buildRow)
+                buildRow = slots.nextRow(buildRow)
               }
-              resolved = true
-            else slot = (slot + 1) & mask
-          }
-        row += 1
-      }
-      if (filled == 0) then ColumnBatches.emptyIntJoin
-      else publish(outKeys, outBuild, outProbe, buildWords, probeWords, outCapacity, filled)
+          row += 1
+        }
+        if (filled == 0) then ColumnBatches.emptyIntJoin
+        else publish(outKeys, outBuild, outProbe, buildWords, probeWords, outCapacity, filled)
 
   private def publish(
       keys: Array[Int],
@@ -278,6 +305,32 @@ object HashJoin:
       throw new IllegalStateException(s"join output reached $capacity rows")
     capacity << 1
 
+  /**
+   * Rows to allocate before a probe writes. A chain longer than one stores a multiplicity, so the
+   * reserve is the exact match count, including one row per miss when `keepMisses` is set. A
+   * unique key has multiplicity one and reserves the probe length. With no chain, the reserve
+   * starts at twice the build length, and at least the probe length, and the writer doubles if
+   * that is short. Zero means the probe emits nothing.
+   */
+  private def matchReserve(
+      index: Option[JoinSlots],
+      probeKeys: Array[Int],
+      probeWords: Array[Long],
+      probeRows: Int,
+      buildRows: Int,
+      keepMisses: Boolean,
+  ): Int =
+    if (probeRows == 0) then 0
+    else
+      index match
+        case Some(table) if table.maxChain > 1 =>
+          table.countOutput(probeKeys, probeWords, probeRows, keepMisses)
+        case Some(table) if table.maxChain == 0 && !keepMisses => 0
+        case Some(_) => math.max(16, probeRows)
+        case None =>
+          val multiple = math.max(16, buildRows) << 1
+          math.max(multiple, math.max(16, probeRows))
+
   private def growWords(words: Array[Long], rowCapacity: Int): Array[Long] =
     val needed = (rowCapacity + 63) >>> 6
     if (words.length == needed) words else Arrays.copyOf(words, needed)
@@ -291,10 +344,7 @@ object HashJoin:
    * newest-first, which is a kernel detail.
    */
   final class Int32Build private (
-      mask: Int,
-      slotKey: Array[Int],
-      head: Array[Int],
-      next: Array[Int],
+      index: Option[JoinSlots],
       buildKeys: Array[Int],
       buildKeyWords: Array[Long],
       buildValues: Array[Int],
@@ -303,27 +353,23 @@ object HashJoin:
   ):
 
     private[HashJoin] def insert(): Unit =
-      var row = 0
-      while (row < rows) {
-        // A null key stays out of the table. Its payload is 0, and inserting it would match
-        // probe key 0.
-        if (Validity.isSet(buildKeyWords, row)) then
-          val key = buildKeys(row)
-          var slot = ColumnHash.mix(key) & mask
-          var placed = false
-          while (!placed) {
-            if (head(slot) == -1) then
-              head(slot) = row
-              slotKey(slot) = key
-              placed = true
-            else if (slotKey(slot) == key) then
-              next(row) = head(slot)
-              head(slot) = row
-              placed = true
-            else slot = (slot + 1) & mask
+      index match
+        case None => ()
+        case Some(slots) =>
+          var row = 0
+          while (row < rows) {
+            // A null key stays out of the table. Its payload is 0, and inserting it would match
+            // probe key 0.
+            if (Validity.isSet(buildKeyWords, row)) then slots.insert(buildKeys(row), row)
+            row += 1
           }
-        row += 1
-      }
+          noteSlots(slots.slots)
+
+    /** Slots in the open-addressed table. An empty build reports zero. */
+    private[scarlet] def slotCount: Int =
+      index match
+        case None => 0
+        case Some(slots) => slots.slots
 
     /** Inner probe. A probe row with no build match, including a null key, is dropped. */
     def probe(side: JoinSide): ColumnBatch = probe(side, preserveProbe = false)
@@ -348,7 +394,26 @@ object HashJoin:
         probeValues: Int32Column,
         preserveProbe: Boolean,
     ): ColumnBatch =
-      var outCapacity = math.max(16, probeKeys.length)
+      val probeKeyValuesEarly = probeKeys.values
+      val probeKeyWordsEarly = probeKeys.validity.words
+      val reserved = matchReserve(
+        index,
+        probeKeyValuesEarly,
+        probeKeyWordsEarly,
+        probeKeys.length,
+        rows,
+        preserveProbe,
+      )
+      if (reserved == 0) then ColumnBatches.emptyIntJoin
+      else writeProbeReserved(probeKeys, probeValues, preserveProbe, reserved)
+
+    private def writeProbeReserved(
+        probeKeys: Int32Column,
+        probeValues: Int32Column,
+        preserveProbe: Boolean,
+        reserved: Int,
+    ): ColumnBatch =
+      var outCapacity = reserved
       var filled = 0
       var outKeys = new Array[Int](outCapacity)
       var outProbe = new Array[Int](outCapacity)
@@ -412,29 +477,27 @@ object HashJoin:
           if (preserveProbe) then appendUnmatched(row)
         else
           val key = probeKeyValues(row)
-          var slot = ColumnHash.mix(key) & mask
-          var resolved = false
-          while (!resolved) {
-            if (head(slot) == -1) then
+          index match
+            case None =>
               if (preserveProbe) then appendUnmatched(row)
-              resolved = true
-            else if (slotKey(slot) == key) then
-              var buildRow = head(slot)
-              while (buildRow != -1) {
-                val buildPresent = Validity.isSet(buildValueWords, buildRow)
-                append(
-                  buildKeys(buildRow),
-                  true,
-                  probeValueValues(row),
-                  Validity.isSet(probeValueWords, row),
-                  if (buildPresent) then buildValues(buildRow) else 0,
-                  buildPresent,
-                )
-                buildRow = next(buildRow)
-              }
-              resolved = true
-            else slot = (slot + 1) & mask
-          }
+            case Some(slots) =>
+              val slot = slots.locate(key)
+              if (slot < 0) then
+                if (preserveProbe) then appendUnmatched(row)
+              else
+                var buildRow = slots.headRow(slot)
+                while (buildRow != -1) {
+                  val buildPresent = Validity.isSet(buildValueWords, buildRow)
+                  append(
+                    buildKeys(buildRow),
+                    true,
+                    probeValueValues(row),
+                    Validity.isSet(probeValueWords, row),
+                    if (buildPresent) then buildValues(buildRow) else 0,
+                    buildPresent,
+                  )
+                  buildRow = slots.nextRow(buildRow)
+                }
         row += 1
       }
       if (filled == 0) then ColumnBatches.emptyIntJoin
@@ -510,7 +573,24 @@ object HashJoin:
         probeValues: Int32Column,
         matched: Array[Long],
     ): ColumnBatch =
-      var outCapacity = math.max(16, probeKeys.length)
+      val reserved = matchReserve(
+        index,
+        probeKeys.values,
+        probeKeys.validity.words,
+        probeKeys.length,
+        rows,
+        keepMisses = true,
+      )
+      if (reserved == 0) then ColumnBatches.emptyIntJoin
+      else writeTrackedReserved(probeKeys, probeValues, matched, reserved)
+
+    private def writeTrackedReserved(
+        probeKeys: Int32Column,
+        probeValues: Int32Column,
+        matched: Array[Long],
+        reserved: Int,
+    ): ColumnBatch =
+      var outCapacity = reserved
       var filled = 0
       var outKeys = new Array[Int](outCapacity)
       var outProbe = new Array[Int](outCapacity)
@@ -570,31 +650,27 @@ object HashJoin:
         if (!Validity.isSet(probeKeyWords, row)) then appendUnmatched(row)
         else
           val key = probeKeyValues(row)
-          var slot = ColumnHash.mix(key) & mask
-          var resolved = false
-          while (!resolved) {
-            if (head(slot) == -1) then
-              appendUnmatched(row)
-              resolved = true
-            else if (slotKey(slot) == key) then
-              var buildRow = head(slot)
-              while (buildRow != -1) {
-                val buildPresent = Validity.isSet(buildValueWords, buildRow)
-                append(
-                  buildKeys(buildRow),
-                  true,
-                  probeValueValues(row),
-                  Validity.isSet(probeValueWords, row),
-                  if (buildPresent) then buildValues(buildRow) else 0,
-                  buildPresent,
-                )
-                // One plain store per emitted pair. `matched` is not shared.
-                Validity.setBit(matched, buildRow)
-                buildRow = next(buildRow)
-              }
-              resolved = true
-            else slot = (slot + 1) & mask
-          }
+          index match
+            case None => appendUnmatched(row)
+            case Some(slots) =>
+              val slot = slots.locate(key)
+              if (slot < 0) then appendUnmatched(row)
+              else
+                var buildRow = slots.headRow(slot)
+                while (buildRow != -1) {
+                  val buildPresent = Validity.isSet(buildValueWords, buildRow)
+                  append(
+                    buildKeys(buildRow),
+                    true,
+                    probeValueValues(row),
+                    Validity.isSet(probeValueWords, row),
+                    if (buildPresent) then buildValues(buildRow) else 0,
+                    buildPresent,
+                  )
+                  // One plain store per emitted pair. `matched` is not shared.
+                  Validity.setBit(matched, buildRow)
+                  buildRow = slots.nextRow(buildRow)
+                }
         row += 1
       }
       if (filled == 0) then ColumnBatches.emptyIntJoin
@@ -649,10 +725,7 @@ object HashJoin:
 
     def empty: Int32Build =
       new Int32Build(
-        mask = 0,
-        slotKey = Array.emptyIntArray,
-        head = Array.emptyIntArray,
-        next = Array.emptyIntArray,
+        index = None,
         buildKeys = Array.emptyIntArray,
         buildKeyWords = Array.emptyLongArray,
         buildValues = Array.emptyIntArray,
@@ -660,17 +733,9 @@ object HashJoin:
         rows = 0,
       )
 
-    def apply(flat: FlatBuild): Int32Build =
-      val slotCapacity = ColumnHash.tableSize(flat.rows)
-      val head = new Array[Int](slotCapacity)
-      val next = new Array[Int](flat.rows)
-      Arrays.fill(head, -1)
-      Arrays.fill(next, -1)
+    def apply(flat: FlatBuild, budget: Long): Int32Build =
       new Int32Build(
-        mask = slotCapacity - 1,
-        slotKey = new Array[Int](slotCapacity),
-        head = head,
-        next = next,
+        index = Some(new JoinSlots(flat.rows, budget)),
         buildKeys = flat.keys,
         buildKeyWords = flat.keyWords,
         buildValues = flat.values,
