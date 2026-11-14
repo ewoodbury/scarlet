@@ -93,15 +93,16 @@ object QueryBench:
 
   def main(args: Array[String]): Unit =
     args.toList match
-      case Nil => runDefault()
+      case Nil => runDefault(None)
       case "large" :: Nil => SortScaleBench.run()
+      case query :: Nil => runDefault(Some(query))
       case other =>
-        System.err.println(s"usage: QueryBench [large], got ${other.mkString(" ")}")
-        System.err.println("accepted: no arguments, or large")
+        System.err.println(s"usage: QueryBench [large|query], got ${other.mkString(" ")}")
+        System.err.println("accepted: no arguments, large, or one query name")
         sys.exit(1)
 
-  /** The suite timed by `QueryBench` with no arguments. */
-  private def runDefault(): Unit =
+  /** The suite timed by `QueryBench` with no arguments. One name times only that query. */
+  private def runDefault(only: Option[String]): Unit =
     checkHarness()
     val savedConf = ScarletConf.get
     val savedRuntime = ScarletRuntime.get
@@ -110,7 +111,9 @@ object QueryBench:
     }.toMap
     try
       install(schedulers, threads = 1, columnar = true)
-      val queries = build()
+      val queries = only match
+        case Some(name) => buildNamed(name)
+        case None => build()
       verifyRowOracle(queries)
       checkGroups(queries)
       System.err.println(s"warm $warmup")
@@ -126,6 +129,28 @@ object QueryBench:
       finally
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)
+
+  private def buildNamed(name: String): Vector[Query] =
+    name match
+      case "filter-join" =>
+        val generated = generate(elementRows)
+        val filteredJoin = FilterJoinChecksum.source(generated, sourcePartitions)
+        Vector(
+          whole(
+            "filter-join",
+            elementRows,
+            FilterJoinChecksum.shape,
+            FilterJoinChecksum.expected(generated),
+            filteredJoin.plan,
+            FilterJoinChecksum.collected(filteredJoin.collect()),
+          ),
+        )
+      case other =>
+        val picked = build().filter(_.name == other)
+        if (picked.isEmpty) then
+          System.err.println(s"unknown query $other")
+          sys.exit(1)
+        else picked
 
   private def build(): Vector[Query] =
     val generated = generate(elementRows)
