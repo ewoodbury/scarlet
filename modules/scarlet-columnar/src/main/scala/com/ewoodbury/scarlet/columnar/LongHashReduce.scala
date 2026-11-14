@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import java.util.concurrent.atomic.AtomicLong
+
 import com.ewoodbury.scarlet.core.ScarletConf
 
 /**
@@ -16,7 +18,9 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * null as null. Partial combines use that same rule, so a later merge still sees the null. This
  * kernel preserves input order: output order is first-seen order inside the batch. Keys in the
  * output are present. A null group clears the value bit and does not publish a payload. The table
- * is at least twice the row count, so one batch does not rehash.
+ * is at least twice the row count, so one batch does not rehash. One table lives on the thread
+ * that scans a morsel. The next morsel on that thread clears it and reuses it when the operator is
+ * the same and the capacity still fits. [[releaseWorkers]] drops it.
  *
  * [[int64Selected]] scans a survivor index with that same null rule. [[byKeySelected]]
  * partial-reduces the index, then exchanges and spills the dense partials the same way [[byKey]]
@@ -69,7 +73,7 @@ object LongHashReduce:
     require(keys.length == values.length, "key and value columns differ in length")
     if (until == from) then ColumnBatches.emptyLongPairs
     else
-      val table = new Table(ColumnHash.tableSize(until - from), op)
+      val table = borrow(until - from, op)
       if (ColumnHash.fullyPresent(keys) && ColumnHash.fullyPresent(values)) then
         table.scanDenseSelected(keys, values, selected.rows, from, until)
       else table.scanSparseSelected(keys, values, selected.rows, from, until)
@@ -100,14 +104,16 @@ object LongHashReduce:
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
     if (batches.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyLongPairs)
     else
-      val combined = PartialCombine.perBatch(
-        batches,
-        batchSize,
-        parallelism,
-        morsel => int64(morsel, keyOrdinal = 0, valueOrdinal = 1, op),
-        partials => int64(partials, keyOrdinal = 0, valueOrdinal = 1, op),
-      )
-      reduceExchanged(combined, numPartitions, parallelism, batchSize, op)
+      try
+        val combined = PartialCombine.perBatch(
+          batches,
+          batchSize,
+          parallelism,
+          morsel => int64(morsel, keyOrdinal = 0, valueOrdinal = 1, op),
+          partials => int64(partials, keyOrdinal = 0, valueOrdinal = 1, op),
+        )
+        reduceExchanged(combined, numPartitions, parallelism, batchSize, op)
+      finally releaseWorkers()
 
   /**
    * [[byKey]] for a selection. Each live prefix is partial-reduced, the dense partials are
@@ -127,15 +133,17 @@ object LongHashReduce:
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
     if (selected.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyLongPairs)
     else
-      val combined = PartialCombine.perBatchSelected(
-        selected,
-        batchSize,
-        parallelism,
-        (one, from, until) =>
-          int64Selected(one, from, until, keyOrdinal = 0, valueOrdinal = 1, op),
-        partials => int64(partials, keyOrdinal = 0, valueOrdinal = 1, op),
-      )
-      reduceExchanged(combined, numPartitions, parallelism, batchSize, op)
+      try
+        val combined = PartialCombine.perBatchSelected(
+          selected,
+          batchSize,
+          parallelism,
+          (one, from, until) =>
+            int64Selected(one, from, until, keyOrdinal = 0, valueOrdinal = 1, op),
+          partials => int64(partials, keyOrdinal = 0, valueOrdinal = 1, op),
+        )
+        reduceExchanged(combined, numPartitions, parallelism, batchSize, op)
+      finally releaseWorkers()
 
   /**
    * Exchange combined partials and reduce each bucket. Shared by [[byKey]] and [[byKeySelected]].
@@ -158,7 +166,7 @@ object LongHashReduce:
       }
 
   private def reduce(keys: Int64Column, values: Int64Column, op: LongBinOp): ColumnBatch =
-    val table = new Table(ColumnHash.tableSize(keys.length), op)
+    val table = borrow(keys.length, op)
     if (ColumnHash.fullyPresent(keys) && ColumnHash.fullyPresent(values)) then
       table.scanDense(keys, values)
     else table.scanSparse(keys, values)
@@ -170,7 +178,44 @@ object LongHashReduce:
   private val missing: Byte = 2
   private val zero: Long = 0L
 
-  private final class Table(capacity: Int, op: LongBinOp):
+  private val allocatedTables = new AtomicLong
+  private val reusedTables = new AtomicLong
+
+  private val locals: ThreadLocal[Table | Null] = new ThreadLocal[Table | Null]()
+
+  /**
+   * Drops this thread's table. [[MorselScheduler]] calls this when a pool task returns, and
+   * [[byKey]] calls it on the caller. A cleared table is not a published batch.
+   */
+  private[columnar] def releaseWorkers(): Unit =
+    locals.remove()
+
+  /** Zeros the reuse counters and drops this thread's table. */
+  private[columnar] def resetReuseForTest(): Unit =
+    allocatedTables.set(0L)
+    reusedTables.set(0L)
+    releaseWorkers()
+
+  /** Tables constructed since the last [[resetReuseForTest]], on every thread. */
+  private[columnar] def tablesAllocatedForTest: Long = allocatedTables.get
+
+  /** Morsels that cleared an existing table instead of allocating one. */
+  private[columnar] def tablesReusedForTest: Long = reusedTables.get
+
+  private def borrow(rows: Int, op: LongBinOp): Table =
+    val need = ColumnHash.tableSize(rows)
+    locals.get() match
+      case current: Table if current.accepts(need, op) =>
+        val _ = reusedTables.incrementAndGet()
+        current.clear()
+        current
+      case _ =>
+        val created = new Table(need, op)
+        locals.set(created)
+        val _ = allocatedTables.incrementAndGet()
+        created
+
+  private final class Table(val capacity: Int, val op: LongBinOp):
     private val mask: Int = capacity - 1
     private val limit: Int = capacity >>> 1
     private val keys: Array[Long] = new Array[Long](capacity)
@@ -178,6 +223,23 @@ object LongHashReduce:
     private val state: Array[Byte] = new Array[Byte](capacity)
     private val slots: Array[Int] = new Array[Int](capacity)
     private var occupied: Int = 0
+
+    @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+    def accepts(need: Int, bin: LongBinOp): Boolean =
+      capacity >= need && (op eq bin)
+
+    /**
+     * Drops every group this morsel inserted. The arrays stay, so the next morsel does not zero
+     * them.
+     */
+    def clear(): Unit =
+      var cursor = 0
+      val rows = occupied
+      while (cursor < rows) {
+        state(slots(cursor)) = empty
+        cursor += 1
+      }
+      occupied = 0
 
     def scanDense(keyColumn: Int64Column, valueColumn: Int64Column): Unit =
       val keyValues = keyColumn.values

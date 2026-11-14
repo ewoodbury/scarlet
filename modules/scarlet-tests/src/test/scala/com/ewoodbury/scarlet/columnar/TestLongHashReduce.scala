@@ -1,11 +1,15 @@
 package com.ewoodbury.scarlet.columnar
 
+import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-class TestLongHashReduce extends AnyFlatSpec with Matchers:
+class TestLongHashReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   private val plus: LongHashReduce.LongBinOp = (left, right) => left + right
+
+  override def beforeEach(): Unit =
+    LongHashReduce.resetReuseForTest()
 
   "byKey" should "return one empty long-pair batch per partition for an empty input" in {
     val parts = LongHashReduce.byKey(
@@ -183,6 +187,83 @@ class TestLongHashReduce extends AnyFlatSpec with Matchers:
     parts.foreach(part => assertValidity(part, BatchCodec.decodeLongPairs(part)))
     selected.rows should be theSameInstanceAs ids
   }
+
+  "int64" should "sum duplicates in first-seen order" in {
+    val decoded = BatchCodec.decodeLongPairs(
+      LongHashReduce.int64(
+        longPairs(Seq((3L, 1L), (1L, 2L), (3L, 4L), (2L, 8L))),
+        keyOrdinal = 0,
+        valueOrdinal = 1,
+        plus,
+      ),
+    )
+
+    decoded shouldBe Seq((3L, 5L), (1L, 2L), (2L, 8L))
+  }
+
+  "byKey" should "sum a key that arrives in two batches at one partition and at four" in {
+    val left = longPairs(Seq((1L, 10L), (2L, 3L), (1L, 1L)))
+    val right = longPairs(Seq((1L, 7L), (3L, 4L)))
+
+    sums(left, right, numPartitions = 1) shouldBe Map(1L -> 18L, 2L -> 3L, 3L -> 4L)
+    sums(left, right, numPartitions = 4) shouldBe Map(1L -> 18L, 2L -> 3L, 3L -> 4L)
+  }
+
+  it should "reuse one table and publish only the second morsel's keys" in {
+    val first = BatchCodec.decodeLongPairs(
+      LongHashReduce.int64(
+        longPairs(Seq((1L, 10L), (1L, 1L))),
+        keyOrdinal = 0,
+        valueOrdinal = 1,
+        plus,
+      ),
+    )
+    val second = BatchCodec.decodeLongPairs(
+      LongHashReduce.int64(
+        longPairs(Seq((2L, 4L), (2L, 5L))),
+        keyOrdinal = 0,
+        valueOrdinal = 1,
+        plus,
+      ),
+    )
+
+    first shouldBe Seq((1L, 11L))
+    second shouldBe Seq((2L, 9L))
+    LongHashReduce.tablesAllocatedForTest shouldBe 1L
+    LongHashReduce.tablesReusedForTest shouldBe 1L
+  }
+
+  it should "clear the reused table between morsels of one batch" in {
+    val rows = Seq((1L, 5L), (1L, 5L), (2L, 3L), (2L, 4L))
+    val reduced = LongHashReduce.byKey(
+      Vector(longPairs(rows)),
+      numPartitions = 1,
+      parallelism = 1,
+      batchSize = 2,
+      plus,
+    )
+
+    reduced.flatMap(batch => BatchCodec.decodeLongPairs(batch)).toMap shouldBe Map(
+      1L -> 10L,
+      2L -> 7L,
+    )
+    LongHashReduce.tablesReusedForTest should be > 0L
+    LongHashReduce.tablesAllocatedForTest should be < 4L
+  }
+
+  private def sums(
+      left: ColumnBatch,
+      right: ColumnBatch,
+      numPartitions: Int,
+  ): Map[Long, Long] =
+    val parts = LongHashReduce.byKey(
+      Vector(left, right),
+      numPartitions,
+      parallelism = 2,
+      batchSize = 2,
+      plus,
+    )
+    parts.flatMap(batch => BatchCodec.decodeLongPairs(batch)).toMap
 
   private def longPairs(rows: Seq[(Long, Long)]): ColumnBatch =
     val keys = Int64Column(rows.map(_._1))
