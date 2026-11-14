@@ -9,17 +9,18 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * Int, long, and string `countByKey`.
  *
  * An int-pair stack of key and value slot atoms is counted by [[FoldedCount]]: the predicates run
- * inside the key scan and no survivor index is built. One [[Plan.MapValuesOp]] above that source
- * is skipped when its child is not a map: the keys are unchanged, so the scan reads the source key
- * column and does not run the value function. A filter above that map must be an int key slot. A
- * value or row filter above the map, a second map, a [[Plan.MapOp]], a flatMap, and a
- * mapPartitions stay on the old path. The plan node decides that. The function is not inspected.
- * No filters and no such map, a whole-row or string step, a non-int slot, and a null component the
- * encoder throws on stay on the old path. That path partial-counts survivor ids, including one
- * row, key, or value filter. A scan and a non-pair child stay on the dense count. The value column
- * is not read, so a null value still counts. A long count publishes [[Columns.LongCounts]]. A
- * string count publishes [[Columns.StringPairs]]. The stored count is an `Int`. A null string key
- * is dropped and `""` is kept.
+ * inside the key scan and no survivor index is built. An owned int-pair scan is hashed from those
+ * arrays. The encoded copy remains for a boxed row, a null, a sort, and a budget miss. One
+ * [[Plan.MapValuesOp]] above that source is skipped when its child is not a map: the keys are
+ * unchanged, so the scan reads the source key column and does not run the value function. A filter
+ * above that map must be an int key slot. A value or row filter above the map, a second map, a
+ * [[Plan.MapOp]], a flatMap, and a mapPartitions stay on the old path. The plan node decides that.
+ * The function is not inspected. No filters and no such map, a whole-row or string step, a non-int
+ * slot, and a null component the encoder throws on stay on the old path. That path partial-counts
+ * survivor ids, including one row, key, or value filter. A scan and a non-pair child stay on the
+ * dense count. The value column is not read, so a null value still counts. A long count publishes
+ * [[Columns.LongCounts]]. A string count publishes [[Columns.StringPairs]]. The stored count is an
+ * `Int`. A null string key is dropped and `""` is kept.
  */
 private[execution] object CountByKeyArms:
 
@@ -134,13 +135,52 @@ private[execution] object CountByKeyArms:
       batchSize: Int,
   ): Option[Vector[ColumnBatch]] =
     foldTarget(source, child, ordinals).flatMap { (plan, op, steps) =>
-      scanned(plan, op, selectedPartition, preserveAbsence, ordinals).flatMap { (under, batches) =>
-        if (sortDropsNullKey(under, batches)) then None
-        else if (steps.isEmpty) then
-          FoldedCount.countUnmapped(batches, steps, width, workers, batchSize)
-        else FoldedCount.count(batches, steps, width, workers, batchSize)
-      }
+      ownedPairs(plan, op) match
+        case Some(parts) => countOwned(parts, steps, width, workers, batchSize)
+        case None =>
+          scanned(plan, op, selectedPartition, preserveAbsence, ordinals).flatMap {
+            (under, batches) =>
+              if (sortDropsNullKey(under, batches)) then None
+              else countEncoded(batches, steps, width, workers, batchSize)
+          }
     }
+
+  /** Fully present int pairs. Anything else, including one boxed partition, stays on encode. */
+  private def ownedPairs(
+      plan: Plan[_],
+      op: PhysicalOp,
+  ): Option[Vector[(Array[Int], Array[Int])]] =
+    import com.ewoodbury.scarlet.core.IntPairArrays
+
+    (plan, op) match
+      case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Pairs, _)) =>
+        val owned = partitions.map { partition =>
+          partition.data match
+            case pairs: IntPairArrays => Some((pairs.keys, pairs.values))
+            case _ => None
+        }
+        if (owned.forall(_.isDefined)) then Some(owned.flatten.toVector) else None
+      case _ => None
+
+  private def countOwned(
+      parts: Vector[(Array[Int], Array[Int])],
+      steps: List[Selection.Step],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    if (steps.isEmpty) then FoldedCount.countOwnedUnmapped(parts, steps, width, workers, batchSize)
+    else FoldedCount.countOwned(parts, steps, width, workers, batchSize)
+
+  private def countEncoded(
+      batches: Vector[ColumnBatch],
+      steps: List[Selection.Step],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    if (steps.isEmpty) then FoldedCount.countUnmapped(batches, steps, width, workers, batchSize)
+    else FoldedCount.count(batches, steps, width, workers, batchSize)
 
   /**
    * Plan under the filters, the physical child to scan, and the steps that apply to that scan. One
