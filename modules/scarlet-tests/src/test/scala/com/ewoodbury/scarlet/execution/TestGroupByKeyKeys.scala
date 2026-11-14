@@ -14,7 +14,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  *
  * Equality is the sequence, per shuffle partition and concatenated. Duplicate keys, one and four
  * partitions, a null key, and one key on two input partitions are covered. Order is the row path's
- * `groupMap` order. `values`, `take`, and a map above the group stay unlowered.
+ * `groupMap` order. `values` and `take` stay unlowered. A map above the group decodes once.
  */
 class TestGroupByKeyKeys extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -113,15 +113,19 @@ class TestGroupByKeyKeys extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     assertSameOrder(keys)
   }
 
-  it should "leave values, take, and a map above the group on the row path" in {
+  it should "leave values and take on the row path and decode a map" in {
     val grouped = DistCollection.ofIntPairs(Array(5, 1, 5), Array(1, 2, 3), 2).groupByKey
     val mapped = grouped.map((row: (Int, Iterable[Int])) => row._1)
 
     ColumnarPlanner.partitioning(grouped.values.plan) shouldBe None
-    ColumnarPlanner.partitioning(mapped.plan) shouldBe None
-    ColumnarPlanner.tryTake(grouped.plan, 1) shouldBe None
     ColumnarPlanner.lower(grouped.values.plan) shouldBe None
-    ColumnarPlanner.lower(mapped.plan) shouldBe None
+    ColumnarPlanner.tryTake(grouped.plan, 1) shouldBe None
+    ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some(
+      "GroupedDecode(GroupByKey(Exchange(Scan)))",
+    )
+    ColumnarPlanner.partitioning(mapped.plan).map(_.layout) shouldBe Some(
+      Layout.GroupedInt(ScarletConf.get.columnarBatchSize),
+    )
   }
 
   it should "build value lists for the group and none for keys" in {
