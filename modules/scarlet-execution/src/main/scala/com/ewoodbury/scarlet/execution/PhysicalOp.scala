@@ -209,8 +209,8 @@ enum PhysicalOp:
    * Right outer join with no exchange. `left` and `right` stay the logical inputs. The left input
    * fills the hash table. The right input is the probe side and is probed in place. The left-outer
    * kernel writes `(key, probe value, build value)`, and the value columns are swapped back to
-   * `(key, left, right)`. Absence is the left value's absence bit. A null value is not absence and
-   * stays on the row path. This is a different node from [[BroadcastJoin]] and from
+   * `(key, left, right)`. Absence is the left value's absence bit. A null value is a clear
+   * validity bit and stays columnar. This is a different node from [[BroadcastJoin]] and from
    * [[BroadcastLeftOuter]].
    */
   case BroadcastRightOuter(left: PhysicalOp, right: PhysicalOp)
