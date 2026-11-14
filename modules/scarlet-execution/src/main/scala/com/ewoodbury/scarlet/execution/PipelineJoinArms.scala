@@ -8,10 +8,10 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
 /**
  * Joins that call [[ColumnPipeline]] and return [[ColumnarInterpreter.Columns]].
  *
- * Long hash, long sort-merge, int sort-merge, broadcast inner, string inner broadcast, and the
- * outer joins live here. Int and string shuffle-hash stay in [[JoinArms]] and [[StringJoinArms]].
- * The string-hash case stays in [[ColumnarInterpreter]]. An outer arm forces `preserveAbsence` on
- * and does not read the flag the caller passed.
+ * Long hash, long sort-merge, string sort-merge, int sort-merge, broadcast inner, string inner
+ * broadcast, and the outer joins live here. Int and string shuffle-hash stay in [[JoinArms]] and
+ * [[StringJoinArms]]. The string-hash case stays in [[ColumnarInterpreter]]. An outer arm forces
+ * `preserveAbsence` on and does not read the flag the caller passed.
  */
 private[execution] object PipelineJoinArms:
 
@@ -56,6 +56,31 @@ private[execution] object PipelineJoinArms:
       LongOuterPipeline.sortMergeInnerJoin(
         longPairsOf(interpretAt(left, leftOp, selectedPartition, preserveAbsence, ordinals)),
         longPairsOf(interpretAt(right, rightOp, selectedPartition, preserveAbsence, ordinals)),
+        ColumnarPlanner.shuffleWidth,
+        ColumnarPlanner.parallelism,
+        ColumnarPlanner.batchSize,
+      ),
+    )
+
+  def stringSortMerge(
+      left: Plan[_],
+      right: Plan[_],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): Columns =
+    // A clear validity bit is a null value, not an absence bit. The matched row is kept.
+    // Over the budget, with spill on, the pipeline throws and writes nothing.
+    Columns.StringTriples(
+      StringOuterPipeline.sortMergeInnerJoin(
+        StringPairWalk.batches(
+          interpretAt(left, leftOp, selectedPartition, preserveAbsence, ordinals),
+        ),
+        StringPairWalk.batches(
+          interpretAt(right, rightOp, selectedPartition, preserveAbsence, ordinals),
+        ),
         ColumnarPlanner.shuffleWidth,
         ColumnarPlanner.parallelism,
         ColumnarPlanner.batchSize,

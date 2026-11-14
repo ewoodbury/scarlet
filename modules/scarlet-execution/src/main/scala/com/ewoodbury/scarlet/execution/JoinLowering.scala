@@ -7,9 +7,9 @@ import com.ewoodbury.scarlet.core.Plan
  *
  * An int inner join accepts no hint, shuffle-hash, broadcast, and sort-merge. A long inner join
  * accepts no hint, shuffle-hash, broadcast, and sort-merge. A string inner join accepts no hint,
- * shuffle-hash, and broadcast. Outer joins on int pairs, on `(Long, Long)` pairs, and on
- * `(String, Int)` pairs accept broadcast, shuffle-hash, an absent hint, and sort-merge. Any other
- * join stays on the row path.
+ * shuffle-hash, broadcast, and sort-merge. Outer joins on int pairs, on `(Long, Long)` pairs, and
+ * on `(String, Int)` pairs accept broadcast, shuffle-hash, an absent hint, and sort-merge. Any
+ * other join stays on the row path.
  */
 @SuppressWarnings(
   Array(
@@ -291,7 +291,7 @@ private[execution] object JoinLowering:
   /**
    * Sort-merge of two outer-join sides. Int pairs use the int node. Long pairs use the long node.
    * Both children are exchanged. Any other kind stays on the row path. The inner sort-merge stays
-   * on [[sortMergeJoinOf]] and accepts int pairs and long pairs.
+   * on [[sortMergeJoinOf]] and accepts int pairs, long pairs, and string pairs.
    */
   private def outerSortMerge(
       left: Plan[_],
@@ -313,7 +313,7 @@ private[execution] object JoinLowering:
   /**
    * Sort-merge of two string-pair sides. Both children are exchanged. Any other kind stays on the
    * row path. Int and long outer joins use [[outerSortMerge]]. The inner sort-merge stays on
-   * [[sortMergeJoinOf]] and accepts int pairs and long pairs.
+   * [[sortMergeJoinOf]] and accepts int pairs, long pairs, and string pairs.
    */
   private def stringOuterSortMerge(
       left: Plan[_],
@@ -331,8 +331,9 @@ private[execution] object JoinLowering:
 
   /**
    * Sort-merge of two inner-join sides. Int pairs use [[PhysicalOp.SortMergeJoin]]. Long pairs use
-   * [[PhysicalOp.LongSortMergeJoin]]. Both children are exchanged. Any other kind stays on the row
-   * path. Outer joins use [[outerSortMerge]].
+   * [[PhysicalOp.LongSortMergeJoin]]. String pairs use [[PhysicalOp.StringSortMergeJoin]]. Both
+   * children are exchanged. Any other kind stays on the row path. Outer joins use
+   * [[outerSortMerge]].
    */
   private def sortMergeJoinOf(
       left: Plan[_],
@@ -348,6 +349,13 @@ private[execution] object JoinLowering:
           case (PhysicalOp.Kind.LongPairs, PhysicalOp.Kind.LongPairs) =>
             Some(
               PhysicalOp.LongSortMergeJoin(
+                PhysicalOp.Exchange(leftOp),
+                PhysicalOp.Exchange(rightOp),
+              ),
+            )
+          case (PhysicalOp.Kind.StringPairs, PhysicalOp.Kind.StringPairs) =>
+            Some(
+              PhysicalOp.StringSortMergeJoin(
                 PhysicalOp.Exchange(leftOp),
                 PhysicalOp.Exchange(rightOp),
               ),
@@ -372,7 +380,7 @@ private[execution] object JoinLowering:
       hashed(PhysicalOp.Kind.Pairs)
     case _: PhysicalOp.LongHashJoin | _: PhysicalOp.LongSortMergeJoin =>
       hashed(PhysicalOp.Kind.LongPairs)
-    case _: PhysicalOp.StringHashJoin =>
+    case _: PhysicalOp.StringHashJoin | _: PhysicalOp.StringSortMergeJoin =>
       hashed(PhysicalOp.Kind.StringTriples)
     case _: PhysicalOp.LongHashLeftOuter | _: PhysicalOp.LongHashRightOuter |
         _: PhysicalOp.LongHashFullOuter | _: PhysicalOp.LongSortMergeLeftOuter |

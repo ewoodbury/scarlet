@@ -14,9 +14,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  *
  * The row path is the oracle. The two sides keep independent dictionaries and match by string
  * equality. A null key is dropped. `""` matches `""`. A null value stays a clear validity bit.
- * An explicit broadcast hint lowers to `StringBroadcastJoin`. String inner sort-merge stays on the
- * row path. Outer joins lower. A key or value filter is applied before the probe, so this hint
- * reads dense batches.
+ * An explicit broadcast hint lowers to `StringBroadcastJoin`. An explicit sort-merge hint lowers
+ * to `StringSortMergeJoin`. Outer joins lower. A key or value filter is applied before the probe,
+ * so this hint reads dense batches.
  */
 class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -325,11 +325,22 @@ class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     fullOuter.collect().toList should contain theSameElementsAs row(fullOuter.collect().toList)
   }
 
-  it should "keep inner sort-merge on the row path" in {
+  it should "lower inner sort-merge and keep an unhinted outer join on the hash node" in {
     val left = DistCollection(Seq("a" -> 1, "b" -> 2), 2)
     val right = DistCollection(Seq("a" -> 10, "c" -> 3), 2)
 
-    refuse(left.sortMergeJoin(right))
+    ColumnarPlanner.lower(left.sortMergeJoin(right).plan).map(_.shape) shouldBe Some(
+      "StringSortMergeJoin(Exchange(Scan), Exchange(Scan))",
+    )
+    ColumnarPlanner.lower(left.join(right).plan).map(_.shape) shouldBe Some(
+      "StringHashJoin(Exchange(Scan), Exchange(Scan))",
+    )
+    ColumnarPlanner.lower(left.shuffleHashJoin(right).plan).map(_.shape) shouldBe Some(
+      "StringHashJoin(Exchange(Scan), Exchange(Scan))",
+    )
+    ColumnarPlanner.lower(left.broadcastJoin(right).plan).map(_.shape) shouldBe Some(
+      "StringBroadcastJoin(Scan, Scan)",
+    )
 
     val leftOuter = left.leftOuterJoin(right)
     val rightOuter = left.rightOuterJoin(right)
@@ -404,11 +415,6 @@ class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     columnar should contain theSameElementsAs expected
     columnar should contain theSameElementsAs row(joined.collect().toList)
     stringTripleBatches(joined.plan).length shouldBe width
-
-  private def refuse[A](collection: DistCollection[A]): Unit =
-    ColumnarPlanner.lower(collection.plan) shouldBe Option.empty[PhysicalOp]
-    ColumnarPlanner.partitioning(collection.plan) shouldBe Option.empty[PartitioningInfo]
-    collection.collect().toList should contain theSameElementsAs row(collection.collect().toList)
 
   private def agree(
       joined: DistCollection[(String, (Int, Int))],

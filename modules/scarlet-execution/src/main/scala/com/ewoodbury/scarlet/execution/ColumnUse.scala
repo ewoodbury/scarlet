@@ -160,6 +160,8 @@ private[execution] object ColumnUse:
         pair(left, right, leftOp, rightOp)
       case (Plan.JoinOp(left, right, _), PhysicalOp.StringHashJoin(leftOp, rightOp)) =>
         pair(left, right, leftOp, rightOp)
+      case (Plan.JoinOp(left, right, _), PhysicalOp.StringSortMergeJoin(leftOp, rightOp)) =>
+        pair(left, right, leftOp, rightOp)
       case (Plan.JoinOp(left, right, _), PhysicalOp.SortMergeJoin(leftOp, rightOp)) =>
         pair(left, right, leftOp, rightOp)
       case (Plan.JoinOp(left, right, _), PhysicalOp.BroadcastJoin(leftOp, rightOp, _)) =>

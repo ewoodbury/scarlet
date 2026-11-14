@@ -30,20 +30,15 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 213 accepted fixtures. The filter over sortByIntKey stays accepted: pairSource keys are
-    // fully present. 205 + 1 = 206. Explicit long inner broadcast is a new accepted fixture, so
-    // 206 + 1 = 207. Explicit string inner broadcast is a new accepted fixture, so 207 + 1 = 208.
-    // Int keys of groupByKey is a new accepted fixture, so 208 + 1 = 209.
-    // Explicit long inner sort-merge is a new accepted fixture, so 209 + 1 = 210.
-    // A map directly above int, string, and long groupByKey is three fixtures, so 210 + 3 = 213.
-    accepted.size shouldBe 213
-    // 35 exclusions. 213 + 35 = 248. That filter is not excluded, because the fixture has no
-    // null key. A null key refuses the shape and is not one of these exclusions.
-    // Long outer joins are covered by execution tests, not contract fixtures, because the
-    // contract does not track the int refusals either. String outer joins are covered by
-    // execution tests, not contract fixtures.
+    // 214 accepted fixtures, 35 exclusions, 249 covered. Additions since 205: int filter on
+    // sortByIntKey (206), long inner broadcast (207), string inner broadcast (208), int keys of
+    // groupByKey (209), long inner sort-merge (210), maps above int/string/long groupByKey (213),
+    // explicit string inner sort-merge (214).
+    accepted.size shouldBe 214
+    // A null key refuses the shape rather than excluding it. Outer joins are covered by execution
+    // tests, not contract fixtures, because the contract does not track the int refusals either.
     excluded.size shouldBe 35
-    (accepted.size + excluded.size) shouldBe 248
+    (accepted.size + excluded.size) shouldBe 249
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -619,6 +614,12 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         narrowInfo(1, stringTripleLayout),
         Some("StringBroadcastJoin(Scan, Scan)"),
       ),
+      AcceptedCase(
+        "explicit sort-merge string join",
+        DistCollection(stringKeySource).sortMergeJoin(DistCollection(stringKeySource)).plan,
+        hashedInfo(stringTripleLayout),
+        Some("StringSortMergeJoin(Exchange(Scan), Exchange(Scan))"),
+      ),
       AcceptedCase("filtered int reduceByKey", reducedAfterFilter, hashedInfo(layout), Some("HashAggregate(Exchange(FilterValue(Scan)))")),
       AcceptedCase("mapValues int reduceByKey", reducedAfterMapValues, hashedInfo(layout), Some("HashAggregate(Exchange(MapValue(Scan)))")),
       AcceptedCase("nested int reduceByKey", reducedTwice, hashedInfo(layout), Some("HashAggregate(Exchange(HashAggregate(Exchange(Scan))))")),
@@ -915,7 +916,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     )
 
   /**
-   * `lower` and the action gates share one decision. A refused plan, including a string or double
+   * `lower` and the action gates share one decision. A refused plan, including a double
    * sort-merge and a type-changing pair map, makes every gate return `None`. An accepted plan
    * runs `tryRun` and `tryCount`. `tryTake` runs when the physical tree keeps input partitions,
    * and for an int-key, long-key, or string-key sort, which runs the whole sort and then decodes
@@ -991,7 +992,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.GroupedDecode(_) | PhysicalOp.CountByKey(_) |
         PhysicalOp.HashJoin(_, _) |
         PhysicalOp.LongHashJoin(_, _) | PhysicalOp.LongSortMergeJoin(_, _) |
-        PhysicalOp.StringHashJoin(_, _) |
+        PhysicalOp.StringHashJoin(_, _) | PhysicalOp.StringSortMergeJoin(_, _) |
         PhysicalOp.SortMergeJoin(_, _) | PhysicalOp.SortMergeLeftOuter(_, _) |
         PhysicalOp.SortMergeRightOuter(_, _) | PhysicalOp.SortMergeFullOuter(_, _) |
         PhysicalOp.HashLeftOuter(_, _) | PhysicalOp.HashRightOuter(_, _) |

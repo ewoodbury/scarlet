@@ -9,11 +9,12 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * key on the preserved side is carried to partition 0. A null build key is not inserted.
  * Sort-merge hash-partitions both sides and runs [[StringSortMerge]] in memory. With spill on, a
  * partition whose present-key estimate is above `spillBudgetBytes` throws before any directory is
- * created.
+ * created. [[sortMergeInnerJoin]] uses that same gate and keeps a null value. An outer method
+ * refuses a null value instead.
  *
- * A null value is not absence. Each entry checks [[ColumnPipeline.valuesFullyPresent]] and throws
- * `IllegalArgumentException` when a value bit is clear. The arm throws [[ColumnarFallback]] before
- * these methods see that batch.
+ * A null value is not absence. Each outer entry checks [[ColumnPipeline.valuesFullyPresent]] and
+ * throws `IllegalArgumentException` when a value bit is clear. The arm throws [[ColumnarFallback]]
+ * before those methods see that batch. [[sortMergeInnerJoin]] does not. It copies the clear bit.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object StringOuterPipeline:
@@ -137,6 +138,30 @@ object StringOuterPipeline:
     }
 
   /**
+   * Inner sort-merge. Both exchanges drop a null key. A null value stays on the batch. Over the
+   * budget, with spill on, this throws and writes nothing. At or under the budget, and whenever
+   * spill is off, the partition stays in memory.
+   */
+  def sortMergeInnerJoin(
+      left: Vector[ColumnBatch],
+      right: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    sortMergeOuter(
+      left,
+      right,
+      numPartitions,
+      parallelism,
+      batchSize,
+      carryLeft = false,
+      carryRight = false,
+      label = "string inner sort-merge",
+      (leftBatch, rightBatch) => StringSortMerge.inner(leftBatch, rightBatch),
+    )
+
+  /**
    * Left outer sort-merge. The left exchange carries a null key. The right exchange drops one.
    * Over the budget, with spill on, this throws and writes nothing.
    */
@@ -159,6 +184,7 @@ object StringOuterPipeline:
       batchSize,
       carryLeft = true,
       carryRight = false,
+      label = "string outer sort-merge",
       (leftBatch, rightBatch) => StringSortMerge.leftOuter(leftBatch, rightBatch),
     )
 
@@ -185,6 +211,7 @@ object StringOuterPipeline:
       batchSize,
       carryLeft = false,
       carryRight = true,
+      label = "string outer sort-merge",
       (leftBatch, rightBatch) => StringSortMerge.rightOuter(leftBatch, rightBatch),
     )
 
@@ -211,6 +238,7 @@ object StringOuterPipeline:
       batchSize,
       carryLeft = true,
       carryRight = true,
+      label = "string outer sort-merge",
       (leftBatch, rightBatch) => StringSortMerge.fullOuter(leftBatch, rightBatch),
     )
 
@@ -247,6 +275,7 @@ object StringOuterPipeline:
       batchSize: Int,
       carryLeft: Boolean,
       carryRight: Boolean,
+      label: String,
       join: (ColumnBatch, ColumnBatch) => ColumnBatch,
   ): Vector[ColumnBatch] =
     val leftBuckets = HashExchange.partitionAllUtf8(
@@ -267,7 +296,7 @@ object StringOuterPipeline:
     MorselScheduler.map(leftBuckets, parallelism) { (part, leftBatch) =>
       val rightBatch = bucketAt(rightBuckets, part)
       if (overBudget(leftBatch, rightBatch, conf)) then
-        refuseSortMerge(leftBatch, rightBatch, conf)
+        refuseSortMerge(leftBatch, rightBatch, conf, label)
       else join(leftBatch, rightBatch)
     }
 
@@ -296,11 +325,15 @@ object StringOuterPipeline:
   private def overBudget(left: ColumnBatch, right: ColumnBatch, conf: ScarletConf): Boolean =
     conf.spillEnabled && retainedSide(left) + retainedSide(right) > conf.spillBudgetBytes
 
-  private def refuseSortMerge(left: ColumnBatch, right: ColumnBatch, conf: ScarletConf): Nothing =
+  private def refuseSortMerge(
+      left: ColumnBatch,
+      right: ColumnBatch,
+      conf: ScarletConf,
+      label: String,
+  ): Nothing =
     val estimate = retainedSide(left) + retainedSide(right)
     throw new IllegalStateException(
-      s"string outer sort-merge spill retains about $estimate bytes, " +
-        s"above the budget of ${conf.spillBudgetBytes} bytes",
+      s"$label spill retains about $estimate bytes, above the budget of ${conf.spillBudgetBytes} bytes",
     )
 
   private def broadcast(
