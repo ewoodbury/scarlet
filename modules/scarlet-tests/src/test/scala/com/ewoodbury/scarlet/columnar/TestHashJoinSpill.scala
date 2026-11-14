@@ -132,6 +132,27 @@ class TestHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     }
   }
 
+  "a duplicate-heavy bucket" should "still refuse when the row-count estimate exceeds the budget" in {
+    val rows = 8000
+    val build = pairs(rowsOf(0, rows, identity))
+    val probe = pairs(Seq((0, 7)))
+    val budget = HashJoin.retainedBuildBytes(rows) - 1L
+    val estimate = HashJoin.retainedBuildBytes(rows)
+    HashJoin.retainedAt(rows, HashJoin.InitialBuildSlots) should be < budget
+
+    withConf(budget) { dir =>
+      val caught = intercept[IllegalStateException] {
+        val _ = join(build, probe)
+      }
+
+      caught.getMessage shouldBe
+        s"shuffle-hash build piece retains about $estimate bytes for $rows rows, " +
+        s"above the budget of $budget bytes"
+      HashJoinSpill.filesWrittenForTest shouldBe 1L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+  }
+
   "duplicate keys" should "emit the full cartesian product" in {
     val copies = 4
     val partners = 3

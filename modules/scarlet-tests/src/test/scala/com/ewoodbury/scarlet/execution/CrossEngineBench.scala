@@ -1,9 +1,19 @@
 package com.ewoodbury.scarlet.execution
 
+import java.lang.management.ManagementFactory
+import java.util.concurrent.locks.LockSupport
+
 import cats.effect.unsafe.implicits.global
+import com.sun.management.ThreadMXBean
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.{BatchCodec, ColumnBatch, ColumnMetrics, CountingSink}
+import com.ewoodbury.scarlet.columnar.{
+  BatchCodec,
+  ColumnBatch,
+  ColumnMetrics,
+  CountingSink,
+  HashJoin,
+}
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
@@ -37,7 +47,8 @@ object CrossEngineBench:
   private val groups = 1024
   private val seed = 0x12345678
   private val shuffleSeed = 58L
-  private val threads = 4
+  private val threads: Int = readThreadCount()
+  private val allocRounds = 5
   private val batchSize = 8192
   private val sourcePartitions = 2
   private val nullStride = 4096
@@ -67,6 +78,8 @@ object CrossEngineBench:
       checksum: Long,
       encodeMs: Double,
       batches: Long,
+      allocMb: Double,
+      slots: Long,
   )
 
   private final case class Observed(value: Any, elapsedMs: Double, batches: Long)
@@ -110,7 +123,8 @@ object CrossEngineBench:
 
   private def runQuery(name: String, settings: Settings): Sample =
     val built = build(name, settings)
-    measure(name, built, settings.warmup, settings.rounds)
+    val timed = measure(name, built, settings.warmup, settings.rounds)
+    timed.copy(allocMb = sampleAlloc(built.action), slots = sampleSlots(built.action))
 
   /** The action closes over the distributed collection, not the source arrays. */
   private def build(name: String, settings: Settings): Built =
@@ -267,7 +281,7 @@ object CrossEngineBench:
       batches = observed.batches
       round += 1
     java.util.Arrays.sort(samples)
-    Sample(samples(samples.length / 2), checksum, built.encodeMs, batches)
+    Sample(samples(samples.length / 2), checksum, built.encodeMs, batches, -1.0, -1L)
 
   private def observe(action: () => Any): Observed =
     val sink = new CountingSink
@@ -393,8 +407,61 @@ $body
 
   private def queryJson(name: String, sample: Sample): String =
     val head = s"""    "$name": {"p50_ms": ${sample.p50Ms}, "checksum": ${sample.checksum},"""
-    val tail = s""" "encode_ms": ${sample.encodeMs}, "batches": ${sample.batches}}"""
+    val tail =
+      s""" "encode_ms": ${sample.encodeMs}, "batches": ${sample.batches}, "alloc_mb": ${sample.allocMb}, "slots": ${sample.slots}}"""
     head + tail
+
+  /** One action, after the timed rounds. Workers have joined, so the counter is complete. */
+  private def sampleSlots(action: () => Any): Long =
+    HashJoin.resetBuiltSlots()
+    ScarletRuntime.get.shuffle.clear()
+    val _ = action()
+    HashJoin.builtSlotsTotal
+
+  /**
+   * Nearest-rank p50 of process-wide thread bytes over [[allocRounds]], in decimal megabytes.
+   * The probe excludes itself. A worker that exits between reads is missing. `-1` means the JVM
+   * refused the allocated-memory probe.
+   */
+  private def sampleAlloc(action: () => Any): Double =
+    startProbe() match
+      case None => -1.0
+      case Some(probe) =>
+        try
+          val samples = new Array[Long](allocRounds)
+          var round = 0
+          while (round < allocRounds) {
+            val (_, bytes) = probe.account {
+              ScarletRuntime.get.shuffle.clear()
+              action()
+            }
+            samples(round) = bytes
+            round += 1
+          }
+          java.util.Arrays.sort(samples)
+          samples(allocRounds / 2).toDouble / 1000000.0
+        finally probe.stop()
+
+  private def startProbe(): Option[AllocProbe] =
+    threadBean.filter(_.isThreadAllocatedMemorySupported).flatMap { bean =>
+      bean.setThreadAllocatedMemoryEnabled(true)
+      if (bean.isThreadAllocatedMemoryEnabled) then Some(new AllocProbe(bean)) else None
+    }
+
+  private def threadBean: Option[ThreadMXBean] =
+    ManagementFactory.getThreadMXBean match
+      case bean: ThreadMXBean => Some(bean)
+      case _ => None
+
+  private def readThreadCount(): Int =
+    sys.env.get("CROSS_THREADS") match
+      case None => 4
+      case Some(text) =>
+        text.toIntOption match
+          case Some(value) if value > 0 => value
+          case _ =>
+            System.err.println(s"CROSS_THREADS must be a positive integer, found $text")
+            sys.exit(1)
 
   private def readSettings(): Settings =
     Settings(
@@ -440,3 +507,108 @@ $body
   private def refuse(message: String): Nothing =
     System.err.println(message)
     throw new HarnessRefusal(message)
+
+  /**
+   * Sums bytes on every live thread except the probe. Morsel workers have exited when the action
+   * returns, so a before/after pair on the caller misses them. The watch reads while the action
+   * runs.
+   */
+  private final class AllocProbe(bean: ThreadMXBean):
+    private val capacity = 1024
+    private val ids = new Array[Long](capacity)
+    private val baseline = new Array[Long](capacity)
+    private val high = new Array[Long](capacity)
+    private var count = 0
+    @volatile private var running = true
+    @volatile private var probeId = 0L
+    private val thread = new Thread(() => watch(), "scarlet-alloc-probe")
+
+    thread.setDaemon(true)
+    thread.start()
+    while (probeId == 0L) LockSupport.parkNanos(10000L)
+
+    def stop(): Unit =
+      running = false
+      LockSupport.unpark(thread)
+      thread.join(1000L)
+      ()
+
+    def account[A](body: => A): (A, Long) =
+      open()
+      try
+        val value = body
+        (value, close())
+      catch
+        case thrown: Throwable =>
+          closeQuietly()
+          throw thrown
+
+    private def watch(): Unit =
+      probeId = Thread.currentThread().getId
+      while (running) {
+        observe(setBaseline = false)
+        LockSupport.parkNanos(50000L)
+      }
+
+    private def open(): Unit = this.synchronized {
+      count = 0
+      observe(setBaseline = true)
+    }
+
+    private def close(): Long = this.synchronized {
+      observe(setBaseline = false)
+      var index = 0
+      var total = 0L
+      while (index < count) {
+        if (ids(index) != probeId) then
+          val base = if (baseline(index) < 0L) 0L else baseline(index)
+          val delta = high(index) - base
+          if (delta > 0L) then total += delta
+        index += 1
+      }
+      total
+    }
+
+    private def closeQuietly(): Unit =
+      try
+        val _ = close()
+      catch
+        case _: IllegalStateException => ()
+
+    private def observe(setBaseline: Boolean): Unit = this.synchronized {
+      val live = bean.getAllThreadIds
+      var index = 0
+      while (index < live.length) {
+        val id = live(index)
+        val bytes = bean.getThreadAllocatedBytes(id)
+        if (bytes >= 0L) then note(id, bytes, setBaseline)
+        index += 1
+      }
+    }
+
+    private def note(id: Long, bytes: Long, setBaseline: Boolean): Unit =
+      val at = slot(id)
+      if (bytes > high(at)) then high(at) = bytes
+      if (setBaseline) then baseline(at) = bytes
+
+    private def slot(id: Long): Int =
+      val existing = indexOf(id)
+      if (existing >= 0) then existing
+      else if (count >= capacity) then
+        throw new IllegalStateException(s"alloc probe filled $capacity thread slots")
+      else
+        val placed = count
+        ids(placed) = id
+        baseline(placed) = -1L
+        high(placed) = 0L
+        count = placed + 1
+        placed
+
+    private def indexOf(id: Long): Int =
+      var index = 0
+      var found = -1
+      while (index < count && found < 0) {
+        if (ids(index) == id) then found = index
+        index += 1
+      }
+      found
