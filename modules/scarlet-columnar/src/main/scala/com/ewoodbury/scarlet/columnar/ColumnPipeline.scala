@@ -201,6 +201,24 @@ object ColumnPipeline:
     )
 
   /**
+   * Match count for [[innerJoin]]. Same exchange, including the slice. A bucket over the spill
+   * budget is joined and then counted. A bucket that fits sums chain lengths and writes nothing.
+   */
+  def countInner(
+      build: Vector[ColumnBatch],
+      probe: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Long =
+    countInner(
+      JoinInput.Dense(sliceAll(build, batchSize)),
+      JoinInput.Dense(sliceAll(probe, batchSize)),
+      numPartitions,
+      parallelism,
+    )
+
+  /**
    * Inner shuffle-hash join. `build` is the left input and `probe` is the right.
    * [[JoinInput.Dense]] is partitioned with [[HashExchange.partitionAll]]. [[JoinInput.Selected]]
    * is partitioned with [[HashExchange.partitionAllSelected]] and is not sliced. Bucket `i` of the
@@ -229,6 +247,32 @@ object ColumnPipeline:
           HashJoin.JoinSide(probeBatch, key = 0, value = 1),
         )
       }
+
+  /**
+   * [[innerJoin]] for a count. The exchange is the same, including a selected side. Over-budget
+   * build buckets still spill and are counted from the batches [[HashJoinSpill]] returns. A bucket
+   * that fits asks [[HashJoin.countInner]] and does not allocate the match columns.
+   */
+  def countInner(
+      build: JoinInput,
+      probe: JoinInput,
+      numPartitions: Int,
+      parallelism: Int,
+  ): Long =
+    val buildBuckets = exchange(build, numPartitions, parallelism)
+    val probeBuckets = exchange(probe, numPartitions, parallelism)
+    val conf = ScarletConf.get
+    if (buildBuckets.exists(bucket => HashJoinSpill.exceeds(bucket, conf))) then
+      ColumnReduce.count(HashJoinSpill.finish(buildBuckets, probeBuckets, parallelism, conf))
+    else
+      MorselScheduler
+        .map(probeBuckets, parallelism) { (part, probeBatch) =>
+          HashJoin.countInner(
+            HashJoin.JoinSide(bucketAt(buildBuckets, part), key = 0, value = 1),
+            HashJoin.JoinSide(probeBatch, key = 0, value = 1),
+          )
+        }
+        .foldLeft(0L)((total, matches) => total + matches.toLong)
 
   private def exchange(
       input: JoinInput,

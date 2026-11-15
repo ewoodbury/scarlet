@@ -15,7 +15,7 @@ import ColumnPipeline.JoinInput
  *
  * A null value is a clear bit in the output, including a selection. It is not an absence bit. A
  * null key is dropped by the exchange. A selected side skips the slice; both dense sides use the
- * caller's flag and slice.
+ * caller's flag and slice. [[count]] uses that same exchange and sums chain lengths.
  */
 private[execution] object JoinArms:
 
@@ -46,6 +46,35 @@ private[execution] object JoinArms:
         val build = input(left, leftOp, leftSelected, selectedPartition, ordinals)
         val probe = input(right, rightOp, rightSelected, selectedPartition, ordinals)
         ColumnPipeline.innerJoin(build, probe, width, workers)
+
+  /** Rows [[inner]] would publish. The match columns are not written. */
+  def count(
+      left: Plan[_],
+      right: Plan[_],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): Long =
+    val width = ColumnarPlanner.shuffleWidth
+    val workers = ColumnarPlanner.parallelism
+    val batchSize = ColumnarPlanner.batchSize
+    val leftSelected = selection(left, leftOp, selectedPartition, ordinals)
+    val rightSelected = selection(right, rightOp, selectedPartition, ordinals)
+    (leftSelected, rightSelected) match
+      case (None, None) =>
+        ColumnPipeline.countInner(
+          pairs(left, leftOp, selectedPartition, preserveAbsence, ordinals),
+          pairs(right, rightOp, selectedPartition, preserveAbsence, ordinals),
+          width,
+          workers,
+          batchSize,
+        )
+      case _ =>
+        val build = input(left, leftOp, leftSelected, selectedPartition, ordinals)
+        val probe = input(right, rightOp, rightSelected, selectedPartition, ordinals)
+        ColumnPipeline.countInner(build, probe, width, workers)
 
   private def selection(
       plan: Plan[_],

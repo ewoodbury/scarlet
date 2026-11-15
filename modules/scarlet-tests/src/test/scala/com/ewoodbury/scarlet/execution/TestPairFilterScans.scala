@@ -115,11 +115,12 @@ class TestPairFilterScans extends AnyFlatSpec with Matchers with BeforeAndAfterE
     counted.result shouldBe expected.length.toLong
     collected.visits - baseline.visits shouldBe cuts.length.toLong
     counted.visits - baseline.visits shouldBe cuts.length.toLong
-    // Collect decodes the index and does not publish the filter. Count still chains the kernel:
-    // one output per morsel and one regroup. A copied slice would add one batch per cut.
-    collected.batches - baseline.batches shouldBe 0L
+    // The bare join count sums matches and does not publish them. Collect still writes one
+    // batch for that partition. The filtered count writes that batch, one per morsel, and one
+    // regroup. A copied slice would add one more batch per cut.
+    collected.batches - baseline.batches shouldBe 1L
     val filterBatches = cuts.length.toLong + 1L
-    counted.batches - baseline.batches shouldBe filterBatches
+    counted.batches - baseline.batches shouldBe filterBatches + 1L
   }
 
   it should "keep partition order when morsels split a triple filter" in {
@@ -139,8 +140,9 @@ class TestPairFilterScans extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
     collected.result shouldBe rowResult
     collected.visits - baseline.visits shouldBe filterVisits.toLong
-    // The index adds visits and no filtered batch. Slicing would publish copied batches.
-    collected.batches - baseline.batches shouldBe 0L
+    // The index adds visits and no filtered batch. The bare count publishes no match batch,
+    // and collect still writes one per partition. Slicing would publish copied batches.
+    collected.batches - baseline.batches shouldBe 2L
   }
 
   private def arm(threads: Int, partitions: Int = 4): Unit =

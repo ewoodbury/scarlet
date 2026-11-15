@@ -308,11 +308,7 @@ object ColumnarPlanner:
       case _: PhysicalOp.GroupByKey =>
         Some(ColumnarInterpreter.groupCount(ColumnarInterpreter.interpret(plan, op)))
       case _ =>
-        Some(
-          ColumnReduce.count(
-            ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op)),
-          ),
-        )
+        Some(MatchCount.of(plan, op))
 
   /**
    * Wide sum of a finished int column. `None` means the row path, including a plan whose result is
