@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.columnar
 
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 
 import scala.annotation.tailrec
 
@@ -164,26 +164,67 @@ private[scarlet] object FoldedCount:
       parallelism: Int,
       batchSize: Int,
   ): Vector[ColumnBatch] =
-    val groups = batches.map(batch => Morsels.of(batch, batchSize))
-    val partials = MorselScheduler.map(groups.flatten, parallelism) { (_, morsel) =>
-      countMorsel(morsel, steps)
-    }
-    val combined = PartialCombine.mergeMorsels(
-      groups.map(_.length),
-      partials,
-      parallelism,
-      HashCount.addCounts,
-    )
-    finish(combined, numPartitions, parallelism, batchSize)
+    try
+      val groups = batches.map(batch => Morsels.of(batch, batchSize))
+      val partials = MorselScheduler.map(groups.flatten, parallelism) { (_, morsel) =>
+        countMorsel(morsel, steps)
+      }
+      val combined = PartialCombine.mergeMorsels(
+        groups.map(_.length),
+        partials,
+        parallelism,
+        HashCount.addCounts,
+      )
+      finish(combined, numPartitions, parallelism, batchSize)
+    finally
+      releaseWorkers()
+      HashCount.releaseWorkers()
 
   private def countMorsel(morsel: Morsel, steps: List[Selection.Step]): ColumnBatch =
     val length = morsel.length
     if (length == 0) then ColumnBatches.emptyIntPairs
     else
       refuse(length.toLong)
-      val table = new Table(ColumnHash.tableSize(length))
+      val table = borrow(length)
       table.scan(morsel.batch, morsel.start, length, steps)
       table.compact()
+
+  /**
+   * One table per thread, sized for the largest morsel that thread has counted. The next morsel
+   * clears the occupied slots and does not zero the arrays. [[MorselScheduler]] drops the holder
+   * when the pool task returns; the caller path drops it when [[execute]] returns.
+   */
+  private val locals: ThreadLocal[Table | Null] = new ThreadLocal[Table | Null]()
+  private val allocatedTables = new AtomicLong
+  private val reusedTables = new AtomicLong
+
+  private[columnar] def releaseWorkers(): Unit =
+    locals.remove()
+
+  /** Zeros the reuse counters and drops this thread's table. */
+  private[columnar] def resetReuseForTest(): Unit =
+    allocatedTables.set(0L)
+    reusedTables.set(0L)
+    releaseWorkers()
+
+  /** Tables constructed since the last [[resetReuseForTest]], on every thread. */
+  private[columnar] def tablesAllocatedForTest: Long = allocatedTables.get
+
+  /** Morsels that cleared an existing table instead of allocating one. */
+  private[columnar] def tablesReusedForTest: Long = reusedTables.get
+
+  private def borrow(rows: Int): Table =
+    val need = ColumnHash.tableSize(rows)
+    locals.get() match
+      case current: Table if current.accepts(need) =>
+        val _ = reusedTables.incrementAndGet()
+        current.clear()
+        current
+      case _ =>
+        val created = new Table(need)
+        locals.set(created)
+        val _ = allocatedTables.incrementAndGet()
+        created
 
   /**
    * Same exchange as [[HashCount]]. Spill stays on the post-exchange bucket. The partial combine
@@ -295,6 +336,21 @@ private[scarlet] object FoldedCount:
     private val state: Array[Byte] = new Array[Byte](capacity)
     private val slots: Array[Int] = new Array[Int](capacity)
     private var occupied: Int = 0
+
+    def accepts(need: Int): Boolean = keys.length >= need
+
+    /**
+     * Drops every key this morsel inserted. The arrays stay, so the next morsel does not zero
+     * them.
+     */
+    def clear(): Unit =
+      var cursor = 0
+      val rows = occupied
+      while (cursor < rows) {
+        state(slots(cursor)) = 0
+        cursor += 1
+      }
+      occupied = 0
 
     def scan(batch: ColumnBatch, start: Int, length: Int, steps: List[Selection.Step]): Unit =
       val readMask = ordinalMask(steps)

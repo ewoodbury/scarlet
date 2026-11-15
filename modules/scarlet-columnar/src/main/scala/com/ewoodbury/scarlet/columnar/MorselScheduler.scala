@@ -45,11 +45,11 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * same thread in another dispatch reads that dispatch's map, so it can carry a different id. A
  * nested inline dispatch does not consult the map.
  *
- * A pool worker drops its [[HashAggregate]] sum holder and its [[LongHashReduce]] table when its
- * task for the dispatch returns. The thread now outlives the call, and those holders are keyed by
- * the thread. Within the task the holder stays, including across a nested inline dispatch and a
- * morsel the worker steals. The inline path does not drop it: the outer morsel may still read it
- * after the nested call returns.
+ * A pool worker drops its [[HashAggregate]] sum holder, its [[LongHashReduce]] table, and the
+ * [[HashCount]] and [[FoldedCount]] tables when its task for the dispatch returns. The thread now
+ * outlives the call, and those holders are keyed by the thread. Within the task the holder stays,
+ * including across a nested inline dispatch and a morsel the worker steals. The inline path does
+ * not drop it: the outer morsel may still read it after the nested call returns.
  */
 object MorselScheduler:
 
@@ -152,6 +152,8 @@ object MorselScheduler:
           finally
             HashAggregate.releaseSumWorkers()
             LongHashReduce.releaseWorkers()
+            HashCount.releaseWorkers()
+            FoldedCount.releaseWorkers()
         finally
           onPool.set(false)
           done.countDown()

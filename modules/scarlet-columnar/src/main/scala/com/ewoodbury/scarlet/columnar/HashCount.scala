@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import java.util.concurrent.atomic.AtomicLong
+
 import com.ewoodbury.scarlet.core.ScarletConf
 
 /**
@@ -57,7 +59,7 @@ object HashCount:
     if (until == from) then ColumnBatches.emptyIntPairs
     else
       refuse((until - from).toLong)
-      val table = new Table(ColumnHash.tableSize(until - from))
+      val table = borrow(until - from)
       if (ColumnHash.fullyPresent(keys)) then
         table.scanDenseSelected(keys, selected.rows, from, until)
       else table.scanSparseSelected(keys, selected.rows, from, until)
@@ -81,12 +83,14 @@ object HashCount:
     requirePositive(numPartitions, parallelism, batchSize)
     if (batches.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs)
     else
-      batches.foreach(requireKey)
-      val rows = batches.iterator.map(_.length.toLong).sum
-      if (refuseBeforeCombine) then refuse(rows)
-      val keysOnly = batches.map(batch => ColumnBatches.takeColumn(batch, 0))
-      val combined = PartialCombine.perBatch(keysOnly, batchSize, parallelism, int32, addCounts)
-      finish(combined, numPartitions, parallelism, batchSize)
+      try
+        batches.foreach(requireKey)
+        val rows = batches.iterator.map(_.length.toLong).sum
+        if (refuseBeforeCombine) then refuse(rows)
+        val keysOnly = batches.map(batch => ColumnBatches.takeColumn(batch, 0))
+        val combined = PartialCombine.perBatch(keysOnly, batchSize, parallelism, int32, addCounts)
+        finish(combined, numPartitions, parallelism, batchSize)
+      finally releaseWorkers()
 
   /**
    * [[byKey]] for a selection. Each live prefix is partial-counted, the dense partials are
@@ -103,17 +107,19 @@ object HashCount:
     requirePositive(numPartitions, parallelism, batchSize)
     if (selected.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs)
     else
-      selected.foreach(one => requireKey(one.batch))
-      val rows = selected.iterator.map(_.count.toLong).sum
-      if (refuseBeforeCombine) then refuse(rows)
-      val combined = PartialCombine.perBatchSelected(
-        selected,
-        batchSize,
-        parallelism,
-        (one, from, until) => int32Selected(one, from, until),
-        addCounts,
-      )
-      finish(combined, numPartitions, parallelism, batchSize)
+      try
+        selected.foreach(one => requireKey(one.batch))
+        val rows = selected.iterator.map(_.count.toLong).sum
+        if (refuseBeforeCombine) then refuse(rows)
+        val combined = PartialCombine.perBatchSelected(
+          selected,
+          batchSize,
+          parallelism,
+          (one, from, until) => int32Selected(one, from, until),
+          addCounts,
+        )
+        finish(combined, numPartitions, parallelism, batchSize)
+      finally releaseWorkers()
 
   /**
    * Estimated bytes of a count table for `rows` input keys.
@@ -156,14 +162,14 @@ object HashCount:
       val keys = ColumnHash.int32At(batch, 0)
       val weights = ColumnHash.int32At(batch, 1)
       require(keys.length == weights.length, "key and count columns differ in length")
-      val table = new Table(ColumnHash.tableSize(keys.length))
+      val table = borrow(keys.length)
       if (ColumnHash.fullyPresent(keys) && ColumnHash.fullyPresent(weights)) then
         table.scanWeights(keys, weights)
       else table.scanWeightsSparse(keys, weights)
       table.compact()
 
   private def countKeys(keys: Int32Column): ColumnBatch =
-    val table = new Table(ColumnHash.tableSize(keys.length))
+    val table = borrow(keys.length)
     if (ColumnHash.fullyPresent(keys)) then table.scanDense(keys)
     else table.scanSparse(keys)
     table.compact()
@@ -208,6 +214,43 @@ object HashCount:
     val bytes = inputRowBytes(rows)
     if (bytes > budget) then throw new ClosedKernelRefusal(rows, bytes, budget)
 
+  /**
+   * One table per thread. A later batch on that thread clears occupied slots instead of zeroing a
+   * new array. [[MorselScheduler]] drops the holder when a pool task returns. [[byKey]] and
+   * [[byKeySelected]] drop the caller's holder, and [[FoldedCount]] drops it after the merge.
+   */
+  private val locals: ThreadLocal[Table | Null] = new ThreadLocal[Table | Null]()
+  private val allocatedTables = new AtomicLong
+  private val reusedTables = new AtomicLong
+
+  private[columnar] def releaseWorkers(): Unit =
+    locals.remove()
+
+  /** Zeros the reuse counters and drops this thread's table. */
+  private[columnar] def resetReuseForTest(): Unit =
+    allocatedTables.set(0L)
+    reusedTables.set(0L)
+    releaseWorkers()
+
+  /** Tables constructed since the last [[resetReuseForTest]], on every thread. */
+  private[columnar] def tablesAllocatedForTest: Long = allocatedTables.get
+
+  /** Batches that cleared an existing table instead of allocating one. */
+  private[columnar] def tablesReusedForTest: Long = reusedTables.get
+
+  private def borrow(rows: Int): Table =
+    val need = ColumnHash.tableSize(rows)
+    locals.get() match
+      case current: Table if current.accepts(need) =>
+        val _ = reusedTables.incrementAndGet()
+        current.clear()
+        current
+      case _ =>
+        val created = new Table(need)
+        locals.set(created)
+        val _ = allocatedTables.incrementAndGet()
+        created
+
   private final class Table(capacity: Int):
     private val mask: Int = capacity - 1
     private val limit: Int = capacity >>> 1
@@ -216,6 +259,20 @@ object HashCount:
     private val state: Array[Byte] = new Array[Byte](capacity)
     private val slots: Array[Int] = new Array[Int](capacity)
     private var occupied: Int = 0
+
+    def accepts(need: Int): Boolean = keys.length >= need
+
+    /**
+     * Drops every key this batch inserted. The arrays stay, so the next batch does not zero them.
+     */
+    def clear(): Unit =
+      var cursor = 0
+      val rows = occupied
+      while (cursor < rows) {
+        state(slots(cursor)) = 0
+        cursor += 1
+      }
+      occupied = 0
 
     def scanDense(keyColumn: Int32Column): Unit =
       val keyValues = keyColumn.values
