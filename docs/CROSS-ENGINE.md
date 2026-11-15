@@ -1,15 +1,104 @@
 # Cross-engine checks: DuckDB and Spark
 
 Not a CI gate. The CI gate is `PerfCheck`, which compares the columnar path with the row path in
-the same run. The decision table is the 2026-11-15 run at `8958ac9`. The 2026-11-14 second run is
-the previous scoreboard, at `ffca249`. The 2026-11-13 devbox section is the earlier warmup-3,
-rounds-10 protocol. The Apple M1 Pro table is history from 2026-11-07. It is not comparable with
-the container or the devbox.
+the same run. The decision table is the 2026-11-15 steady-window run at `2b7b01e`. The warmup-5
+full-window run at `8958ac9` is the previous scoreboard. The 2026-11-14 second run is the one
+before that, at `ffca249`. The 2026-11-13 devbox section is the earlier warmup-3, rounds-10
+protocol. The Apple M1 Pro table is history from 2026-11-07. It is not comparable with the
+container or the devbox.
 
-## 2026-11-15 — devbox, current tree
+## 2026-11-15 — devbox, steady window
 
-Decision table. Commit `8958ac9`. Same machine and the same paired protocol as the 2026-11-14
-second run.
+Decision table. Commit `2b7b01e`. Same machine as the warmup-5 section below.
+
+- Machine: `sjc-gpu-01` (`nixos`), x86_64, AMD Ryzen 9 5900XT, 32 threads, 62 GB, OpenJDK
+  21.0.13, sbt 1.10.11. The CPU governor is `powersave`. `sudo -n true` asks for a password, so
+  the governor was left.
+- Scarlet: 1e6 rows, 4 threads, 2 filters, no nulls, spill on. Each log booted sbt (`welcome to
+  sbt`) and the first query started at about 3.5–4.0 s of JVM uptime. Warmup 80, rounds 30.
+  `steady_ms` is the upper median of the last 10 rounds. `compilation` is kept and published as
+  `steady_ms`. `machine` (the two halves of those last 10 differ by more than 10%) is dropped.
+  The row is the upper median of the kept values, index `n/2` after sorting. Drop the five when
+  fewer than three JVMs remain, or when `(max - min) / median` of the kept values is above 0.10.
+- DuckDB 2.0.0, in memory, same rows, threads, and filters. Warmup 5, rounds 30. The engine is
+  native, so the timer has no JIT compile-in: one extra process, not in the five below, had
+  first-10 / last-10 median ratios of 1.07, 1.11, 1.04, 1.01, 0.89, and 1.01 across the six
+  queries, and the join's tail was the slower half. A process before that five printed count at
+  1.220 ms, so the column is the upper median of five processes, not one process. Sum's five
+  p50s span 10.1% (0.979 to 1.084 ms). The other five queries span 0.6% to 9.6%. The published
+  DuckDB number is still that median. The 10% drop rule is the Scarlet rule.
+
+| query | DuckDB | Scarlet | ratio | DuckDB checksum | Scarlet checksum | kept |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| filter + count | 1.020 ms | 0.732 ms | 1.39x ahead | 333036 | 333036 | 5 of 5 |
+| filter + sum | 1.037 ms | — | — | 166553391274 | 166553391274 | none |
+| filter + countByKey | 1.514 ms | 1.542 ms | 1.02x behind | 11147169 | 11147169 | 5 of 5 |
+| filter + reduceByKey | 2.045 ms | 1.707 ms | 1.20x ahead | 166564205407 | 166564205407 | 3 of 5 |
+| filter + join | 4.141 ms | 5.360 ms | 1.29x behind | 3330360 | 3330360 | 4 of 5 |
+| filter + sort | 70.245 ms | 35.568 ms | 1.97x ahead | 5343278082631 | 5343278082631 | 5 of 5 |
+
+Checksums matched on every Scarlet JVM and every DuckDB process. The harness still runs
+`filter-groupbykey` in the same JVM, between sum and reduce. That query is not a row here. The
+DuckDB script's `filter-groupbykey` is `count(*)` grouped by key, which is Scarlet's
+`filter-countbykey`.
+
+The first five is the published row when it passes. A later five is used only after an earlier
+five was dropped. Count and join passed on the first five. CountByKey passed on the second.
+`reduceByKey` and sort passed on the third. Sum did not pass.
+
+### What was dropped
+
+- filter + count, first five, kept. All five were `compilation`. Steady values 0.706, 0.713,
+  0.732, 0.743, 0.779 ms. Median 0.732 ms. Span 9.97%.
+- filter + sum, three fives, all dropped on span. Every JVM was `ok` or `compilation`. Medians
+  0.666 ms (span 26.5%), 0.714 ms (span 12.9%), and 0.696 ms (span 17.3%). The fifteen steady
+  readings run from 0.627 ms to 0.804 ms. All are ahead of DuckDB 1.037 ms, from 1.29x to 1.65x.
+  There is no kept row.
+- filter + countByKey, first five dropped. All five were `ok`, at 2.589, 2.709, 1.656, 1.622,
+  and 1.557 ms. Span 69.5%. The second five is the row: 1.448, 1.508, 1.542, 1.587, 1.594 ms,
+  one of them `compilation`, median 1.542 ms, span 9.4%, 5 of 5. A third five was 1.456–1.670 ms,
+  span 13.6%, and was dropped.
+- filter + reduceByKey, first two fives dropped. Each kept only two JVMs; the other three were
+  `machine`. The third five dropped two `machine` JVMs (1.619 ms and 1.673 ms) and kept 1.694
+  (`compilation`), 1.707, and 1.753 ms. Median 1.707 ms. Span 3.5%. 3 of 5.
+- filter + join, first five, kept. Dropped one `machine` JVM at 5.389 ms. Kept 5.196, 5.241,
+  5.360, and 5.388 ms. Median 5.360 ms. Span 3.6%. 4 of 5. Two later fives also passed, medians
+  5.150 ms and 5.097 ms, and are not the row.
+- filter + sort, first two fives dropped. All JVMs were `ok`, and one or two tails sat near 56 ms
+  after a head near 35 ms (56.197 ms; then 55.728 ms and 57.088 ms). Spans 62% and 60%. The third
+  five had no slow tail: 35.196, 35.508, 35.568, 35.960, 36.302 ms. Median 35.568 ms. Span 3.1%.
+  5 of 5.
+
+### Against the warmup-5 table
+
+Protocols differ, and the tree moved from `8958ac9` to `2b7b01e`. Count, countByKey, and
+`reduceByKey` changed in #225, #229, #231, and #232. Join and sort have no operator commit in
+that range. #227 added a sum test and did not change a sum kernel.
+
+- filter + count: 1.028 ms, 1.02x ahead, to 0.732 ms, 1.39x ahead.
+- filter + sum: 0.888 ms, 1.23x ahead. No kept steady five. The readings sit below that p50 and
+  stay ahead of DuckDB.
+- filter + countByKey: 3.112 ms, 1.90x behind, to 1.542 ms, 1.02x behind.
+- filter + reduceByKey: 4.082 ms, 2.00x behind, to 1.707 ms, 1.20x ahead.
+- filter + join: 6.120 ms, 1.47x behind, to 5.360 ms, 1.29x behind.
+- filter + sort: 36.184 ms, 1.92x ahead, to 35.568 ms, 1.97x ahead.
+
+```shell
+ssh nixos 'LD_LIBRARY_PATH=$(ls -d /nix/store/*gcc-15.3.0-lib/lib | head -1) \
+  ~/ce/bin/python ~/cross_engine_duckdb.py --rows 1000000 --threads 4 --warmup 5 --rounds 30'
+
+ssh nixos 'cd ~/scarlet && CROSS_ROWS=1000000 CROSS_FILTERS=2 CROSS_NULLS=false \
+  CROSS_THREADS=4 CROSS_WARMUP=80 CROSS_ROUNDS=30 \
+  sbt -batch -J-Xmx8g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.CrossEngineBench"'
+```
+
+The DuckDB command ran five times. The Scarlet command ran five times per five, three fives in
+all, from a detached checkout of `2b7b01e`. `Test / fork` is false, so each boot is the bench JVM.
+
+## 2026-11-15 — devbox, warmup 5
+
+Earlier decision table. Commit `8958ac9`. Same machine and the same paired protocol as the
+2026-11-14 second run. Not the decision table.
 
 - Machine: `nixos`, x86_64, 32 cores, 62 GB, OpenJDK 21.0.13, sbt 2. The CPU governor is
   `powersave`.
@@ -89,7 +178,7 @@ values are 4.682, 4.758, 4.796, and 4.870 ms. Their median is 4.796 ms and the s
 Count drops one JVM whose last-10 halves are 2.010 ms and 1.389 ms. The kept `steady_ms`
 values are 1.099, 1.113, 1.129, and 1.165 ms. Their median is 1.129 ms and the span is 5.8%.
 Checksums on every JVM were count `333036` and join `3330360`, the same formulas as the table.
-These milliseconds are this container. The devbox column stays the 2026-11-15 measurement.
+These milliseconds are this container. They are not the devbox steady-window table.
 
 The harness prints `STEADY` and writes `steady_ms` plus `steady`. The rule:
 
@@ -104,8 +193,9 @@ The harness prints `STEADY` and writes `steady_ms` plus `steady`. The rule:
 - If `scaling_governor` reads `powersave` and `sudo -n true` succeeds, set `performance` for
   the run and record it. Otherwise record the governor and leave it.
 
-The Scarlet milliseconds and the ratios in the table above are warmup-5 full-window p50s.
-They are stale against this rule. The checksums stay on the formulas in that table.
+The Scarlet milliseconds in this section are warmup-5 full-window p50s. They are not the
+decision table. The steady-window section is the one that applies this rule. The checksums
+stay on the formulas in that table.
 
 ## 2026-11-14 — devbox, second run
 
@@ -196,7 +286,7 @@ ssh nixos 'cd ~/scarlet && CROSS_ROWS=1000000 CROSS_FILTERS=2 CROSS_NULLS=false 
 
 Historical Apple M1 Pro setup for the 2026-11-07 table below. That table is not comparable with
 the container or the devbox. Its ratios are history. Current ratios are in
-"2026-11-15 — devbox, current tree".
+"2026-11-15 — devbox, steady window".
 
 One-time comparison, 2026-11-07.
 
@@ -212,7 +302,7 @@ One-time comparison, 2026-11-07.
 ## Queries at 1M rows
 
 Historical Apple M1 Pro table, 2026-11-07. Not comparable with the container or the devbox.
-Current ratios are in "2026-11-15 — devbox, current tree".
+Current ratios are in "2026-11-15 — devbox, steady window".
 
 Measured again after the scan-path work (2026-11-07, `main` @ `05d1faf`). DuckDB and Spark columns
 are unchanged from the original run. The `countByKey` row was added on 2026-11-08 (`main` @
@@ -234,7 +324,7 @@ not the decision table: Scarlet was 1.9x slower on the sum, 2.6x on the count, 4
 per key, 3.3-4.8x on the reduce, 4.6x on the join, and 0.78x on the sort. The 2026-11-13
 shorter-protocol ratios were count 2.4x behind, sum 2.6x behind, countByKey 3.0x behind,
 reduceByKey 4.8x behind, join 5.8x behind, sort 1.13x ahead. Current ratios are in
-"2026-11-15 — devbox, current tree".
+"2026-11-15 — devbox, steady window".
 
 **The `groupByKey` row is not the same query on the two sides, and the `countByKey` row is.**
 DuckDB runs `SELECT k, count(*) ... GROUP BY k` and never materialises the values. For the
@@ -349,7 +439,7 @@ not show that the null was kept.
 
 The 2-5x gap here is the 2026-11-07 M1 Pro history (count 2.6x, sum 1.9x, countByKey 4.8x, reduce
 3.3-4.8x, join 4.6x, sort 0.78x), not the decision table. Current ratios are in
-"2026-11-15 — devbox, current tree". On that M1 run the gap to DuckDB on scans,
+"2026-11-15 — devbox, steady window". On that M1 run the gap to DuckDB on scans,
 aggregates and joins was the scalar JVM kernel plus the source encode, not representation. Two
 measured spikes killed the earlier explanations: a 10-bit packed column scans slower than a raw
 int array at this size (1.91 vs 0.84 ns/row), and the Panama
