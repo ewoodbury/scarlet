@@ -17,7 +17,7 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
  * Phase split for a real `filter.count` and `filter.countByKey`. Not a test, and not part of
- * `make test`. No kernel change.
+ * `make test`.
  *
  * The input matches [[FilterPhaseBench]] and [[CrossEngineBench]]: 1e6 int pairs, keys
  * `row % 1024`, the same LCG values, two source partitions, batch 8192, two filters (`key % 3 !=
@@ -29,8 +29,18 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  *
  *   - `action` is `count()` or `countByKey.collect()`, including encode and decode.
  *   - `encode` is [[SourceEncode.encodePairs]] for the ordinals the count plan demands.
- *   - `kernel` is [[FoldedCount.count]] on those batches: morsel hash, partial merge, exchange.
+ *   - `kernel` is [[FoldedCount.count]]. A morsel whose present keys span fewer than 4096 values
+ *     increments a dense slot; every other morsel still hash-inserts. Then the partials merge.
  *   - `dispatch` is [[MorselScheduler.map]] over the encoded morsels. The body returns the length.
+ *   - `scan` reads the key and value arrays. `predicate` applies both filters.
+ *     `predicate-call` calls the underlying `Int => Boolean` instead of the trait adapter.
+ *   - `insert` is the open-addressed insert the dense path replaces, on the survivors and the
+ *     production table size. `insert-fit` sizes that table for 1024 groups. Neither is the live
+ *     kernel. `mix` is only [[ColumnHash.mix]].
+ *   - `merge` exchanges partials built outside the timer. `output` decodes a finished result.
+ *   - `direct` repeats the dense count and its merge outside [[FoldedCount]].
+ *
+ * Passes are not subtracted from each other. A parallel pass includes its morsel dispatch.
  *
  * A checksum other than the pinned pair fails the process. Count is `333036`. `countByKey` is
  * `11147169`, the sum of `key * 31 + count`, and `10821571`, the xor fold.
@@ -103,6 +113,33 @@ object CountKeyPhaseBench:
           timeQuery("filter-countbykey", "dispatch", width, warmup, rounds, allocRounds) {
             dispatchPhase(prepared, width)
           },
+          timeQuery("filter-countbykey", "scan", width, warmup, rounds, allocRounds) {
+            scanPhase(prepared, width)
+          },
+          timeQuery("filter-countbykey", "predicate", width, warmup, rounds, allocRounds) {
+            predicatePhase(prepared, width, directCall = false)
+          },
+          timeQuery("filter-countbykey", "predicate-call", width, warmup, rounds, allocRounds) {
+            predicatePhase(prepared, width, directCall = true)
+          },
+          timeQuery("filter-countbykey", "insert", width, warmup, rounds, allocRounds) {
+            insertPhase(prepared, width, fit = false)
+          },
+          timeQuery("filter-countbykey", "insert-fit", width, warmup, rounds, allocRounds) {
+            insertPhase(prepared, width, fit = true)
+          },
+          timeQuery("filter-countbykey", "mix", width, warmup, rounds, allocRounds) {
+            mixPhase(prepared, width)
+          },
+          timeQuery("filter-countbykey", "direct", width, warmup, rounds, allocRounds) {
+            directPhase(prepared, width)
+          },
+          timeQuery("filter-countbykey", "merge", width, warmup, rounds, allocRounds) {
+            mergePhase(prepared, width)
+          },
+          timeQuery("filter-countbykey", "output", width, warmup, rounds, allocRounds) {
+            outputPhase(prepared)
+          },
         )
       }
       System.err.println(table(readings))
@@ -126,6 +163,7 @@ object CountKeyPhaseBench:
       steps: List[Selection.Step],
       batches: Vector[ColumnBatch],
       morsels: Vector[Morsel],
+      work: CountKeyPhases.Work,
   )
 
   private def prepare(
@@ -163,11 +201,21 @@ object CountKeyPhaseBench:
     if (morsels.length <= sourcePartitions) then
       refuse(s"cut ${morsels.length} morsels from $sourcePartitions partitions")
     val kernel = FoldedCount.count(batches, steps, shuffleWidth, 4, batchSize)
-    kernel match
+    val kernelBatches = kernel match
       case Some(partials) =>
         if (crossOf(partials) != crossChecksum) then
           refuse(s"setup kernel ${crossOf(partials)} != $crossChecksum")
+        partials
       case None => refuse("folded count declined on the bench input")
+    val work = CountKeyPhases.prepare(batches, morsels, steps, shuffleWidth, batchSize)
+    if (CountKeyPhases.cross(work.finished) != crossChecksum) then
+      refuse(s"hash partials ${CountKeyPhases.cross(work.finished)} != $crossChecksum")
+    if (CountKeyPhases.fingerprint(work.finished) != CountKeyPhases.fingerprint(kernelBatches))
+    then refuse("hash partial order drifted from FoldedCount")
+    if (CountKeyPhases.cross(work.directSample) != crossChecksum) then
+      refuse(s"direct ${CountKeyPhases.cross(work.directSample)} != $crossChecksum")
+    if (CountKeyPhases.fingerprint(work.directSample) != CountKeyPhases.fingerprint(kernelBatches))
+    then refuse("direct order drifted from FoldedCount")
     Prepared(
       () => filtered.count(),
       () => {
@@ -182,6 +230,7 @@ object CountKeyPhaseBench:
       steps,
       batches,
       morsels,
+      work,
     )
 
   private def countAction(prepared: Prepared): ActionNotes =
@@ -231,6 +280,50 @@ object CountKeyPhaseBench:
       ColumnMetrics.batchCount,
       FoldedCount.passesForTest,
     )
+
+  private def scanPhase(prepared: Prepared, threads: Int): ActionNotes =
+    val got = CountKeyPhases.scan(prepared.work, threads)
+    if (got != prepared.work.scanChecksum) then refuse(s"scan $got != ${prepared.work.scanChecksum}")
+    ActionNotes(got, 0, 0, 0)
+
+  private def predicatePhase(prepared: Prepared, threads: Int, directCall: Boolean): ActionNotes =
+    val got = CountKeyPhases.predicate(prepared.work, threads, directCall)
+    if (got != countChecksum) then refuse(s"predicate $got != $countChecksum")
+    ActionNotes(got, 0, 0, 0)
+
+  private def insertPhase(prepared: Prepared, threads: Int, fit: Boolean): ActionNotes =
+    val got = CountKeyPhases.insert(prepared.work, threads, fit)
+    if (got != countChecksum) then refuse(s"insert $got != $countChecksum")
+    ActionNotes(got, 0, 0, 0)
+
+  private def mixPhase(prepared: Prepared, threads: Int): ActionNotes =
+    val got = CountKeyPhases.mix(prepared.work, threads)
+    if (got != prepared.work.mixChecksum) then refuse(s"mix $got != ${prepared.work.mixChecksum}")
+    ActionNotes(got, 0, 0, 0)
+
+  private def directPhase(prepared: Prepared, threads: Int): ActionNotes =
+    val counted = CountKeyPhases.direct(
+      prepared.morsels,
+      prepared.steps,
+      shuffleWidth,
+      batchSize,
+      threads,
+    )
+    val got = CountKeyPhases.cross(counted)
+    if (got != crossChecksum) then refuse(s"direct $got != $crossChecksum")
+    if (CountKeyPhases.fingerprint(counted) != CountKeyPhases.fingerprint(prepared.work.directSample))
+    then refuse("direct order drifted across a timed round")
+    ActionNotes(got, 0, 0, 0)
+
+  private def mergePhase(prepared: Prepared, threads: Int): ActionNotes =
+    val got = CountKeyPhases.merge(prepared.work, threads)
+    if (got != crossChecksum) then refuse(s"merge $got != $crossChecksum")
+    ActionNotes(got, 0, 0, 0)
+
+  private def outputPhase(prepared: Prepared): ActionNotes =
+    val got = CountKeyPhases.output(prepared.work)
+    if (got != crossChecksum) then refuse(s"output $got != $crossChecksum")
+    ActionNotes(got, 0, 0, 0)
 
   private def dispatchPhase(prepared: Prepared, threads: Int): ActionNotes =
     val lengths =
@@ -408,6 +501,8 @@ object CountKeyPhaseBench:
       s"count-key-phase rows=$rows morsels=${prepared.morsels.length} batch=$batchSize " +
         s"warmup=$warmup rounds=$rounds alloc=$allocRounds spill=true p50=upper-median " +
         s"count=$countChecksum xor=$xorChecksum cross=$crossChecksum " +
+        s"extraProbes=${prepared.work.extraProbes} inserted=${prepared.work.inserted} " +
+        s"left=${prepared.work.predicateClass} right=${prepared.work.directClass} " +
         s"java=${runtime.getVmName} ${runtime.getVmVersion}",
     )
 

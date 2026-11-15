@@ -11,10 +11,11 @@ import com.ewoodbury.scarlet.core.ScarletConf
  *
  * The row walk matches [[Selection.count]]. Steps run in order and a failure stops the row. A null
  * int slot fails its step and does not call the predicate. When every ordinal the steps read is
- * present on the morsel, the bit test is skipped. Each survivor is inserted with
- * [[ColumnHash.mix]] and the same linear probe as [[HashCount]]. A null key is dropped even when
- * no step reads the key. A null value still counts when no step reads the value. The stored count
- * is an `Int` and wraps on overflow.
+ * present on the morsel, the bit test is skipped. A morsel whose present keys fit in a small span
+ * counts with [[DirectCount]], one dense slot per key in first-seen order. Every other morsel
+ * inserts with [[ColumnHash.mix]] and the same linear probe as [[HashCount]]. A null key is
+ * dropped even when no step reads the key. A null value still counts when no step reads the value.
+ * The stored count is an `Int` and wraps on overflow.
  *
  * [[count]] returns `None` before any table when `steps` is empty or is not a stack of
  * [[Selection.Step.Int32]] slot atoms, and when the source-row estimate does not fit the budget.
@@ -180,14 +181,18 @@ private[scarlet] object FoldedCount:
       releaseWorkers()
       HashCount.releaseWorkers()
 
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def countMorsel(morsel: Morsel, steps: List[Selection.Step]): ColumnBatch =
     val length = morsel.length
     if (length == 0) then ColumnBatches.emptyIntPairs
     else
       refuse(length.toLong)
-      val table = borrow(length)
-      table.scan(morsel.batch, morsel.start, length, steps)
-      table.compact()
+      DirectCount.aggregate(morsel, steps) match
+        case null =>
+          val table = borrow(length)
+          table.scan(morsel.batch, morsel.start, length, steps)
+          table.compact()
+        case batch => batch
 
   /**
    * One table per thread, sized for the largest morsel that thread has counted. The next morsel
@@ -200,6 +205,7 @@ private[scarlet] object FoldedCount:
 
   private[columnar] def releaseWorkers(): Unit =
     locals.remove()
+    DirectCount.release()
 
   /** Zeros the reuse counters and drops this thread's table. */
   private[columnar] def resetReuseForTest(): Unit =
