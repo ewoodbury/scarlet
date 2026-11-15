@@ -620,7 +620,9 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     baseline.count shouldBe 12L
     compacted.count shouldBe baseline.count
     predicateCalls.get() shouldBe baseline.count.toInt
-    compacted.batches - baseline.batches shouldBe conf.defaultShufflePartitions.toLong
+    // The bare count publishes no match batch. The filtered count still writes the join, one
+    // batch per partition, and then the filter, one batch per partition.
+    compacted.batches - baseline.batches shouldBe (conf.defaultShufflePartitions.toLong * 2L)
     compacted.visits - baseline.visits shouldBe conf.defaultShufflePartitions.toLong
   }
 

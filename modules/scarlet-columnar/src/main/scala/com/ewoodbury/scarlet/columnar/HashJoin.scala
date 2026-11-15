@@ -68,6 +68,20 @@ object HashJoin:
     else indexed(buildKeys, buildValues).write(probeKeys, probeValues)
 
   /**
+   * Match rows [[innerInt32]] would publish. A null key is not a match. A null value is. No output
+   * column is allocated.
+   */
+  private[scarlet] def countInner(build: JoinSide, probe: JoinSide): Int =
+    val buildKeys = ColumnHash.int32At(build.batch, build.key)
+    val buildValues = ColumnHash.int32At(build.batch, build.value)
+    val probeKeys = ColumnHash.int32At(probe.batch, probe.key)
+    val probeValues = ColumnHash.int32At(probe.batch, probe.value)
+    require(buildKeys.length == buildValues.length, "build key and value columns differ in length")
+    require(probeKeys.length == probeValues.length, "probe key and value columns differ in length")
+    if (buildKeys.length == 0 || probeKeys.length == 0) then 0
+    else indexed(buildKeys, buildValues).countMatches(probeKeys)
+
+  /**
    * One build table for every batch in `sides`, in vector order. An empty input, or batches whose
    * live lengths sum to zero, probes to an empty batch and allocates nothing. A non-int column or
    * a bad ordinal fails before the table is built. Otherwise [[retainedBuildBytes]] is compared
@@ -183,6 +197,15 @@ object HashJoin:
       noteSlots(slots.slots)
 
     def slotCount: Int = slots.slots
+
+    /** Inner matches. A null probe key contributes nothing. */
+    def countMatches(probeKeys: Int32Column): Int =
+      slots.countOutput(
+        probeKeys.values,
+        probeKeys.validity.words,
+        probeKeys.length,
+        keepMisses = false,
+      )
 
     def write(probeKeys: Int32Column, probeValues: Int32Column): ColumnBatch =
       val buildValueValues = buildValues.values
