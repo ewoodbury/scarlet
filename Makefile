@@ -12,6 +12,10 @@ test-lint: ## Run linting without fixing
 test: ## Run tests
 	sbt test
 
+.PHONY: perf-check
+perf-check: ## Run the same performance gate CI runs (columnar path, layout ratios)
+	sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.PerfCheck"
+
 .PHONY: test-one
 test-one: ## Run a single suite: make test-one T=com.ewoodbury.scarlet.core.TestLocalActions
 	sbt "scarlet-tests/testOnly $(T)"

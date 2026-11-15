@@ -79,7 +79,7 @@ object CrossEngineBench:
       allocMb: Double,
   )
 
-  private final case class Observed(value: Any, elapsedMs: Double, batches: Long)
+  private final case class Observed(value: Any, elapsedMs: Double, batches: Long, fused: Long)
 
   /** Printed before throw so `finally` can restore conf, then the process exits. */
   private final class HarnessRefusal(message: String) extends RuntimeException(message)
@@ -271,7 +271,8 @@ object CrossEngineBench:
     round = 0
     while (round < rounds) do
       val observed = observe(built.action)
-      if (observed.batches == 0L) then refuse(s"$name published no column batch")
+      if (observed.batches == 0L && observed.fused == 0L) then
+        refuse(s"$name published no column batch and folded nothing")
       samples(round) = observed.elapsedMs
       checksum = checksumOf(observed.value)
       batches = observed.batches
@@ -293,7 +294,7 @@ object CrossEngineBench:
       val started = System.nanoTime()
       val value = action()
       val elapsedMs = (System.nanoTime() - started) / 1_000_000.0
-      Observed(value, elapsedMs, sink.batchCount)
+      Observed(value, elapsedMs, sink.batchCount, sink.fusedCount)
     finally ColumnMetrics.restore(previous)
 
   private def checksumOf(value: Any): Long = value match

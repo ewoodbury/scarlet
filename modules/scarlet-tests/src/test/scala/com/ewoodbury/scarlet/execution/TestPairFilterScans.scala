@@ -11,8 +11,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
  * Collect of one pair or triple slot filter decodes a survivor index. It visits each morsel and
- * does not publish a filtered batch. Count of a pair scan still walks the encoded source in
- * place. Interpreting the filter, and counting a triple filter, still chain one kernel: one
+ * does not publish a filtered batch. Count of a pair scan folds the owned arrays and publishes
+ * no batch. Interpreting the filter, and counting a triple filter, still chain one kernel: one
  * output per morsel and one regroup when a partition is split. Copying each slice would publish
  * one extra batch per visit, and that batch count rejects it.
  */
@@ -44,8 +44,8 @@ class TestPairFilterScans extends AnyFlatSpec with Matchers with BeforeAndAfterE
     counted.visits shouldBe collected.visits
     // The index is decoded in place. Encode is the only published batch.
     collected.batches shouldBe 1L
-    // Count reads the encoded source in place and does not publish a gathered batch per morsel.
-    counted.batches shouldBe 1L
+    // Count folds the owned arrays and does not publish a batch.
+    counted.batches shouldBe 0L
     // interpret still chains one kernel: one output per morsel, then one regroup.
     val dense = interpreted(pairs)
     dense.visits shouldBe cuts.length.toLong
