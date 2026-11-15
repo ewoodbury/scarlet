@@ -119,8 +119,15 @@ object CrossEngineBench:
     }
 
   private def runQuery(name: String, settings: Settings): Sample =
+    val uptime = java.lang.management.ManagementFactory.getRuntimeMXBean.getUptime
+    System.err.println(s"QUERY_BEGIN $name ${System.currentTimeMillis()} uptime=$uptime")
     val built = build(name, settings)
-    measure(name, built, settings.warmup, settings.rounds)
+    val sample = measure(name, built, settings.warmup, settings.rounds)
+    val endUptime = java.lang.management.ManagementFactory.getRuntimeMXBean.getUptime
+    System.err.println(
+      s"QUERY_END $name ${System.currentTimeMillis()} uptime=$endUptime p50=${sample.p50Ms} checksum=${sample.checksum}",
+    )
+    sample
 
   /** The action closes over the distributed collection, not the source arrays. */
   private def build(name: String, settings: Settings): Built =
@@ -277,6 +284,9 @@ object CrossEngineBench:
       checksum = checksumOf(observed.value)
       batches = observed.batches
       round += 1
+    if (name == "filter-join" || name == "filter-count") then
+      val shown = samples.mkString(",")
+      System.err.println(s"SAMPLES $name $shown")
     java.util.Arrays.sort(samples)
     Sample(
       samples(samples.length / 2),
