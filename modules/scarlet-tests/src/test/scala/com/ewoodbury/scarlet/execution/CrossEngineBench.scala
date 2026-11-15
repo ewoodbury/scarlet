@@ -30,6 +30,11 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * Spill is enabled for this process only. The `spillEnabled` default stays false, and the spill
  * budget stays the 64 MiB default.
  *
+ * `STEADY` is the median of the last 10 rounds. `compilation` means the first 10 are still above
+ * that floor, so publish `steady_ms` rather than the full-window `p50_ms`. `machine` means the
+ * two halves of those last 10 differ by more than 10 percent: drop the JVM. The threshold and
+ * the five-JVM rule are in `docs/CROSS-ENGINE.md`.
+ *
  * `CROSS_THREADS` selects the scheduler width. It defaults to 4. Allocation is a separate pass
  * after the timed rounds, the nearest-rank middle sample of [[allocRounds]] process-wide thread
  * byte deltas, in decimal megabytes. The probe is off during the timed rounds.
@@ -77,7 +82,12 @@ object CrossEngineBench:
       encodeMs: Double,
       batches: Long,
       allocMb: Double,
+      steadyMs: Double,
+      verdict: String,
   )
+
+  /** Last-10 median, first-10 median, and `ok` / `compilation` / `machine` / `short`. */
+  private final case class Steady(ms: Double, head: Double, verdict: String)
 
   private final case class Observed(value: Any, elapsedMs: Double, batches: Long, fused: Long)
 
@@ -284,9 +294,13 @@ object CrossEngineBench:
       checksum = checksumOf(observed.value)
       batches = observed.batches
       round += 1
+    val steady = steadyOf(samples)
     if (name == "filter-join" || name == "filter-count") then
       val shown = samples.mkString(",")
       System.err.println(s"SAMPLES $name $shown")
+    System.err.println(
+      s"STEADY $name ${steady.verdict} steady=${steady.ms} head=${steady.head}",
+    )
     java.util.Arrays.sort(samples)
     Sample(
       samples(samples.length / 2),
@@ -294,7 +308,39 @@ object CrossEngineBench:
       built.encodeMs,
       batches,
       sampleAlloc(built.action),
+      steady.ms,
+      steady.verdict,
     )
+
+  /**
+   * Last 10 rounds are the steady floor. The first 10 are the compile slope when they are still
+   * high. The two halves of the last 10 catch a stall that a single median would hide. Fewer
+   * than 20 rounds leaves no separate tail, so the line is `short`.
+   */
+  private def steadyOf(samples: Array[Double]): Steady =
+    val n = samples.length
+    val tailN = math.min(10, n)
+    val headN = math.min(10, n)
+    val tail = medianRange(samples, n - tailN, n)
+    val head = medianRange(samples, 0, headN)
+    if (n < 20) then Steady(tail, head, "short")
+    else
+      val mid = n - tailN / 2
+      val left = medianRange(samples, n - tailN, mid)
+      val right = medianRange(samples, mid, n)
+      val low = math.min(left, right)
+      val high = math.max(left, right)
+      val verdict =
+        if (high > low * 1.10) then "machine"
+        else if (head > tail * 1.10) then "compilation"
+        else "ok"
+      Steady(tail, head, verdict)
+
+  /** Upper median of `[from, until)`, the same slot as the full-window p50. */
+  private def medianRange(samples: Array[Double], from: Int, until: Int): Double =
+    val copy = java.util.Arrays.copyOfRange(samples, from, until)
+    java.util.Arrays.sort(copy)
+    copy(copy.length / 2)
 
   private def observe(action: () => Any): Observed =
     val sink = new CountingSink
@@ -421,9 +467,10 @@ $body
   private def queryJson(name: String, sample: Sample): String =
     val alloc = if (sample.allocMb.isNaN) "null" else sample.allocMb.toString
     val head = s"""    "$name": {"p50_ms": ${sample.p50Ms}, "checksum": ${sample.checksum},"""
+    val steady = s""" "steady_ms": ${sample.steadyMs}, "steady": "${sample.verdict}","""
     val tail =
       s""" "alloc_mb": $alloc, "encode_ms": ${sample.encodeMs}, "batches": ${sample.batches}}"""
-    head + tail
+    head + steady + tail
 
   /** Middle sample of [[allocRounds]] process-wide byte deltas, in decimal megabytes. */
   private def sampleAlloc(action: () => Any): Double =
@@ -466,8 +513,10 @@ $body
       filters = readChoice("CROSS_FILTERS", 2, Set(1, 2)),
       nulls = readFlag("CROSS_NULLS", false),
       query = readQuery(),
-      warmup = readInt("CROSS_WARMUP", 3),
-      rounds = readInt("CROSS_ROUNDS", 10),
+      // Warmup 5 still leaves filter-join falling after round 5. 80 is the depth whose
+      // last 10 rounds sit on the floor. See docs/CROSS-ENGINE.md.
+      warmup = readInt("CROSS_WARMUP", 80),
+      rounds = readInt("CROSS_ROUNDS", 30),
     )
 
   private def readInt(name: String, default: Int): Int =

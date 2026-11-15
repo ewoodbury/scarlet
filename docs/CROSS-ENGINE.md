@@ -65,6 +65,48 @@ ssh nixos 'cd ~/scarlet && CROSS_ROWS=1000000 CROSS_FILTERS=2 CROSS_NULLS=false 
 The Scarlet command ran five times. Each log booted sbt from `welcome to sbt`, and the table is
 the median of those five p50s.
 
+### Stability
+
+The join publishes above are 6.120 ms, then 10.359 ms, then 10.997 ms for one command. 10.997 /
+6.120 is 1.80×. That is larger than the kernel gaps this scoreboard is trying to see. The
+devbox governor was `powersave`. This container is aarch64, 4 cores, Vendor ID Apple, OpenJDK
+21.0.13. `/sys/devices/system/cpu/cpu0/cpufreq` is absent and `sudo` is absent, so the governor
+was left unset.
+
+A cold `filter-join` (warmup 0, 40 rounds, `java -Xmx4g -XX:+UseG1GC`) opens at 289.5 ms.
+Sample indexes 16–19 are 6.8, 6.1, 6.2, and 7.1 ms. `PrintCompilation` on that shape shows
+`HashExchange` from uptime 1146 ms, inside the 289 ms first round (`QUERY_BEGIN` uptime 889
+ms), and `JoinSlots` at 1330 ms while later rounds are still falling. Eight
+full-suite JVMs at warmup 5 and rounds 30 all kept falling after round 5: the median of the
+first 10 rounds was 1.29× to 2.06× the median of the last 10. The full-window p50 sits on that
+slope, which is how one JVM lands near 6 ms and another near 10 ms. A cold `filter-count`
+compiles in round 0 only: 120.35 ms, then 2.60 ms. A later jump, such as a join whose last 10
+rounds split 10.3 ms / 7.2 ms, is the machine.
+
+Warmup 80 and rounds 30 on the full suite, five fresh JVMs, same heap and GC. Join JVM 1 was
+`machine` (last-10 halves 10.292 ms and 7.221 ms) and is dropped. The other four `steady_ms`
+values are 4.682, 4.758, 4.796, and 4.870 ms. Their median is 4.796 ms and the span is 3.9%.
+Count drops one JVM whose last-10 halves are 2.010 ms and 1.389 ms. The kept `steady_ms`
+values are 1.099, 1.113, 1.129, and 1.165 ms. Their median is 1.129 ms and the span is 5.8%.
+Checksums on every JVM were count `333036` and join `3330360`, the same formulas as the table.
+These milliseconds are this container. The devbox column stays the 2026-11-15 measurement.
+
+The harness prints `STEADY` and writes `steady_ms` plus `steady`. The rule:
+
+- Warmup 80, rounds 30, five fresh JVMs. `CROSS_WARMUP` and `CROSS_ROUNDS` now default to
+  those. `steady_ms` is the upper median of the last 10 rounds.
+- `compilation`: the first 10 are more than 1.10× the last 10. Publish `steady_ms`. The
+  full-window `p50_ms` still contains the slope.
+- `machine`: the two halves of the last 10 differ by more than 10%. Drop that JVM.
+- `short`: fewer than 20 rounds, so the line has no separate tail. Do not publish.
+- Publish the median of the kept `steady_ms` values. Drop the set when `(max - min) / median`
+  is above 0.10, or when fewer than three JVMs remain.
+- If `scaling_governor` reads `powersave` and `sudo -n true` succeeds, set `performance` for
+  the run and record it. Otherwise record the governor and leave it.
+
+The Scarlet milliseconds and the ratios in the table above are warmup-5 full-window p50s.
+They are stale against this rule. The checksums stay on the formulas in that table.
+
 ## 2026-11-14 — devbox, second run
 
 Earlier decision table. Commit `ffca249`. Same machine as the 2026-11-13 section, paired protocol.
@@ -348,7 +390,9 @@ CROSS_ROWS=10000000 CROSS_FILTERS=2 CROSS_NULLS=false CROSS_QUERY=filter-count \
 ```
 
 `CROSS_ROWS` defaults to 1000000, `CROSS_FILTERS` to 2 (`1` is the key filter only), and
-`CROSS_NULLS` to false. `CROSS_WARMUP` defaults to 3 and `CROSS_ROUNDS` to 10. Set `CROSS_QUERY`
+`CROSS_NULLS` to false. The command above pins warmup 3 and rounds 10. The harness defaults
+are warmup 80 and rounds 30, so a steady tail is visible. `steady_ms` is the median of the
+last 10 rounds; publish that when `steady` is `ok` or `compilation`. Set `CROSS_QUERY`
 to one of `filter-count`, `filter-sum`, `filter-groupbykey`, `filter-reducebykey`, `filter-join`,
 `filter-sort`, or `filter-countbykey`. Omit it to run all seven in that process, dropping each
 query's input before the next. `encode_ms` is reported separately and is not subtracted from the
