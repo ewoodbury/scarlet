@@ -49,9 +49,13 @@ object Validity:
    */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private[columnar] def livePresent(validity: Validity, live: Int): Boolean =
+    livePresent(validity.words, live)
+
+  /** [[livePresent]] on a bitmap the caller already holds. `live` must fit in `words`. */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private[columnar] def livePresent(words: Array[Long], live: Int): Boolean =
     if (live == 0) then true
     else
-      val words = validity.words
       val fullWords = liveWords(live)
       var index = 0
       var dense = true

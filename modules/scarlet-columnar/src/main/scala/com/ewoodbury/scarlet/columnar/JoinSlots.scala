@@ -89,6 +89,45 @@ private[columnar] final class JoinSlots(rowCount: Int, budget: Long):
       probeRows: Int,
       keepMisses: Boolean,
   ): Int =
+    val total =
+      if (Validity.livePresent(probeWords, probeRows)) then
+        if (keepMisses) then countLiveMisses(probeKeys, probeRows)
+        else countLiveHits(probeKeys, probeRows)
+      else countSparse(probeKeys, probeWords, probeRows, keepMisses)
+    if (total > ColumnHash.MaxCapacity.toLong) then
+      throw new IllegalStateException(s"join output reached $total rows")
+    total.toInt
+
+  /** Every probe key is present. A miss adds nothing. */
+  private def countLiveHits(probeKeys: Array[Int], probeRows: Int): Long =
+    var total = 0L
+    var row = 0
+    while (row < probeRows) {
+      val slot = locate(probeKeys(row))
+      if (slot >= 0) then total += chain(slot).toLong
+      row += 1
+    }
+    total
+
+  /** Every probe key is present. A miss adds one row. */
+  private def countLiveMisses(probeKeys: Array[Int], probeRows: Int): Long =
+    var total = 0L
+    var row = 0
+    while (row < probeRows) {
+      val slot = locate(probeKeys(row))
+      if (slot >= 0) then total += chain(slot).toLong
+      else total += 1L
+      row += 1
+    }
+    total
+
+  /** A null probe key is a miss. The bit test stays inside the row loop. */
+  private def countSparse(
+      probeKeys: Array[Int],
+      probeWords: Array[Long],
+      probeRows: Int,
+      keepMisses: Boolean,
+  ): Long =
     var total = 0L
     var row = 0
     while (row < probeRows) {
@@ -100,9 +139,7 @@ private[columnar] final class JoinSlots(rowCount: Int, budget: Long):
         else if (keepMisses) then total += 1L
       row += 1
     }
-    if (total > ColumnHash.MaxCapacity.toLong) then
-      throw new IllegalStateException(s"join output reached $total rows")
-    total.toInt
+    total
 
   private def grow(): Unit =
     val nextCapacity = capacity << 1
