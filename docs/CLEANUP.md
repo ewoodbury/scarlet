@@ -1,0 +1,107 @@
+# Cleanup inventory
+
+Survey of debt to delete or merge before the next task copies it. No behavior change in this pass. Rank is risk of leaving the item times how small the fix is. A primitive loop that differs only by array element type is specialization, not a merge.
+
+There is no `scalar-*` module and no file of that name. The scalar kernels are `Int32Pipeline`, `Int64Pipeline`, `Float64Pipeline`, `Utf8Pipeline`, and the int/long/string hash, join, and sort twins under `scarlet-columnar`.
+
+`make test` does not run `runMain` benches (`QueryBench`, `JoinBuildBench`, `MaterialisationStudy`, `JoinBench`, `SpillBench`, `SortScaleBench`, the phase benches). A move inside those files is not pinned by the suite. Do not delete them. `TestColumnarContract.excludedCases` is not a skipped test: each excluded plan is asserted to have no layout (`TestColumnarContract.scala:62`). No `ignore`, `pending`, or `cancel` suite was found. `pending` in the tree is a local bit mask, not a skipped example.
+
+## Ranked
+
+- **The decision table is one kernel behind the tree, and the file still calls it current.** `docs/CROSS-ENGINE.md:1` and `:8` name the 2026-11-15 steady window at `2b7b01e` as the decision table. That commit is an ancestor of `HEAD`. `ff3ae81` (#233) wrote the section. `b704c3c` (#234) then changed `HashJoin`, `Selection`, `JoinWrite`, `Validity`, and added `Int32Select` and `SlotFold`. The published ratios do not include that scan. Sum is `—` / kept none (`:34`). `:54` says every dropped reading is 1.29x to 1.65x ahead of DuckDB 1.037 ms. `:79`, inside the current section, still leads with the warmup-5 number: 0.888 ms, 1.23x ahead. The harness publishes the upper median, index `n/2` (`CrossEngineBench.scala:339`). `:191` and `:484` call that "the median". Smallest change: one line under the title that the table stops at `2b7b01e` and that #234 is not in it, start `:79` with "no kept row", and say upper median at `:191` and `:484`. No test covers the prose.
+
+- **`docs/CROSS-ENGINE.md` repeats three older scoreboards and a reproduce block that is not the decision protocol.** The steady window is warmup 80, rounds 30 (`:18`, and `CrossEngineBench.scala:518` defaults). The warmup-5 table (`:98`), the `ffca249` table (`:200`), and the 2026-11-13 warmup-3 table (`:253`) are labeled earlier. The M1 ratios are stated twice, at `:322` and again at `:440`. The same `ssh nixos` pair is copied at `:86`, `:145`, and `:241`. The reproduce block at `:477` pins `CROSS_WARMUP=3` and `CROSS_ROUNDS=10`, and the next paragraph (`:483`) says the harness defaults are 80 and 30. Same machine, two sbt names: `:15` says sbt 1.10.11, `:103`, `:205`, and `:257` say sbt 2. Smallest change: keep the steady-window section and the labeled history, delete the repeated command blocks and the second M1 ratio sentence, and make the reproduce shell use 80 and 30. Prose only. No test covers it.
+
+- **The contract count is maintained in three places, and one of them still says 205.** `TestColumnarContract.scala:37` asserts 214 accepted, `:40` asserts 35 excluded, `:41` asserts 249. `docs/ARCHITECTURE.md:67` matches that. The same file at `:236` opens with "205 accepted, for 240" and then adds a changelog until it reaches 214 and 249. The test comment at `:33` repeats the changelog. The contract table (`ARCHITECTURE.md:75` through `:120`) and the prose from `:199` through `:314` describe the same joins, sorts, and `countByKey` spill rules a second time. `DAGScheduler.md:67` and `ARCHITECTURE.md:362` both list the shuffle-write priority. Smallest change: leave the three assertions, delete the arithmetic from the doc and the test comment, and point the prose at the table instead of restating it. The assertions are the coverage. The sentences are not.
+
+- **`docs/ARCHITECTURE.md` disagrees with itself on outer joins and on which sort-merge spills.** `:202` and `:547` say a long outer join lowers, and a long or string sort-merge throws and writes nothing when the estimate is over the budget. `:485` says a non-int key, including a long key, stays on the row path. `:494` lists "sort-merge joins" as spilling, and `:512` says an over-budget sort-merge is written as runs, with no key type. `ScarletConf.scala:78` says a sort-merge partition is written as runs, and `:80` says long and string sort-merge throw instead. Int sort-merge is the path that spills. Smallest change: prefix `:494` and `:512` with "int", and delete the "stays on the row path" clause at `:485`. `TestLongOuterJoin`, `TestStringOuterJoin`, and `TestSortMergeRuns` pin the behavior. The sentences do not.
+
+- **`docs/DAGScheduler.md:1` says the scheduler is the only entry and that there is no separate narrow path.** `docs/ARCHITECTURE.md:43` says `DefaultExecutionService` tries `ColumnarPlanner.tryRun` first and only then `DAGScheduler.executePartitions`. A columnar plan never reaches the stage graph. `docs/StageBuilder.md` describes the row compiler and does not say so. Smallest change: rewrite the opening of `DAGScheduler.md` to "row path only, after the planner declines." `TestColumnarContract` pins the decline. The markdown does not.
+
+- **Three files sit on the 1200-line gate.** `checkFileLength` fails above 1200 (`build.sbt:6`). The next appended case fails the build.
+  - `TestColumnarContract.scala`, 1197. Accretion of fixture rows (`acceptedCases` about 337–799, `excludedCases` about 811–929). The examples are short. Extract the fixture lists into a companion object. The suite itself walks them.
+  - `QueryBench.scala`, 1197. Accretion of queries plus an allocation probe (`AllocProbe` near the end). Not in `make test`. Extract the probe. Uncovered by the suite.
+  - `JoinBuildBench.scala`, 1192. Accretion of join-build policies, a private open table, and another allocation probe. Not in `make test`. Extract the probe. Uncovered by the suite.
+  Do not delete the benches. Nothing in `make test` constructs them.
+
+- **`JoinBuildBench` reimplements `ColumnHash.tableSize` and `ColumnHash.mix`.** The comment at `JoinBuildBench.scala:29` says `policy-current` is `ColumnHash.tableSize`. The local copy is `tableSize` at `:751` and `mix` at `:795` (the same `0x7feb352d` / `0x846ca68b` mix as `ColumnHash.scala:21`). `TestHashAggregate.scala:183` pins the real function. The bench is not in `make test`, so a drift is invisible to the suite. Smallest change: call `ColumnHash`. Do not delete the bench. The formula's tests do not execute this file.
+
+- **Non-generic helpers copied under a new name per key type.** These are the copies a later task will paste again. The primitive load stays. The index arithmetic does not.
+  - `growWords` (`(rowCapacity + 63) >>> 6`, then `Arrays.copyOf`) at `HashJoin.scala:372`, `LongHashJoin.scala:168`, `StringHashJoin.scala:281`, `LongHashOuter.scala:544`, `StringHashOuter.scala:587`, and again in the test helper `JoinPhaseOps.scala:182`. `doubled` (`capacity << 1`, same `MaxCapacity` throw) sits beside each of those and at `JoinWrite.scala:358`. `orMatched` is the same word OR at `HashJoin.scala:880`, `LongHashOuter.scala:442`, `StringHashOuter.scala:456`. Smallest change: one function on `Validity` or `ColumnHash`. Covered by `TestHashJoin`, `TestLongHashJoin`, `TestHashJoinSpill`, `TestLongHashJoinSpill`, `TestStringHashJoinSpill`. `JoinPhaseOps` is not a suite.
+  - `ElementPipeline` matches the same 14 filter/project shapes three times (`ElementPipeline.scala:28`, `:118`, `:193`) for int, double, and string. Long already builds an `Int64Pipeline.Step` list and does not. Smallest change: one match that receives the already-cast functions. Leave `FF` / `sum*`. Covered by `TestElementShapes` and `TestMorselRanges`.
+  - Int open-addressed `add` / `locate` (`ColumnHash.mix`, then linear probe) in `HashCount.scala:365`, `FoldedCount.scala:632`, and `StringHashCount.scala:379` (dictionary codes are `Int`). `HashReduce.scala:243` and `StringHashReduce.scala:252` are the same probe with a payload. Long key tables stay specialized. Smallest change: one int count table. Covered by `TestCountByKey`, `TestCountTableReuse`, `TestStringHash`.
+  - `denseRange` walks a bit mask and calls `Validity.rangePresent` in both `Selection.scala:191` and `FoldedCount.scala:325`. Smallest change: one helper. Covered by `TestFusedPairFold` and `TestCountByKey`.
+  - `presentKeys` counts set validity bits in `LongOuterPipeline.scala:316`, `StringOuterPipeline.scala:304`, and `SortMergeRuns.scala:254`. `clearCount` is the same loop with the test inverted (`HashJoin.scala:897` and the long and string outer twins). No `Validity` popcount exists, so each new outer pipeline rewrites it. Smallest change: `Validity.countSet`. Covered by `TestLongOuterColumns`, `TestStringOuterColumns`, `TestSortMergeRuns`.
+  - `withLeftovers` / `bucketAt` / `sliceAll` in `ColumnPipeline.scala:722`, `LongOuterPipeline.scala:369`, and `StringOuterPipeline.scala:357`. `HashExchange.bucketAt` (`HashExchange.scala:528`) is a fourth, already generic, and private. Smallest change: one package-private trio. Covered by `TestColumnPipeline`, `TestLongOuterJoin`, `TestStringOuterJoin`.
+  - `swapValueColumns` is the same three-column permutation in `LongOuterArms.scala:290`, `StringOuterArms.scala:290`, and `PipelineJoinArms.scala:538`. Smallest change: one function. Covered by `TestRightOuterColumnar`, `TestFullOuterColumnar`, `TestLongOuterJoin`, `TestStringOuterJoin`.
+  - Mergesort driver `sortIndices` (width doubling, ping-pong buffers, `System.arraycopy`) in `SortMerge.scala:210`, `LongSortMerge.scala:357`, `RankSplit.scala:128`, and `RankSplitLong.scala:128`. The compare is specialized. The driver is not. Smallest change: one driver that takes an index comparator. Covered by `TestSortMergeJoin`, `TestLongSortMergeJoin`, `TestRankSplitRuns`, `TestRankSplitLongRuns`.
+  - Run heap `siftDown` / `siftUp` / `swap` in `OrderedRunHeap.scala:47`, `OrderedRunHeapLong.scala` (the `less` compare stays), and again inside `StringRankSplit.scala` and `StringRankSplitRuns.scala`. Smallest change: one heap, delete the string-local copies. Covered by `TestRankSplitRuns`, `TestRankSplitLongRuns`, `TestStringSortSpill`.
+  - `RankSplitRuns.scala` (627) and `RankSplitLongRuns.scala` (638) share 36 method names (`spill`, `spillSelected`, `writeRuns`, `openCursors`, `mergePass`, and the rest). `StringRankSplitRuns.scala` (722) adds a string heap on top of that list. Smallest change is not a generic merge of the three files. Extract the spill control that does not touch the key array, the same cut as `spill` / `writeRuns` / `openCursors`. Covered by `TestRankSplitRuns`, `TestRankSplitLongRuns`, `TestStringSortSpill`. Do not delete a primitive gather.
+  - Allocation probe `slot` / `observe` / `account` / `close` / `stop` is copied across `QueryBench.scala` (from about 1062), `CrossEngineBench.scala` (from about 529), `SortScaleBench.scala`, `JoinBench.scala`, and `JoinBuildBench.scala`. Smallest change: one probe object. These mains are not in `make test`. Uncovered. Do not delete a bench to "remove" the copy.
+
+- **`HashJoin` writes a slot counter nobody reads.** `builtSlots` (`HashJoin.scala:41`), `resetBuiltSlots` (`:43`), `builtSlotsTotal` (`:46`), and `noteSlots` (`:48`, called at `:197` and `:404`). The only other mention of `resetBuiltSlots` is the scaladoc link. No test reads the total. Do not delete it in a change that claims a test pins the counter. The smallest checked removal is to delete the four sites and run `TestHashJoin`, which covers the build and does not cover the counter. The counter itself is uncovered.
+
+- **Other symbols with no caller. Do not delete them until a test is the oracle, or until the deletion's only claim is "the suite still passes and never called this."**
+  - `PredicatePlan.filterAtom` (`PredicatePlan.scala:76`) classifies a predicate from the declared `apply` and is not on the `compile` path (`:70` calls `toAtom`). Callers: none. Uncovered. A later call would not match the live compiler.
+  - `ScarletRuntime.setForCurrentThread` (`ScarletRuntime.scala:41`) and `clearThreadLocal` (`:45`). `get` still prefers the thread local. Callers: none. Uncovered.
+  - `Task.createStageTask` (`Task.scala:20`), `createShuffleHashJoinTask` (`:24`), `createBroadcastHashJoinTask` (`:48`), `createSortMergeJoinTask` (`:55`). Live code builds the case classes in `StageExecutor` and `JoinExecutor`. Callers of these four factories: none. The tasks themselves are covered. The factories are not.
+  - `ColumnarInterpreter.decodePrefix` (`ColumnarInterpreter.scala:262`) has one caller, `TestLeftOuterColumnar.scala:565`. `tryTake` uses `decodePrefixFor` instead. Do not delete it. The one example does not show that the two prefixes match.
+
+- **`docs/ARCHITECTURE.md:18` says `columnar` depends on nothing.** `build.sbt:130` is `.dependsOn(scarlet-core)`. Columnar imports `ScarletConf` from core (thirty files) and does not name `Plan`. The build comment at `build.sbt:122` is the accurate sentence. `docs/CompletedTodos.md:44` says the build has five modules and omits `scarlet-columnar`. `:65` says a true typed sort-merge is deferred. Columnar sort-merge is `SortMerge`, `LongSortMerge`, and `StringSortMerge`. The row path still groups by key (`ARCHITECTURE.md:307`), so the note is half true and, unlike the notes above it, not marked superseded. `README.md:58` checks off lineage recovery. `ARCHITECTURE.md:405` says lineage recovery was removed and retry remains. `README.md:81` still lists columnar execution as unchecked future work. Smallest change: fix the dependency sentence, mark the two completed-todo lines superseded, reword the README retry bullet, and check the columnar item. No test covers the docs.
+
+- **Two house-rule files disagree with the machine and with each other.** `AGENTS.md:8` says Java 17 is preinstalled. This container is OpenJDK 21.0.13. CI is JDK 17 (`.github/workflows/test-sbt.yaml:18`). The file never says a post-17 API fails CI (`Thread.threadId` is 19+). `AGENTS.md:9` says the launcher binary is sbt 2.x. `/usr/bin/sbt` is `builtin_sbt_version=1.10.11`, and `project/build.properties` is `sbt.version=1.10.11`. `.github/copilot-instructions.md:11` says to avoid `while` with no kernel exception, and `:18` still has the typo "writign". `AGENTS.md:55` allows a tight columnar `while`, and `build.sbt:36` excludes `Wart.While` from warnings. Smallest change: one sentence in `AGENTS.md` that local JDK 21 must not be used as the language level, correct the launcher line, and delete `copilot-instructions.md` or point it at `AGENTS.md`. No test covers the markdown.
+
+## Files over 900 lines
+
+Counts are `wc -l`. Structural means one planner, interpreter, or kernel whose private state is the reason it is one file. Accretion means cases, wrappers, or decode arms appended per task.
+
+| Lines | File | What it contains | Kind | Smallest split | Tests |
+| ---: | --- | --- | --- | --- | --- |
+| 1197 | `TestColumnarContract.scala` | Contract fixtures and three count assertions | Accretion | Fixture lists to a companion | This suite |
+| 1197 | `QueryBench.scala` | Query catalog, timing, allocation probe | Accretion | `AllocProbe` | Uncovered (`runMain`) |
+| 1192 | `JoinBuildBench.scala` | Join-build policies and a private table | Accretion | Probe and `OpenTable` | Uncovered (`runMain`) |
+| 1150 | `ColumnarInterpreter.scala` | `interpretAt` match over `PhysicalOp` | Structural | Join arms (about 504–802) to a `JoinInterpret` next to `JoinArms` | `TestLeftOuterColumnar`, `TestRightOuterColumnar`, `TestFullOuterColumnar`, `TestHashJoin`, `TestLongKeyJoin`, `TestStringKeyJoin` |
+| 1142 | `StageBuilder.scala` | Row stage graph, one walk of `Plan` | Structural | Shuffle helpers from about 974 | `TestPartitioningInfo`, `TestShuffleWriteReason`, `TestStageGraphValidation` |
+| 1140 | `Selection.scala` | Survivor index, plus count and `sumInt32` that do not gather | Accretion | Count and sum (about 84–619) to `SelectionFold` | `TestFusedPairFold`, `TestColumnarSelection`, `TestSelection` |
+| 1136 | `BatchCodec.scala` | Encode and decode per column shape | Accretion | Triple decoders (about 549–703) | `TestTripleOps`, `TestLongKeyJoin` |
+| 1125 | `Int32Pipeline.scala` | Pattern names. Collect goes to `Int32Fuse`. Sums are wrappers around one `sumInt32` | Accretion of names | Length-4 and five-project wrappers | `TestTrailingProject`, `TestColumnKernelPipeline` |
+| 1049 | `TestColumnFilterRange.scala` | The same window and tail cases per float, string, bool | Accretion | String-project behavior | This suite. Whole-batch siblings are `TestColumnKernelFilter` |
+| 1047 | `ColumnarPlanner.scala` | Action gates plus `lower`. Joins already live in `JoinLowering` | Accretion of gates | `tryTake` through the prefix helpers | `TestColumnarActions`, `TestSelectionBoundary` |
+| 1040 | `HashAggregate.scala` | Int grouped sum, min, count, max, and `GroupTable` | Structural | `GroupTable` (about 733–1020), `private[columnar]` | `TestHashAggregate`, `TestGroupedSumKernel` |
+| 998 | `TestRightOuterColumnar.scala` | Broadcast, shuffle-hash, sort-merge, copied from the left and full suites | Accretion | Sort-merge block before the next strategy | This suite |
+| 981 | `TestColumnarActions.scala` | `take`, `count`, `sum`, `groupedSum` against the row path | Accretion | Grouped-sum block (about 351–654) | This suite |
+| 976 | `DenseSum.scala` | Direct-index grouped sum. `Accumulator` owns the slots | Structural | Leave. Splitting the class splits the slot arrays | `TestDenseGroupedSum`, `TestDenseScan` |
+| 964 | `TestCountByKey.scala` | Int, string, and long count, then about 330 lines of builders | Accretion | Helpers from about 635 | This suite. Spill is `TestHashCountSpill` |
+| 955 | `SortMergeRuns.scala` | Spill sort-merge, cursors, and the equal-key group | Structural | Leave. Cursor and output buffer share the run | `TestSortMergeRuns` |
+| 950 | `TestSelectionBoundary.scala` | Publish-versus-decode, repeated per column kind | Accretion | Long-filter behavior (about 576–802) | This suite |
+| 942 | `HashJoin.scala` | Int32 build table, probe, null-key bitmap | Structural | Leave `Int32Build` with its insert and probe | `TestHashJoin`, `TestJoinMatchCount` |
+| 939 | `TestFullOuterColumnar.scala` | Same strategy blocks as the right-outer suite | Accretion | Sort-merge block | This suite |
+| 933 | `Float64Pipeline.scala` | Pattern wrappers around one `sumFloat` (`:805`) | Accretion of names | Leave until a fifth step | `TestColumnKernelPipeline`, `TestFoldParity` |
+| 932 | `ColumnKernel.scala` | Monomorphic filter and project per primitive | Structural | Leave the loops. UTF-8 literal mask (about 166–312) can move later | `TestColumnKernelFilter`, `TestColumnKernelProject`, `TestColumnFilterRange` |
+| 918 | `MaterialisationStudy.scala` | F4/B4/S5/P5/GROUPED study harness | Accretion | Next pattern only. Support object already exists | Uncovered (`runMain`) |
+| 914 | `Int64Pipeline.scala` | One `sumSteps` match and unrolled arms, same contract as int | Structural | Leave until a sixth arity | `TestColumnReduce`, `TestLongColumnar`, `TestFoldParity` |
+
+Next files under the line, in the order a new task will hit them: `TestColumnarSelection.scala` 894, `TestLeftOuterColumnar.scala` 884, `SpillStore.scala` 848, `TestSelection.scala` 844, `SortScaleBench.scala` 836, `SpillBench.scala` 831, `JoinBench.scala` 810, `ColumnPipeline.scala` 799, `HashExchange.scala` 756, `FoldedCount.scala` 715, `StringRankSplitRuns.scala` 722, `DistCollection.scala` 703.
+
+## Specialization, not debt
+
+Do not merge these. The bodies differ by primitive type, and each type has its own suite.
+
+- `sumInt32` / `sumFloat` / the long `sumF`…`sumPPPPP` arms. One loop per element type is the point of the file.
+- `scatterInt32` / `scatterInt64` / `scatterFloat64` / `scatterBool` in `HashExchange`. UTF-8 codes are `Array[Int]` and are the duplicate called out above, not these four.
+- `LongHashCount.locate` and `LongHashReduce.locate`. They hash `Long` keys.
+- `OrderedRunHeap` versus `OrderedRunHeapLong`, for the `less` compare only.
+- `IntArrays`, `LongArrays`, `DoubleArrays`, `BoolArrays`, `StringArrays`. Owned primitive storage.
+- `seedUtf8` in `Selection.scala`. It calls `utf8String` and does not share the bit test with `seedInt64` / `seedFloat64` / `seedBool`. Those three bit walks are the duplicate. `seedInt32` already delegates to `Int32Select.seedChecked`.
+
+`private[columnar]` methods with one caller (`tryReuseDirect`, `reuseZero`, `sumReuse`, `armDirectFailure`, `directTouchedSlots`) are seams, not dead code. `tryReuseDirect` is called from `GroupedSumKernel`. `armDirectFailure` and `directTouchedSlots` exist so `TestDenseGroupedSum` can fail one scan. Leave them.
+
+## House rules that still match
+
+- `checkFileLength` fails above 1200. 1200 is allowed (`build.sbt:6`, `AGENTS.md:20`).
+- `Test / parallelExecution := false` (`build.sbt:24`).
+- `spillEnabled` defaults to false (`ScarletConf.scala:67`).
+- `Wart.AsInstanceOf` and `Wart.Any` are errors. Other wartremover findings are warnings. There is no `-Werror`, so a warning does not fail lint (`build.sbt:27`, `AGENTS.md:21`).
+- CI runs `make test-lint`, `sbt test`, `PerfCheck`, then `make test-spill` on JDK 17 (`.github/workflows/test-sbt.yaml`).
+- `CrossEngineBench` defaults are warmup 80 and rounds 30.
+- Cats Effect is still on the row scheduler path.
