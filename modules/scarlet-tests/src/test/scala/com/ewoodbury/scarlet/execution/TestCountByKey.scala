@@ -116,6 +116,52 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     found shouldBe Map(1 -> 2)
   }
 
+  it should "count one repeated key on one partition and on four" in {
+    val rows = 400
+    val keys = Array.fill(rows)(4)
+    val values = Array.fill(rows)(1)
+    val filtered = (parts: Int) =>
+      DistCollection
+        .ofIntPairs(keys, values, parts)
+        .filterKeys((key: Int) => key > 0)
+        .filterValues((value: Int) => value >= 0)
+    assertFolded(filtered(1), Map(4 -> rows))
+    assertFolded(filtered(4), Map(4 -> rows))
+  }
+
+  it should "count a small key domain in first-seen order" in {
+    val rows = 10000
+    val keys = Array.tabulate(rows)(row => row % 200)
+    val values = Array.tabulate(rows)(row => if (row % 5 == 0) then -1 else 1)
+    val expected = keys.indices.foldLeft(Map.empty[Int, Int]) { (seen, row) =>
+      val key = keys(row)
+      if ((key % 3 != 0) && (values(row) >= 0)) then seen.updated(key, seen.getOrElse(key, 0) + 1)
+      else seen
+    }
+    assertFolded(
+      DistCollection
+        .ofIntPairs(keys, values, 4)
+        .filterKeys((key: Int) => key % 3 != 0)
+        .filterValues((value: Int) => value >= 0),
+      expected,
+    )
+  }
+
+  it should "keep keys that hash to the same slot" in {
+    // 0 and 4221 share the low bits of ColumnHash.mix and sit more than 4096 apart, so the dense
+    // counter declines. The probe has to keep both.
+    mixSlot(0) shouldBe mixSlot(4221)
+    val keys = Array(4221, 0, 4221, 0, 4221, 0)
+    val values = Array(1, 2, 3, -4, 5, 6)
+    assertFolded(
+      DistCollection
+        .ofIntPairs(keys, values, 1)
+        .filterKeys((key: Int) => key >= 0)
+        .filterValues((value: Int) => value >= 0),
+      Map(4221 -> 3, 0 -> 2),
+    )
+  }
+
   it should "fold one filter and a two-filter stack in the hash path's key order" in {
     val source = DistCollection.ofIntPairs(
       Array(5, 5, 6, 1, 5, 7, 6, 1, 8, 5),
@@ -900,6 +946,12 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
         ),
       ),
     )
+
+  /** Low 14 bits of [[com.ewoodbury.scarlet.columnar.ColumnHash.mix]]. A 16384-slot table uses them. */
+  private def mixSlot(key: Int): Int =
+    val first = (key ^ (key >>> 16)) * 0x7feb352d
+    val second = (first ^ (first >>> 15)) * 0x846ca68b
+    (second ^ (second >>> 16)) & 16383
 
   private def row[A](body: => A): A =
     val saved = ScarletConf.get
