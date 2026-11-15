@@ -236,6 +236,29 @@ private[scarlet] object Selection:
             keyValues,
             valueValues,
           )
+      case Step.Int32(ordinal, keep) :: Nil =>
+        SlotFold.countOne(
+          start,
+          length,
+          ordinal,
+          keep,
+          keyValues,
+          keyWords,
+          valueValues,
+          valueWords,
+          checkBits,
+        )
+      case Step.IntPair(keep) :: Nil =>
+        SlotFold.countPair(
+          start,
+          length,
+          keep,
+          keyValues,
+          keyWords,
+          valueValues,
+          valueWords,
+          checkBits,
+        )
       case _ =>
         if (checkBits) then
           countEachChecked(start, length, stack, keyValues, keyWords, valueValues, valueWords)
@@ -376,6 +399,35 @@ private[scarlet] object Selection:
           measureWords,
           skipMeasureNull,
         )
+      case Step.Int32(ordinal, keep) :: Nil =>
+        SlotFold.sumOne(
+          start,
+          length,
+          ordinal,
+          keep,
+          keyValues,
+          keyWords,
+          valueValues,
+          valueWords,
+          checkBits,
+          measureValues,
+          measureWords,
+          skipMeasureNull,
+        )
+      case Step.IntPair(keep) :: Nil =>
+        SlotFold.sumPair(
+          start,
+          length,
+          keep,
+          keyValues,
+          keyWords,
+          valueValues,
+          valueWords,
+          checkBits,
+          measureValues,
+          measureWords,
+          skipMeasureNull,
+        )
       case _ =>
         sumEach(
           start,
@@ -411,19 +463,21 @@ private[scarlet] object Selection:
     val rightValues = if (rightOrdinal == 0) keyValues else valueValues
     val leftWords = if (leftOrdinal == 0) keyWords else valueWords
     val rightWords = if (rightOrdinal == 0) keyWords else valueWords
+    val keepLeft = capturedInt(leftKeep)
+    val keepRight = capturedInt(rightKeep)
     val end = start + length
     var row = start
     var total = 0L
     if (!checkBits && skipMeasureNull) then
       while (row < end) {
-        if (leftKeep(leftValues(row)) && rightKeep(rightValues(row))) then
+        if (keepLeft(leftValues(row)) && keepRight(rightValues(row))) then
           total += measureValues(row).toLong
         row += 1
       }
     else if (!checkBits) then
       while (row < end) {
         if (
-            leftKeep(leftValues(row)) && rightKeep(rightValues(row)) &&
+            keepLeft(leftValues(row)) && keepRight(rightValues(row)) &&
             Validity.isSet(measureWords, row)
           )
         then total += measureValues(row).toLong
@@ -432,8 +486,8 @@ private[scarlet] object Selection:
     else if (skipMeasureNull) then
       while (row < end) {
         if (
-            Validity.isSet(leftWords, row) && leftKeep(leftValues(row)) &&
-            Validity.isSet(rightWords, row) && rightKeep(rightValues(row))
+            Validity.isSet(leftWords, row) && keepLeft(leftValues(row)) &&
+            Validity.isSet(rightWords, row) && keepRight(rightValues(row))
           )
         then total += measureValues(row).toLong
         row += 1
@@ -441,8 +495,8 @@ private[scarlet] object Selection:
     else
       while (row < end) {
         if (
-            Validity.isSet(leftWords, row) && leftKeep(leftValues(row)) &&
-            Validity.isSet(rightWords, row) && rightKeep(rightValues(row)) &&
+            Validity.isSet(leftWords, row) && keepLeft(leftValues(row)) &&
+            Validity.isSet(rightWords, row) && keepRight(rightValues(row)) &&
             Validity.isSet(measureWords, row)
           )
         then total += measureValues(row).toLong
@@ -624,18 +678,7 @@ private[scarlet] object Selection:
   ): Int =
     val column = int32At(batch, ordinal)
     Ranges.check(start, length, column.length)
-    val values = column.values
-    val words = column.validity.words
-    val end = start + length
-    var row = start
-    var written = 0
-    while (row < end) {
-      if (Validity.isSet(words, row) && predicate(values(row))) then
-        index(written) = row
-        written += 1
-      row += 1
-    }
-    written
+    Int32Select.seed(column, start, length, predicate, index)
 
   private def restrictInt32(
       batch: ColumnBatch,
@@ -644,19 +687,7 @@ private[scarlet] object Selection:
       index: Array[Int],
       count: Int,
   ): Int =
-    val column = int32At(batch, ordinal)
-    val values = column.values
-    val words = column.validity.words
-    var read = 0
-    var written = 0
-    while (read < count) {
-      val row = index(read)
-      if (Validity.isSet(words, row) && predicate(values(row))) then
-        index(written) = row
-        written += 1
-      read += 1
-    }
-    written
+    Int32Select.restrict(int32At(batch, ordinal), predicate, index, count)
 
   private def seedInt64(
       batch: ColumnBatch,

@@ -224,14 +224,22 @@ object HashJoin:
           rows,
           keepMisses = false,
         )
+      val present = JoinWrite.dense(probeKeys, probeValues, buildValues)
       if (reserved == 0) then ColumnBatches.emptyIntJoin
-      else if (
-          slots.maxChain > 1 && probeRows <= JoinWrite.MaxProbeRows &&
-          JoinWrite.dense(probeKeys, probeValues, buildValues)
-        )
-      then
+      else if (slots.maxChain > 1 && probeRows <= JoinWrite.MaxProbeRows && present) then
         // One walk of each chain, then a copy per hit. A null stays on the loop below.
         JoinWrite.writeGrouped(slots, buildValueValues, probeKeys, probeValues, reserved)
+      else if (present) then
+        JoinWrite.writeDense(
+          slots,
+          buildKeyValues,
+          buildValueValues,
+          probeKeyValues,
+          probeValueValues,
+          probeRows,
+          reserved,
+          probeBeforeBuild = false,
+        )
       else
         var outCapacity = reserved
         var filled = 0
@@ -435,6 +443,23 @@ object HashJoin:
         preserveProbe,
       )
       if (reserved == 0) then ColumnBatches.emptyIntJoin
+      else if (!preserveProbe) then
+        index match
+          case Some(slots) =>
+            JoinWrite.writePresent(
+              slots,
+              buildKeys,
+              buildValues,
+              buildValueWords,
+              rows,
+              probeKeys,
+              probeValues,
+              reserved,
+              probeBeforeBuild = true,
+            ) match
+              case Some(batch) => batch
+              case None => writeProbeReserved(probeKeys, probeValues, preserveProbe, reserved)
+          case None => writeProbeReserved(probeKeys, probeValues, preserveProbe, reserved)
       else writeProbeReserved(probeKeys, probeValues, preserveProbe, reserved)
 
     private def writeProbeReserved(
