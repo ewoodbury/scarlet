@@ -80,6 +80,31 @@ class TestFusedPairFold extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     dropped.values.sum shouldBe twoPassSum(dropped, 1)
   }
 
+  "a widened int" should "add Int.MaxValue and a negative without wrapping" in {
+    val mixed = DistCollection
+      .ofIntPairs(Array(1, 2, 3), Array(Int.MaxValue, -5, Int.MaxValue), 1)
+      .filterKeys((key: Int) => key % 3 != 0)
+    val mixedSum = Int.MaxValue.toLong - 5L
+
+    mixed.count() shouldBe 2L
+    mixed.values.sum shouldBe mixedSum
+    mixed.keys.sum shouldBe 3L
+    mixed.values.sum shouldBe twoPassSum(mixed, 1)
+    mixed.keys.sum shouldBe twoPassSum(mixed, 0)
+
+    val both = DistCollection
+      .ofIntPairs(Array(1, 2), Array(Int.MaxValue, Int.MaxValue), 1)
+      .filterValues((_: Int) => true)
+    both.values.sum shouldBe Int.MaxValue.toLong * 2L
+    both.values.sum shouldBe twoPassSum(both, 1)
+
+    val dropped = DistCollection
+      .ofIntPairs(Array(3), Array(Int.MaxValue), 1)
+      .filterKeys((key: Int) => key % 3 != 0)
+    dropped.values.sum shouldBe 0L
+    dropped.count() shouldBe 0L
+  }
+
   "an owned scan" should "keep every row or no row" in {
     val keys = Array(1, 2, 3, 4)
     val values = Array(10, -2, 0, 7)
