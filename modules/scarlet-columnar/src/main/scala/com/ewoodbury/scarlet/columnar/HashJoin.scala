@@ -189,12 +189,24 @@ object HashJoin:
     private val keyWords: Array[Long] = buildKeys.validity.words
 
     def insert(): Unit =
+      // An all-valid key column has nothing to skip. The bit test stays when a null is possible.
+      if (Validity.livePresent(keyWords, rows)) then insertPresent()
+      else insertSparse()
+      noteSlots(slots.slots)
+
+    private def insertPresent(): Unit =
+      var row = 0
+      while (row < rows) {
+        slots.insert(buildKeyValues(row), row)
+        row += 1
+      }
+
+    private def insertSparse(): Unit =
       var row = 0
       while (row < rows) {
         if (Validity.isSet(keyWords, row)) then slots.insert(buildKeyValues(row), row)
         row += 1
       }
-      noteSlots(slots.slots)
 
     def slotCount: Int = slots.slots
 

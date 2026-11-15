@@ -15,10 +15,10 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * Int inner shuffle-hash join over a filter selection.
  *
- * A filter stack on either side, including one filter, keeps the survivor index. The exchange scatters those rows
- * and does not slice them. A null value on a dropped row stays on this path. A null value on a
- * selected row, or on a dense side beside a selection, stays columnar. A null key is still
- * dropped.
+ * An owned int-pair slot stack is copied as dense survivors. A boxed source, a null, or any other
+ * stack keeps the survivor index. The exchange scatters those rows and does not slice them. A
+ * null value on a dropped row stays on the index path. A null value on a selected row, or on a
+ * dense side beside a selection, stays columnar. A null key is still dropped.
  */
 class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
