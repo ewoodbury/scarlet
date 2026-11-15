@@ -18,12 +18,13 @@ import com.ewoodbury.scarlet.core.ScarletConf
  *
  * [[count]] returns `None` before any table when `steps` is empty or is not a stack of
  * [[Selection.Step.Int32]] slot atoms, and when the source-row estimate does not fit the budget.
- * [[countUnmapped]] is that scan after one key-preserving `mapValues` was skipped. An empty stack
- * there counts every present key and still does not read the value column. Survivor rows are not
- * known until the scan, so that estimate is an upper bound on the charge
- * [[HashCount.byKeySelected]] uses. The caller keeps the index path, which still refuses or spills
- * from the survivor count. A folded partial that does fit is exchanged like [[HashCount]], and an
- * over-budget post-exchange bucket still finishes in [[HashCountSpill]].
+ * [[countOwned]] is that scan over owned int arrays: the columns alias those arrays for the hash
+ * and are not returned. [[countUnmapped]] is the encoded scan after one key-preserving `mapValues`
+ * was skipped. An empty stack there counts every present key and still does not read the value
+ * column. Survivor rows are not known until the scan, so that estimate is an upper bound on the
+ * charge [[HashCount.byKeySelected]] uses. The caller keeps the index path, which still refuses or
+ * spills from the survivor count. A folded partial that does fit is exchanged like [[HashCount]],
+ * and an over-budget post-exchange bucket still finishes in [[HashCountSpill]].
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[scarlet] object FoldedCount:
@@ -95,6 +96,39 @@ private[scarlet] object FoldedCount:
     requirePositive(numPartitions, parallelism, batchSize)
     if (!admitsUnmapped(steps)) then None
     else counted(batches, steps, numPartitions, parallelism, batchSize)
+
+  /**
+   * [[count]] for arrays that are already fully present.
+   *
+   * The input columns retain the arrays. They exist only for the scan. The compact publishes new
+   * key and count arrays, so a later action can still read the source. `None` has the same meaning
+   * as [[count]].
+   */
+  def countOwned(
+      parts: Vector[(Array[Int], Array[Int])],
+      steps: List[Selection.Step],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    requirePositive(numPartitions, parallelism, batchSize)
+    if (!admits(steps)) then None
+    else counted(presentParts(parts), steps, numPartitions, parallelism, batchSize)
+
+  /**
+   * [[countUnmapped]] for fully present arrays. `steps` may be empty. The input columns alias the
+   * arrays and are not returned. See [[countOwned]].
+   */
+  def countOwnedUnmapped(
+      parts: Vector[(Array[Int], Array[Int])],
+      steps: List[Selection.Step],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    requirePositive(numPartitions, parallelism, batchSize)
+    if (!admitsUnmapped(steps)) then None
+    else counted(presentParts(parts), steps, numPartitions, parallelism, batchSize)
 
   private def counted(
       batches: Vector[ColumnBatch],
@@ -204,6 +238,24 @@ private[scarlet] object FoldedCount:
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
+
+  /**
+   * One all-valid batch per partition. The columns keep the caller's arrays. Do not return this
+   * batch: the partition still owns those arrays for a later action.
+   */
+  private def presentParts(parts: Vector[(Array[Int], Array[Int])]): Vector[ColumnBatch] =
+    parts.map { (keys, values) =>
+      require(keys.length == values.length, "key and value arrays differ in length")
+      val rows = keys.length
+      new ColumnBatch(
+        Vector(LogicalType.Int32, LogicalType.Int32),
+        Vector(
+          Int32Column.of(keys, Validity.allValid(rows), rows),
+          Int32Column.of(values, Validity.allValid(rows), rows),
+        ),
+        rows,
+      )
+    }
 
   private def requireKey(batch: ColumnBatch): Unit =
     val keyType = batch.schema.headOption.getOrElse {
