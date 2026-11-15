@@ -10,9 +10,11 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  *
  * A slot-filter stack on an int or string child partial-reduces survivor ids, including a stack of
  * one. A long key, value, or row stack folds those predicates into the partial table and does not
- * build the index. An int-pair row filter and a whole-row string filter still use the index. The
- * exchange sees dense partials. A map, a scan, and a non-pair child stay on the dense reduce. The
- * `None` path is the only one that interprets a child the fold did not already scan.
+ * build the index. An owned long-pair source is read in place. A boxed source is still encoded,
+ * which is what keeps a null key. An int-pair row filter and a whole-row string filter still use
+ * the index. The exchange sees dense partials. A map, a scan, and a non-pair child stay on the
+ * dense reduce. The `None` path is the only one that interprets a child the fold did not already
+ * scan.
  */
 private[execution] object ReduceArms:
 
@@ -108,7 +110,7 @@ private[execution] object ReduceArms:
   /**
    * Scan the child under the filter stack once and fold `steps` into the partial table. `None`
    * when the stack is not a long key, value, or row selection. The caller then keeps the index
-   * path, which interprets that child itself.
+   * path, which interprets that child itself. An owned long-pair scan is not encoded first.
    */
   private def foldLong(
       source: Plan[_],
@@ -123,11 +125,32 @@ private[execution] object ReduceArms:
   ): Option[Vector[ColumnBatch]] =
     longSteps(source, child, ordinals).map { steps =>
       val (underPlan, underOp) = PredicatePlan.childOf(source, child)
-      val batches = longPairsOf(
-        interpretAt(underPlan, underOp, selectedPartition, preserveAbsence, ordinals),
+      val batches = sharedLongPairs(underPlan, underOp, selectedPartition, ordinals).getOrElse(
+        longPairsOf(
+          interpretAt(underPlan, underOp, selectedPartition, preserveAbsence, ordinals),
+        ),
       )
       FoldedLongReduce.reduce(batches, steps, width, workers, batchSize, binOp)
     }
+
+  /**
+   * Owned long-pair partitions for an in-place fold. `None` when the child is not that scan, a
+   * selector asked for one partition, or the demand is a single column. A boxed partition stays on
+   * the encoder.
+   */
+  private def sharedLongPairs(
+      plan: Plan[_],
+      op: PhysicalOp,
+      selectedPartition: Option[Int],
+      ordinals: Set[Int],
+  ): Option[Vector[ColumnBatch]] =
+    if (selectedPartition.nonEmpty) then None
+    else if (ordinals.size == 1 && (ordinals.contains(0) || ordinals.contains(1))) then None
+    else
+      (plan, op) match
+        case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.LongPairs, _)) =>
+          SourceEncode.shareOwnedLongPairs(partitions)
+        case _ => None
 
   /** Long selection steps, in source order. Empty and non-long stacks are `None`. */
   private def longSteps(

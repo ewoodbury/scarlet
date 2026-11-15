@@ -100,8 +100,9 @@ private[execution] object SourceEncode:
   /**
    * Encode the ordinals [[ColumnUse]] demanded. `{0}` copies keys and `{1}` copies values, each as
    * one `Int64` column at index 0. Any other set, including `{0, 1}`, keeps both columns. A boxed
-   * one-side encode keeps a null and does not read the other component. Sort, reduce, and join
-   * demand both columns, so they still encode both.
+   * one-side encode keeps a null and does not read the other component. Sort and join demand both
+   * columns, so they still copy both. A folded long `reduceByKey` of owned arrays uses
+   * [[shareOwnedLongPairs]] and does not call this.
    */
   private[execution] def encodeLongPairs(
       partitions: Seq[Partition[_]],
@@ -150,6 +151,38 @@ private[execution] object SourceEncode:
         @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
         val rows = other.asInstanceOf[Iterable[(Long, Long)]]
         BatchCodec.longPairs(rows)
+
+  /**
+   * One batch per owned long-pair partition, in partition order, sharing the partition arrays.
+   *
+   * `None` when any partition is boxed. Those rows can hold a null, and the encoder is what
+   * records it. An owned array has no nulls. The batch borrows the arrays for the fold and is not
+   * a published result: the reduce writes new output arrays and does not mutate these. Two
+   * half-million-row copies are larger than a G1 region, and scheduling them on the pool made the
+   * four-thread scan slower than the copy.
+   */
+  private[execution] def shareOwnedLongPairs(
+      partitions: Seq[Partition[_]],
+  ): Option[Vector[ColumnBatch]] =
+    import com.ewoodbury.scarlet.core.LongPairArrays
+
+    def shareOne(pairs: LongPairArrays): ColumnBatch =
+      val rows = pairs.keys.length
+      new ColumnBatch(
+        Vector(LogicalType.Int64, LogicalType.Int64),
+        Vector(
+          Int64Column.of(pairs.keys, Validity.allValid(rows), rows),
+          Int64Column.of(pairs.values, Validity.allValid(rows), rows),
+        ),
+        rows,
+      )
+
+    val shared = partitions.foldLeft(Option(List.empty[ColumnBatch])) { (acc, partition) =>
+      (acc, partition.data) match
+        case (Some(built), pairs: LongPairArrays) => Some(shareOne(pairs) :: built)
+        case _ => None
+    }
+    shared.map(built => built.reverse.toVector)
 
   /**
    * Pair encode for grouped sum. Both columns are kept, including when a caller demanded one

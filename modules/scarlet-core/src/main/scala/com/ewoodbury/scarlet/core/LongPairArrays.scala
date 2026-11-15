@@ -4,9 +4,9 @@ package com.ewoodbury.scarlet.core
  * Primitive keys and values for one `(Long, Long)` partition.
  *
  * The iterator yields pairs for the row path. The arrays are `private[scarlet]`, so a caller who
- * pattern matches [[Partition.data]] on a public plan cannot mutate a constructed collection. The
- * columnar encoder copies them into columns. The partition stays readable for a later action, so
- * the columns do not adopt the arrays.
+ * pattern matches [[Partition.data]] on a public plan cannot mutate a constructed collection. A
+ * published column copies them, so the partition stays readable for a later action. A folded
+ * `reduceByKey` may read the arrays for that call and still writes its own output.
  */
 final class LongPairArrays private (
     private[scarlet] val keys: Array[Long],

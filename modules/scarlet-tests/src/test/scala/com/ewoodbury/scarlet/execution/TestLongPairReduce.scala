@@ -6,7 +6,7 @@ import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
-import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
+import com.ewoodbury.scarlet.core.{LongPairArrays, Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.HashPartitioner
 
@@ -383,6 +383,49 @@ class TestLongPairReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     ColumnarPlanner.tryTake(reduced.plan, 1) shouldBe None
   }
 
+  it should "match the row path for a dense key domain and a sparse one without copying" in {
+    val denseKeys = Array.tabulate(64)(row => (row % 8).toLong)
+    val denseValues = Array.tabulate(64)(row => (row + 1).toLong)
+    val dense = DistCollection
+      .ofLongPairs(denseKeys, denseValues, 2)
+      .filterKeys((key: Long) => key % 3L != 0L)
+      .filterValues((value: Long) => value >= 0L)
+    val denseReduced = dense.reduceByKey[Long, Long](_ + _)
+    val denseRows = ColumnMetrics.withSink(new CountingSink) {
+      val got = denseReduced.collect().toList
+      ColumnMetrics.primitiveEncodeCount shouldBe 0L
+      got
+    }
+    denseRows shouldBe row(dense.reduceByKey[Long, Long](_ + _).collect().toList)
+    denseRows.map { case (key, _) => key }.distinct shouldBe denseRows.map { case (key, _) => key }
+
+    val sparseKeys = Array.tabulate(32)(row => row.toLong * 1000L + 7L)
+    val sparseValues = Array.tabulate(32)(row => row.toLong + 1L)
+    val sparseSource = DistCollection.ofLongPairs(sparseKeys, sparseValues, 4)
+    val sparse = sparseSource
+      .filterKeys((key: Long) => key % 3L != 0L)
+      .filterValues((value: Long) => value >= 0L)
+    val sparseReduced = sparse.reduceByKey[Long, Long](_ + _)
+    val sparseRows = ColumnMetrics.withSink(new CountingSink) {
+      val got = sparseReduced.collect().toList
+      ColumnMetrics.primitiveEncodeCount shouldBe 0L
+      got
+    }
+    val firstSeen = (0 until 32).flatMap { row =>
+      val key = row.toLong * 1000L + 7L
+      val value = row.toLong + 1L
+      if (key % 3L != 0L && value >= 0L) then Some((key, value)) else None
+    }.toList
+
+    // The row path orders by hash bucket. The fold keeps first-seen key order.
+    sparseRows shouldBe firstSeen
+    sparseRows should contain theSameElementsAs row(
+      sparse.reduceByKey[Long, Long](_ + _).collect().toList,
+    )
+    sparseRows.map { case (key, _) => key }.distinct.length shouldBe sparseRows.length
+    outputArrays(sparseSource.plan, sparseReduced.plan)
+  }
+
   it should "collect an empty source as no rows and four empty batches" in {
     val rows = DistCollection.ofLongPairs(Array.empty[Long], Array.empty[Long], 4)
     val reduced = rows.reduceByKey[Long, Long](_ + _)
@@ -444,6 +487,27 @@ class TestLongPairReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     mapped.collect().toList shouldBe row(mapped.collect().toList)
     filtered.collect().toList shouldBe row(filtered.collect().toList)
   }
+
+  /** Output columns are copies. The fold may read the source arrays and must not publish them. */
+  private def outputArrays(source: Plan[_], reduced: Plan[_]): Unit =
+    val owned = source match
+      case Plan.Source(partitions, _) =>
+        partitions.flatMap { partition =>
+          partition.data match
+            case pairs: LongPairArrays => Seq(pairs.keys, pairs.values)
+            case _ => Nil
+        }
+      case _ => fail(s"expected an owned source, got $source")
+    val outputs = longPairBatches(reduced).flatMap { batch =>
+      batch.columns.collect { case column: Int64Column => column.values }
+    }
+    outputs.nonEmpty shouldBe true
+    owned.nonEmpty shouldBe true
+    outputs.foreach { values =>
+      owned.foreach { sourceArray =>
+        values should not be theSameInstanceAs(sourceArray)
+      }
+    }
 
   private def longPairBatches(plan: Plan[_]): Vector[ColumnBatch] =
     val lowered = ColumnarPlanner.lower(plan).getOrElse(fail(s"expected a lowered plan, got $plan"))
