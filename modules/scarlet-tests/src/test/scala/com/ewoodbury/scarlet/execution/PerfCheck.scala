@@ -125,15 +125,23 @@ object PerfCheck:
         val value = action()
         samples(round) = (System.nanoTime() - start) / 1_000_000.0
         checksum = checksumOf(value)
-        if problem.isEmpty then problem = publishedMiss(name, columnar, sink.batchCount)
+        if problem.isEmpty then problem = publishedMiss(name, columnar, sink.batchCount, sink.fusedCount)
       finally ColumnMetrics.restore(previous)
       round += 1
     java.util.Arrays.sort(samples)
     Measured(samples(samples.length / 2), checksum, problem)
 
-  private def publishedMiss(name: String, columnar: Boolean, batches: Long): Option[String] =
-    if columnar then Option.when(batches == 0L)(s"$name columnar published no column batch")
-    else Option.when(batches != 0L)(s"$name row published $batches column batches")
+  private def publishedMiss(
+      name: String,
+      columnar: Boolean,
+      batches: Long,
+      fused: Long,
+  ): Option[String] =
+    // A filtered count or sum publishes no batch and folds the source columns in place; either note
+    // proves the columnar path ran. A row run must show neither.
+    if columnar then
+      Option.when(batches == 0L && fused == 0L)(s"$name columnar published no batch and folded nothing")
+    else Option.when(batches != 0L || fused != 0L)(s"$name row published $batches batches, $fused folds")
 
   private def checksumOf(value: Any): Long = value match
     case number: Long => number

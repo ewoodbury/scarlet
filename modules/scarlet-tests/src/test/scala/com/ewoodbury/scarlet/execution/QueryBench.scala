@@ -447,8 +447,8 @@ object QueryBench:
     try
       val fold = query.columnarGroups()
       require(
-        sink.batchCount > 0L,
-        s"${query.name} columnar t$threads group check published no column batch",
+        sink.batchCount > 0L || sink.fusedCount > 0L,
+        s"${query.name} columnar t$threads group check published no batch and folded nothing",
       )
       fold
     finally ColumnMetrics.restore(previous)
@@ -484,7 +484,7 @@ object QueryBench:
       val started = System.nanoTime()
       val got = query.run()
       val elapsed = System.nanoTime() - started
-      requirePath(query.name, columnar, threads, sink.batchCount)
+      requirePath(query.name, columnar, threads, sink.batchCount, sink.fusedCount)
       require(
         matches(got, query.expected),
         s"${query.name} ${layoutName(columnar)} t$threads ${show(got)} != ${show(query.expected)}",
@@ -499,15 +499,23 @@ object QueryBench:
     try
       ScarletRuntime.get.shuffle.clear()
       val got = query.run()
-      requirePath(query.name, columnar, threads, sink.batchCount)
+      requirePath(query.name, columnar, threads, sink.batchCount, sink.fusedCount)
       got
     finally ColumnMetrics.restore(previous)
 
-  private def requirePath(name: String, columnar: Boolean, threads: Int, batches: Long): Unit =
+  private def requirePath(
+      name: String,
+      columnar: Boolean,
+      threads: Int,
+      batches: Long,
+      fused: Long,
+  ): Unit =
     val layout = layoutName(columnar)
-    if (columnar) then
-      require(batches > 0L, s"$name $layout t$threads published no column batch")
-    else require(batches == 0L, s"$name $layout t$threads published $batches column batches")
+    // A count or sum over source columns publishes no batch and folds in place. Either note proves
+    // the columnar arm ran; neither may appear on a row run.
+    val why = s"$name $layout t$threads published $batches batches and $fused folds"
+    if (columnar) then require(batches > 0L || fused > 0L, why)
+    else require(batches == 0L && fused == 0L, why)
 
   /**
    * Process-wide bytes for every width and layout. The probe runs only in this pass, so it does
@@ -534,7 +542,7 @@ object QueryBench:
                       ScarletRuntime.get.shuffle.clear()
                       query.run()
                     }
-                    requirePath(query.name, columnar, threads, sink.batchCount)
+                    requirePath(query.name, columnar, threads, sink.batchCount, sink.fusedCount)
                     require(
                       matches(got, query.expected),
                       s"${query.name} alloc ${show(got)}",

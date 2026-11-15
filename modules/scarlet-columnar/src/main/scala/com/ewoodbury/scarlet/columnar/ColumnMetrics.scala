@@ -30,6 +30,13 @@ trait MetricsSink:
    */
   def primitiveEncode(): Unit
 
+  /**
+   * One source range folded in place, with no encoded batch and no copy — the shape a filtered
+   * count or sum takes when nothing downstream reads the columns. A run that only folds still
+   * proves the columnar arm ran, which [[batch]] alone cannot show.
+   */
+  def fused(): Unit = ()
+
 /** Ignores every note. This is the sink installed at startup. */
 object NoOpSink extends MetricsSink:
 
@@ -53,6 +60,7 @@ final class CountingSink extends MetricsSink:
   private val visits = new AtomicLong(0L)
   private val decodedRows = new AtomicLong(0L)
   private val primitiveEncodes = new AtomicLong(0L)
+  private val fusedFolds = new AtomicLong(0L)
 
   def batch(): Unit =
     val _ = batches.incrementAndGet()
@@ -66,6 +74,9 @@ final class CountingSink extends MetricsSink:
   def primitiveEncode(): Unit =
     val _ = primitiveEncodes.incrementAndGet()
 
+  override def fused(): Unit =
+    val _ = fusedFolds.incrementAndGet()
+
   def batchCount: Long = batches.get()
 
   def visitCount: Long = visits.get()
@@ -75,6 +86,9 @@ final class CountingSink extends MetricsSink:
 
   /** Owned, `ArraySeq`, or raw primitive encodes, including booleans. A pair counts once. */
   def primitiveEncodeCount: Long = primitiveEncodes.get()
+
+  /** Source ranges folded in place, with no encoded batch. */
+  def fusedCount: Long = fusedFolds.get()
 
 /**
  * Counts published batches, morsel visits, decoded rows, and primitive source encodes on the
@@ -153,3 +167,6 @@ object ColumnMetrics:
 
   private[columnar] def primitiveEncode(): Unit =
     current.get().primitiveEncode()
+
+  private[columnar] def fused(): Unit =
+    current.get().fused()

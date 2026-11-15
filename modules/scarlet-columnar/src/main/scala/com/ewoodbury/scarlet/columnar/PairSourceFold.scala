@@ -24,6 +24,10 @@ private[scarlet] object PairSourceFold:
     prepare(keys, values, start, length, steps)
     if (length == 0) then 0L
     else
+      // This fold is the columnar arm's work for one range of one source batch and publishes no
+      // encoded batch, so note the fold itself. A caller can still tell a columnar run from a row
+      // fallback without this costing an allocation.
+      ColumnMetrics.fused()
       steps match
         case Selection.Step.Int32(left, leftKeep) :: Selection.Step
               .Int32(right, rightKeep) :: Nil =>
@@ -57,6 +61,7 @@ private[scarlet] object PairSourceFold:
     prepare(keys, values, start, length, steps)
     if (length == 0) then 0L
     else
+      ColumnMetrics.fused()
       val measure = column(measureOrdinal, keys, values)
       steps match
         case Selection.Step.Int32(left, leftKeep) :: Selection.Step
