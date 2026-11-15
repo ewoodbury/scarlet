@@ -63,7 +63,7 @@ private[scarlet] object FoldedLongReduce:
           batch => LongHashReduce.int64(batch, keyOrdinal = 0, valueOrdinal = 1, op),
         )
         LongHashReduce.exchangeReduced(combined, numPartitions, parallelism, batchSize, op)
-      finally LongHashReduce.releaseWorkers()
+      finally LongHashReduce.releaseOversized()
 
   private def longStep(step: Selection.Step): Boolean = step match
     case Selection.Step.Int64(column, _) => column == 0 || column == 1

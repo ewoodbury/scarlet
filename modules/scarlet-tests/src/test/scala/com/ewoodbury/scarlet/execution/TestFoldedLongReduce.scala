@@ -74,6 +74,21 @@ class TestFoldedLongReduce extends AnyFlatSpec with Matchers with BeforeAndAfter
       decode(viaIndex(Vector(selected), numPartitions = 4, parallelism = 4, batchSize = 3))
   }
 
+  it should "keep first-seen order when a two-filter table grows" in {
+    // Two steps take the inlined update. Batch size 3 sizes a 16-slot table. Twelve distinct keys
+    // double it on the insert path.
+    val count = 24
+    val rows = Seq.tabulate(count)(row => ((row % 12).toLong, (row + 1).toLong))
+    val batch = longPairs(rows)
+    val both = List(Selection.Step.Int64(0, keepAll), Selection.Step.Int64(1, keepAll))
+    val selected = index(batch, both)
+
+    decode(fold(Vector(batch), both, numPartitions = 1, parallelism = 1, batchSize = 3)) shouldBe
+      decode(viaIndex(Vector(selected), numPartitions = 1, parallelism = 1, batchSize = 3))
+    decode(fold(Vector(batch), both, numPartitions = 4, parallelism = 4, batchSize = 3)) shouldBe
+      decode(viaIndex(Vector(selected), numPartitions = 4, parallelism = 4, batchSize = 3))
+  }
+
   it should "drop a null key, keep one null value, and unbox a second null" in {
     val batch = sparse(
       Array(1L, 7L, 1L, 2L, 3L, 2L),

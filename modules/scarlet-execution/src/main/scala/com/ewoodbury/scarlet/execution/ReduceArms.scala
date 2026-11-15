@@ -71,8 +71,9 @@ private[execution] object ReduceArms:
     val op = reduceFunc.asInstanceOf[(Long, Long) => Long]
     // A long key, value, or row stack folds the predicates into the partial table. The index path
     // remains for a stack the fold does not admit. The `None` path is the only one that
-    // interprets a child the fold did not already scan.
-    val binOp: LongHashReduce.LongBinOp = (left: Long, right: Long) => op(left, right)
+    // interprets a child the fold did not already scan. The same plan function keeps one adapter,
+    // so a retained partial table accepts the next collect.
+    val binOp = longBinOp(op)
     val width = ColumnarPlanner.shuffleWidth
     val workers = ColumnarPlanner.parallelism
     val batchSize = ColumnarPlanner.batchSize
@@ -151,6 +152,24 @@ private[execution] object ReduceArms:
         case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.LongPairs, _)) =>
           SourceEncode.shareOwnedLongPairs(partitions)
         case _ => None
+
+  /**
+   * One adapter per plan function. A fresh lambda on every collect would miss the retained table,
+   * because reuse requires the same operator instance. The plan holds `op`, so the weak key dies
+   * with the plan. The adapter does not keep the key alive.
+   */
+  private val longOpLock = new Object
+  private val longOps =
+    new java.util.WeakHashMap[(Long, Long) => Long, LongHashReduce.LongBinOp]
+
+  private def longBinOp(op: (Long, Long) => Long): LongHashReduce.LongBinOp =
+    longOpLock.synchronized {
+      Option(longOps.get(op)).getOrElse {
+        val created: LongHashReduce.LongBinOp = (left, right) => op(left, right)
+        longOps.put(op, created)
+        created
+      }
+    }
 
   /** Long selection steps, in source order. Empty and non-long stacks are `None`. */
   private def longSteps(

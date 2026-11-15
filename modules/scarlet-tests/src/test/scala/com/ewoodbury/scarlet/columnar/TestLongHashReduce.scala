@@ -4,6 +4,9 @@ import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import com.ewoodbury.scarlet.api.DistCollection
+import com.ewoodbury.scarlet.core.ScarletConf
+
 class TestLongHashReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   private val plus: LongHashReduce.LongBinOp = (left, right) => left + right
@@ -250,6 +253,51 @@ class TestLongHashReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     LongHashReduce.tablesReusedForTest should be > 0L
     LongHashReduce.tablesAllocatedForTest should be < 4L
   }
+
+  it should "keep a modest table across two reduces and hide it from the next operator" in {
+    val rows = Seq((1L, 10L), (2L, 3L), (1L, 1L))
+    val once = reducedBy(rows, plus)
+    val allocated = LongHashReduce.tablesAllocatedForTest
+    val twice = reducedBy(rows, plus)
+
+    twice shouldBe once
+    twice shouldBe Map(1L -> 11L, 2L -> 3L)
+    LongHashReduce.tablesAllocatedForTest shouldBe allocated
+    val other: LongHashReduce.LongBinOp = (left, right) => left + right
+    reducedBy(Seq((4L, 8L)), other) shouldBe Map(4L -> 8L)
+  }
+
+  it should "reuse one retained table across two collects of one filtered reduce" in {
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(
+        saved.copy(columnarExecution = true, threadPoolSize = 1, defaultShufflePartitions = 1),
+      )
+      val reduced = DistCollection
+        .ofLongPairs(Array(1L, 1L, 2L, 3L, 2L), Array(10L, 1L, 4L, 5L, 6L), 1)
+        .filterKeys((key: Long) => key > 0L)
+        .filterValues((value: Long) => value >= 0L)
+        .reduceByKey[Long, Long](_ + _)
+      val first = reduced.collect().toList
+      val allocated = LongHashReduce.tablesAllocatedForTest
+      val reused = LongHashReduce.tablesReusedForTest
+      val second = reduced.collect().toList
+
+      second should contain theSameElementsAs first
+      second should contain theSameElementsAs Seq((1L, 11L), (2L, 10L), (3L, 5L))
+      LongHashReduce.tablesAllocatedForTest shouldBe allocated
+      LongHashReduce.tablesReusedForTest should be > reused
+    finally ScarletConf.set(saved)
+  }
+
+  private def reducedBy(
+      rows: Seq[(Long, Long)],
+      op: LongHashReduce.LongBinOp,
+  ): Map[Long, Long] =
+    LongHashReduce
+      .byKey(Vector(longPairs(rows)), numPartitions = 1, parallelism = 1, batchSize = 2, op)
+      .flatMap(batch => BatchCodec.decodeLongPairs(batch))
+      .toMap
 
   private def sums(
       left: ColumnBatch,

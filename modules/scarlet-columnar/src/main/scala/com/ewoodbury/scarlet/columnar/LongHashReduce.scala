@@ -20,7 +20,9 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * output are present. A null group clears the value bit and does not publish a payload. The table
  * is at least twice the row count, so one batch does not rehash. One table lives on the thread
  * that scans a morsel. The next morsel on that thread clears it and reuses it when the operator is
- * the same and the capacity still fits. [[releaseWorkers]] drops it.
+ * the same and the capacity still fits. A table of at most 65536 slots stays for the next reduce.
+ * [[releaseOversized]] drops a larger one. [[releaseWorkers]] drops whatever the thread still
+ * holds.
  *
  * [[int64Selected]] scans a survivor index with that same null rule. [[int64FilteredGroup]]
  * applies long key, value, or row steps during the insert, so a filtered scan does not build that
@@ -174,7 +176,7 @@ object LongHashReduce:
           partials => int64(partials, keyOrdinal = 0, valueOrdinal = 1, op),
         )
         reduceExchanged(combined, numPartitions, parallelism, batchSize, op)
-      finally releaseWorkers()
+      finally releaseOversized()
 
   /**
    * [[byKey]] for a selection. Each live prefix is partial-reduced, the dense partials are
@@ -204,7 +206,7 @@ object LongHashReduce:
           partials => int64(partials, keyOrdinal = 0, valueOrdinal = 1, op),
         )
         reduceExchanged(combined, numPartitions, parallelism, batchSize, op)
-      finally releaseWorkers()
+      finally releaseOversized()
 
   /**
    * Exchange combined partials and reduce each bucket. Called by the folded long reduce; [[byKey]]
@@ -258,8 +260,25 @@ object LongHashReduce:
   private val locals: ThreadLocal[Table | Null] = new ThreadLocal[Table | Null]()
 
   /**
-   * Drops this thread's table. [[MorselScheduler]] calls this when a pool task returns, and
-   * [[byKey]] calls it on the caller. A cleared table is not a published batch.
+   * Slots a worker may keep. `tableSize(8192)` is 16384, the filtered partial for the default
+   * batch. A table past this is a high-cardinality reduce and is not kept on the pool thread.
+   */
+  private val retainSlots = 1 << 16
+
+  /**
+   * Drops this thread's table when it is larger than [[retainSlots]]. A smaller table stays, so
+   * the next reduce with the same operator clears it instead of zeroing a new one.
+   * [[MorselScheduler]] calls this when a pool task returns. [[byKey]] and the folded reduce call
+   * it on the caller.
+   */
+  private[columnar] def releaseOversized(): Unit =
+    locals.get() match
+      case current: Table if current.oversized => locals.remove()
+      case _ => ()
+
+  /**
+   * Drops this thread's table. Tests use this so a retained table does not leak into the next
+   * case. A cleared table is not a published batch.
    */
   private[columnar] def releaseWorkers(): Unit =
     locals.remove()
@@ -302,6 +321,9 @@ object LongHashReduce:
     @SuppressWarnings(Array("org.wartremover.warts.Equals"))
     def accepts(need: Int, bin: LongBinOp): Boolean =
       capacity >= need && (op eq bin)
+
+    /** True when this table is too large to leave on a pool thread. */
+    def oversized: Boolean = capacity > retainSlots
 
     /**
      * Drops every group this morsel inserted. The arrays stay, so the next morsel does not zero
@@ -438,6 +460,14 @@ object LongHashReduce:
         rows,
       )
 
+    /**
+     * Key filter, then value filter, then the present-key update.
+     *
+     * The update is in this loop. [[addPresent]] does not inline here, and after the first keys of
+     * a stripe almost every survivor is an update. A new key, and a null value that is still
+     * missing, still go through [[addPresent]], which may grow the table. The arrays are read
+     * again after that call.
+     */
     private def scanKeyThenValue(
         keyValues: Array[Long],
         valueValues: Array[Long],
@@ -447,11 +477,26 @@ object LongHashReduce:
         valueKeep: ColumnKernel.Int64Predicate,
     ): Unit =
       var row = start
+      var capMask = mask
+      var st = state
+      var ks = keys
+      var vs = values
       while (row < end) {
         val key = keyValues(row)
         if (keyKeep(key)) then
           val value = valueValues(row)
-          if (valueKeep(value)) then addPresent(key, value)
+          if (valueKeep(value)) then
+            var slot = ColumnHash.mix(java.lang.Long.hashCode(key)) & capMask
+            while (st(slot) != empty && ks(slot) != key) {
+              slot = (slot + 1) & capMask
+            }
+            if (st(slot) == present) then vs(slot) = op(vs(slot), value)
+            else
+              addPresent(key, value)
+              capMask = mask
+              st = state
+              ks = keys
+              vs = values
         row += 1
       }
 
