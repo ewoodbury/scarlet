@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import java.util.concurrent.atomic.AtomicInteger
+
 /**
  * Dense partial count for a morsel whose keys sit in a small span.
  *
@@ -22,6 +24,13 @@ private[columnar] object DirectCount:
 
   def release(): Unit = locals.remove()
 
+  /** Largest dense counter since [[resetPeakForTest]], in slots. */
+  def peakSlotsForTest: Int = peakSlots.get
+
+  /** Clears [[peakSlotsForTest]]. */
+  def resetPeakForTest(): Unit =
+    peakSlots.set(0)
+
   /**
    * One partial, or null when this morsel stays on the hash table. The returned batch is
    * independent of the reused counter.
@@ -37,6 +46,101 @@ private[columnar] object DirectCount:
           two(morsel, left, leftKeep, right, rightKeep)
         case _ =>
           null
+
+  /**
+   * One partial for every range of `batch`, or null when the hash table should own the segment.
+   *
+   * The ranges are one source batch in scan order. The counter is `counts(key - min)` and its
+   * length is the key span, not the row count. A span at or above [[SpanLimit]], a segment shorter
+   * than [[MinRows]], a null in a column the steps read, or any step list other than two int slots
+   * returns null.
+   */
+  def aggregateRanges(
+      batch: ColumnBatch,
+      starts: Array[Int],
+      lengths: Array[Int],
+      steps: List[Selection.Step],
+  ): ColumnBatch | Null =
+    require(starts.length == lengths.length, "count ranges disagree")
+    steps match
+      case Selection.Step.Int32(left, leftKeep) :: Selection.Step.Int32(right, rightKeep) :: Nil =>
+        ranges(batch, starts, lengths, left, leftKeep, right, rightKeep)
+      case _ =>
+        null
+
+  private def ranges(
+      batch: ColumnBatch,
+      starts: Array[Int],
+      lengths: Array[Int],
+      leftOrdinal: Int,
+      leftKeep: ColumnKernel.Int32Predicate,
+      rightOrdinal: Int,
+      rightKeep: ColumnKernel.Int32Predicate,
+  ): ColumnBatch | Null =
+    val count = starts.length
+    var total = 0
+    var cursor = 0
+    var ready = true
+    while (cursor < count && ready) {
+      val length = lengths(cursor)
+      if (length > 0) then
+        total += length
+        val start = starts(cursor)
+        ready = columnReady(batch, 0, start, length) &&
+          columnReady(batch, leftOrdinal, start, length) &&
+          columnReady(batch, rightOrdinal, start, length)
+      cursor += 1
+    }
+    if (!ready || total < MinRows) then null
+    else
+      val keys = ColumnHash.int32At(batch, 0).values
+      val values =
+        if ((leftOrdinal == 1) || (rightOrdinal == 1)) then ColumnHash.int32At(batch, 1).values
+        else keys
+      var min = 0
+      var max = 0
+      var seen = false
+      var fits = true
+      cursor = 0
+      while (cursor < count && fits) {
+        val end = starts(cursor) + lengths(cursor)
+        var row = starts(cursor)
+        if (!seen && row < end) then
+          min = keys(row)
+          max = min
+          seen = true
+          row += 1
+        while (row < end && fits) {
+          val key = keys(row)
+          if (key < min) then min = key
+          else if (key > max) then max = key
+          if (max.toLong - min.toLong >= SpanLimit.toLong) then fits = false
+          row += 1
+        }
+        cursor += 1
+      }
+      if (!fits || !seen) then null
+      else
+        val span = (max - min) + 1
+        val buffer = borrow(span)
+        buffer.clear()
+        buffer.prepare(min, span)
+        notePeak(buffer.slotCount)
+        val left = if (leftOrdinal == 0) then keys else values
+        val right = if (rightOrdinal == 0) then keys else values
+        val keepLeft = function(leftKeep)
+        val keepRight = function(rightKeep)
+        cursor = 0
+        while (cursor < count) {
+          val end = starts(cursor) + lengths(cursor)
+          var row = starts(cursor)
+          while (row < end) {
+            if (keepLeft(left(row)) && keepRight(right(row))) then buffer.add(keys(row))
+            row += 1
+          }
+          cursor += 1
+        }
+        buffer.compact()
 
   private def two(
       morsel: Morsel,
@@ -108,6 +212,7 @@ private[columnar] object DirectCount:
         val buffer = borrow(span)
         buffer.clear()
         buffer.prepare(min, span)
+        notePeak(buffer.slotCount)
         val left = if (leftOrdinal == 0) then keys else values
         val right = if (rightOrdinal == 0) then keys else values
         row = start
@@ -130,6 +235,11 @@ private[columnar] object DirectCount:
     max.toLong - min.toLong >= SpanLimit.toLong
 
   private val locals: ThreadLocal[Dense | Null] = new ThreadLocal[Dense | Null]()
+  private val peakSlots = new AtomicInteger
+
+  private def notePeak(slots: Int): Unit =
+    var prev = peakSlots.get
+    while (slots > prev && !peakSlots.compareAndSet(prev, slots)) do prev = peakSlots.get
 
   private def borrow(span: Int): Dense =
     locals.get() match
@@ -146,6 +256,8 @@ private[columnar] object DirectCount:
     private var min: Int = 0
 
     def accepts(span: Int): Boolean = counts.length >= span
+
+    def slotCount: Int = counts.length
 
     def clear(): Unit =
       var cursor = 0
