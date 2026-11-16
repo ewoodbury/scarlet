@@ -161,6 +161,20 @@ object ColumnarPlanner:
         Some(
           ColumnarInterpreter.decodePrefixFor(ColumnarInterpreter.interpret(plan, op), n, op),
         )
+      case PhysicalOp.SortByIntValueDesc(child) =>
+        plan match
+          case Plan.SortByIntValueDescOp(source) =>
+            Some(
+              ColumnarInterpreter.decodePrefixFor(
+                ColumnarInterpreter.Columns.Pairs(
+                  SortArms.take(source, child, ColumnUse.ordinals(plan, op), n),
+                ),
+                n,
+                op,
+              ),
+            )
+          case _ =>
+            throw new IllegalStateException("SortByIntValueDesc expected SortByIntValueDescOp")
       case other =>
         PartitionPreserving.of(other).map(count => prefixOf(plan, other, count, n))
 
@@ -784,6 +798,8 @@ object ColumnarPlanner:
     case plan if JoinLowering.isJoin(plan) => JoinLowering.lower(plan, lowerChild)
     case Plan.SortByIntKeyOp(source) =>
       SortLowering.lowerInt(source, lowerPlan)
+    case Plan.SortByIntValueDescOp(source) =>
+      SortLowering.lowerIntValueDesc(source, lowerPlan)
     case Plan.SortByLongKeyOp(source) =>
       SortLowering.lowerLong(source, lowerPlan)
     case Plan.SortByStringKeyOp(source) =>
@@ -977,6 +993,8 @@ object ColumnarPlanner:
     case PhysicalOp.MapValue(child) => infoOf(child)
     case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey =>
       SortLowering.info(shuffleWidth, layoutOf(PhysicalOp.Kind.Pairs))
+    case _: PhysicalOp.SortByIntValueDesc =>
+      SortLowering.infoValueDesc(shuffleWidth, layoutOf(PhysicalOp.Kind.Pairs))
     case _: PhysicalOp.SortByStringKey =>
       SortLowering.info(shuffleWidth, layoutOf(PhysicalOp.Kind.StringPairs))
     case _: PhysicalOp.HashAggregate | _: PhysicalOp.LongHashAggregate =>

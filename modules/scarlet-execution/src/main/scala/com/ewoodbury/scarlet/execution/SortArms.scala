@@ -1,0 +1,80 @@
+package com.ewoodbury.scarlet.execution
+
+import com.ewoodbury.scarlet.columnar.{ColumnBatch, IntTopN, Selected}
+import com.ewoodbury.scarlet.core.Plan
+
+/**
+ * Int-pair sort by value descending then key ascending.
+ *
+ * [[sort]] is the full order for collect. [[take]] is a bounded heap of `n` rows and does not run
+ * that sort. A null value or key orders as zero and stays null. Ties keep input order.
+ */
+private[execution] object SortArms:
+
+  def sort(
+      source: Plan[_],
+      child: PhysicalOp,
+      ordinals: Set[Int],
+  ): ColumnarInterpreter.Columns =
+    ColumnarInterpreter.Columns.Pairs(sorted(source, child, ordinals))
+
+  def take(
+      source: Plan[_],
+      child: PhysicalOp,
+      ordinals: Set[Int],
+      n: Int,
+  ): Vector[ColumnBatch] =
+    Vector(prefix(source, child, ordinals, n))
+
+  private def sorted(
+      source: Plan[_],
+      child: PhysicalOp,
+      ordinals: Set[Int],
+  ): Vector[ColumnBatch] =
+    survivors(source, child, ordinals) match
+      case Left(batches) => IntTopN.sortBatches(batches)
+      case Right(selected) => IntTopN.sortSelected(selected)
+
+  private def prefix(
+      source: Plan[_],
+      child: PhysicalOp,
+      ordinals: Set[Int],
+      n: Int,
+  ): ColumnBatch =
+    survivors(source, child, ordinals) match
+      case Left(batches) => IntTopN.takeBatches(batches, n)
+      case Right(selected) => IntTopN.takeSelected(selected, n)
+
+  private def survivors(
+      source: Plan[_],
+      child: PhysicalOp,
+      ordinals: Set[Int],
+  ): Either[Vector[ColumnBatch], Vector[Selected]] =
+    val selected = FilterChain.selected(
+      source,
+      child,
+      selectedPartition = None,
+      preserveAbsence = true,
+      ordinals,
+    )
+    selected match
+      case Some(parts) =>
+        Right[Vector[ColumnBatch], Vector[Selected]](parts)
+      case None =>
+        Left[Vector[ColumnBatch], Vector[Selected]](
+          pairBatches(
+            ColumnarInterpreter.interpretAt(
+              source,
+              child,
+              selectedPartition = None,
+              preserveAbsence = true,
+              ordinals,
+            ),
+          ),
+        )
+
+  private def pairBatches(columns: ColumnarInterpreter.Columns): Vector[ColumnBatch] =
+    columns match
+      case ColumnarInterpreter.Columns.Pairs(parts) => parts
+      case other =>
+        throw new IllegalStateException(s"int value-desc sort expected int pairs, got $other")

@@ -68,6 +68,8 @@ private[execution] object ColumnUse:
       walk(source, child, parent union Set(0, 1))
     case (Plan.SortByIntKeyOp(source), PhysicalOp.SortByIntKey(child)) =>
       walk(source, child, parent union Set(0, 1))
+    case (Plan.SortByIntValueDescOp(source), PhysicalOp.SortByIntValueDesc(child)) =>
+      walk(source, child, parent union Set(0, 1))
     case (Plan.SortByLongKeyOp(source), PhysicalOp.SortByLongKey(child)) =>
       walk(source, child, parent union Set(0, 1))
     case (Plan.SortByStringKeyOp(source), PhysicalOp.SortByStringKey(child)) =>
@@ -137,6 +139,7 @@ private[execution] object ColumnUse:
     case Plan.ReduceByKeyOp(source, _) => Some(source)
     case Plan.SortByOp(source, _, _) => Some(source)
     case Plan.SortByIntKeyOp(source) => Some(source)
+    case Plan.SortByIntValueDescOp(source) => Some(source)
     case Plan.SortByLongKeyOp(source) => Some(source)
     case Plan.SortByStringKeyOp(source) => Some(source)
     case Plan.Source(_, _) | Plan.UnionOp(_, _) | Plan.JoinOp(_, _, _) |

@@ -6,7 +6,8 @@ import com.ewoodbury.scarlet.core.Plan
  * Lowers a typed key sort and reports its layout.
  *
  * [[Plan.SortByIntKeyOp]] lowers when its child is a scan of int pairs, or filters over that scan,
- * to [[PhysicalOp.SortByIntKey]]. [[Plan.SortByLongKeyOp]] and [[Plan.SortByStringKeyOp]] lower
+ * to [[PhysicalOp.SortByIntKey]]. [[Plan.SortByIntValueDescOp]] lowers for the same child shape to
+ * [[PhysicalOp.SortByIntValueDesc]]. [[Plan.SortByLongKeyOp]] and [[Plan.SortByStringKeyOp]] lower
  * for the same shape on long pairs and string pairs, to [[PhysicalOp.SortByLongKey]] and
  * [[PhysicalOp.SortByStringKey]]. A map, aggregate, or join under any of these sorts stays on the
  * row path. A filter whose child is not that scan does not lower. [[acceptsAsChild]] refuses every
@@ -26,8 +27,8 @@ private[execution] object SortLowering:
 
   /** A parent cannot wrap a sort. The sort itself is lowered by [[ColumnarPlanner.lower]]. */
   def acceptsAsChild(op: PhysicalOp): Boolean = op match
-    case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey |
-        _: PhysicalOp.SortByStringKey =>
+    case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByIntValueDesc |
+        _: PhysicalOp.SortByLongKey | _: PhysicalOp.SortByStringKey =>
       false
     case _ => true
 
@@ -38,6 +39,15 @@ private[execution] object SortLowering:
     lowerPlan(source) match
       case Some(child) if acceptsScanOrFilters(child, PhysicalOp.Kind.Pairs) =>
         Some(PhysicalOp.SortByIntKey(child))
+      case _ => None
+
+  def lowerIntValueDesc(
+      source: Plan[(Int, Int)],
+      lowerPlan: Plan[_] => Option[PhysicalOp],
+  ): Option[PhysicalOp] =
+    lowerPlan(source) match
+      case Some(child) if acceptsScanOrFilters(child, PhysicalOp.Kind.Pairs) =>
+        Some(PhysicalOp.SortByIntValueDesc(child))
       case _ => None
 
   def lowerLong(
@@ -70,5 +80,13 @@ private[execution] object SortLowering:
     PartitioningInfo(
       Distribution.Range(shuffleWidth, PartitioningInfo.RowKeyOrdinals),
       OrderingTag.Sorted(PartitioningInfo.RowKeyOrdinals, Seq(true)),
+      layout,
+    )
+
+  /** Range width is the shuffle width. Order is value descending, then key ascending. */
+  def infoValueDesc(shuffleWidth: Int, layout: Layout): PartitioningInfo =
+    PartitioningInfo(
+      Distribution.Range(shuffleWidth, Seq(1, 0)),
+      OrderingTag.Sorted(Seq(1, 0), Seq(false, true)),
       layout,
     )

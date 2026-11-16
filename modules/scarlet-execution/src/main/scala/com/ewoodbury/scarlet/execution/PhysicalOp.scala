@@ -437,6 +437,15 @@ enum PhysicalOp:
   case SortByIntKey(child: PhysicalOp)
 
   /**
+   * Global sort of an int-pair scan by effective value descending, then effective key ascending. A
+   * null value or key orders as zero and stays null. Ties keep input order. `take(n)` is a bounded
+   * heap of `n` rows. Collect is the full two-key order. Output kind is [[PhysicalOp.Kind.Pairs]].
+   *
+   * The ordering tag is [[OrderingTag.Sorted]] with `Seq(1, 0)` and `Seq(false, true)`.
+   */
+  case SortByIntValueDesc(child: PhysicalOp)
+
+  /**
    * Global sort of a long-pair scan. Each source partition is sorted by effective key, then the
    * sorted runs are rank-merged into `defaultShufflePartitions`. A null key orders as zero and
    * stays null. A null value stays null. Ties keep input order. Output kind is
@@ -485,6 +494,7 @@ enum PhysicalOp:
         case PhysicalOp.Kind.StringPairs => PhysicalOp.Kind.StringPairs
         case _ => PhysicalOp.Kind.Pairs
     case SortByIntKey(_) => PhysicalOp.Kind.Pairs
+    case SortByIntValueDesc(_) => PhysicalOp.Kind.Pairs
     case SortByLongKey(_) => PhysicalOp.Kind.LongPairs
     case SortByStringKey(_) => PhysicalOp.Kind.StringPairs
     case HashAggregate(_) => PhysicalOp.Kind.Pairs
@@ -582,6 +592,7 @@ enum PhysicalOp:
       s"$label(${child.shape})"
     case MapValue(child) => s"MapValue(${child.shape})"
     case SortByIntKey(child) => s"SortByIntKey(${child.shape})"
+    case SortByIntValueDesc(child) => s"SortByIntValueDesc(${child.shape})"
     case SortByLongKey(child) => s"SortByLongKey(${child.shape})"
     case SortByStringKey(child) => s"SortByStringKey(${child.shape})"
     case HashAggregate(child) => s"HashAggregate(${child.shape})"

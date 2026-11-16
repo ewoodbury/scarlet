@@ -184,11 +184,12 @@ private[execution] object ColumnarInterpreter:
 
   /**
    * Decode `columns`. Int pairs use [[BatchCodec.decodeIntPairsPreservingAbsence]] only for
-   * [[PhysicalOp.SortByIntKey]]. Every other int-pair op uses [[BatchCodec.decodeIntPairs]], which
-   * rejects a clear bit. Long pairs use [[BatchCodec.decodeLongPairs]], which already keeps a
-   * clear bit. [[PhysicalOp.SortByLongKey]] returns long pairs, so collect and take use that
-   * decoder and do not call the int-pair function. A long column projected from a long pair keeps
-   * a clear bit via [[BatchCodec.decodeLongsPreservingAbsence]]. An element long scan still uses
+   * [[PhysicalOp.SortByIntKey]] and [[PhysicalOp.SortByIntValueDesc]]. Every other int-pair op
+   * uses [[BatchCodec.decodeIntPairs]], which rejects a clear bit. Long pairs use
+   * [[BatchCodec.decodeLongPairs]], which already keeps a clear bit. [[PhysicalOp.SortByLongKey]]
+   * returns long pairs, so collect and take use that decoder and do not call the int-pair
+   * function. A long column projected from a long pair keeps a clear bit via
+   * [[BatchCodec.decodeLongsPreservingAbsence]]. An element long scan still uses
    * [[BatchCodec.decodeLongs]], which rejects a clear bit. Int triples use
    * [[BatchCodec.decodeIntTriplesPreservingAbsence]] for a [[PhysicalOp.Project]] and for an int
    * inner join: [[PhysicalOp.HashJoin]], [[PhysicalOp.BroadcastJoin]], or
@@ -234,7 +235,7 @@ private[execution] object ColumnarInterpreter:
    */
   private def intPairDecoder(op: PhysicalOp): (ColumnBatch, Int) => Seq[(Int, Int)] =
     op match
-      case _: PhysicalOp.SortByIntKey =>
+      case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByIntValueDesc =>
         (batch, rows) =>
           val started = System.nanoTime()
           val decoded = BatchCodec.decodeIntPairsPreservingAbsence(batch, rows)
@@ -812,6 +813,10 @@ private[execution] object ColumnarInterpreter:
         preserveAbsence,
         ordinals,
       )
+    case (Plan.SortByIntValueDescOp(source), PhysicalOp.SortByIntValueDesc(child)) =>
+      // Boundary guard: take uses the heap arm, so a selector never reaches this collect path.
+      require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
+      SortArms.sort(source, child, ordinals)
     case (Plan.SortByIntKeyOp(source), PhysicalOp.SortByIntKey(child)) =>
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")

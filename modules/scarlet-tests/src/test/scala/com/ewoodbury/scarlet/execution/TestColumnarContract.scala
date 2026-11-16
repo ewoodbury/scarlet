@@ -1000,7 +1000,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.LongBroadcastJoin(_, _, _) | PhysicalOp.StringBroadcastJoin(_, _, _) |
         PhysicalOp.BroadcastLeftOuter(_, _) | PhysicalOp.BroadcastRightOuter(_, _) |
         PhysicalOp.BroadcastFullOuter(_, _) | PhysicalOp.SortByIntKey(_) |
-        PhysicalOp.SortByLongKey(_) | PhysicalOp.SortByStringKey(_) | PhysicalOp.Union(_, _) |
+        PhysicalOp.SortByIntValueDesc(_) | PhysicalOp.SortByLongKey(_) |
+        PhysicalOp.SortByStringKey(_) | PhysicalOp.Union(_, _) |
         PhysicalOp.Dedupe(_) | PhysicalOp.LongHashLeftOuter(_, _) |
         PhysicalOp.LongHashRightOuter(_, _) | PhysicalOp.LongHashFullOuter(_, _) |
         PhysicalOp.LongBroadcastLeftOuter(_, _) | PhysicalOp.LongBroadcastRightOuter(_, _) |
@@ -1015,8 +1016,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
 
   /** A key sort is not partition-preserving, and `tryTake` still runs it. */
   private def acceptsTake(op: PhysicalOp): Boolean = op match
-    case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey |
-        _: PhysicalOp.SortByStringKey =>
+    case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByIntValueDesc |
+        _: PhysicalOp.SortByLongKey | _: PhysicalOp.SortByStringKey =>
       true
     case other => preservesPartitions(other)
 
@@ -1151,6 +1152,7 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
     case Plan.SortByOp(_, _, _) => PlanNode.SortBy
     // Typed key nodes deliberately share the generic PlanNode.SortBy label.
     case Plan.SortByIntKeyOp(_) => PlanNode.SortBy
+    case Plan.SortByIntValueDescOp(_) => PlanNode.SortBy
     case Plan.SortByLongKeyOp(_) => PlanNode.SortBy
     case Plan.SortByStringKeyOp(_) => PlanNode.SortBy
     case Plan.JoinOp(_, _, _) => PlanNode.Join
