@@ -8,7 +8,8 @@ import com.ewoodbury.scarlet.api.DistCollection
  * `filter-distinct` is `keys.distinct.count`. `filter-twogroup` is one map over `groupByKey`
  * that keeps the count and the sum. `filter-topn` is a generic sort on `(v desc, sk asc)` plus
  * `take`. `filter-keymod` maps the key to `k % 100` and then `countByKey`. The sort and the
- * key-changing map are not columnar plans; the harness reports that decline instead of timing it.
+ * key-changing map are not columnar plans. The harness reports that decline and does not time
+ * it unless `CROSS_TIME_ROW` is set.
  *
  * The checksum folds output columns left to right with `acc * 31 + field`, then sums those row
  * hashes. One column is the value. Two columns are `a * 31 + b`. Three columns are
