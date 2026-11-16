@@ -2,11 +2,12 @@
 
 Not a CI gate. The CI gate is `PerfCheck`, which compares the columnar path with the row path in
 the same run. The decision table is the 2026-11-16 pinned run at `b704c3c`. The 2026-11-15
-steady-window run at `2b7b01e` (#233) is the previous scoreboard. The protocol difference is the
-pinning. The warmup-5 full-window run at `8958ac9` is the one before that. The 2026-11-14 second
-run is at `ffca249`. The 2026-11-13 devbox section is the earlier warmup-3, rounds-10 protocol.
-The Apple M1 Pro table is history from 2026-11-07. It is not comparable with the container or
-the devbox.
+steady-window run at `2b7b01e` (#233) is the previous scoreboard. That table stops at `2b7b01e`;
+later kernels (`HashJoin`, `Selection`, `JoinWrite`, `Validity`, `Int32Select`, `SlotFold` from
+#234) are not in it. The protocol difference from the pinned table is the pinning. The warmup-5
+full-window run at `8958ac9` is the one before that. The 2026-11-14 second run is at `ffca249`.
+The 2026-11-13 devbox section is the earlier warmup-3, rounds-10 protocol. The Apple M1 Pro table
+is history from 2026-11-07. It is not comparable with the container or the devbox.
 
 ## 2026-11-16 — devbox, pinned
 
@@ -111,9 +112,10 @@ is the `b704c3c` test classpath.
 
 ## 2026-11-15 — devbox, steady window
 
-Previous decision table, #233. Commit `2b7b01e`. Not the decision table. The difference from
-this run to the pinned table above is `taskset -c 0,2,4,6`. Same machine as the warmup-5
-section below.
+Previous scoreboard, #233. The table stops at `2b7b01e`. Later kernels are not in it: #234
+changed `HashJoin`, `Selection`, `JoinWrite`, and `Validity`, and added `Int32Select` and
+`SlotFold`. Not the decision table. The difference from this run to the pinned table above is
+`taskset -c 0,2,4,6`. Same machine as the warmup-5 section below.
 
 - Machine: `sjc-gpu-01` (`nixos`), x86_64, AMD Ryzen 9 5900XT, 32 threads, 62 GB, OpenJDK
   21.0.13, sbt 1.10.11. The CPU governor is `powersave`. `sudo -n true` asks for a password, so
@@ -180,21 +182,12 @@ Protocols differ, and the tree moved from `8958ac9` to `2b7b01e`. Count, countBy
 that range. #227 added a sum test and did not change a sum kernel.
 
 - filter + count: 1.028 ms, 1.02x ahead, to 0.732 ms, 1.39x ahead.
-- filter + sum: 0.888 ms, 1.23x ahead. No kept steady five. The readings sit below that p50 and
-  stay ahead of DuckDB.
+- filter + sum: no kept row. The warmup-5 p50 was 0.888 ms, 1.23x ahead. The readings sit below
+  that p50 and stay ahead of DuckDB.
 - filter + countByKey: 3.112 ms, 1.90x behind, to 1.542 ms, 1.02x behind.
 - filter + reduceByKey: 4.082 ms, 2.00x behind, to 1.707 ms, 1.20x ahead.
 - filter + join: 6.120 ms, 1.47x behind, to 5.360 ms, 1.29x behind.
 - filter + sort: 36.184 ms, 1.92x ahead, to 35.568 ms, 1.97x ahead.
-
-```shell
-ssh nixos 'LD_LIBRARY_PATH=$(ls -d /nix/store/*gcc-15.3.0-lib/lib | head -1) \
-  ~/ce/bin/python ~/cross_engine_duckdb.py --rows 1000000 --threads 4 --warmup 5 --rounds 30'
-
-ssh nixos 'cd ~/scarlet && CROSS_ROWS=1000000 CROSS_FILTERS=2 CROSS_NULLS=false \
-  CROSS_THREADS=4 CROSS_WARMUP=80 CROSS_ROUNDS=30 \
-  sbt -batch -J-Xmx8g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.CrossEngineBench"'
-```
 
 The DuckDB command ran five times. The Scarlet command ran five times per five, three fives in
 all, from a detached checkout of `2b7b01e`. `Test / fork` is false, so each boot is the bench JVM.
@@ -207,7 +200,7 @@ Earlier decision table. Commit `8958ac9`. Same machine and the same paired proto
 - Machine: `nixos`, x86_64, 32 cores, 62 GB, OpenJDK 21.0.13, sbt 2. The CPU governor is
   `powersave`.
 - Protocol: 1e6 rows, 4 threads, 2 filters, no nulls, warmup 5, rounds 30. DuckDB 2.0.0, one
-  in-memory run. Scarlet is the median of five fresh JVMs. Spill is on in the Scarlet harness.
+  in-memory run. Scarlet is the upper median of five fresh JVMs. Spill is on in the Scarlet harness.
 - Since `ffca249`: #221 folds a pair-filter count or sum over the source arrays and does not
   encode a batch. #224 counts an int shuffle-hash inner join by summing chain lengths and does
   not write the match columns. #223 replaced the previous copy of this scoreboard and did not
@@ -239,24 +232,15 @@ Earlier decision table. Commit `8958ac9`. Same machine and the same paired proto
 - filter + sort: 35.794 ms to 36.184 ms, 1.94x to 1.92x ahead. Inside the previous span
   (35.120–37.202 ms).
 
-Protocol: 1e6 rows, 4 threads, two filters, no nulls, warmup 5, 30 rounds. Scarlet is the median
-of five fresh JVMs. DuckDB is one in-memory run. The join median is 6.120 ms and sits inside
+Protocol: 1e6 rows, 4 threads, two filters, no nulls, warmup 5, 30 rounds. Scarlet is the upper
+median of five fresh JVMs. DuckDB is one in-memory run. The join median is 6.120 ms and sits inside
 5.9–7.1 ms. The five p50s are 5.736, 5.979, 6.120, 7.045, and 10.715 ms. The 10.715 ms sample is
 the JVM that compiled three columnar sources before the rounds. Two later fives of the same
 command, after this harness had already run, median'd at 10.359 ms (span 6.337–10.884) and
 10.997 ms (span 8.112–11.223).
 
-```shell
-ssh nixos 'LD_LIBRARY_PATH=$(ls -d /nix/store/*gcc-15.3.0-lib/lib | head -1) \
-  ~/ce/bin/python ~/cross_engine_duckdb.py --rows 1000000 --threads 4 --warmup 5 --rounds 30'
-
-ssh nixos 'cd ~/scarlet && CROSS_ROWS=1000000 CROSS_FILTERS=2 CROSS_NULLS=false \
-  CROSS_WARMUP=5 CROSS_ROUNDS=30 \
-  sbt -batch -J-Xmx8g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.CrossEngineBench"'
-```
-
 The Scarlet command ran five times. Each log booted sbt from `welcome to sbt`, and the table is
-the median of those five p50s.
+the upper median of those five p50s.
 
 ### Stability
 
@@ -313,7 +297,7 @@ Not the decision table.
 
 - Machine: `nixos`, x86_64, 32 cores, 62 GB, OpenJDK 21.0.13, sbt 2.
 - Protocol: 1e6 rows, 4 threads, 2 filters, no nulls, warmup 5, rounds 30. DuckDB 2.0.0, one
-  in-memory run. Scarlet is the median of five fresh JVMs. Spill is on in the Scarlet harness.
+  in-memory run. Scarlet is the upper median of five fresh JVMs. Spill is on in the Scarlet harness.
 - Since `cededb0`: join output rewrite (#215), reduceByKey fold (#216), reduce phases (#214),
   reduceByKey partial-table sizing (#220), and the countByKey key copy (#222). Long and string
   inner sort-merge (#211, #217) and map above `groupByKey` (#213) do not run on this int suite.
@@ -347,17 +331,8 @@ outside noise: the median is 14.649 ms against 14.231 ms, and the five JVMs span
 so the ratio stays 3.49x and outside the 2.0x target. Sort stayed inside noise (35.794 ms against
 35.988 ms) and stayed ahead, 1.94x.
 
-```shell
-ssh nixos 'LD_LIBRARY_PATH=$(ls -d /nix/store/*gcc-15.3.0-lib/lib | head -1) \
-  ~/ce/bin/python ~/cross_engine_duckdb.py --rows 1000000 --threads 4 --warmup 5 --rounds 30'
-
-ssh nixos 'cd ~/scarlet && CROSS_ROWS=1000000 CROSS_FILTERS=2 CROSS_NULLS=false \
-  CROSS_WARMUP=5 CROSS_ROUNDS=30 \
-  sbt -batch -J-Xmx8g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.CrossEngineBench"'
-```
-
 The Scarlet command ran five times. Each log booted sbt from `welcome to sbt`, and the table is
-the median of those five p50s.
+the upper median of those five p50s.
 
 ## 2026-11-13 — devbox, both engines, one machine
 
@@ -379,17 +354,6 @@ Earlier protocol (warmup 3, rounds 10). Both engines on one machine. Not the dec
 
 Scarlet's harness enables spill while DuckDB is in memory. Neither engine is tuned to its best
 configuration. The ratio is like-for-like on the query, not on the deployment.
-
-```shell
-# DuckDB side (nix python needs libstdc++ from the nix store)
-ssh nixos 'LD_LIBRARY_PATH=$(ls -d /nix/store/*gcc-15.3.0-lib/lib | head -1) \
-  ~/ce/bin/python ~/cross_engine_duckdb.py --rows 1000000 --threads 4 --rounds 10'
-
-# Scarlet side
-ssh nixos 'cd ~/scarlet && CROSS_ROWS=1000000 CROSS_FILTERS=2 CROSS_NULLS=false \
-  CROSS_WARMUP=3 CROSS_ROUNDS=10 \
-  sbt -batch -J-Xmx8g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.CrossEngineBench"'
-```
 
 ## Setup
 
@@ -546,8 +510,7 @@ not show that the null was kept.
 
 ## Reading
 
-The 2-5x gap here is the 2026-11-07 M1 Pro history (count 2.6x, sum 1.9x, countByKey 4.8x, reduce
-3.3-4.8x, join 4.6x, sort 0.78x), not the decision table. Current ratios are in
+The 2-5x gap here is the 2026-11-07 M1 Pro history, not the decision table. Current ratios are in
 "2026-11-16 — devbox, pinned". On that M1 run the gap to DuckDB on scans,
 aggregates and joins was the scalar JVM kernel plus the source encode, not representation. Two
 measured spikes killed the earlier explanations: a 10-bit packed column scans slower than a raw
@@ -584,13 +547,13 @@ JAVA_HOME=$(/usr/libexec/java_home -v 17) \
 
 # Scarlet side: one query per process, 4 GB heap
 CROSS_ROWS=10000000 CROSS_FILTERS=2 CROSS_NULLS=false CROSS_QUERY=filter-count \
-  CROSS_WARMUP=3 CROSS_ROUNDS=10 \
+  CROSS_WARMUP=80 CROSS_ROUNDS=30 \
   sbt -J-Xmx4g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.CrossEngineBench"
 ```
 
 `CROSS_ROWS` defaults to 1000000, `CROSS_FILTERS` to 2 (`1` is the key filter only), and
-`CROSS_NULLS` to false. The command above pins warmup 3 and rounds 10. The harness defaults
-are warmup 80 and rounds 30, so a steady tail is visible. `steady_ms` is the upper median of
+`CROSS_NULLS` to false. The command above uses the harness defaults, warmup 80 and rounds 30,
+so a steady tail is visible. `steady_ms` is the upper median of
 the last 10 rounds, index `n/2` after sorting. Publish it when `steady` is `ok` or
 `compilation`. Drop a JVM tagged `machine` (the two halves of those last 10 differ by more
 than 10%). Drop the set when fewer than three JVMs remain, or when `(max - min) / median` of
