@@ -1,7 +1,7 @@
 # DAG Scheduler
 
-The `DAGScheduler` is the single execution entry point. Every plan — narrow or wide — is
-compiled into a stage graph and executed through it. There is no separate narrow path.
+The `DAGScheduler` is the row path only, after the planner declines. A plan that
+`ColumnarPlanner.tryRun` does not accept is compiled into a stage graph and executed through it.
 
 ## Responsibilities
 

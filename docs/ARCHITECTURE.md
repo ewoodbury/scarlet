@@ -482,8 +482,7 @@ The rules that hold for every kind:
   probe still emits every build row.
 - **Hints.** Left, right, and full outer on int pairs lower for an absent, shuffle-hash, or
   broadcast hint. Left, right, and full outer sort-merge of int pairs also lower for an explicit
-  sort-merge hint. A non-int key, including a long key, stays on the row path. The row executor always shuffle-hashes an
-  outer join and ignores the hint.
+  sort-merge hint. The row executor always shuffle-hashes an outer join and ignores the hint.
 - **Budget.** `broadcastBuildBudgetBytes` bounds the build table only. The matched-row bitmaps sit
   beside it. When the build contains a null key, the present-key rows are also copied once, and
   that copy is outside the budget as well.
@@ -492,9 +491,11 @@ The rules that hold for every kind:
 ## Spill
 
 Grouped sum, an inner broadcast join's build, an int shuffle-hash build bucket, a long shuffle-hash
-build bucket, a string shuffle-hash build bucket, sort-merge joins, an int-pair `sortByIntKey`, a
+build bucket, a string shuffle-hash build bucket, an int sort-merge join, an int-pair `sortByIntKey`, a
 long-pair `sortByLongKey`, a string-pair `sortByStringKey`, an over-budget int, long, or string
 `reduceByKey` bucket, and an over-budget int, long, or string `countByKey` bucket spill when `spillEnabled` is on.
+Int, long, and string sort-merge kernels exist and are measured. Only the int path spills; a long
+or string sort-merge throws on a sort-merge spill and writes nothing.
 `spillBudgetBytes` is the in-memory trigger. The flag defaults off. `spillMaxFiles` and
 `spillMaxBytes` cap one spill store.
 
@@ -510,8 +511,8 @@ in-memory groups and writes nothing. A morsel whose group table does not fit thr
 charges 8-byte keys. The string estimate charges dictionary bytes, including an entry no row uses.
 
 At or under `spillBudgetBytes`, and whenever `spillEnabled` is off, a sort-merge partition stays
-in memory. Over the budget, with spill on, each side is written as sorted runs and merged
-`spillFanIn` at a time.
+in memory. Over the budget, with spill on, an int sort-merge writes each side as sorted runs and
+merges `spillFanIn` at a time. A long or string sort-merge throws and writes nothing.
 
 An int-pair `sortByIntKey` keeps the physical op `SortByIntKey`. Over the budget, each input
 partition is sorted, written as one run, and released. Runs are merged `spillFanIn` at a time,
