@@ -17,8 +17,17 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * dropped even when no step reads the key. A null value still counts when no step reads the value.
  * The stored count is an `Int` and wraps on overflow.
  *
+ * Each worker takes one contiguous stripe of the morsels. Every morsel of one source batch in that
+ * stripe folds into a single table and compacts once, so a repeated key is updated instead of
+ * inserted again. The table starts at the longest morsel, not the stripe's row count, and grows
+ * only when a new key passes the load limit. A segment whose keys fit in a small span uses
+ * [[DirectCount]], one dense slot per key in the span.
+ *
  * [[count]] returns `None` before any table when `steps` is empty or is not a stack of
- * [[Selection.Step.Int32]] slot atoms, and when the source-row estimate does not fit the budget.
+ * [[Selection.Step.Int32]] slot atoms. Spill off also returns `None` when the source-row estimate
+ * does not fit the budget. Spill on charges one morsel, so a long stripe of repeated keys stays
+ * here. A one-row table that does not fit still charges the whole input. A grow or a merged
+ * partial that does not fit throws [[ClosedKernelRefusal]] before that array is allocated.
  * [[countOwned]] is that scan over owned int arrays: the columns alias those arrays for the hash
  * and are not returned. [[countUnmapped]] is the encoded scan after one key-preserving `mapValues`
  * was skipped. An empty stack there counts every present key and still does not read the value
@@ -143,7 +152,7 @@ private[scarlet] object FoldedCount:
       Some(Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs))
     else
       batches.foreach(requireKey)
-      if (!withinBudget(batches)) then None
+      if (!withinBudget(batches, batchSize)) then None
       else
         notePass()
         Some(execute(batches, steps, numPartitions, parallelism, batchSize))
@@ -166,42 +175,143 @@ private[scarlet] object FoldedCount:
       batchSize: Int,
   ): Vector[ColumnBatch] =
     try
-      val groups = batches.map(batch => Morsels.of(batch, batchSize))
-      val partials = MorselScheduler.map(groups.flatten, parallelism) { (_, morsel) =>
-        countMorsel(morsel, steps)
-      }
-      val combined = PartialCombine.mergeMorsels(
-        groups.map(_.length),
-        partials,
-        parallelism,
-        HashCount.addCounts,
-      )
-      finish(combined, numPartitions, parallelism, batchSize)
+      val (counts, morsels) = pieces(batches, batchSize)
+      if (morsels.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs)
+      else
+        val width = math.min(parallelism, morsels.length)
+        val partials = MorselScheduler
+          .map(stripes(morsels, width), width) { (_, pieces) =>
+            foldStripe(pieces, steps)
+          }
+          .flatten
+        val combined = PartialCombine.mergeMorsels(
+          overlapCounts(counts, width),
+          partials,
+          parallelism,
+          HashCount.addCounts,
+        )
+        finish(combined, numPartitions, parallelism, batchSize)
     finally
       releaseWorkers()
       HashCount.releaseWorkers()
 
-  @SuppressWarnings(Array("org.wartremover.warts.Null"))
-  private def countMorsel(morsel: Morsel, steps: List[Selection.Step]): ColumnBatch =
-    val length = morsel.length
-    if (length == 0) then ColumnBatches.emptyIntPairs
-    else
-      refuse(length.toLong)
-      DirectCount.aggregate(morsel, steps) match
-        case null =>
-          val table = borrow(length)
-          table.scan(morsel.batch, morsel.start, length, steps)
-          table.compact()
-        case batch => batch
+  private final case class Piece(morsel: Morsel, batchId: Int)
+
+  /** Morsel counts line up with [[PartialCombine.mergeMorsels]]. */
+  private def pieces(
+      batches: Vector[ColumnBatch],
+      batchSize: Int,
+  ): (Vector[Int], Vector[Piece]) =
+    val grouped = batches.zipWithIndex.map { (batch, batchId) =>
+      Morsels.of(batch, batchSize).map(morsel => Piece(morsel, batchId))
+    }
+    (grouped.map(_.length), grouped.flatten)
 
   /**
-   * One table per thread, sized for the largest morsel that thread has counted. The next morsel
-   * clears the occupied slots and does not zero the arrays. [[MorselScheduler]] drops the holder
-   * when the pool task returns; the caller path drops it when [[execute]] returns.
+   * Contiguous morsel groups. Earlier workers take the extra row when the count does not divide.
+   * Flatten stays in batch order because each stripe is one slice of that order.
+   */
+  private def stripes(morsels: Vector[Piece], width: Int): Vector[Vector[Piece]] =
+    val count = morsels.length
+    val base = count / width
+    val extra = count % width
+    Vector.tabulate(width) { worker =>
+      val start = worker * base + math.min(worker, extra)
+      val length = base + (if (worker < extra) then 1 else 0)
+      morsels.slice(start, start + length)
+    }
+
+  /** One compact per contiguous run of a source batch. Runs stay in batch order. */
+  private def foldStripe(pieces: Vector[Piece], steps: List[Selection.Step]): Vector[ColumnBatch] =
+    val rows = pieces.toArray
+    val total = rows.length
+    var index = 0
+    var acc = Vector.empty[ColumnBatch]
+    while (index < total) {
+      val batchId = rows(index).batchId
+      var end = index + 1
+      while (end < total && rows(end).batchId == batchId) {
+        end += 1
+      }
+      acc = acc :+ foldSegment(rows, index, end, steps)
+      index = end
+    }
+    acc
+
+  /**
+   * How many stripe partials each input batch owns. A stripe overlaps a batch in at most one run,
+   * and flatten emits those runs in batch order, so this is the [[PartialCombine]] grouping.
+   */
+  private def overlapCounts(counts: Vector[Int], width: Int): Vector[Int] =
+    if (width <= 1) then Vector.fill(counts.length)(1)
+    else
+      val total = counts.foldLeft(0)((sum, count) => sum + count)
+      val base = total / width
+      val extra = total % width
+      var batchStart = 0
+      var acc = Vector.empty[Int]
+      counts.foreach { count =>
+        val batchEnd = batchStart + count
+        var worker = 0
+        var hits = 0
+        while (worker < width) {
+          val start = worker * base + math.min(worker, extra)
+          val end = start + base + (if (worker < extra) then 1 else 0)
+          if (start < batchEnd && batchStart < end) then hits += 1
+          worker += 1
+        }
+        acc = acc :+ hits
+        batchStart = batchEnd
+      }
+      acc
+
+  /** One partial for every morsel of one source batch inside a stripe. */
+  @SuppressWarnings(Array("org.wartremover.warts.Null", "org.wartremover.warts.Var"))
+  private def foldSegment(
+      rows: Array[Piece],
+      from: Int,
+      until: Int,
+      steps: List[Selection.Step],
+  ): ColumnBatch =
+    val count = until - from
+    val starts = new Array[Int](count)
+    val lengths = new Array[Int](count)
+    var cursor = 0
+    var maxLength = 0
+    while (cursor < count) {
+      val morsel = rows(from + cursor).morsel
+      starts(cursor) = morsel.start
+      lengths(cursor) = morsel.length
+      if (morsel.length > maxLength) then maxLength = morsel.length
+      cursor += 1
+    }
+    if (maxLength == 0) then ColumnBatches.emptyIntPairs
+    else
+      val batch = rows(from).morsel.batch
+      DirectCount.aggregateRanges(batch, starts, lengths, steps) match
+        case null =>
+          val table = borrow(maxLength)
+          var index = 0
+          while (index < count) {
+            val length = lengths(index)
+            if (length > 0) then table.scan(batch, starts(index), length, steps)
+            index += 1
+          }
+          table.compact()
+        case counted => counted
+
+  /**
+   * One table per thread. A stripe clears it between source batches and not between morsels of one
+   * batch. It starts at the longest morsel and grows for new keys. [[MorselScheduler]] drops the
+   * holder when the pool task returns; the caller path drops it when [[execute]] returns.
    */
   private val locals: ThreadLocal[Table | Null] = new ThreadLocal[Table | Null]()
   private val allocatedTables = new AtomicLong
   private val reusedTables = new AtomicLong
+  private val peakSlots = new AtomicInteger
+
+  /** Key, count, occupancy byte, and slot index. Matches [[HashCount.inputRowBytes]]. */
+  private val SlotBytes = 13L
 
   private[columnar] def releaseWorkers(): Unit =
     locals.remove()
@@ -211,13 +321,28 @@ private[scarlet] object FoldedCount:
   private[columnar] def resetReuseForTest(): Unit =
     allocatedTables.set(0L)
     reusedTables.set(0L)
+    peakSlots.set(0)
+    DirectCount.resetPeakForTest()
+    HashCount.resetPeakForTest()
     releaseWorkers()
 
   /** Tables constructed since the last [[resetReuseForTest]], on every thread. */
   private[columnar] def tablesAllocatedForTest: Long = allocatedTables.get
 
-  /** Morsels that cleared an existing table instead of allocating one. */
+  /** Segments that cleared an existing table instead of allocating one. */
   private[columnar] def tablesReusedForTest: Long = reusedTables.get
+
+  /**
+   * Largest table since [[resetReuseForTest]], in slots. Includes the dense counter and the
+   * [[HashCount]] merge, which is where a per-morsel concat would show up.
+   */
+  private[scarlet] def peakSlotsForTest: Int =
+    math.max(peakSlots.get, math.max(DirectCount.peakSlotsForTest, HashCount.peakSlotsForTest))
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def notePeak(slots: Int): Unit =
+    var prev = peakSlots.get
+    while (slots > prev && !peakSlots.compareAndSet(prev, slots)) do prev = peakSlots.get
 
   private def borrow(rows: Int): Table =
     val need = ColumnHash.tableSize(rows)
@@ -225,11 +350,13 @@ private[scarlet] object FoldedCount:
       case current: Table if current.accepts(need) =>
         val _ = reusedTables.incrementAndGet()
         current.clear()
+        notePeak(current.slotCount)
         current
       case _ =>
         val created = new Table(need)
         locals.set(created)
         val _ = allocatedTables.incrementAndGet()
+        notePeak(need)
         created
 
   /**
@@ -251,23 +378,21 @@ private[scarlet] object FoldedCount:
       else MorselScheduler.map(buckets, parallelism)((_, bucket) => HashCount.addCounts(bucket))
 
   /**
-   * Source rows stand in for survivors. The hash path charges survivors, which are never more than
-   * this, and [[HashCount.inputRowBytes]] grows with the row count. A batch that fits therefore
-   * fits every morsel cut from it and the merged partial, whose row count is at most the batch
-   * length.
+   * Spill off charges every source row. Spill on charges one morsel: the partial grows with
+   * distinct keys, and [[HashCount.addCounts]] still refuses a merge that does not fit. A one-row
+   * table larger than the budget charges the whole input, whichever way spill is set.
    */
-  private def withinBudget(batches: Vector[ColumnBatch]): Boolean =
+  private def withinBudget(batches: Vector[ColumnBatch], batchSize: Int): Boolean =
     val conf = ScarletConf.get
     val budget = conf.spillBudgetBytes
     val rows = batches.iterator.map(_.length.toLong).sum
     if (!conf.spillEnabled || HashCount.inputRowBytes(1L) > budget) then
       HashCount.inputRowBytes(rows) <= budget
-    else batches.forall(batch => HashCount.inputRowBytes(batch.length.toLong) <= budget)
-
-  private def refuse(rows: Long): Unit =
-    val budget = ScarletConf.get.spillBudgetBytes
-    val bytes = HashCount.inputRowBytes(rows)
-    if (bytes > budget) then throw new ClosedKernelRefusal(rows, bytes, budget)
+    else
+      batches.forall { batch =>
+        val morsel = math.min(batch.length.toLong, batchSize.toLong)
+        HashCount.inputRowBytes(morsel) <= budget
+      }
 
   private def notePass(): Unit =
     val _ = passes.incrementAndGet()
@@ -334,16 +459,18 @@ private[scarlet] object FoldedCount:
     }
     dense
 
-  private final class Table(capacity: Int):
-    private val mask: Int = capacity - 1
-    private val limit: Int = capacity >>> 1
-    private val keys: Array[Int] = new Array[Int](capacity)
-    private val counts: Array[Int] = new Array[Int](capacity)
-    private val state: Array[Byte] = new Array[Byte](capacity)
-    private val slots: Array[Int] = new Array[Int](capacity)
+  private final class Table(initial: Int):
+    private var mask: Int = initial - 1
+    private var limit: Int = initial >>> 1
+    private var keys: Array[Int] = new Array[Int](initial)
+    private var counts: Array[Int] = new Array[Int](initial)
+    private var state: Array[Byte] = new Array[Byte](initial)
+    private var slots: Array[Int] = new Array[Int](initial)
     private var occupied: Int = 0
 
     def accepts(need: Int): Boolean = keys.length >= need
+
+    def slotCount: Int = keys.length
 
     /**
      * Drops every key this morsel inserted. The arrays stay, so the next morsel does not zero
@@ -630,10 +757,8 @@ private[scarlet] object FoldedCount:
       }
 
     private def add(key: Int, weight: Int): Unit =
-      val slot = locate(key)
+      val slot = locateForInsert(key)
       if (state(slot) == 0) then
-        if (occupied >= limit) then
-          throw new IllegalStateException(s"hash count table is full at $occupied groups")
         state(slot) = 1
         keys(slot) = key
         counts(slot) = weight
@@ -641,10 +766,57 @@ private[scarlet] object FoldedCount:
         occupied += 1
       else counts(slot) = counts(slot) + weight
 
+    /**
+     * Slot for `key`. A new key at the load limit doubles the table and is located again. An
+     * existing key does not grow it. [[grow]] reinserts occupied groups in first-seen order.
+     */
+    private def locateForInsert(key: Int): Int =
+      val slot = locate(key)
+      if (state(slot) == 0 && occupied >= limit) then
+        grow()
+        locate(key)
+      else slot
+
     private def locate(key: Int): Int =
       var slot = ColumnHash.mix(key) & mask
       while (state(slot) != 0 && keys(slot) != key) slot = (slot + 1) & mask
       slot
+
+    /** Doubles the table and reinserts occupied groups in first-seen order. */
+    private def grow(): Unit =
+      val next = keys.length << 1
+      if (next <= 0 || next > ColumnHash.MaxCapacity) then
+        throw new IllegalStateException(s"hash count table is full at $occupied groups")
+      val bytes = next.toLong * SlotBytes
+      val budget = ScarletConf.get.spillBudgetBytes
+      if (bytes > budget) then throw new ClosedKernelRefusal(occupied.toLong, bytes, budget)
+      val nextMask = next - 1
+      val nextKeys = new Array[Int](next)
+      val nextCounts = new Array[Int](next)
+      val nextState = new Array[Byte](next)
+      val nextSlots = new Array[Int](next)
+      var cursor = 0
+      val rows = occupied
+      while (cursor < rows) {
+        val from = slots(cursor)
+        val key = keys(from)
+        var slot = ColumnHash.mix(key) & nextMask
+        while (nextState(slot) != 0) {
+          slot = (slot + 1) & nextMask
+        }
+        nextState(slot) = 1
+        nextKeys(slot) = key
+        nextCounts(slot) = counts(from)
+        nextSlots(cursor) = slot
+        cursor += 1
+      }
+      keys = nextKeys
+      counts = nextCounts
+      state = nextState
+      slots = nextSlots
+      mask = nextMask
+      limit = next >>> 1
+      notePeak(next)
 
   @tailrec
   private def keepsDense(

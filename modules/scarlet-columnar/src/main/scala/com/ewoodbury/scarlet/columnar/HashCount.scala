@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.columnar
 
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 
 import com.ewoodbury.scarlet.core.ScarletConf
 
@@ -222,6 +222,7 @@ object HashCount:
   private val locals: ThreadLocal[Table | Null] = new ThreadLocal[Table | Null]()
   private val allocatedTables = new AtomicLong
   private val reusedTables = new AtomicLong
+  private val peakSlots = new AtomicInteger
 
   private[columnar] def releaseWorkers(): Unit =
     locals.remove()
@@ -230,6 +231,7 @@ object HashCount:
   private[columnar] def resetReuseForTest(): Unit =
     allocatedTables.set(0L)
     reusedTables.set(0L)
+    peakSlots.set(0)
     releaseWorkers()
 
   /** Tables constructed since the last [[resetReuseForTest]], on every thread. */
@@ -238,17 +240,31 @@ object HashCount:
   /** Batches that cleared an existing table instead of allocating one. */
   private[columnar] def tablesReusedForTest: Long = reusedTables.get
 
+  /** Largest count table since [[resetReuseForTest]] or [[resetPeakForTest]], in slots. */
+  private[columnar] def peakSlotsForTest: Int = peakSlots.get
+
+  /** Clears [[peakSlotsForTest]] without touching the reuse counters. */
+  private[columnar] def resetPeakForTest(): Unit =
+    peakSlots.set(0)
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def notePeak(slots: Int): Unit =
+    var prev = peakSlots.get
+    while (slots > prev && !peakSlots.compareAndSet(prev, slots)) do prev = peakSlots.get
+
   private def borrow(rows: Int): Table =
     val need = ColumnHash.tableSize(rows)
     locals.get() match
       case current: Table if current.accepts(need) =>
         val _ = reusedTables.incrementAndGet()
         current.clear()
+        notePeak(current.slotCount)
         current
       case _ =>
         val created = new Table(need)
         locals.set(created)
         val _ = allocatedTables.incrementAndGet()
+        notePeak(need)
         created
 
   private final class Table(capacity: Int):
@@ -261,6 +277,8 @@ object HashCount:
     private var occupied: Int = 0
 
     def accepts(need: Int): Boolean = keys.length >= need
+
+    def slotCount: Int = keys.length
 
     /**
      * Drops every key this batch inserted. The arrays stay, so the next batch does not zero them.
