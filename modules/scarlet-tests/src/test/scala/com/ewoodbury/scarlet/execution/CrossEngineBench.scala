@@ -8,7 +8,7 @@ import com.sun.management.ThreadMXBean
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{BatchCodec, ColumnBatch, ColumnMetrics, CountingSink}
-import com.ewoodbury.scarlet.core.ScarletConf
+import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
@@ -17,8 +17,9 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  *
  * Each query builds its own input and drops it before the next query starts. `encode_ms` times one
  * encode of that input before warmup and is not subtracted from the action. The action timer still
- * includes the scan encode. A measured action that publishes no column batch fails the process.
- * The row path is not run here.
+ * includes the scan encode. A columnar action that publishes no column batch and folds nothing
+ * fails the process. A plan [[ColumnarPlanner]] declines is not timed: `batches`, `fused`, and
+ * `arm` say `row`, and one execution supplies the checksum. That run is not a speed.
  *
  * Owned int arrays use [[BatchCodec.intPairs]]. Owned long arrays use
  * [[BatchCodec.copiedLongPairs]], the scan's array encode. A null long value is timed with
@@ -63,6 +64,10 @@ object CrossEngineBench:
     "filter-join",
     "filter-sort",
     "filter-countbykey",
+    "filter-distinct",
+    "filter-topn",
+    "filter-twogroup",
+    "filter-keymod",
   )
 
   private final case class Settings(
@@ -74,16 +79,21 @@ object CrossEngineBench:
       rounds: Int,
   )
 
-  private final case class Built(action: () => Any, encodeMs: Double)
+  private final case class Built(action: () => Any, encodeMs: Double, plan: Plan[_])
+
+  /** `action` is the timed body. `plan` is the plan that body runs, used to name the arm. */
+  private final case class Armed(action: () => Any, plan: Plan[_])
 
   private final case class Sample(
       p50Ms: Double,
       checksum: Long,
       encodeMs: Double,
       batches: Long,
+      fused: Long,
       allocMb: Double,
       steadyMs: Double,
       verdict: String,
+      arm: String,
   )
 
   /** Last-10 median, first-10 median, and `ok` / `compilation` / `machine` / `short`. */
@@ -146,28 +156,55 @@ object CrossEngineBench:
     val nulls = settings.nulls
     name match
       case "filter-count" =>
-        withInts(rows, filters, nulls)(_.count())
+        withInts(rows, filters, nulls)(data => Armed(() => data.count(), data.plan))
       case "filter-countbykey" =>
         withInts(rows, filters, nulls) { data =>
+          val counted = data.countByKey
           // Checksum: sum of (key * 31L + count) over each countByKey pair.
-          data.countByKey.collect().map { case (key, count) => key * 31L + count }.sum
+          Armed(
+            () => counted.collect().map { case (key, count) => key * 31L + count }.sum,
+            counted.plan,
+          )
         }
       case "filter-sum" =>
-        withInts(rows, filters, nulls)(_.values.sum)
+        withInts(rows, filters, nulls)(data => Armed(() => data.values.sum, data.values.plan))
       case "filter-groupbykey" =>
         withInts(rows, filters, nulls) { data =>
-          data.groupByKey.collect().map { case (key, vs) => key * 31L + vs.size }.sum
+          val grouped = data.groupByKey
+          Armed(
+            () => grouped.collect().map { case (key, vs) => key * 31L + vs.size }.sum,
+            grouped.plan,
+          )
         }
       case "filter-reducebykey" =>
         withLongs(rows, filters, nulls) { data =>
-          data.reduceByKey[Long, Long](_ + _).collect().map { case (key, value) =>
-            key * 31L + value
-          }.sum
+          val reduced = data.reduceByKey[Long, Long](_ + _)
+          Armed(
+            () => reduced.collect().map { case (key, value) => key * 31L + value }.sum,
+            reduced.plan,
+          )
         }
       case "filter-join" =>
         joinQuery(rows, filters, nulls)
       case "filter-sort" =>
         sortQuery(rows, filters, nulls)
+      case "filter-distinct" =>
+        withInts(rows, filters, nulls) { data =>
+          val distinct = CrossEngineShapes.distinct(data)
+          Armed(() => distinct.count(), distinct.plan)
+        }
+      case "filter-topn" =>
+        topQuery(rows, filters, nulls)
+      case "filter-twogroup" =>
+        withInts(rows, filters, nulls) { data =>
+          val grouped = CrossEngineShapes.twoGroup(data)
+          Armed(() => CrossEngineShapes.tripleChecksum(grouped.collect()), grouped.plan)
+        }
+      case "filter-keymod" =>
+        withInts(rows, filters, nulls) { data =>
+          val counted = CrossEngineShapes.keyMod(data)
+          Armed(() => CrossEngineShapes.pairChecksum(counted.collect()), counted.plan)
+        }
       case other =>
         refuse(s"unknown query $other")
 
@@ -175,17 +212,19 @@ object CrossEngineBench:
       rows: Int,
       filters: Int,
       nulls: Boolean,
-  )(action: DistCollection[(Int, Int)] => Any): Built =
+  )(use: DistCollection[(Int, Int)] => Armed): Built =
     val (data, encodeMs) = filteredInts(rows, filters, nulls)
-    Built(() => action(data), encodeMs)
+    val armed = use(data)
+    Built(armed.action, encodeMs, armed.plan)
 
   private def withLongs(
       rows: Int,
       filters: Int,
       nulls: Boolean,
-  )(action: DistCollection[(Long, Long)] => Any): Built =
+  )(use: DistCollection[(Long, Long)] => Armed): Built =
     val (data, encodeMs) = filteredLongs(rows, filters, nulls)
-    Built(() => action(data), encodeMs)
+    val armed = use(data)
+    Built(armed.action, encodeMs, armed.plan)
 
   private def filteredInts(
       rows: Int,
@@ -243,22 +282,41 @@ object CrossEngineBench:
         val data = DistCollection.ofIntPairs(keys, values, sourcePartitions)
         (filterInts(data, filters), elapsed)
     val joined = filtered.join(side)
-    Built(() => joined.count(), encodeMs)
+    Built(() => joined.count(), encodeMs, joined.plan)
+
+  /** Pairs are `(sk, v)`. `sk` is the Fisher-Yates permutation. `v` is the shared generator. */
+  private def sortSource(rows: Int, nulls: Boolean): (DistCollection[(Int, Int)], Double) =
+    val order = permutation(rows)
+    if (nulls) then
+      val pairs = nullableInts(rows, order)
+      val elapsed = timed(BatchCodec.intPairsPreservingAbsence(pairs))
+      (DistCollection(pairs, sourcePartitions), elapsed)
+    else
+      val values = lcgValues(rows)
+      val elapsed = timed(BatchCodec.intPairs(order, values))
+      (DistCollection.ofIntPairs(order, values, sourcePartitions), elapsed)
 
   private def sortQuery(rows: Int, filters: Int, nulls: Boolean): Built =
-    val order = permutation(rows)
-    val (sorted, encodeMs) =
-      if (nulls) then
-        val pairs = nullableInts(rows, order)
-        val elapsed = timed(BatchCodec.intPairsPreservingAbsence(pairs))
-        val data = DistCollection(pairs, sourcePartitions)
-        (filterInts(data, filters).sortByIntKey, elapsed)
-      else
-        val values = lcgValues(rows)
-        val elapsed = timed(BatchCodec.intPairs(order, values))
-        val data = DistCollection.ofIntPairs(order, values, sourcePartitions)
-        (filterInts(data, filters).sortByIntKey, elapsed)
-    Built(() => sorted.collect().map { case (key, value) => key * 31L + value }.sum, encodeMs)
+    val (data, encodeMs) = sortSource(rows, nulls)
+    val sorted = filterInts(data, filters).sortByIntKey
+    Built(
+      () => sorted.collect().map { case (key, value) => key * 31L + value }.sum,
+      encodeMs,
+      sorted.plan,
+    )
+
+  /**
+   * Same pairs as [[sortQuery]]. The filter is `sk % 3 != 0` and `v >= 0`. Order is value
+   * descending, then `sk` ascending, then `take(100)`. Generic `sortBy` does not lower.
+   */
+  private def topQuery(rows: Int, filters: Int, nulls: Boolean): Built =
+    val (data, encodeMs) = sortSource(rows, nulls)
+    val sorted = CrossEngineShapes.sorted(filterInts(data, filters))
+    Built(
+      () => CrossEngineShapes.pairChecksum(sorted.take(CrossEngineShapes.topLimit)),
+      encodeMs,
+      sorted.plan,
+    )
 
   private def filterInts(
       data: DistCollection[(Int, Int)],
@@ -277,6 +335,47 @@ object CrossEngineBench:
     else keyed.filterValues((value: Long) => value >= 0)
 
   private def measure(name: String, built: Built, warmup: Int, rounds: Int): Sample =
+    armOf(built.plan) match
+      case None => rowSample(name, built)
+      case Some(shape) => columnarSample(name, built, shape, warmup, rounds)
+
+  /**
+   * Physical shape when [[ColumnarPlanner]] accepts `plan`. `None` is the row path, including a
+   * lowered tree whose layout is invalid. This does not run the plan.
+   */
+  private def armOf(plan: Plan[_]): Option[String] =
+    ColumnarPlanner.partitioning(plan) match
+      case None => None
+      case Some(_) => ColumnarPlanner.lower(plan).map(_.shape)
+
+  /**
+   * One execution, for the checksum. The timed loop stays off: a row-path p50 is not a columnar
+   * speed. A batch or a fused fold here means the decline was wrong.
+   */
+  private def rowSample(name: String, built: Built): Sample =
+    val observed = observe(built.action)
+    if (observed.batches != 0L || observed.fused != 0L) then
+      refuse(s"$name declined but published batches=${observed.batches} fused=${observed.fused}")
+    System.err.println(s"ROW $name checksum=${checksumOf(observed.value)}")
+    Sample(
+      Double.NaN,
+      checksumOf(observed.value),
+      built.encodeMs,
+      0L,
+      0L,
+      Double.NaN,
+      Double.NaN,
+      "row",
+      "row",
+    )
+
+  private def columnarSample(
+      name: String,
+      built: Built,
+      shape: String,
+      warmup: Int,
+      rounds: Int,
+  ): Sample =
     var round = 0
     while (round < warmup) do
       ScarletRuntime.get.shuffle.clear()
@@ -285,6 +384,7 @@ object CrossEngineBench:
     val samples = new Array[Double](rounds)
     var checksum = 0L
     var batches = 0L
+    var fused = 0L
     round = 0
     while (round < rounds) do
       val observed = observe(built.action)
@@ -293,13 +393,14 @@ object CrossEngineBench:
       samples(round) = observed.elapsedMs
       checksum = checksumOf(observed.value)
       batches = observed.batches
+      fused = observed.fused
       round += 1
     val steady = steadyOf(samples)
     if (name == "filter-join" || name == "filter-count") then
       val shown = samples.mkString(",")
       System.err.println(s"SAMPLES $name $shown")
     System.err.println(
-      s"STEADY $name ${steady.verdict} steady=${steady.ms} head=${steady.head}",
+      s"STEADY $name ${steady.verdict} steady=${steady.ms} head=${steady.head} arm=$shape",
     )
     java.util.Arrays.sort(samples)
     Sample(
@@ -307,9 +408,11 @@ object CrossEngineBench:
       checksum,
       built.encodeMs,
       batches,
+      fused,
       sampleAlloc(built.action),
       steady.ms,
       steady.verdict,
+      shape,
     )
 
   /**
@@ -465,12 +568,20 @@ $body
 }"""
 
   private def queryJson(name: String, sample: Sample): String =
-    val alloc = if (sample.allocMb.isNaN) "null" else sample.allocMb.toString
-    val head = s"""    "$name": {"p50_ms": ${sample.p50Ms}, "checksum": ${sample.checksum},"""
-    val steady = s""" "steady_ms": ${sample.steadyMs}, "steady": "${sample.verdict}","""
+    val alloc = jsonDouble(sample.allocMb)
+    val p50 = jsonDouble(sample.p50Ms)
+    val steadyMs = jsonDouble(sample.steadyMs)
+    val (batches, fused) = sample.arm match
+      case "row" => ("\"row\"", "\"row\"")
+      case _ => (sample.batches.toString, sample.fused.toString)
+    val head = s"""    "$name": {"p50_ms": $p50, "checksum": ${sample.checksum},"""
+    val steady = s""" "steady_ms": $steadyMs, "steady": "${sample.verdict}","""
     val tail =
-      s""" "alloc_mb": $alloc, "encode_ms": ${sample.encodeMs}, "batches": ${sample.batches}}"""
+      s""" "alloc_mb": $alloc, "encode_ms": ${sample.encodeMs}, "batches": $batches, "fused": $fused, "arm": "${sample.arm}"}"""
     head + steady + tail
+
+  private def jsonDouble(value: Double): String =
+    if (value.isNaN) then "null" else value.toString
 
   /** Middle sample of [[allocRounds]] process-wide byte deltas, in decimal megabytes. */
   private def sampleAlloc(action: () => Any): Double =
