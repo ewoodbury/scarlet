@@ -491,7 +491,7 @@ The rules that hold for every kind:
 ## Spill
 
 Grouped sum, an inner broadcast join's build, an int shuffle-hash build bucket, a long shuffle-hash
-build bucket, a string shuffle-hash build bucket, sort-merge joins, an int-pair `sortByIntKey`, a
+build bucket, a string shuffle-hash build bucket, an int sort-merge join, an int-pair `sortByIntKey`, a
 long-pair `sortByLongKey`, a string-pair `sortByStringKey`, an over-budget int, long, or string
 `reduceByKey` bucket, and an over-budget int, long, or string `countByKey` bucket spill when `spillEnabled` is on.
 Int, long, and string sort-merge kernels exist and are measured. Only the int path spills; a long
