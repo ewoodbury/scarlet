@@ -4,6 +4,18 @@ package com.ewoodbury.scarlet.execution
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[execution] object PairChecksum:
 
+  /** Local stable sort, then a rolling mix of key then value. Runs outside the timer. */
+  def expectedSortedInts(keys: Array[Int], values: Array[Int]): Long =
+    val order = Array.tabulate(keys.length)(identity)
+    scala.util.Sorting.stableSort(order, (left: Int, right: Int) => keys(left) < keys(right))
+    ordered(order, row => keys(row).toLong, row => values(row).toLong)
+
+  /** Local stable sort, then a rolling mix of key then value. Runs outside the timer. */
+  def expectedSortedLongs(keys: Array[Long], values: Array[Long]): Long =
+    val order = Array.tabulate(keys.length)(identity)
+    scala.util.Sorting.stableSort(order, (left: Int, right: Int) => keys(left) < keys(right))
+    ordered(order, row => keys(row), row => values(row))
+
   def ordered(order: Array[Int], keyAt: Int => Long, valueAt: Int => Long): Long =
     var index = 0
     var hash = 0L

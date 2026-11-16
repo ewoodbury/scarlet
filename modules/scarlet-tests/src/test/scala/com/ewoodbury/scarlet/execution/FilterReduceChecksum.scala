@@ -1,15 +1,41 @@
 package com.ewoodbury.scarlet.execution
 
+import com.ewoodbury.scarlet.api.DistCollection
+
 /**
  * Order-independent checksum for the two-filter `reduceByKey` bench.
  *
  * Keys are `row % groups`. The filters drop a key divisible by 3 and a negative value. The hash
  * sums `(key * 31) xor the wrapped value sum` over kept keys. `reduceByKey` wraps at `Int`, so the
- * local sum uses `Int` addition. Key order does not matter.
- * It also carries the two-filter count.
+ * local sum uses `Int` addition. Key order does not matter. It also carries the two-filter count.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[execution] object FilterReduceChecksum:
+
+  val shape: String = "HashAggregate(Exchange(FilterValue(FilterKey(Scan))))"
+
+  val countShape: String = "FilterValue(FilterKey(Scan))"
+
+  def source(
+      keys: Array[Int],
+      values: Array[Int],
+      partitions: Int,
+  ): DistCollection[(Int, Int)] =
+    DistCollection
+      .ofIntPairs(keys, values, partitions)
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+      .reduceByKey[Int, Int](_ + _)
+
+  def countSource(
+      keys: Array[Int],
+      values: Array[Int],
+      partitions: Int,
+  ): DistCollection[(Int, Int)] =
+    DistCollection
+      .ofIntPairs(keys, values, partitions)
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
 
   def expected(keys: Array[Int], values: Array[Int], groups: Int): Long =
     val sums = new Array[Int](groups)

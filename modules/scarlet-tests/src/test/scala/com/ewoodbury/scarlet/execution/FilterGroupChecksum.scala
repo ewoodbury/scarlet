@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import com.ewoodbury.scarlet.api.DistCollection
+
 /**
  * Order-independent checksum for the two-filter int `groupByKey` bench.
  *
@@ -8,6 +10,19 @@ package com.ewoodbury.scarlet.execution
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[execution] object FilterGroupChecksum:
+
+  val shape: String = "GroupByKey(Exchange(FilterValue(FilterKey(Scan))))"
+
+  def source(
+      keys: Array[Int],
+      values: Array[Int],
+      partitions: Int,
+  ): DistCollection[(Int, Iterable[Int])] =
+    DistCollection
+      .ofIntPairs(keys, values, partitions)
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+      .groupByKey
 
   def expected(keys: Array[Int], values: Array[Int], groups: Int): Long =
     val sums = new Array[Long](groups)

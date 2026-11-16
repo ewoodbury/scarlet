@@ -4,14 +4,11 @@ import java.lang.management.ManagementFactory
 import java.util.Locale
 import java.util.concurrent.locks.LockSupport
 
-import scala.util.Random
-
 import cats.effect.unsafe.implicits.global
 import com.sun.management.ThreadMXBean
 
-import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
-import com.ewoodbury.scarlet.core.{IntPairArrays, Plan, ScarletConf}
+import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
@@ -21,24 +18,24 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * string inner joins, and int sort, plus unfiltered int-pair and long-pair sorts. Not a test, and
  * not part of `make test`.
  *
- * Each query is built once. The timed region is the action. The scalar checksum is compared
- * after the timer stops, against a local loop and one row-path execution. A mismatch fails the
- * run. Grouped queries also checksum per-group sums outside the timer. `grouped-shuffled` must
- * differ from the repeating checksum. `grouped-sparse` and `grouped-shifting` spread groups so
- * the partial hashes, and one morsel of each must not be sorted.
+ * Each query is built once. The timed region is the action. The scalar checksum is compared after
+ * the timer stops, against a local loop and one row-path execution. A mismatch fails the run.
+ * Grouped queries also checksum per-group sums outside the timer. `grouped-shuffled` must differ
+ * from the repeating checksum. `grouped-sparse` and `grouped-shifting` spread groups so the
+ * partial hashes, and one morsel of each must not be sorted.
  *
  * Every sample installs a [[CountingSink]] outside the timer. A columnar sample must publish at
  * least one batch. A row sample must publish none.
  *
- * `runMain` executes in the sbt JVM. `Test / fork` is left false, so absolute times carry sbt
- * and JIT noise. Comparisons within one run are the signal. Width and layout order are
- * counterbalanced. The measure phase starts one step later than warmup. One
- * [[LocalTaskScheduler]] per width is built for the run and shut down at the end.
+ * `runMain` executes in the sbt JVM. `Test / fork` is left false, so absolute times carry sbt and
+ * JIT noise. Comparisons within one run are the signal. Width and layout order are
+ * counterbalanced. The measure phase starts one step later than warmup. One [[LocalTaskScheduler]]
+ * per width is built for the run and shut down at the end.
  *
- * An optional `large` argument runs [[SortScaleBench]] instead: int-key and long-key sorts at
- * 5e6 rows, columnar only, widths 1 and 4, then a 1e6 spill stress at width 1. Two warmup
- * rounds are discarded and ten are measured. The row path is not run. Any other argument
- * prints usage to stderr and exits nonzero.
+ * An optional `large` argument runs [[SortScaleBench]] instead: int-key and long-key sorts at 5e6
+ * rows, columnar only, widths 1 and 4, then a 1e6 spill stress at width 1. Two warmup rounds are
+ * discarded and ten are measured. The row path is not run. Any other argument prints usage to
+ * stderr and exits nonzero.
  *
  * {{{
  * sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.QueryBench"
@@ -53,26 +50,19 @@ object QueryBench:
   private val measure = 40
   private val measureOffset = 1
   private val allocRounds = 5
-  private val batchSize = 8192
-  private val sourcePartitions = 2
-  private val elementRows = 1000000
-  private val groupedRows = 10000000
-  private val groups = 1024
-  private val distinctStrings = 1000
-  private val stringNeedle = 42
-  private val lcgSeed = 0x12345678
-  private val shuffledSeed = 58L
+  private val batchSize = QueryBenchCases.batchSize
+  private val sourcePartitions = QueryBenchCases.sourcePartitions
   private val threadCounts = Vector(1, 4)
   private val layouts = Vector(true, false)
 
-  private enum Answer:
+  private[execution] enum Answer:
     case Whole(value: Long)
     case Real(value: Double)
 
   /** Per-group sums folded in key order. `total` is the grand sum of those groups. */
-  private final case class GroupFold(hash: Long, total: Long)
+  private[execution] final case class GroupFold(hash: Long, total: Long)
 
-  private final class Query(
+  private[execution] final class Query(
       val name: String,
       val rows: Int,
       val shape: String,
@@ -131,191 +121,12 @@ object QueryBench:
         ScarletRuntime.set(savedRuntime)
 
   private def buildNamed(name: String): Vector[Query] =
-    name match
-      case "filter-join" =>
-        val generated = generate(elementRows)
-        val filteredJoin = FilterJoinChecksum.source(generated, sourcePartitions)
-        Vector(
-          whole(
-            "filter-join",
-            elementRows,
-            FilterJoinChecksum.shape,
-            FilterJoinChecksum.expected(generated),
-            filteredJoin.plan,
-            FilterJoinChecksum.collected(filteredJoin.collect()),
-          ),
-        )
-      case other =>
-        val picked = build().filter(_.name == other)
-        if (picked.isEmpty) then
-          System.err.println(s"unknown query $other")
-          sys.exit(1)
-        else picked
+    QueryBenchCases.buildNamed(name)
 
   private def build(): Vector[Query] =
-    val generated = generate(elementRows)
-    val narrowSum = expectNarrow(generated)
-    val chainSum = expectPlus(generated, steps = 4)
-    val doubleSum = expectPositiveDoubles(generated)
-    val ints = DistCollection.ofInts(generated, sourcePartitions)
-    val narrow = ints.filter(_ > 0).map(_ * 2)
-    val intChain = ints.map(_ + 1).map(_ + 1).map(_ + 1).map(_ + 1)
-    val longs = DistCollection.ofLongs(generated.map(_.toLong), sourcePartitions)
-    val longChain = longs.map(_ + 1L).map(_ + 1L).map(_ + 1L).map(_ + 1L)
-    val doubles = DistCollection.ofDoubles(generated.map(_.toDouble), sourcePartitions)
-    val positive = doubles.filter(_ > 0.0)
-    val texts = stringRows(elementRows)
-    val strings = DistCollection.ofStrings(texts, sourcePartitions).filterStringEquals("k42")
-    val flags = Array.tabulate(elementRows)(row => (row & 1) == 0)
-    val bools = DistCollection.ofBools(flags, sourcePartitions).filter(identity)
-    val sortKeys = permutation(elementRows)
-    require(!isSorted(sortKeys), "sort keys stayed in order")
-    val intSort = DistCollection.ofIntPairs(sortKeys, generated, sourcePartitions).sortByIntKey
-    val longSortKeys = widen(sortKeys)
-    val longSortValues = widen(generated)
-    val longSort =
-      DistCollection.ofLongPairs(longSortKeys, longSortValues, sourcePartitions).sortByLongKey
-    val (repeating, shuffled, groupedTotal) = groupedSources()
-    val repeatFold = sourceGroupFold(repeating)
-    val shuffledFold = sourceGroupFold(shuffled)
-    require(repeatFold.total == groupedTotal, "repeating groups drifted from the closed sum")
-    require(shuffledFold.total == groupedTotal, "shuffled groups drifted from the closed sum")
-    require(repeatFold.hash != shuffledFold.hash, "grouped checksums collided")
-    val sparse = GroupedBenchCases.sparse(groupedRows, sourcePartitions, batchSize)
-    val shifting = GroupedBenchCases.shifting(groupedRows, sourcePartitions, batchSize)
-    require(sparse.hash != shifting.hash, "spread checksums collided")
-    require(sparse.hash != repeatFold.hash, "sparse checksum collided with repeating groups")
-    GroupedBenchCases.requireHashFallback(sparse, shifting, batchSize)
-    val groupKeys = Array.tabulate(elementRows)(row => row % groups)
-    val keptGroups = FilterGroupChecksum.expected(groupKeys, generated, groups)
-    val filteredGroups = DistCollection
-      .ofIntPairs(groupKeys, generated, sourcePartitions)
-      .filterKeys((key: Int) => key % 3 != 0)
-      .filterValues((value: Int) => value >= 0)
-      .groupByKey
-    val keptCounts = FilterCountChecksum.expected(groupKeys, generated, groups)
-    val filteredCounts = DistCollection
-      .ofIntPairs(groupKeys, generated, sourcePartitions)
-      .filterKeys((key: Int) => key % 3 != 0)
-      .filterValues((value: Int) => value >= 0)
-      .countByKey
-    val filteredCount = DistCollection
-      .ofIntPairs(groupKeys, generated, sourcePartitions)
-      .filterKeys((key: Int) => key % 3 != 0)
-      .filterValues((value: Int) => value >= 0)
-    val stringGroups = FilterStringGroupChecksum.source(generated, sourcePartitions)
-    val stringReduce = FilterStringReduceChecksum.source(generated, sourcePartitions)
-    val keptReduce = FilterReduceChecksum.expected(groupKeys, generated, groups)
-    val filteredReduce = DistCollection
-      .ofIntPairs(groupKeys, generated, sourcePartitions)
-      .filterKeys((key: Int) => key % 3 != 0)
-      .filterValues((value: Int) => value >= 0)
-      .reduceByKey[Int, Int](_ + _)
-    val filteredJoin = FilterJoinChecksum.source(generated, sourcePartitions)
-    val stringJoin = FilterStringJoinChecksum.source(generated, sourcePartitions)
-    val filteredSort = FilterSortChecksum.source(sortKeys, generated, sourcePartitions)
-    Vector(
-      whole("int-narrow", elementRows, "Pipeline2(Scan)", narrowSum, narrow.plan, narrow.sum),
-      whole("int-chain", elementRows, "Pipeline4(Scan)", chainSum, intChain.plan, intChain.sum),
-      whole("long-chain", elementRows, "Pipeline4(Scan)", chainSum, longChain.plan, longChain.sum),
-      real("double", elementRows, "Filter(Scan)", doubleSum, positive.plan, positive.sum),
-      whole("string", elementRows, "Filter(Scan)", expectString(), strings.plan, strings.count()),
-      whole("boolean", elementRows, "Filter(Scan)", expectBools(), bools.plan, bools.count()),
-      whole(
-        "int-sort-key",
-        elementRows,
-        "SortByIntKey(Scan)",
-        expectSortedInts(sortKeys, generated),
-        intSort.plan,
-        PairChecksum.intPairs(intSort.collect()),
-      ),
-      whole(
-        "long-sort-key",
-        elementRows,
-        "SortByLongKey(Scan)",
-        expectSortedLongs(longSortKeys, longSortValues),
-        longSort.plan,
-        PairChecksum.longPairs(longSort.collect()),
-      ),
-      grouped("grouped-repeat", repeating, repeatFold.hash),
-      grouped("grouped-shuffled", shuffled, shuffledFold.hash),
-      openGrouped("grouped-sparse", sparse),
-      openGrouped("grouped-shifting", shifting),
-      whole(
-        "filter-groupbykey",
-        elementRows,
-        "GroupByKey(Exchange(FilterValue(FilterKey(Scan))))",
-        keptGroups,
-        filteredGroups.plan,
-        FilterGroupChecksum.collected(filteredGroups.collect(), groups),
-      ),
-      whole(
-        "filter-countbykey",
-        elementRows,
-        "CountByKey(Exchange(FilterValue(FilterKey(Scan))))",
-        keptCounts,
-        filteredCounts.plan,
-        FilterCountChecksum.collected(filteredCounts.collect(), groups),
-      ),
-      whole(
-        "filter-count",
-        elementRows,
-        "FilterValue(FilterKey(Scan))",
-        FilterReduceChecksum.expectedCount(groupKeys, generated),
-        filteredCount.plan,
-        filteredCount.count(),
-      ),
-      whole(
-        "filter-string-groupbykey",
-        elementRows,
-        FilterStringGroupChecksum.shape,
-        FilterStringGroupChecksum.expected(generated),
-        stringGroups.plan,
-        FilterStringGroupChecksum.collected(stringGroups.collect()),
-      ),
-      whole(
-        "filter-reducebykey",
-        elementRows,
-        "HashAggregate(Exchange(FilterValue(FilterKey(Scan))))",
-        keptReduce,
-        filteredReduce.plan,
-        FilterReduceChecksum.collected(filteredReduce.collect(), groups),
-      ),
-      whole(
-        "filter-string-reducebykey",
-        elementRows,
-        FilterStringReduceChecksum.shape,
-        FilterStringReduceChecksum.expected(generated),
-        stringReduce.plan,
-        FilterStringReduceChecksum.collected(stringReduce.collect()),
-      ),
-      whole(
-        "filter-join",
-        elementRows,
-        FilterJoinChecksum.shape,
-        FilterJoinChecksum.expected(generated),
-        filteredJoin.plan,
-        FilterJoinChecksum.collected(filteredJoin.collect()),
-      ),
-      whole(
-        "filter-string-join",
-        elementRows,
-        FilterStringJoinChecksum.shape,
-        FilterStringJoinChecksum.expected(generated),
-        stringJoin.plan,
-        FilterStringJoinChecksum.collected(stringJoin.collect()),
-      ),
-      whole(
-        "filter-sort",
-        elementRows,
-        FilterSortChecksum.shape,
-        FilterSortChecksum.expected(sortKeys, generated),
-        filteredSort.plan,
-        FilterSortChecksum.collected(filteredSort.collect()),
-      ),
-    )
+    QueryBenchCases.build()
 
-  private def whole(
+  private[execution] def whole(
       name: String,
       rows: Int,
       shape: String,
@@ -335,7 +146,7 @@ object QueryBench:
       () => unusedGroups(name),
     )
 
-  private def real(
+  private[execution] def real(
       name: String,
       rows: Int,
       shape: String,
@@ -355,44 +166,10 @@ object QueryBench:
       () => unusedGroups(name),
     )
 
-  private def grouped(
-      name: String,
-      source: DistCollection[(Int, Int)],
-      hash: Long,
-  ): Query =
-    requireShape(name, "GroupedSum(Scan)", source.plan)
-    new Query(
-      name,
-      groupedRows,
-      "GroupedSum(Scan)",
-      Answer.Whole(sourceGroupFold(source).total),
-      () => Answer.Whole(source.groupedSum),
-      Some(hash),
-      () => sourceGroupFold(source),
-      () => columnarGroupFold(source),
-    )
-
-  private def openGrouped(name: String, input: GroupedBenchCases.Input): Query =
-    requireShape(name, "GroupedSum(Scan)", input.source.plan)
-    val source = input.source
-    new Query(
-      name,
-      groupedRows,
-      "GroupedSum(Scan)",
-      Answer.Whole(input.total),
-      () => Answer.Whole(source.groupedSum),
-      Some(input.hash),
-      () => copied(GroupedBenchCases.sourceFold(source)),
-      () => copied(GroupedBenchCases.columnarFold(source)),
-    )
-
-  private def copied(fold: GroupedBenchCases.Fold): GroupFold =
-    GroupFold(fold.hash, fold.total)
-
   private def unusedGroups(name: String): GroupFold =
     throw new IllegalStateException(s"$name has no group checksum")
 
-  private def requireShape(name: String, shape: String, plan: Plan[_]): Unit =
+  private[execution] def requireShape(name: String, shape: String, plan: Plan[_]): Unit =
     val got =
       if (shape.startsWith("GroupedSum")) then
         ColumnarPlanner.groupedSumPeel(plan).getOrElse("refused")
@@ -407,8 +184,8 @@ object QueryBench:
     }
 
   /**
-   * Row folds must reproduce the stored checksum. Columnar folds `sumByKey` at this width and
-   * must reproduce it too. The public action's grand total is checked on both layouts.
+   * Row folds must reproduce the stored checksum. Columnar folds `sumByKey` at this width and must
+   * reproduce it too. The public action's grand total is checked on both layouts.
    */
   private def checkGroups(queries: Vector[Query]): Unit =
     threadCounts.foreach { threads =>
@@ -489,8 +266,7 @@ object QueryBench:
         matches(got, query.expected),
         s"${query.name} ${layoutName(columnar)} t$threads ${show(got)} != ${show(query.expected)}",
       )
-      if (record) then
-        query.elapsed(layoutIndex(columnar))(widthIndex(threads))(round) = elapsed
+      if (record) then query.elapsed(layoutIndex(columnar))(widthIndex(threads))(round) = elapsed
     finally ColumnMetrics.restore(previous)
 
   private def runObserved(query: Query, threads: Int, columnar: Boolean): Answer =
@@ -721,288 +497,6 @@ object QueryBench:
     val runtime = ScarletRuntime.get
     ScarletRuntime.set(runtime.copy(scheduler = scheduler))
 
-  private def groupedSources()
-      : (DistCollection[(Int, Int)], DistCollection[(Int, Int)], Long) =
-    val keys = Array.tabulate(groupedRows)(row => row % groups)
-    val values = Array.tabulate(groupedRows)(row => row)
-    val shuffled = shuffleWithinMorsels(keys)
-    val expected = groupedRows.toLong * (groupedRows.toLong - 1L) / 2L
-    require(sumInts(values) == expected, "grouped values drifted from the closed sum")
-    val repeating = DistCollection.ofIntPairs(keys, values, sourcePartitions)
-    val permuted = DistCollection.ofIntPairs(shuffled, values, sourcePartitions)
-    (repeating, permuted, expected)
-
-  /**
-   * Shuffles each morsel in place on a copy. Morsels are `columnarBatchSize` ranges from the
-   * start of each source partition, which is how the columnar scan slices a partition. The key
-   * multiset of each range stays equal to `row % groups`. Values stay in row order, so the grand
-   * total is unchanged and the per-group sums are not.
-   */
-  private def shuffleWithinMorsels(keys: Array[Int]): Array[Int] =
-    val copy = keys.clone()
-    val random = new Random(shuffledSeed)
-    val partRows = keys.length / sourcePartitions
-    require(partRows * sourcePartitions == keys.length, "grouped rows do not split evenly")
-    var part = 0
-    while (part < sourcePartitions) {
-      val origin = part * partRows
-      var start = 0
-      while (start < partRows) {
-        val length = math.min(batchSize, partRows - start)
-        fisherYates(copy, origin + start, length, random)
-        require(
-          sameCounts(keys, copy, origin + start, length),
-          s"morsel multiset changed at ${origin + start}",
-        )
-        start += length
-      }
-      part += 1
-    }
-    require(!keys.sameElements(copy), "shuffled keys kept sequential order")
-    copy
-
-  private def fisherYates(values: Array[Int], start: Int, length: Int, random: Random): Unit =
-    var offset = length - 1
-    while (offset > 0) {
-      val swap = random.nextInt(offset + 1)
-      val left = start + offset
-      val right = start + swap
-      val held = values(left)
-      values(left) = values(right)
-      values(right) = held
-      offset -= 1
-    }
-
-  private def sameCounts(left: Array[Int], right: Array[Int], start: Int, length: Int): Boolean =
-    val counts = new Array[Int](groups)
-    var index = 0
-    while (index < length) {
-      counts(left(start + index)) += 1
-      index += 1
-    }
-    index = 0
-    var matched = true
-    while (index < length && matched) {
-      val key = right(start + index)
-      counts(key) -= 1
-      if (counts(key) < 0) then matched = false
-      index += 1
-    }
-    var cursor = 0
-    while (cursor < counts.length && matched) {
-      if (counts(cursor) != 0) then matched = false
-      cursor += 1
-    }
-    matched
-
-  /**
-   * Folds pairs the row path reads. Present keys contribute `(key * 31) ^ groupSum`. The sum of
-   * those terms is the checksum. Key order makes it independent of row order.
-   */
-  private def sourceGroupFold(source: DistCollection[(Int, Int)]): GroupFold =
-    val sums = new Array[Long](groups)
-    val seen = new Array[Int](groups)
-    source.plan match
-      case Plan.Source(partitions, _) =>
-        partitions.foreach { partition =>
-          partition.data match
-            case pairs: IntPairArrays => addPairs(pairs.keys, pairs.values, sums, seen)
-            case _ =>
-              throw new IllegalStateException("grouped source was not an owned pair array")
-        }
-      case _ => throw new IllegalStateException("grouped plan was not a source")
-    finishGroups(sums, seen)
-
-  /**
-   * Folds the groups the columnar kernel returns. Partials are already exchanged, and a key that
-   * appears in more than one batch is accumulated before the fold.
-   */
-  private def columnarGroupFold(source: DistCollection[(Int, Int)]): GroupFold =
-    require(
-      ScarletConf.get.columnarExecution,
-      "columnar group checksum ran with columnar execution off",
-    )
-    source.plan match
-      case sourcePlan: Plan.Source[_] =>
-        val encoded = SourceEncode.encodeGroupedPairs(sourcePlan.partitions)
-        val summed = ColumnPipeline.sumByKey(
-          encoded,
-          keyOrdinal = 0,
-          valueOrdinal = 1,
-          numPartitions = ColumnarPlanner.shuffleWidth,
-          parallelism = ColumnarPlanner.parallelism,
-          batchSize = ColumnarPlanner.batchSize,
-          steps = Vector.empty[PairStep],
-        )
-        val sums = new Array[Long](groups)
-        val seen = new Array[Int](groups)
-        summed.foreach(batch => addBatch(batch, sums, seen))
-        finishGroups(sums, seen)
-      case _ => throw new IllegalStateException("grouped plan was not a source")
-
-  private def addPairs(
-      keys: Array[Int],
-      values: Array[Int],
-      sums: Array[Long],
-      seen: Array[Int],
-  ): Unit =
-    require(keys.length == values.length, "grouped key and value lengths differ")
-    var index = 0
-    while (index < keys.length) {
-      addGroup(keys(index), values(index).toLong, sums, seen)
-      index += 1
-    }
-
-  private def addBatch(batch: ColumnBatch, sums: Array[Long], seen: Array[Int]): Unit =
-    if (batch.length != 0) then
-      val keys = intKeys(batch)
-      val values = longSums(batch)
-      var row = 0
-      while (row < batch.length) {
-        require(keys.isValid(row) && values.isValid(row), "grouped checksum saw a null cell")
-        addGroup(keys.values(row), values.values(row), sums, seen)
-        row += 1
-      }
-
-  private def addGroup(key: Int, value: Long, sums: Array[Long], seen: Array[Int]): Unit =
-    require(key >= 0 && key < groups, s"grouped checksum key $key outside 0 until $groups")
-    sums(key) += value
-    seen(key) += 1
-
-  private def finishGroups(sums: Array[Long], seen: Array[Int]): GroupFold =
-    var key = 0
-    var hash = 0L
-    var total = 0L
-    var present = 0
-    while (key < groups) {
-      if (seen(key) > 0) then
-        present += 1
-        total += sums(key)
-        hash += (key.toLong * 31L) ^ sums(key)
-      key += 1
-    }
-    require(present == groups, s"grouped checksum saw $present groups, expected $groups")
-    GroupFold(hash, total)
-
-  private def intKeys(batch: ColumnBatch): Int32Column =
-    batch.columns.headOption match
-      case Some(column: Int32Column) => column
-      case _ => throw new IllegalStateException("grouped key column was not int32")
-
-  private def longSums(batch: ColumnBatch): Int64Column =
-    batch.columns.lift(1) match
-      case Some(column: Int64Column) => column
-      case _ => throw new IllegalStateException("grouped sum column was not int64")
-
-  private def generate(rows: Int): Array[Int] =
-    val values = new Array[Int](rows)
-    var index = 0
-    var state = lcgSeed
-    while (index < rows) {
-      state = state * 1664525 + 1013904223
-      val mixed = state & 0x7fffffff
-      values(index) = (mixed % 2000001) - 1000000
-      index += 1
-    }
-    values
-
-  private def expectNarrow(values: Array[Int]): Long =
-    var index = 0
-    var sum = 0L
-    while (index < values.length) {
-      val value = values(index)
-      if (value > 0) then sum += (value * 2).toLong
-      index += 1
-    }
-    sum
-
-  private def expectPlus(values: Array[Int], steps: Int): Long =
-    var index = 0
-    var sum = 0L
-    val extra = steps.toLong
-    while (index < values.length) {
-      sum += values(index).toLong + extra
-      index += 1
-    }
-    sum
-
-  private def expectPositiveDoubles(values: Array[Int]): Double =
-    var index = 0
-    var sum = 0.0
-    while (index < values.length) {
-      val value = values(index).toDouble
-      if (value > 0.0) then sum += value
-      index += 1
-    }
-    sum
-
-  private def expectString(): Long =
-    var index = 0
-    var count = 0L
-    while (index < elementRows) {
-      if (index % distinctStrings == stringNeedle) then count += 1L
-      index += 1
-    }
-    count
-
-  private def permutation(rows: Int): Array[Int] =
-    val keys = Array.tabulate(rows)(identity)
-    fisherYates(keys, 0, rows, new Random(lcgSeed.toLong))
-    keys
-
-  private def isSorted(keys: Array[Int]): Boolean =
-    var index = 1
-    var ordered = true
-    while (index < keys.length && ordered) {
-      if (keys(index - 1) > keys(index)) then ordered = false
-      index += 1
-    }
-    ordered
-
-  private def widen(values: Array[Int]): Array[Long] =
-    val widened = new Array[Long](values.length)
-    var index = 0
-    while (index < values.length) {
-      widened(index) = values(index).toLong
-      index += 1
-    }
-    widened
-
-  /** Local stable sort, then a rolling mix of key then value. Runs outside the timer. */
-  private def expectSortedInts(keys: Array[Int], values: Array[Int]): Long =
-    val order = Array.tabulate(keys.length)(identity)
-    scala.util.Sorting.stableSort(order, (left: Int, right: Int) => keys(left) < keys(right))
-    PairChecksum.ordered(order, row => keys(row).toLong, row => values(row).toLong)
-
-  /** Local stable sort, then a rolling mix of key then value. Runs outside the timer. */
-  private def expectSortedLongs(keys: Array[Long], values: Array[Long]): Long =
-    val order = Array.tabulate(keys.length)(identity)
-    scala.util.Sorting.stableSort(order, (left: Int, right: Int) => keys(left) < keys(right))
-    PairChecksum.ordered(order, row => keys(row), row => values(row))
-
-  private def expectBools(): Long =
-    var index = 0
-    var count = 0L
-    while (index < elementRows) {
-      if ((index & 1) == 0) then count += 1L
-      index += 1
-    }
-    count
-
-  private def stringRows(rows: Int): Array[String] =
-    val pool = Array.tabulate(distinctStrings)(index => "k" + index.toString)
-    require(sameText(pool(stringNeedle), "k42"), "string needle drifted")
-    Array.tabulate(rows)(row => pool(row % distinctStrings))
-
-  private def sumInts(values: Array[Int]): Long =
-    var index = 0
-    var total = 0L
-    while (index < values.length) {
-      total += values(index).toLong
-      index += 1
-    }
-    total
-
   private def preamble(allocOn: Boolean): String =
     val runtime = ManagementFactory.getRuntimeMXBean
     val alloc = if (allocOn) then "process-wide-estimate" else "unavailable"
@@ -1155,8 +649,7 @@ object QueryBench:
     private def closeQuietly(): Unit =
       try
         val _ = close()
-      catch
-        case _: IllegalStateException => ()
+      catch case _: IllegalStateException => ()
 
     private def observe(setBaseline: Boolean): Unit = this.synchronized {
       val live = bean.getAllThreadIds
