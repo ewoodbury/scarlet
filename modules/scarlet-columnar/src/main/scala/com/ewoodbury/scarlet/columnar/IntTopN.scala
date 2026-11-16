@@ -6,8 +6,10 @@ package com.ewoodbury.scarlet.columnar
  * A null value or key orders as zero and stays null. Ties keep input order: the earlier source
  * batch, then the smaller row id. [[take]] is a bounded heap of `limit` rows. When `limit` covers
  * every live row, [[take]] is the full sort. The full sort is two stable [[IntIndexSort]] passes:
- * key ascending, then bitwise-not of the effective value so a signed descending order matches
- * unsigned radix.
+ * effective key ascending, then the bitwise-not of the effective value. [[IntIndexSort]] orders
+ * signed ints. Bitwise-not is strictly decreasing on those ints, so the second pass is signed
+ * value descending, the same compare the heap uses. The sign-bit flip that makes an unsigned radix
+ * match `Integer.compare` lives in [[IntIndexSort]], not in `~`.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[scarlet] object IntTopN:

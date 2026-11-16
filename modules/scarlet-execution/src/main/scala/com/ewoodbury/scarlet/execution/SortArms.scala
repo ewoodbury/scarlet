@@ -6,8 +6,9 @@ import com.ewoodbury.scarlet.core.Plan
 /**
  * Int-pair sort by value descending then key ascending.
  *
- * [[sort]] is the full order for collect. [[take]] is a bounded heap of `n` rows and does not run
- * that sort. A null value or key orders as zero and stays null. Ties keep input order.
+ * [[sort]] is the full order for collect. [[take]] is a bounded heap of `n` rows when `n` is below
+ * the live row count, and that same full sort when `n` covers every live row. A null value or key
+ * orders as zero and stays null. Ties keep input order.
  */
 private[execution] object SortArms:
 
