@@ -6,31 +6,59 @@ on:
   pull_request:
     branches: [ main ]
 
+# A newer push to the same branch makes the older run pointless; stop paying for it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  gates:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '21'
           distribution: 'temurin'
-          cache: 'sbt'
-          
+
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
 
-      - name: Lint check
-        run: make test-lint
+      # Dependencies only. These keys are stable across source changes, so the restore always hits
+      # and a run never downloads the world.
+      - name: Cache coursier and sbt
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.sbt
+            ~/.ivy2/cache
+          key: sbt-deps-${{ runner.os }}-${{ hashFiles('**/*.sbt', 'project/build.properties') }}
+          restore-keys: sbt-deps-${{ runner.os }}-
 
-      - name: Run tests
-        run: sbt test
+      # Compilation output, so a run recompiles only what changed. The key follows the build
+      # definition rather than every source edit, so the base layer is reused and zinc does the rest.
+      - name: Cache compiled classes
+        uses: actions/cache@v4
+        with:
+          path: |
+            **/target
+            project/target
+            project/project/target
+          key: sbt-classes-${{ runner.os }}-${{ hashFiles('**/*.sbt', 'project/build.properties') }}
+          restore-keys: sbt-classes-${{ runner.os }}-
 
-      - name: Performance smoke check
-        run: sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.PerfCheck"
+      # One sbt process, one compile, one project load. As separate steps this suite compiled twice:
+      # scalafix needs semanticdb, and `sbt test` did not reuse that output, so every run paid for a
+      # full recompile in each step.
+      - name: Gates
+        run: |
+          sbt -J-Xmx4g -batch \
+            ";checkFileLength; scalafixAll --check; scalafmtCheck; test; \
+              scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.PerfCheck"
 
       - name: Bounded-heap spill check
         run: make test-spill
-        timeout-minutes: 20
