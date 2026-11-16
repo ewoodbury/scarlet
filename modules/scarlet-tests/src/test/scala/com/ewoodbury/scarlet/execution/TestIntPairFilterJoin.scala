@@ -5,7 +5,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.{ColumnBatch, ColumnPipeline, Int32Column}
+import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -81,6 +81,34 @@ class TestIntPairFilterJoin extends AnyFlatSpec with Matchers with BeforeAndAfte
     present.join(empty).count() shouldBe 0L
     present.join(miss).count() shouldBe 0L
     present.join(duplicated).count() shouldBe 4L
+  }
+
+  it should "submit one pool task per worker on the count, not one per bucket" in {
+    // 1e5 filtered rows, batch 8192, two partitions: 14 build morsels. Four workers submit
+    // four tasks. The probe is three rows in two partitions, so two morsels and two tasks.
+    // Shuffle width stays 4. Six submits is that pair of dispatches, not the width.
+    ScarletConf.set(
+      originalConf.copy(
+        columnarExecution = true,
+        columnarBatchSize = 8192,
+        defaultShufflePartitions = 4,
+        threadPoolSize = 4,
+        spillEnabled = false,
+      ),
+    )
+    val rows = 100000
+    val keys = Array.tabulate(rows)(row => row % 1024)
+    val values = Array.fill(rows)(1)
+    val left = DistCollection
+      .ofIntPairs(keys, values, 2)
+      .filterKeys((key: Int) => key % 3 != 0)
+    val right = DistCollection.ofIntPairs(Array(0, 1, 2), Array(1, 1, 1), 2)
+    val before = MorselScheduler.submittedOnCaller
+    val sink = new CountingSink
+    val counted = ColumnMetrics.withSink(sink)(left.join(right).count())
+    MorselScheduler.submittedOnCaller - before shouldBe 6L
+    sink.visitCount shouldBe 16L
+    counted should be > 0L
   }
 
   it should "leave a boxed source on the survivor index" in {

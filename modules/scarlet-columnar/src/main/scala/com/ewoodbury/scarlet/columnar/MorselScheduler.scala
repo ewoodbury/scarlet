@@ -51,6 +51,10 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * thread now outlives the call, and those holders are keyed by the thread. Within the task the
  * holder stays, including across a nested inline dispatch and a morsel the worker steals. The
  * inline path does not drop it: the outer morsel may still read it after the nested call returns.
+ *
+ * Each `pool.execute` adds one to a counter on the calling thread. An inline dispatch does not
+ * execute a task, so it does not add. The add is one plain store per submitted task, on the
+ * caller, and the morsel body does not read it.
  */
 object MorselScheduler:
 
@@ -105,6 +109,20 @@ object MorselScheduler:
   private val onPool: ThreadLocal[Boolean] = new ThreadLocal[Boolean]:
     override def initialValue(): Boolean = false
 
+  /**
+   * Submits observed by this thread. Workers do not touch it: `pool.execute` runs on the caller.
+   * One cell, so a note does not allocate.
+   */
+  private val submitNotes = new ThreadLocal[Array[Long]]:
+    override def initialValue(): Array[Long] = new Array[Long](1)
+
+  /** Tasks this thread has passed to [[pool.execute]] since the thread started. */
+  private[scarlet] def submittedOnCaller: Long = submitNotes.get()(0)
+
+  private def noteSubmit(): Unit =
+    val slot = submitNotes.get()
+    slot(0) = slot(0) + 1L
+
   private def dispatch[M, A](
       morsels: Vector[M],
       parallelism: Int,
@@ -158,6 +176,7 @@ object MorselScheduler:
         finally
           onPool.set(false)
           done.countDown()
+      noteSubmit()
       pool.execute(task)
     }
     await(done)
