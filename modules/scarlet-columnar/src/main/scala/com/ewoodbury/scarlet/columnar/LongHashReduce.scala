@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.columnar
 
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 
 import com.ewoodbury.scarlet.core.ScarletConf
 
@@ -256,6 +256,7 @@ object LongHashReduce:
 
   private val allocatedTables = new AtomicLong
   private val reusedTables = new AtomicLong
+  private val peakSlots = new AtomicInteger
 
   private val locals: ThreadLocal[Table | Null] = new ThreadLocal[Table | Null]()
 
@@ -287,7 +288,22 @@ object LongHashReduce:
   private[columnar] def resetReuseForTest(): Unit =
     allocatedTables.set(0L)
     reusedTables.set(0L)
+    peakSlots.set(0)
     releaseWorkers()
+
+  /**
+   * Largest reduce table since [[resetReuseForTest]], in slots. Includes a grown filtered table.
+   */
+  private[scarlet] def peakSlotsForTest: Int = peakSlots.get
+
+  /** Clears [[peakSlotsForTest]] without touching the reuse counters. */
+  private[scarlet] def resetPeakForTest(): Unit =
+    peakSlots.set(0)
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def notePeak(slots: Int): Unit =
+    var prev = peakSlots.get
+    while (slots > prev && !peakSlots.compareAndSet(prev, slots)) do prev = peakSlots.get
 
   /** Tables constructed since the last [[resetReuseForTest]], on every thread. */
   private[columnar] def tablesAllocatedForTest: Long = allocatedTables.get
@@ -438,6 +454,7 @@ object LongHashReduce:
       }
 
     def compact(): ColumnBatch =
+      notePeak(capacity)
       val rows = occupied
       val outKeys = new Array[Long](rows)
       val outValues = new Array[Long](rows)
