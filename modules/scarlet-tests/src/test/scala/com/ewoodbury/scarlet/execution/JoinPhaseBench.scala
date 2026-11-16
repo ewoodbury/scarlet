@@ -30,8 +30,12 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * `append-grouped` is [[JoinWrite]]. `kernel` is [[HashJoin.innerInt32]]. `count` sums lengths of
  * an already written join. `action` is the real `count`, including encode.
  *
- * Each line is its own p50, nearest-rank `ceil(50/100*n)` over 40 rounds after 5 warmups. Phases
- * are not subtracted. Four threads run before one thread, so the morsel pool is sized at 4.
+ * Each line is its own nearest-rank p50 over `JOIN_PHASE_ROUNDS` rounds (default 40) after
+ * `JOIN_PHASE_WARMUP` warmups (default 5). `steady_ms` is the upper median of the last 10 rounds,
+ * with the same `ok` / `compilation` / `machine` rule as [[CrossEngineBench]]. Phases are not
+ * subtracted. `build-selection` still times [[Selection.applySelected]] and the id copy. The
+ * production count does not: an owned int-pair slot stack is folded into the encode, and that
+ * cost is inside `action`. Four threads run before one thread, so the morsel pool is sized at 4.
  *
  * {{{
  * sbt -J-Xmx4g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.JoinPhaseBench"
@@ -46,8 +50,8 @@ object JoinPhaseBench:
   private val batchSize = 8192
   private val sourcePartitions = 2
   private val width = 4
-  private val warmup = 5
-  private val rounds = 40
+  private val warmup = readInt("JOIN_PHASE_WARMUP", 5)
+  private val rounds = readInt("JOIN_PHASE_ROUNDS", 40)
   private val lcgSeed = 0x12345678
 
   private val keepKey: ColumnKernel.Int32Predicate = (key: Int) => key % 3 != 0
@@ -87,7 +91,13 @@ object JoinPhaseBench:
   /** Logical and physical scan, so probe selection is the real `None` path. */
   private final case class PlanRef(plan: Plan[_], op: PhysicalOp)
 
-  private final case class Reading(phase: String, threads: Int, p50Ms: Double)
+  private final case class Reading(
+      phase: String,
+      threads: Int,
+      p50Ms: Double,
+      steadyMs: Double,
+      verdict: String,
+  )
 
   def main(args: Array[String]): Unit =
     val savedConf = ScarletConf.get
@@ -291,12 +301,12 @@ object JoinPhaseBench:
 
   private def time[A](phase: String, threads: Int)(body: => A)(check: A => Unit): Reading =
     System.err.println(s"sample $phase threads=$threads")
-    val p50 = sample(body)(check)
-    val reading = Reading(phase, threads, p50)
+    val (p50, steadyMs, verdict) = sample(body)(check)
+    val reading = Reading(phase, threads, p50, steadyMs, verdict)
     println(line(reading))
     reading
 
-  private def sample[A](body: => A)(check: A => Unit): Double =
+  private def sample[A](body: => A)(check: A => Unit): (Double, Double, String) =
     var round = 0
     while (round < warmup) {
       check(body)
@@ -316,7 +326,35 @@ object JoinPhaseBench:
       finally ColumnMetrics.restore(previous)
       round += 1
     }
-    nearest(samples)
+    val steady = steadyOf(samples)
+    (nearest(samples), steady.ms, steady.verdict)
+
+  /** Last-10 upper median. Same verdicts as [[CrossEngineBench.steadyOf]]. */
+  private def steadyOf(samples: Array[Double]): Steady =
+    val n = samples.length
+    val tailN = math.min(10, n)
+    val headN = math.min(10, n)
+    val tail = medianRange(samples, n - tailN, n)
+    val head = medianRange(samples, 0, headN)
+    if (n < 20) then Steady(tail, head, "short")
+    else
+      val mid = n - tailN / 2
+      val left = medianRange(samples, n - tailN, mid)
+      val right = medianRange(samples, mid, n)
+      val low = math.min(left, right)
+      val high = math.max(left, right)
+      val verdict =
+        if (high > low * 1.10) then "machine"
+        else if (head > tail * 1.10) then "compilation"
+        else "ok"
+      Steady(tail, head, verdict)
+
+  private final case class Steady(ms: Double, head: Double, verdict: String)
+
+  private def medianRange(samples: Array[Double], from: Int, until: Int): Double =
+    val copy = Arrays.copyOfRange(samples, from, until)
+    Arrays.sort(copy)
+    copy(copy.length / 2)
 
   private def encode(ownedParts: Vector[Owned]): Vector[ColumnBatch] =
     ownedParts.map(part => BatchCodec.copiedIntPairs(part.keys, part.values))
@@ -410,17 +448,17 @@ object JoinPhaseBench:
     System.err.println(
       s"join-phase rows=$rows output=${prepared.outputRows} fold=${prepared.fold} " +
         s"batch=$batchSize width=$width warmup=$warmup rounds=$rounds spill=true " +
-        s"p50=nearest-rank java=${runtime.getVmName} ${runtime.getVmVersion}",
+        s"p50=nearest-rank steady=last-10 java=${runtime.getVmName} ${runtime.getVmVersion}",
     )
 
   private def table(readings: Vector[Reading]): String =
     val header = Vector(
       "",
-      "| phase | threads | p50 ms |",
-      "| --- | ---: | ---: |",
+      "| phase | threads | p50 ms | steady ms | verdict |",
+      "| --- | ---: | ---: | ---: | --- |",
     )
     val body = readings.map { reading =>
-      s"| ${reading.phase} | ${reading.threads} | ${millis(reading.p50Ms)} |"
+      s"| ${reading.phase} | ${reading.threads} | ${millis(reading.p50Ms)} | ${millis(reading.steadyMs)} | ${reading.verdict} |"
     }
     (header ++ body).mkString("\n")
 
@@ -430,7 +468,18 @@ object JoinPhaseBench:
       s""""phase":"${reading.phase}",""" +
       s""""threads":${reading.threads},""" +
       s""""rows":$rows,""" +
-      s""""p50_ms":${millis(reading.p50Ms)}}"""
+      s""""p50_ms":${millis(reading.p50Ms)},""" +
+      s""""steady_ms":${millis(reading.steadyMs)},""" +
+      s""""steady":"${reading.verdict}"}"""
 
   private def millis(value: Double): String =
     String.format(Locale.ENGLISH, "%.3f", value)
+
+  private def readInt(name: String, default: Int): Int =
+    sys.env.get(name) match
+      case None => default
+      case Some(text) =>
+        text.toIntOption match
+          case Some(value) if value > 0 => value
+          case _ =>
+            refuse(s"$name must be a positive integer, found $text")
