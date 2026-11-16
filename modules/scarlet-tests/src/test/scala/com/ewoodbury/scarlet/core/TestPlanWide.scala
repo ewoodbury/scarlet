@@ -30,6 +30,7 @@ class TestPlanWide extends AnyFlatSpec with Matchers {
     // Global operations
     PlanWide.isWide(Plan.SortByOp(source, (x: Int) => x, Ordering.Int)) shouldBe true
     PlanWide.isWide(Plan.SortByIntKeyOp(intPairs)) shouldBe true
+    PlanWide.isWide(Plan.SortByIntValueDescOp(intPairs)) shouldBe true
     PlanWide.isWide(Plan.SortByLongKeyOp(longPairs)) shouldBe true
     PlanWide.isWide(Plan.SortByStringKeyOp(stringPairs)) shouldBe true
     PlanWide.isWide(Plan.RepartitionOp(source, 4)) shouldBe true
@@ -159,6 +160,7 @@ class TestPlanWide extends AnyFlatSpec with Matchers {
     PlanWide.isDirectlyWide(Plan.ReduceByKeyOp(kvSource, (a: String, b: String) => a + b)) shouldBe true
     PlanWide.isDirectlyWide(Plan.SortByOp(source, identity, Ordering.Int)) shouldBe true
     PlanWide.isDirectlyWide(Plan.SortByIntKeyOp(intPairs)) shouldBe true
+    PlanWide.isDirectlyWide(Plan.SortByIntValueDescOp(intPairs)) shouldBe true
     PlanWide.isDirectlyWide(Plan.SortByLongKeyOp(longPairs)) shouldBe true
     PlanWide.isDirectlyWide(Plan.SortByStringKeyOp(stringPairs)) shouldBe true
     PlanWide.isDirectlyWide(Plan.PartitionByOp(kvSource, 4)) shouldBe true
@@ -205,6 +207,7 @@ class TestPlanWide extends AnyFlatSpec with Matchers {
       Plan.ReduceByKeyOp(kvSource, (a: String, b: String) => a + b),
       Plan.SortByOp(source, identity, Ordering.Int),
       Plan.SortByIntKeyOp(intPairs),
+      Plan.SortByIntValueDescOp(intPairs),
       Plan.SortByLongKeyOp(longPairs),
       Plan.SortByStringKeyOp(stringPairs),
       Plan.PartitionByOp(kvSource, 4),

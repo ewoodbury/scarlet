@@ -603,7 +603,7 @@ to one of `filter-count`, `filter-sum`, `filter-groupbykey`, `filter-reducebykey
 query's input before the next. `filter-distinct` is `count(DISTINCT k)` and `filter-twogroup` is
 `count` plus `sum(v)` grouped by `k`; both lower. `filter-topn` is the sort-key table (`sk`, `v`)
 ordered by `v` descending, `sk` ascending, limited to 100. `filter-keymod` groups by `k % 100`.
-Those two do not lower: `batches`, `fused`, and `arm` are `row`, and the row is one checksum
+`filter-keymod` does not lower: `batches`, `fused`, and `arm` are `row`, and the row is one checksum
 execution, not a timed p50. `encode_ms` is reported separately and is not subtracted from the
 action. The action timer still includes the scan encode. Spill is on for this harness only.
 

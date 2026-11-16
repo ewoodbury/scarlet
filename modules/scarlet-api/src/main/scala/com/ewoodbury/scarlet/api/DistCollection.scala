@@ -256,6 +256,17 @@ final case class DistCollection[A](plan: Plan[A]):
     DistCollection(Plan.SortByIntKeyOp(kvPlan))
 
   /**
+   * Sorts `(Int, Int)` pairs by column 1 descending, then column 0 ascending. Builds
+   * [[Plan.SortByIntValueDescOp]] from the key-value plan. Generic [[sortBy]] stays an opaque
+   * [[Plan.SortByOp]] and runs on the row path. A scan of int pairs, or a filter chain over one,
+   * lowers. `take(n)` is a bounded heap of `n` rows and does not sort the survivors. Collect is
+   * the full two-key order. A map, aggregate, or join under the sort stays on the row path. A null
+   * value or key orders as zero and stays null. Ties keep input order.
+   */
+  def sortByIntValueDesc(using ev: A =:= (Int, Int)): DistCollection[(Int, Int)] =
+    DistCollection(Plan.SortByIntValueDescOp(kvPlan))
+
+  /**
    * Sorts `(Long, Long)` pairs ascending by column 0. Builds [[Plan.SortByLongKeyOp]] from the
    * key-value plan. Generic [[sortBy]] stays an opaque [[Plan.SortByOp]] and runs on the row path.
    * A scan of long pairs, or key and value filters over that scan, lowers to a columnar rank

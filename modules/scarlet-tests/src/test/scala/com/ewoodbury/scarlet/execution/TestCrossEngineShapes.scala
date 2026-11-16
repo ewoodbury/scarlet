@@ -12,8 +12,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Known answers for the four added cross-engine shapes, on one small int table.
  *
  * The filter is `k % 3 != 0` and `v >= 0`, except the top-N shape, which filters `sk`. The
- * fallback test is the value sort: `tryRun` declines it, and the taken prefix is still the
- * global order.
+ * generic value sort still declines; `sortByIntValueDesc` lowers.
  */
 class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -83,6 +82,9 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
   "filter-topn" should "keep the first rows in value order" in {
     val data = filtered(topKeys, topValues)
     val sorted = CrossEngineShapes.sorted(data)
+    ColumnarPlanner.lower(sorted.plan).map(_.shape) shouldBe Some(
+      "SortByIntValueDesc(FilterValue(FilterKey(Scan)))",
+    )
     // The winning rows sit past index 2 in their source partition. A limit applied before
     // the sort would drop them.
     sorted.collect().take(3) shouldBe List(1 -> 100, 2 -> 99, 4 -> 10)
@@ -90,9 +92,11 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     sorted.take(3) shouldBe List(1 -> 100, 2 -> 99, 4 -> 10)
   }
 
-  "a value sort" should "decline tryRun and stay off the columnar arm" in {
+  "a generic value sort" should "decline tryRun and stay off the columnar arm" in {
     val data = filtered(topKeys, topValues)
-    val plan = CrossEngineShapes.sorted(data).plan
+    val plan = data
+      .sortBy(pair => (pair._2, pair._1))(using Ordering.Tuple2(Ordering.Int.reverse, Ordering.Int))
+      .plan
     ColumnarPlanner.lower(plan).isEmpty shouldBe true
     ColumnarPlanner.partitioning(plan).isEmpty shouldBe true
     ColumnarPlanner.tryRun(plan).isEmpty shouldBe true

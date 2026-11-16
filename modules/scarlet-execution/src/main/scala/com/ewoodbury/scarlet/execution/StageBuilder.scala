@@ -344,8 +344,8 @@ object StageBuilder:
    *   4. **Wide Transformations (Shuffle Operations)**:
    *      - GroupByKeyOp, CountByKeyOp, ReduceByKeyOp: Supports shuffle bypass optimization when
    *        already partitioned correctly
-   *      - SortByOp, SortByIntKeyOp, SortByLongKeyOp, SortByStringKeyOp, PartitionByOp,
-   *        RepartitionOp, CoalesceOp: Always creates shuffle boundaries
+   *      - SortByOp, SortByIntKeyOp, SortByIntValueDescOp, SortByLongKeyOp, SortByStringKeyOp,
+   *        PartitionByOp, RepartitionOp, CoalesceOp: Always creates shuffle boundaries
    *      - JoinOp, LeftOuterJoinOp, RightOuterJoinOp, FullOuterJoinOp, CoGroupOp: Multi-input wide
    *        operations with side tagging for disambiguation
    *      - Uses WideOp metadata structures for shuffle execution planning
@@ -666,6 +666,17 @@ object StageBuilder:
           dependencies,
         )
 
+      case valueSort: Plan.SortByIntValueDescOp =>
+        sortByShuffle(
+          ctx,
+          valueSort.source,
+          (pair: (Int, Int)) => (pair._2, pair._1),
+          Ordering.Tuple2(Ordering.Int.reverse, Ordering.Int),
+          valueSort,
+          builderMap,
+          dependencies,
+        )
+
       case longSort: Plan.SortByLongKeyOp =>
         sortByShuffle(
           ctx,
@@ -967,9 +978,9 @@ object StageBuilder:
       case key => key
 
   /**
-   * Range-partitions and locally sorts. `SortByOp`, `SortByIntKeyOp`, `SortByLongKeyOp`, and
-   * `SortByStringKeyOp` share this shuffle. The caller supplies the key function and the ordering.
-   * A null string key orders as `""` and the original row stays null.
+   * Range-partitions and locally sorts. `SortByOp`, `SortByIntKeyOp`, `SortByIntValueDescOp`,
+   * `SortByLongKeyOp`, and `SortByStringKeyOp` share this shuffle. The caller supplies the key
+   * function and the ordering. A null string key orders as `""` and the original row stays null.
    */
   private def sortByShuffle[A, B](
       ctx: BuildContext,

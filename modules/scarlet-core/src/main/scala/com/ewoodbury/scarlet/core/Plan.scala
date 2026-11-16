@@ -282,6 +282,21 @@ object Plan {
   case class SortByIntKeyOp(source: Plan[(Int, Int)]) extends Plan[(Int, Int)]
 
   /**
+   * Sorts `(Int, Int)` pairs by column 1 descending, then column 0 ascending. This node is planned
+   * like [[SortByOp]] with the key `(value, key)` and
+   * `Ordering.Tuple2(Ordering.Int.reverse, Ordering.Int)`. Generic [[SortByOp]] stays opaque. A
+   * scan of int pairs, or a filter chain over one, lowers to a columnar top-N when `take` asks for
+   * a prefix, and to a full two-key sort when the action materializes every row. A map, aggregate,
+   * or join under the sort stays on the row path. A filter, join, aggregate, or projection above
+   * it stays on the row path. A null value or key orders as zero and stays null. Ties keep input
+   * order.
+   *
+   * @param source
+   *   The preceding plan node.
+   */
+  case class SortByIntValueDescOp(source: Plan[(Int, Int)]) extends Plan[(Int, Int)]
+
+  /**
    * Sorts `(Long, Long)` pairs ascending by column 0. This node is planned like [[SortByOp]] with
    * the key taken from column 0 and [[Ordering.Long]]. Generic [[SortByOp]] stays opaque. A scan
    * of long pairs, or key and value filters over that scan, lowers to a columnar rank split. Those
