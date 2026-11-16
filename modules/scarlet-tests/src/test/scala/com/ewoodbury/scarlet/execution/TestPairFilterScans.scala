@@ -107,20 +107,23 @@ class TestPairFilterScans extends AnyFlatSpec with Matchers with BeforeAndAfterE
     val expected = (0 until rows by 2).map(key => key -> ((1, 2)))
 
     arm(threads = 1, partitions = 1)
-    val baseline = measure(joined.count())
+    val countedJoin = measure(joined.count())
+    val plain = measure(joined.collect().toSeq)
     val collected = measure(filtered.collect().toSeq)
     val counted = measure(filtered.count())
 
     collected.result shouldBe expected
     counted.result shouldBe expected.length.toLong
-    collected.visits - baseline.visits shouldBe cuts.length.toLong
-    counted.visits - baseline.visits shouldBe cuts.length.toLong
-    // The bare join count sums matches and does not publish them. Collect still writes one
-    // batch for that partition. The filtered count writes that batch, one per morsel, and one
-    // regroup. A copied slice would add one more batch per cut.
-    collected.batches - baseline.batches shouldBe 1L
-    val filterBatches = cuts.length.toLong + 1L
-    counted.batches - baseline.batches shouldBe filterBatches + 1L
+    countedJoin.result shouldBe rows.toLong
+    // The owned count reads each source morsel and publishes no batch.
+    countedJoin.batches shouldBe 0L
+    countedJoin.visits shouldBe (sourceMorsels(rows, 1) * 2).toLong
+    // The filter visits each morsel of the written join and does not publish a slice.
+    collected.visits - plain.visits shouldBe cuts.length.toLong
+    counted.visits - plain.visits shouldBe cuts.length.toLong
+    collected.batches shouldBe plain.batches
+    // Filtered count adds one batch per morsel and one regroup on top of that match batch.
+    counted.batches - plain.batches shouldBe cuts.length.toLong + 1L
   }
 
   it should "keep partition order when morsels split a triple filter" in {
@@ -134,16 +137,28 @@ class TestPairFilterScans extends AnyFlatSpec with Matchers with BeforeAndAfterE
     val filterVisits = ColumnBatches.cuts(4, batchSize).length + ColumnBatches.cuts(5, batchSize).length
 
     arm(threads = 4, partitions = 2)
-    val baseline = measure(joined.count())
+    val countedJoin = measure(joined.count())
+    val plain = measure(joined.collect().toSeq)
     val collected = measure(filtered.collect().toSeq)
     val rowResult = rowCollect(filtered)
 
     collected.result shouldBe rowResult
-    collected.visits - baseline.visits shouldBe filterVisits.toLong
-    // The index adds visits and no filtered batch. The bare count publishes no match batch,
-    // and collect still writes one per partition. Slicing would publish copied batches.
-    collected.batches - baseline.batches shouldBe 2L
+    countedJoin.result shouldBe rows.toLong
+    countedJoin.batches shouldBe 0L
+    countedJoin.visits shouldBe (sourceMorsels(rows, 1) + sourceMorsels(rows, 2)).toLong
+    // The filter visits each output morsel and does not publish a copied slice.
+    collected.visits - plain.visits shouldBe filterVisits.toLong
+    collected.batches shouldBe plain.batches
   }
+
+  /** Morsels one `ofIntPairs` side cuts, with the remainder on the leading partitions. */
+  private def sourceMorsels(rows: Int, partitions: Int): Int =
+    val base = rows / partitions
+    val extra = rows % partitions
+    (0 until partitions).map { index =>
+      val length = base + (if (index < extra) then 1 else 0)
+      ColumnBatches.cuts(length, batchSize).length
+    }.sum
 
   private def arm(threads: Int, partitions: Int = 4): Unit =
     ScarletRuntime.get.shuffle.clear()

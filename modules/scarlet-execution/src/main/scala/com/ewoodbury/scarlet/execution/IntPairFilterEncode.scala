@@ -35,6 +35,115 @@ private[execution] object IntPairFilterEncode:
               }
         case _ => None
 
+  /**
+   * Inner-join cardinality of two owned int-pair sides. A slot filter is applied while the keys
+   * are counted. Values are read only by the predicate and are not copied. `None` when either side
+   * is boxed, null, or not an int slot stack on an owned scan: the caller keeps the exchange.
+   */
+  def tryCount(
+      leftPlan: Plan[_],
+      leftOp: PhysicalOp,
+      rightPlan: Plan[_],
+      rightOp: PhysicalOp,
+      ordinals: Set[Int],
+  ): Option[Long] =
+    (countSide(leftPlan, leftOp, ordinals), countSide(rightPlan, rightOp, ordinals)) match
+      case (Some(build), Some(probe)) => Some(JoinKeyCount.multiply(build, probe))
+      case _ => None
+
+  private def countSide(
+      plan: Plan[_],
+      op: PhysicalOp,
+      ordinals: Set[Int],
+  ): Option[JoinKeyCount.Table] =
+    if (!ordinals.contains(0) || !ordinals.contains(1)) then None
+    else
+      op.kind match
+        case PhysicalOp.Kind.Pairs =>
+          owned(plan, op).flatMap { parts =>
+            classify(plan, op, ordinals).map(mode => accumulate(parts, mode))
+          }
+        case _ => None
+
+  private def classify(plan: Plan[_], op: PhysicalOp, ordinals: Set[Int]): Option[Mode] =
+    PredicatePlan.compile(plan, op) match
+      case None =>
+        (plan, op) match
+          case (_: Plan.Source[_], PhysicalOp.Scan(PhysicalOp.Kind.Pairs, _)) => Some(Mode.All)
+          case _ => None
+      case Some(compiled) =>
+        PredicatePlan.selectionSteps(PredicatePlan.encoded(compiled, ordinals)) match
+          case Some(steps) if steps.nonEmpty =>
+            pack(steps).map(slots => Mode.Filtered(gate(slots)))
+          case _ => None
+
+  private def accumulate(parts: Vector[IntPairArrays], mode: Mode): JoinKeyCount.Table =
+    val work = jobs(parts, ColumnarPlanner.batchSize)
+    if (work.isEmpty) then JoinKeyCount.fresh()
+    else
+      val workers = ColumnarPlanner.parallelism
+      val slots = math.min(math.max(workers, 1), work.length)
+      val tables = Array.tabulate(slots)(_ => JoinKeyCount.fresh())
+      val _ = MorselScheduler.mapByThread(work, workers) { (id, job) =>
+        fill(job, mode, tables(id))
+        0
+      }
+      JoinKeyCount.merge(tables.toVector)
+
+  private def fill(job: Job, mode: Mode, table: JoinKeyCount.Table): Unit =
+    mode match
+      case Mode.All => fillAll(job, table)
+      case Mode.Filtered(gate) =>
+        gate match
+          case fast: KeyThenValue =>
+            fillKept(job, fast.keepKey, fast.keepValue, table)
+          case other: Generic =>
+            fillGenericKeys(job, other.slots, table)
+
+  private def fillAll(job: Job, table: JoinKeyCount.Table): Unit =
+    val keys = job.keys
+    var row = job.start
+    val end = job.end
+    while (row < end) {
+      table.addOne(keys(row))
+      row += 1
+    }
+
+  private def fillKept(
+      job: Job,
+      keepKey: Int => Boolean,
+      keepValue: Int => Boolean,
+      table: JoinKeyCount.Table,
+  ): Unit =
+    val keys = job.keys
+    val values = job.values
+    var row = job.start
+    val end = job.end
+    while (row < end) {
+      val key = keys(row)
+      if (keepKey(key) && keepValue(values(row))) then table.addOne(key)
+      row += 1
+    }
+
+  private def fillGenericKeys(
+      job: Job,
+      slots: Array[Slot],
+      table: JoinKeyCount.Table,
+  ): Unit =
+    val keys = job.keys
+    val values = job.values
+    var row = job.start
+    val end = job.end
+    while (row < end) {
+      val key = keys(row)
+      if (passes(slots, key, values(row))) then table.addOne(key)
+      row += 1
+    }
+
+  private enum Mode:
+    case All
+    case Filtered(gate: Gate)
+
   private def slotsOf(
       plan: Plan[_],
       op: PhysicalOp,
