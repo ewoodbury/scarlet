@@ -93,6 +93,10 @@ ratio. Pinning is the protocol change. #234 is in the binary.
 - filter + join: 5.360 ms, 1.29x behind, to 5.062 ms, 1.22x behind. Span 3.1%.
 - filter + sort: 35.568 ms, 1.97x ahead, to 34.527 ms, 2.04x ahead. Span 6.1%.
 
+Run as in Setup, with `CROSS_WARMUP=80` and `CROSS_ROUNDS=30` as stated for this table. Deltas:
+`taskset -c 0,2,4,6` on both engines, DuckDB `--warmup 5 --rounds 30`, Scarlet `java -Xmx10g`
+instead of sbt.
+
 ```shell
 ssh nixos 'LD_LIBRARY_PATH=$(ls -d /nix/store/*gcc-15.3.0-lib/lib | head -1) \
   taskset -c 0,2,4,6 ~/ce/bin/python ~/cross_engine_duckdb.py \
@@ -189,8 +193,11 @@ that range. #227 added a sum test and did not change a sum kernel.
 - filter + join: 6.120 ms, 1.47x behind, to 5.360 ms, 1.29x behind.
 - filter + sort: 36.184 ms, 1.92x ahead, to 35.568 ms, 1.97x ahead.
 
-The DuckDB command ran five times. The Scarlet command ran five times per five, three fives in
-all, from a detached checkout of `2b7b01e`. `Test / fork` is false, so each boot is the bench JVM.
+Run as in Setup, with `CROSS_WARMUP=80` and `CROSS_ROUNDS=30` as stated for this table. On
+`nixos`, DuckDB used `~/ce/bin/python` with `--warmup 5 --rounds 30` and Scarlet used
+`sbt -batch -J-Xmx8g`, both unpinned. DuckDB ran five times. Scarlet ran five times per five,
+three fives in all, from a detached checkout of `2b7b01e`. `Test / fork` is false, so each boot
+is the bench JVM.
 
 ## 2026-11-15 — devbox, warmup 5
 
@@ -236,19 +243,21 @@ Protocol: 1e6 rows, 4 threads, two filters, no nulls, warmup 5, 30 rounds. Scarl
 median of five fresh JVMs. DuckDB is one in-memory run. The join median is 6.120 ms and sits inside
 5.9–7.1 ms. The five p50s are 5.736, 5.979, 6.120, 7.045, and 10.715 ms. The 10.715 ms sample is
 the JVM that compiled three columnar sources before the rounds. Two later fives of the same
-command, after this harness had already run, median'd at 10.359 ms (span 6.337–10.884) and
-10.997 ms (span 8.112–11.223).
+Scarlet invocation (warmup 5, rounds 30, `sbt -J-Xmx8g` on `nixos`), after this harness had
+already run, median'd at 10.359 ms (span 6.337–10.884) and 10.997 ms (span 8.112–11.223).
 
-The Scarlet command ran five times. Each log booted sbt from `welcome to sbt`, and the table is
-the upper median of those five p50s.
+Run as in Setup, with `CROSS_WARMUP=5` and `CROSS_ROUNDS=30` as stated for this table. On
+`nixos`, DuckDB was one in-memory run (`--warmup 5 --rounds 30`) and Scarlet used
+`sbt -batch -J-Xmx8g`. Scarlet ran five times. Each log booted sbt from `welcome to sbt`, and
+the table is the upper median of those five p50s.
 
 ### Stability
 
-The join publishes above are 6.120 ms, then 10.359 ms, then 10.997 ms for one command. 10.997 /
-6.120 is 1.80×. That is larger than the kernel gaps this scoreboard is trying to see. The
-devbox governor was `powersave`. This container is aarch64, 4 cores, Vendor ID Apple, OpenJDK
-21.0.13. `/sys/devices/system/cpu/cpu0/cpufreq` is absent and `sudo` is absent, so the governor
-was left unset.
+The join publishes above are 6.120 ms, then 10.359 ms, then 10.997 ms for that same warmup-5
+Scarlet invocation. 10.997 / 6.120 is 1.80×. That is larger than the kernel gaps this
+scoreboard is trying to see. The devbox governor was `powersave`. This container is aarch64,
+4 cores, Vendor ID Apple, OpenJDK 21.0.13. `/sys/devices/system/cpu/cpu0/cpufreq` is absent and
+`sudo` is absent, so the governor was left unset.
 
 A cold `filter-join` (warmup 0, 40 rounds, `java -Xmx4g -XX:+UseG1GC`) opens at 289.5 ms.
 Sample indexes 16–19 are 6.8, 6.1, 6.2, and 7.1 ms. `PrintCompilation` on that shape shows
@@ -331,8 +340,10 @@ outside noise: the median is 14.649 ms against 14.231 ms, and the five JVMs span
 so the ratio stays 3.49x and outside the 2.0x target. Sort stayed inside noise (35.794 ms against
 35.988 ms) and stayed ahead, 1.94x.
 
-The Scarlet command ran five times. Each log booted sbt from `welcome to sbt`, and the table is
-the upper median of those five p50s.
+Run as in Setup, with `CROSS_WARMUP=5` and `CROSS_ROUNDS=30` as stated for this table. On
+`nixos`, DuckDB was one in-memory run (`--warmup 5 --rounds 30`) and Scarlet used
+`sbt -batch -J-Xmx8g`. Scarlet ran five times. Each log booted sbt from `welcome to sbt`, and
+the table is the upper median of those five p50s.
 
 ## 2026-11-13 — devbox, both engines, one machine
 
@@ -354,14 +365,33 @@ Earlier protocol (warmup 3, rounds 10). Both engines on one machine. Not the dec
 
 Scarlet's harness enables spill while DuckDB is in memory. Neither engine is tuned to its best
 configuration. The ratio is like-for-like on the query, not on the deployment.
+Run as in Setup, with `CROSS_WARMUP=3` and `CROSS_ROUNDS=10` as stated for this table. On
+`nixos`, DuckDB used `--rounds 10` and Scarlet used `sbt -batch -J-Xmx8g`.
 
 ## Setup
 
-Historical Apple M1 Pro setup for the 2026-11-07 table below. That table is not comparable with
-the container or the devbox. Its ratios are history. Current ratios are in
-"2026-11-16 — devbox, pinned".
+Canonical reproduction. `CrossEngineBench` defaults are warmup 80, rounds 30, `CROSS_ROWS=1000000`,
+`CROSS_FILTERS=2`, `CROSS_NULLS=false`, `CROSS_THREADS=4`, spill on for this harness only. That is
+the protocol of the 2026-11-16 pinned table and the 2026-11-15 steady-window table, except the
+deltas those sections name (pin, heap, `java -cp` vs sbt). Current ratios are in
+"2026-11-16 — devbox, pinned". The 2026-11-07 table below is a one-time Apple M1 Pro run, warmup 3,
+measured 10, p50. It is not this command and is not comparable with the container or the devbox.
+The 2026-11-13 table used warmup 3, rounds 10 on the devbox.
 
-One-time comparison, 2026-11-07.
+```shell
+# DuckDB. Pass --warmup and --rounds as stated for the table being reproduced.
+python3 -m venv /tmp/cross-engine-venv
+/tmp/cross-engine-venv/bin/pip install duckdb pandas pyarrow
+/tmp/cross-engine-venv/bin/python cross_engine_duckdb.py \
+  --rows 1000000 --threads 4 --warmup 5 --rounds 30
+
+# Scarlet: harness defaults, warmup 80, rounds 30
+CROSS_ROWS=1000000 CROSS_FILTERS=2 CROSS_NULLS=false CROSS_THREADS=4 \
+  CROSS_QUERY=filter-count CROSS_WARMUP=80 CROSS_ROUNDS=30 \
+  sbt -J-Xmx4g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.CrossEngineBench"
+```
+
+One-time comparison, 2026-11-07. Apple M1 Pro, warmup 3, measured 10. Not the command above.
 
 - Machine: Apple M1 Pro, 8 cores, 16 GB.
 - DuckDB 2.0.0, in-memory, `PRAGMA threads=4`.
@@ -545,15 +575,18 @@ JAVA_HOME=$(/usr/libexec/java_home -v 17) \
   PYSPARK_DRIVER_PYTHON=/tmp/spark-venv/bin/python \
   /tmp/spark-venv/bin/python cross_engine_spark.py
 
-# Scarlet side: one query per process, 4 GB heap
+# Scarlet side: Setup protocol at 10M rows, one query per process, 4 GB heap.
+# The 2026-11-07 M1 table and the 2026-11-08 spilled harness used warmup 3, measured 10.
 CROSS_ROWS=10000000 CROSS_FILTERS=2 CROSS_NULLS=false CROSS_QUERY=filter-count \
   CROSS_WARMUP=80 CROSS_ROUNDS=30 \
   sbt -J-Xmx4g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.CrossEngineBench"
 ```
 
 `CROSS_ROWS` defaults to 1000000, `CROSS_FILTERS` to 2 (`1` is the key filter only), and
-`CROSS_NULLS` to false. The command above uses the harness defaults, warmup 80 and rounds 30,
-so a steady tail is visible. `steady_ms` is the upper median of
+`CROSS_NULLS` to false. Run Scarlet as in Setup for the harness defaults, warmup 80 and rounds 30,
+so a steady tail is visible. The 10M command above is that protocol at `CROSS_ROWS=10000000`.
+It is not the 2026-11-07 M1 protocol (warmup 3, measured 10) and not the 2026-11-13 protocol
+(warmup 3, rounds 10). `steady_ms` is the upper median of
 the last 10 rounds, index `n/2` after sorting. Publish it when `steady` is `ok` or
 `compilation`. Drop a JVM tagged `machine` (the two halves of those last 10 differ by more
 than 10%). Drop the set when fewer than three JVMs remain, or when `(max - min) / median` of
