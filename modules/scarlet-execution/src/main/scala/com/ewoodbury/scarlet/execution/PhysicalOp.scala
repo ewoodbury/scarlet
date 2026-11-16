@@ -439,7 +439,9 @@ enum PhysicalOp:
   /**
    * Global sort of an int-pair scan by effective value descending, then effective key ascending. A
    * null value or key orders as zero and stays null. Ties keep input order. `take(n)` is a bounded
-   * heap of `n` rows. Collect is the full two-key order. Output kind is [[PhysicalOp.Kind.Pairs]].
+   * heap of `n` rows when `n` is below the live row count. When `n` covers every live row, take is
+   * the full sort rather than that heap. Collect is the same full order. Output kind is
+   * [[PhysicalOp.Kind.Pairs]].
    *
    * The ordering tag is [[OrderingTag.Sorted]] with `Seq(1, 0)` and `Seq(false, true)`.
    */
