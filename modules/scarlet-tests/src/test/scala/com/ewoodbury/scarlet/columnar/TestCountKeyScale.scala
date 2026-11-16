@@ -150,6 +150,32 @@ class TestCountKeyScale extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     FoldedCount.peakSlotsForTest shouldBe 64
   }
 
+  it should "combine two overlapping stripes in single-stripe first-seen order" in {
+    val rows = 200
+    val keys = Array.tabulate(rows)(row => row % 5)
+    val values = Array.fill(rows)(1)
+    val steps = List(Selection.Step.Int32(0, keep), Selection.Step.Int32(1, keep))
+    val single = FoldedCount
+      .countOwned(
+        Vector((keys, values)),
+        steps,
+        numPartitions = 1,
+        parallelism = 1,
+        batchSize = 32,
+      )
+      .getOrElse(fail("single stripe declined"))
+    val split = FoldedCount
+      .countOwned(
+        Vector((keys, values)),
+        steps,
+        numPartitions = 1,
+        parallelism = 2,
+        batchSize = 32,
+      )
+      .getOrElse(fail("two stripes declined"))
+    decode(split) shouldBe decode(single)
+  }
+
   it should "count a dense span in first-seen order" in {
     val rows = 200
     val keys = Array.tabulate(rows)(row => row % 50)
