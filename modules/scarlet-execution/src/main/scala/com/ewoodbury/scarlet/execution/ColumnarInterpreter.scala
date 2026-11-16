@@ -234,7 +234,12 @@ private[execution] object ColumnarInterpreter:
    */
   private def intPairDecoder(op: PhysicalOp): (ColumnBatch, Int) => Seq[(Int, Int)] =
     op match
-      case _: PhysicalOp.SortByIntKey => BatchCodec.decodeIntPairsPreservingAbsence
+      case _: PhysicalOp.SortByIntKey =>
+        (batch, rows) =>
+          val started = System.nanoTime()
+          val decoded = BatchCodec.decodeIntPairsPreservingAbsence(batch, rows)
+          RankSplitTrace.addOutput(System.nanoTime() - started)
+          decoded
       case _: PhysicalOp.SortByLongKey =>
         (_, _) =>
           throw new IllegalStateException(
@@ -817,6 +822,7 @@ private[execution] object ColumnarInterpreter:
       // index is written and dropped rows are not. Take decodes the prefix.
       val width = ColumnarPlanner.shuffleWidth
       val workers = ColumnarPlanner.parallelism
+      val scanStarted = System.nanoTime()
       val sorted = FilterChain.selected(
         source,
         child,
@@ -825,6 +831,7 @@ private[execution] object ColumnarInterpreter:
         ordinals,
       ) match
         case Some(parts) =>
+          RankSplitTrace.addScan(System.nanoTime() - scanStarted)
           RankSplitRuns.sortAndSplitSelected(parts, width, workers, ScarletConf.get)
         case None =>
           val batches = pairsOf(
@@ -836,6 +843,7 @@ private[execution] object ColumnarInterpreter:
               ordinals,
             ),
           )
+          RankSplitTrace.addScan(System.nanoTime() - scanStarted)
           RankSplitRuns.sortAndSplit(batches, width, workers, ScarletConf.get)
       Columns.Pairs(sorted)
     case (Plan.SortByLongKeyOp(source), PhysicalOp.SortByLongKey(child)) =>
