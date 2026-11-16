@@ -9,6 +9,7 @@ import cats.effect.unsafe.implicits.global
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
+import com.ewoodbury.scarlet.columnar.JoinCountTrace.Probe
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.ScarletRuntime.RuntimeComponents
@@ -40,6 +41,12 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * `JOIN_PHASE_ROWS` selects the filtered side (default 1e6). The right side stays 10240 rows.
  * At 1e7 the match count is about 33.3e6 and the output-row guard scales with that.
  *
+ * `JOIN_PHASE_THREADS`, when set, is the only pool width, and it is installed before the first
+ * dispatch so the morsel pool is that size. Unset keeps the historical four-then-one run, which
+ * sizes the pool at four. `JOIN_PHASE_ONLY=action` times the real `count` and the phases
+ * [[JoinCountTrace]] records on that call. It does not time the hash-join replicas. The count
+ * multiplies key tallies. It does not exchange. Submits are `pool.execute` calls on the caller.
+ *
  * {{{
  * JOIN_PHASE_ROWS=10000000 JOIN_PHASE_WARMUP=80 JOIN_PHASE_ROUNDS=30 \
  *   sbt -J-Xmx4g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.JoinPhaseBench"
@@ -56,6 +63,21 @@ object JoinPhaseBench:
   private val width = 4
   private val warmup = readInt("JOIN_PHASE_WARMUP", 5)
   private val rounds = readInt("JOIN_PHASE_ROUNDS", 40)
+  private val requestedThreads = readOptionalInt("JOIN_PHASE_THREADS")
+  private val actionOnly = sys.env.get("JOIN_PHASE_ONLY").contains("action")
+  private val actionPhases = Array[String](
+    "build-open",
+    "build-classify",
+    "build-setup",
+    "build-scan",
+    "build-merge",
+    "probe-open",
+    "probe-classify",
+    "probe-setup",
+    "probe-scan",
+    "probe-merge",
+    "product",
+  )
   private val lcgSeed = 0x12345678
 
   private val keepKey: ColumnKernel.Int32Predicate = (key: Int) => key % 3 != 0
@@ -101,22 +123,26 @@ object JoinPhaseBench:
       p50Ms: Double,
       steadyMs: Double,
       verdict: String,
+      submits: Option[Long],
+      visits: Option[Long],
   )
 
   def main(args: Array[String]): Unit =
     val savedConf = ScarletConf.get
     val savedRuntime = ScarletRuntime.get
-    val schedulers = Map(1 -> new LocalTaskScheduler(1), width -> new LocalTaskScheduler(width))
+    val lead = requestedThreads.getOrElse(width)
+    val schedulers = schedulersFor(lead)
     var status = 0
     try
-      configure(savedConf, width)
-      ScarletRuntime.set(savedRuntime.copy(scheduler = schedulers(width)))
+      configure(savedConf, lead)
+      ScarletRuntime.set(savedRuntime.copy(scheduler = schedulers(lead)))
       val prepared = prepare()
       accept(prepared)
       preamble(prepared)
-      val four = timeAll(savedConf, savedRuntime, schedulers, prepared, width)
-      val one = timeAll(savedConf, savedRuntime, schedulers, prepared, 1)
-      System.err.println(table(four ++ one))
+      val readings = requestedThreads match
+        case Some(threads) => runWidths(savedConf, savedRuntime, schedulers, prepared, Vector(threads))
+        case None => runWidths(savedConf, savedRuntime, schedulers, prepared, Vector(width, 1))
+      System.err.println(table(readings))
     catch
       case refused: HarnessRefusal =>
         System.err.println(refused.getMessage)
@@ -189,10 +215,7 @@ object JoinPhaseBench:
       kernel,
       outputRows,
       fold,
-      () => {
-        ScarletRuntime.get.shuffle.clear()
-        joined.count()
-      },
+      () => joined.count(),
       probePlan,
     )
 
@@ -208,9 +231,170 @@ object JoinPhaseBench:
       refuse("build bucket has a null")
     if (!prepared.parts.forall(part => JoinPhaseOps.liveValues(part.probe))) then
       refuse("probe bucket has a null")
+    ScarletRuntime.get.shuffle.clear()
     val counted = prepared.action()
     if (counted != prepared.outputRows) then
       refuse(s"action count $counted != ${prepared.outputRows}")
+
+  private def schedulersFor(lead: Int): Map[Int, LocalTaskScheduler] =
+    Vector(lead, width, 1).distinct
+      .map(threads => threads -> new LocalTaskScheduler(threads))
+      .toMap
+
+  private def runWidths(
+      saved: ScarletConf,
+      runtime: RuntimeComponents,
+      schedulers: Map[Int, LocalTaskScheduler],
+      prepared: Prepared,
+      widths: Vector[Int],
+  ): Vector[Reading] =
+    widths.flatMap { threads =>
+      val traced = timeActionSplit(saved, runtime, schedulers, prepared, threads)
+      if (actionOnly) then traced
+      else timeAll(saved, runtime, schedulers, prepared, threads) ++ traced
+    }
+
+  /**
+   * One sampling loop for the real count. Leaf phases come from [[JoinCountTrace]] on that same
+   * call, so they are not a second reconstruction. Submits and visits must be the same on every
+   * round. A shuffle width of 32 must submit the same tasks: the count does not read it.
+   */
+  private def timeActionSplit(
+      saved: ScarletConf,
+      runtime: RuntimeComponents,
+      schedulers: Map[Int, LocalTaskScheduler],
+      prepared: Prepared,
+      threads: Int,
+  ): Vector[Reading] =
+    configure(saved, threads)
+    ScarletRuntime.set(runtime.copy(scheduler = schedulers(threads)))
+    System.err.println(s"sample action-split threads=$threads")
+    val probe = new PhaseProbe
+    val previous = JoinCountTrace.install(probe)
+    val phaseSamples = Array.tabulate(actionPhases.length)(_ => new Array[Double](rounds))
+    val phaseSubmits = Array.tabulate(actionPhases.length)(_ => new Array[Long](rounds))
+    val actionSamples = new Array[Double](rounds)
+    val visitSamples = new Array[Long](rounds)
+    try
+      var round = 0
+      while (round < warmup) {
+        probe.clear()
+        val counted = prepared.action()
+        if (counted != prepared.outputRows) then refuse(s"warmup count $counted")
+        round += 1
+      }
+      round = 0
+      while (round < rounds) {
+        probe.clear()
+        val sink = new CountingSink
+        val previousSink = ColumnMetrics.install(sink)
+        val started = System.nanoTime()
+        val counted =
+          try prepared.action()
+          finally ColumnMetrics.restore(previousSink)
+        val elapsed = (System.nanoTime() - started) / 1_000_000.0
+        if (counted != prepared.outputRows) then refuse(s"action count $counted")
+        actionSamples(round) = elapsed
+        visitSamples(round) = sink.visitCount
+        val seen = probe.snapshot()
+        val names = Array.tabulate(seen.length)(index => seen(index)._1)
+        if (!names.sameElements(actionPhases)) then
+          refuse(
+            s"action phases ${names.mkString(",")} expected ${actionPhases.mkString(",")}",
+          )
+        var index = 0
+        while (index < actionPhases.length) {
+          val (_, nanos, submits) = seen(index)
+          phaseSamples(index)(round) = nanos / 1_000_000.0
+          phaseSubmits(index)(round) = submits
+          index += 1
+        }
+        round += 1
+      }
+    finally JoinCountTrace.restore(previous)
+    val visits = stableLong(visitSamples, "visits")
+    val leaves = actionPhases.indices.map { index =>
+      val submits = stableLong(phaseSubmits(index), actionPhases(index))
+      val steady = steadyOf(phaseSamples(index))
+      val reading = Reading(
+        actionPhases(index),
+        threads,
+        nearest(phaseSamples(index)),
+        steady.ms,
+        steady.verdict,
+        Some(submits),
+        None,
+      )
+      println(parallelLine(reading))
+      reading
+    }.toVector
+    val actionSteady = steadyOf(actionSamples)
+    val actionSubmits = leaves.foldLeft(0L)((sum, reading) => sum + reading.submits.getOrElse(0L))
+    val action = Reading(
+      "action",
+      threads,
+      nearest(actionSamples),
+      actionSteady.ms,
+      actionSteady.verdict,
+      Some(actionSubmits),
+      Some(visits),
+    )
+    println(parallelLine(action))
+    checkShuffleWidth(prepared, threads, actionSubmits)
+    leaves :+ action
+
+  /** The count's submit total must not move when the shuffle width does. */
+  private def checkShuffleWidth(prepared: Prepared, threads: Int, expected: Long): Unit =
+    val saved = ScarletConf.get
+    ScarletConf.set(saved.copy(defaultShufflePartitions = 32))
+    try
+      val before = MorselScheduler.submittedOnCaller
+      val counted = prepared.action()
+      val submits = MorselScheduler.submittedOnCaller - before
+      if (counted != prepared.outputRows) then refuse(s"wide shuffle count $counted")
+      if (submits != expected) then
+        refuse(s"shuffle width 32 submitted $submits, the timed width submitted $expected")
+      println(
+        "{" +
+          """"schema":"join-parallel-1",""" +
+          """"phase":"shuffle-width",""" +
+          s""""threads":$threads,""" +
+          """"width":32,""" +
+          s""""submits":$submits,""" +
+          """"same":true}""",
+      )
+    finally ScarletConf.set(saved)
+
+  private def stableLong(values: Array[Long], label: String): Long =
+    val first = values(0)
+    var index = 1
+    while (index < values.length) {
+      if (values(index) != first) then
+        refuse(s"$label changed from $first to ${values(index)} on round $index")
+      index += 1
+    }
+    first
+
+  private final class PhaseProbe extends Probe:
+    private val names = new Array[String](16)
+    private val nanos = new Array[Long](16)
+    private val submits = new Array[Long](16)
+    private val used = new Array[Int](1)
+
+    def add(phase: String, elapsed: Long, submitted: Long): Unit =
+      val index = used(0)
+      if (index >= names.length) then
+        throw new IllegalStateException(s"join count recorded more than ${names.length} phases")
+      names(index) = phase
+      nanos(index) = elapsed
+      submits(index) = submitted
+      used(0) = index + 1
+
+    def snapshot(): Array[(String, Long, Long)] =
+      Array.tabulate(used(0))(index => (names(index), nanos(index), submits(index)))
+
+    def clear(): Unit =
+      used(0) = 0
 
   private def timeAll(
       saved: ScarletConf,
@@ -308,7 +492,7 @@ object JoinPhaseBench:
   private def time[A](phase: String, threads: Int)(body: => A)(check: A => Unit): Reading =
     System.err.println(s"sample $phase threads=$threads")
     val (p50, steadyMs, verdict) = sample(body)(check)
-    val reading = Reading(phase, threads, p50, steadyMs, verdict)
+    val reading = Reading(phase, threads, p50, steadyMs, verdict, None, None)
     println(line(reading))
     reading
 
@@ -454,17 +638,22 @@ object JoinPhaseBench:
     System.err.println(
       s"join-phase rows=$rows output=${prepared.outputRows} fold=${prepared.fold} " +
         s"batch=$batchSize width=$width warmup=$warmup rounds=$rounds spill=true " +
-        s"p50=nearest-rank steady=last-10 java=${runtime.getVmName} ${runtime.getVmVersion}",
+        s"threads=${requestedThreads.getOrElse(width)} onlyAction=$actionOnly " +
+        s"${affinity()} p50=nearest-rank steady=last-10 " +
+        s"java=${runtime.getVmName} ${runtime.getVmVersion}",
     )
 
   private def table(readings: Vector[Reading]): String =
     val header = Vector(
       "",
-      "| phase | threads | p50 ms | steady ms | verdict |",
-      "| --- | ---: | ---: | ---: | --- |",
+      "| phase | threads | p50 ms | steady ms | verdict | submits | visits |",
+      "| --- | ---: | ---: | ---: | --- | ---: | ---: |",
     )
     val body = readings.map { reading =>
-      s"| ${reading.phase} | ${reading.threads} | ${millis(reading.p50Ms)} | ${millis(reading.steadyMs)} | ${reading.verdict} |"
+      val submits = reading.submits.fold("")(_.toString)
+      val visits = reading.visits.fold("")(_.toString)
+      s"| ${reading.phase} | ${reading.threads} | ${millis(reading.p50Ms)} | " +
+        s"${millis(reading.steadyMs)} | ${reading.verdict} | $submits | $visits |"
     }
     (header ++ body).mkString("\n")
 
@@ -480,6 +669,33 @@ object JoinPhaseBench:
 
   private def millis(value: Double): String =
     String.format(Locale.ENGLISH, "%.3f", value)
+
+  private def parallelLine(reading: Reading): String =
+    val submits = reading.submits.fold("null")(_.toString)
+    val visits = reading.visits.fold("null")(_.toString)
+    "{" +
+      """"schema":"join-parallel-1",""" +
+      s""""phase":"${reading.phase}",""" +
+      s""""threads":${reading.threads},""" +
+      s""""rows":$rows,""" +
+      s""""p50_ms":${millis(reading.p50Ms)},""" +
+      s""""steady_ms":${millis(reading.steadyMs)},""" +
+      s""""steady":"${reading.verdict}",""" +
+      s""""submits":$submits,""" +
+      s""""visits":$visits}"""
+
+  private def affinity(): String =
+    val lines = java.nio.file.Files.readAllLines(java.nio.file.Path.of("/proc/self/status"))
+    var found = "Cpus_allowed_list: unknown"
+    val iterator = lines.iterator()
+    while (iterator.hasNext) {
+      val row = iterator.next()
+      if (row.startsWith("Cpus_allowed_list")) then found = row
+    }
+    found
+
+  private def readOptionalInt(name: String): Option[Int] =
+    if (sys.env.contains(name)) then Some(readInt(name, 1)) else None
 
   private def readInt(name: String, default: Int): Int =
     sys.env.get(name) match

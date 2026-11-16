@@ -47,8 +47,11 @@ private[execution] object IntPairFilterEncode:
       rightOp: PhysicalOp,
       ordinals: Set[Int],
   ): Option[Long] =
-    (countSide(leftPlan, leftOp, ordinals), countSide(rightPlan, rightOp, ordinals)) match
-      case (Some(build), Some(probe)) => Some(JoinKeyCount.multiply(build, probe))
+    val build = JoinCountTrace.labeled("build")(countSide(leftPlan, leftOp, ordinals))
+    val probe = JoinCountTrace.labeled("probe")(countSide(rightPlan, rightOp, ordinals))
+    (build, probe) match
+      case (Some(built), Some(probed)) =>
+        Some(JoinCountTrace.time("product")(JoinKeyCount.multiply(built, probed)))
       case _ => None
 
   private def countSide(
@@ -60,8 +63,10 @@ private[execution] object IntPairFilterEncode:
     else
       op.kind match
         case PhysicalOp.Kind.Pairs =>
-          owned(plan, op).flatMap { parts =>
-            classify(plan, op, ordinals).map(mode => accumulate(parts, mode))
+          JoinCountTrace.time("open")(owned(plan, op)).flatMap { parts =>
+            JoinCountTrace.time("classify")(classify(plan, op, ordinals)).map { mode =>
+              accumulate(parts, mode)
+            }
           }
         case _ => None
 
@@ -78,17 +83,19 @@ private[execution] object IntPairFilterEncode:
           case _ => None
 
   private def accumulate(parts: Vector[IntPairArrays], mode: Mode): JoinKeyCount.Table =
-    val work = jobs(parts, ColumnarPlanner.batchSize)
+    val work = JoinCountTrace.time("setup")(jobs(parts, ColumnarPlanner.batchSize))
     if (work.isEmpty) then JoinKeyCount.fresh()
     else
       val workers = ColumnarPlanner.parallelism
       val slots = math.min(math.max(workers, 1), work.length)
       val tables = Array.tabulate(slots)(_ => JoinKeyCount.fresh())
-      val _ = MorselScheduler.mapByThread(work, workers) { (id, job) =>
-        fill(job, mode, tables(id))
-        0
+      val _ = JoinCountTrace.time("scan") {
+        MorselScheduler.mapByThread(work, workers) { (id, job) =>
+          fill(job, mode, tables(id))
+          0
+        }
       }
-      JoinKeyCount.merge(tables.toVector)
+      JoinCountTrace.time("merge")(JoinKeyCount.merge(tables.toVector))
 
   private def fill(job: Job, mode: Mode, table: JoinKeyCount.Table): Unit =
     mode match

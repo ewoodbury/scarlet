@@ -26,6 +26,20 @@ class TestMorselScheduler extends AnyFlatSpec with Matchers with BeforeAndAfterE
     lengths shouldBe morsels.map(_.length)
   }
 
+  it should "submit one pool task per worker slot, and none on the inline path" in {
+    val morsels = (0 until 32).toVector
+    val before = MorselScheduler.submittedOnCaller
+    val _ = MorselScheduler.map(morsels, parallelism = 4)((_, value) => value)
+    MorselScheduler.submittedOnCaller - before shouldBe 4L
+    val afterFour = MorselScheduler.submittedOnCaller
+    val _ = MorselScheduler.map(morsels, parallelism = 8)((_, value) => value)
+    MorselScheduler.submittedOnCaller - afterFour shouldBe 8L
+    val afterEight = MorselScheduler.submittedOnCaller
+    val _ = MorselScheduler.map(morsels, parallelism = 1)((_, value) => value)
+    val _ = MorselScheduler.map(Vector(1), parallelism = 4)((_, value) => value)
+    MorselScheduler.submittedOnCaller shouldBe afterEight
+  }
+
   it should "count one visit for every morsel when several workers run" in {
     val morsels = (0 until 8).toVector.map(row => BatchCodec.ints(Seq(row)))
     ColumnMetrics.withSink(new CountingSink) {
