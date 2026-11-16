@@ -97,7 +97,7 @@ object StringOuterPipeline:
         MorselScheduler.mapByThread(probe, parallelism) { (worker, probeBatch) =>
           table.probeFull(probeBatch, bitsets(worker))
         }
-    val matched = StringHashOuter.orMatched(bitsets)
+    val matched = Validity.orMatched(bitsets)
     withLeftovers(
       probed,
       table.unmatchedBuild(matched).toVector ++ nullKeys.toVector.map(emitNull),
@@ -303,15 +303,7 @@ object StringOuterPipeline:
   /** Present keys only. A null key is not charged and is not a match. */
   private def presentKeys(batch: ColumnBatch): Int =
     val keys = ColumnKernel.asUtf8(ColumnKernel.columnAt(batch, 0), 0)
-    val words = keys.validity.words
-    val width = keys.length
-    var count = 0
-    var row = 0
-    while (row < width) {
-      if (Validity.isSet(words, row)) then count += 1
-      row += 1
-    }
-    count
+    Validity.countSet(keys.validity.words, keys.length)
 
   /**
    * Sorted-side bytes for the present keys of `batch`. Zero present keys retain nothing. The
@@ -358,20 +350,10 @@ object StringOuterPipeline:
       probed: Vector[ColumnBatch],
       leftovers: Vector[ColumnBatch],
   ): Vector[ColumnBatch] =
-    val tail = leftovers.filter(_.length > 0)
-    if (tail.isEmpty) then probed
-    else
-      val extra = tail match
-        case Vector(only) => only
-        case many => ColumnBatches.concat(many)
-      if (probed.isEmpty) then Vector(extra) else probed :+ extra
+    ColumnBatches.withLeftovers(probed, leftovers)
 
   private def bucketAt(buckets: Vector[ColumnBatch], part: Int): ColumnBatch =
-    buckets.lift(part).getOrElse {
-      throw new IllegalArgumentException(s"missing partition $part")
-    }
+    ColumnBatches.bucketAt(buckets, part)
 
   private def sliceAll(batches: Vector[ColumnBatch], batchSize: Int): Vector[ColumnBatch] =
-    require(batches.nonEmpty, "pipeline needs at least one batch")
-    require(batchSize > 0, s"batch size must be positive, got $batchSize")
-    batches.flatMap(batch => ColumnBatches.slice(batch, batchSize))
+    ColumnBatches.sliceAll(batches, batchSize)

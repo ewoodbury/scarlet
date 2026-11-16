@@ -194,5 +194,53 @@ object Validity:
     }
     new Validity(words, capacity)
 
+  /**
+   * Copy `words` to cover `rowCapacity` rows. The same array is returned when it already has that
+   * many words. Extra bits in a copied tail word are kept; a shorter copy drops them.
+   */
+  private[columnar] def growWords(words: Array[Long], rowCapacity: Int): Array[Long] =
+    val needed = wordCount(rowCapacity)
+    if (words.length == needed) then words else Arrays.copyOf(words, needed)
+
+  /**
+   * OR `bitsets` into the first array. The caller has joined the threads that wrote them, so the
+   * words are plain loads and stores.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private[scarlet] def orMatched(bitsets: Array[Array[Long]]): Array[Long] =
+    require(bitsets.length > 0, "matched bitsets are empty")
+    val merged = bitsets(0)
+    var index = 1
+    while (index < bitsets.length) {
+      val from = bitsets(index)
+      require(from.length == merged.length, "matched bitsets differ in length")
+      var word = 0
+      while (word < merged.length) {
+        merged(word) = merged(word) | from(word)
+        word += 1
+      }
+      index += 1
+    }
+    merged
+
+  /**
+   * Set bits in `[0, live)`. `live == 0` is zero. Bits at `live` and beyond are ignored, including
+   * spare bits in the tail word.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private[columnar] def countSet(words: Array[Long], live: Int): Int =
+    if (live == 0) then 0
+    else
+      val fullWords = liveWords(live)
+      var index = 0
+      var count = 0
+      while (index < fullWords) {
+        count += java.lang.Long.bitCount(words(index))
+        index += 1
+      }
+      val tail = tailBits(live)
+      if (tail != 0) then count += java.lang.Long.bitCount(words(fullWords) & tailMask(tail))
+      count
+
   private def wordCount(capacity: Int): Int =
     (capacity + 63) >>> 6

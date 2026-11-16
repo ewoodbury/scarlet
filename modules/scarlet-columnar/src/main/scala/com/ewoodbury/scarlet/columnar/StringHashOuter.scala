@@ -229,14 +229,14 @@ object StringHashOuter:
       val probeRows = probeKeys.length
 
       def grow(): Unit =
-        outCapacity = doubled(outCapacity)
+        outCapacity = ColumnHash.doubled(outCapacity)
         outCodes = Arrays.copyOf(outCodes, outCapacity)
         outProbe = Arrays.copyOf(outProbe, outCapacity)
         outBuild = Arrays.copyOf(outBuild, outCapacity)
-        keyWords = growWords(keyWords, outCapacity)
-        probeWords = growWords(probeWords, outCapacity)
-        buildWords = growWords(buildWords, outCapacity)
-        buildAbsence = buildAbsence.map(bits => growWords(bits, outCapacity))
+        keyWords = Validity.growWords(keyWords, outCapacity)
+        probeWords = Validity.growWords(probeWords, outCapacity)
+        buildWords = Validity.growWords(buildWords, outCapacity)
+        buildAbsence = buildAbsence.map(bits => Validity.growWords(bits, outCapacity))
 
       def append(
           code: Int,
@@ -389,18 +389,20 @@ object StringHashOuter:
     else
       val columns = sides.map(checkedSide)
       val nullRows = columns.foldLeft(0L) { (total, side) =>
-        total + clearCount(side.keys.validity.words, side.keys.length).toLong
+        val keys = side.keys
+        total + (keys.length - Validity.countSet(keys.validity.words, keys.length)).toLong
       }
       require(nullRows <= Int.MaxValue.toLong, s"null build keys has $nullRows rows")
       if (nullRows == 0L) then (sides, None)
       else
         val presentPieces = columns.flatMap { side =>
-          val present = side.keys.length - clearCount(side.keys.validity.words, side.keys.length)
+          val present = Validity.countSet(side.keys.validity.words, side.keys.length)
           if (present == 0) then None
           else Some(takeRows(side.keys, side.values, keepNull = false, present))
         }
         val nullPieces = columns.flatMap { side =>
-          val cleared = clearCount(side.keys.validity.words, side.keys.length)
+          val cleared =
+            side.keys.length - Validity.countSet(side.keys.validity.words, side.keys.length)
           if (cleared == 0) then None
           else Some(takeRows(side.keys, side.values, keepNull = true, cleared))
         }
@@ -448,35 +450,6 @@ object StringHashOuter:
         keyWords,
         firstAbsence = Some(probeAbsence),
       )
-
-  /**
-   * OR `bitsets` into the first array. The caller has joined the threads that wrote them, so the
-   * words are plain loads and stores.
-   */
-  private[scarlet] def orMatched(bitsets: Array[Array[Long]]): Array[Long] =
-    require(bitsets.length > 0, "matched bitsets are empty")
-    val merged = bitsets(0)
-    var index = 1
-    while (index < bitsets.length) {
-      val from = bitsets(index)
-      require(from.length == merged.length, "matched bitsets differ in length")
-      var word = 0
-      while (word < merged.length) {
-        merged(word) = merged(word) | from(word)
-        word += 1
-      }
-      index += 1
-    }
-    merged
-
-  private def clearCount(words: Array[Long], live: Int): Int =
-    var row = 0
-    var count = 0
-    while (row < live) {
-      if (!Validity.isSet(words, row)) then count += 1
-      row += 1
-    }
-    count
 
   private def takeRows(
       keys: DictUtf8Column,
@@ -578,15 +551,6 @@ object StringHashOuter:
       case Some(bits) if Validity.anySet(bits, rows) =>
         Int32Column.withAbsence(values, validity, Validity.fromWords(bits, capacity), rows)
       case _ => Int32Column.of(values, validity, rows)
-
-  private def doubled(capacity: Int): Int =
-    if (capacity >= ColumnHash.MaxCapacity) then
-      throw new IllegalStateException(s"join output reached $capacity rows")
-    capacity << 1
-
-  private def growWords(words: Array[Long], rowCapacity: Int): Array[Long] =
-    val needed = (rowCapacity + 63) >>> 6
-    if (words.length == needed) words else Arrays.copyOf(words, needed)
 
   private val pairSchema: Vector[LogicalType] =
     Vector(LogicalType.Utf8Dict, LogicalType.Int32)

@@ -253,15 +253,7 @@ private[scarlet] object SortMergeRuns:
    */
   private def presentKeys(batch: ColumnBatch): Int =
     val keys = ColumnHash.int32At(batch, 0)
-    val words = keys.validity.words
-    val rows = keys.length
-    var count = 0
-    var row = 0
-    while (row < rows) {
-      if (Validity.isSet(words, row)) then count += 1
-      row += 1
-    }
-    count
+    Validity.countSet(keys.validity.words, keys.length)
 
   /**
    * Cuts present rows into morsels, sorts each morsel, and publishes it. The buffer is one morsel.

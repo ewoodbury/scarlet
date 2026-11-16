@@ -193,12 +193,12 @@ object StringHashJoin:
             var buildRow = head(id)
             while (buildRow != -1) {
               if (filled == outCapacity) then
-                outCapacity = doubled(outCapacity)
+                outCapacity = ColumnHash.doubled(outCapacity)
                 outCodes = Arrays.copyOf(outCodes, outCapacity)
                 outBuild = Arrays.copyOf(outBuild, outCapacity)
                 outProbe = Arrays.copyOf(outProbe, outCapacity)
-                buildWords = growWords(buildWords, outCapacity)
-                probeWords = growWords(probeWords, outCapacity)
+                buildWords = Validity.growWords(buildWords, outCapacity)
+                probeWords = Validity.growWords(probeWords, outCapacity)
               outCodes(filled) = probeCodes(row)
               if (Validity.isSet(buildValueWords, buildRow)) then
                 outBuild(filled) = buildValueValues(buildRow)
@@ -272,12 +272,3 @@ object StringHashJoin:
       ),
       rows,
     )
-
-  private def doubled(capacity: Int): Int =
-    if (capacity >= ColumnHash.MaxCapacity) then
-      throw new IllegalStateException(s"join output reached $capacity rows")
-    capacity << 1
-
-  private def growWords(words: Array[Long], rowCapacity: Int): Array[Long] =
-    val needed = (rowCapacity + 63) >>> 6
-    if (words.length == needed) words else Arrays.copyOf(words, needed)

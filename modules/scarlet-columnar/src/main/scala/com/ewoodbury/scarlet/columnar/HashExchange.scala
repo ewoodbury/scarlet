@@ -526,9 +526,7 @@ object HashExchange:
     ColumnKernel.asUtf8(ColumnKernel.columnAt(batch, ordinal), ordinal)
 
   private def bucketAt[A](buckets: Vector[A], part: Int): A =
-    buckets.lift(part).getOrElse {
-      throw new IllegalArgumentException(s"missing partition $part")
-    }
+    ColumnBatches.bucketAt(buckets, part)
 
   private def scatter(column: Column, dest: Array[Int], counts: Array[Int]): Vector[Column] =
     column match
