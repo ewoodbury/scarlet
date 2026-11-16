@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import java.util.concurrent.atomic.AtomicInteger
+
 /**
  * Rank-split of int-pair partitions.
  *
@@ -7,10 +9,11 @@ package com.ewoodbury.scarlet.columnar
  * its value, and a null key orders as zero. The null payload is not read. Ties keep input order,
  * so the total order is (effective key, partition index, row index).
  *
- * The local sort is a bottom-up merge of row indexes. The merge is a binary min-heap of run
- * indexes, one cursor per input run, not a linear scan of those cursors and not `Ordering`. A heap
- * pop is logarithmic in the number of runs. There is one run per input batch. The heap stores at
- * most one int per run, including a run with no rows, which is never pushed.
+ * The local sort is [[IntIndexSort]], a stable radix of row indexes by effective key. The
+ * cross-run merge is a binary min-heap of run indexes, one cursor per input run, not a linear scan
+ * of those cursors and not `Ordering`. A heap pop is logarithmic in the number of runs. There is
+ * one run per input batch. The heap stores at most one int per run, including a run with no rows,
+ * which is never pushed.
  *
  * The row at global rank `r` is written into output partition `r * partitions / rows`. Both
  * factors are non-negative, and `/` is integer division. That quotient is the inverse of the
@@ -36,6 +39,20 @@ package com.ewoodbury.scarlet.columnar
  * unchanged.
  */
 object RankSplit:
+
+  private val runsForTestCounter = new AtomicInteger(0)
+  private val mergesForTestCounter = new AtomicInteger(0)
+
+  /** Non-empty runs in the most recent [[merge]]. */
+  private[scarlet] def runsForTest: Int = runsForTestCounter.get
+
+  /** In-memory k-way merges since [[resetForTest]]. One sort is one merge. */
+  private[scarlet] def mergePassesForTest: Int = mergesForTestCounter.get
+
+  /** Clears the run and merge counters. */
+  private[scarlet] def resetForTest(): Unit =
+    runsForTestCounter.set(0)
+    mergesForTestCounter.set(0)
 
   def sortAndSplit(
       batches: Vector[ColumnBatch],
@@ -81,13 +98,19 @@ object RankSplit:
     total.toInt
 
   private def sortRuns(batches: Vector[ColumnBatch], parallelism: Int): Vector[ColumnBatch] =
-    MorselScheduler.map(batches, parallelism)((_, batch) => sortBatch(batch))
+    val started = System.nanoTime()
+    val sorted = MorselScheduler.map(batches, parallelism)((_, batch) => sortBatch(batch))
+    RankSplitTrace.addRun(System.nanoTime() - started)
+    sorted
 
   private def sortRunsSelected(
       selected: Vector[Selected],
       parallelism: Int,
   ): Vector[ColumnBatch] =
-    MorselScheduler.map(selected, parallelism)((_, one) => sortSelected(one))
+    val started = System.nanoTime()
+    val sorted = MorselScheduler.map(selected, parallelism)((_, one) => sortSelected(one))
+    RankSplitTrace.addRun(System.nanoTime() - started)
+    sorted
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def sortBatch(batch: ColumnBatch): ColumnBatch =
@@ -101,8 +124,13 @@ object RankSplit:
         order(row) = row
         row += 1
       }
+      val indexStarted = System.nanoTime()
       sortIndices(keys.values, keys.validity.words, order)
-      gather(keys, values, order)
+      RankSplitTrace.addIndex(System.nanoTime() - indexStarted)
+      val gatherStarted = System.nanoTime()
+      val gathered = gather(keys, values, order)
+      RankSplitTrace.addGather(System.nanoTime() - gatherStarted)
+      gathered
 
   /**
    * One dense run of the live prefix. `order` holds the absolute ids, so [[sortIndices]] and
@@ -120,81 +148,19 @@ object RankSplit:
       order(slot) = selected.rows(slot)
       slot += 1
     }
+    val indexStarted = System.nanoTime()
     sortIndices(keys.values, keys.validity.words, order)
-    gather(keys, values, order)
+    RankSplitTrace.addIndex(System.nanoTime() - indexStarted)
+    val gatherStarted = System.nanoTime()
+    val gathered = gather(keys, values, order)
+    RankSplitTrace.addGather(System.nanoTime() - gatherStarted)
+    gathered
 
-  /** Sort `order` by effective key, then by the row index stored in `order`. */
-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  /** Sort `order` by effective key. Equal keys keep the smaller input row index. */
   private def sortIndices(keys: Array[Int], keyWords: Array[Long], order: Array[Int]): Unit =
-    val rows = order.length
-    if (rows > 1) then
-      val buffer = new Array[Int](rows)
-      var src = order
-      var dst = buffer
-      var sortedInOrder = true
-      var width = 1
-      while (width < rows) {
-        var start = 0
-        while (start < rows) {
-          val mid = math.min(start.toLong + width.toLong, rows.toLong).toInt
-          val end = math.min(start.toLong + (width.toLong << 1), rows.toLong).toInt
-          mergeIndices(keys, keyWords, src, dst, start, mid, end)
-          start = end
-        }
-        val previous = src
-        src = dst
-        dst = previous
-        sortedInOrder = !sortedInOrder
-        val grown = width.toLong << 1
-        width = if (grown >= rows.toLong) rows else grown.toInt
-      }
-      if (!sortedInOrder) then System.arraycopy(src, 0, order, 0, rows)
-
-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private def mergeIndices(
-      keys: Array[Int],
-      keyWords: Array[Long],
-      src: Array[Int],
-      dst: Array[Int],
-      start: Int,
-      mid: Int,
-      end: Int,
-  ): Unit =
-    var left = start
-    var right = mid
-    var out = start
-    while (left < mid && right < end) {
-      if (before(keys, keyWords, src(left), src(right))) then
-        dst(out) = src(left)
-        left += 1
-      else
-        dst(out) = src(right)
-        right += 1
-      out += 1
-    }
-    while (left < mid) {
-      dst(out) = src(left)
-      left += 1
-      out += 1
-    }
-    while (right < end) {
-      dst(out) = src(right)
-      right += 1
-      out += 1
-    }
-
-  /** Earlier effective key first. Equal keys keep the smaller input row index. */
-  private def before(
-      keys: Array[Int],
-      keyWords: Array[Long],
-      leftRow: Int,
-      rightRow: Int,
-  ): Boolean =
-    val order = Integer.compare(
-      effective(keys, keyWords, leftRow),
-      effective(keys, keyWords, rightRow),
-    )
-    order < 0 || (order == 0 && leftRow < rightRow)
+    if (order.length > 1) then
+      IntIndexSort.sort(keys, keyWords, order)
+      RankSplitTrace.notePasses(2)
 
   private def effective(keys: Array[Int], keyWords: Array[Long], row: Int): Int =
     if (Validity.isSet(keyWords, row)) keys(row) else 0
@@ -223,16 +189,23 @@ object RankSplit:
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def merge(runs: Vector[ColumnBatch], rows: Int, partitions: Int): Vector[ColumnBatch] =
+    val started = System.nanoTime()
     val opened: Array[Run] = runs.iterator.map(openRun).toArray
     val cursors = new Array[Int](opened.length)
     val keys = new Array[Int](opened.length)
     val heap = new OrderedRunHeap(keys)
     var run = 0
+    var live = 0
     while (run < opened.length) {
-      if (opened(run).length > 0) then pushRun(heap, keys, opened, cursors, run)
+      if (opened(run).length > 0) then
+        pushRun(heap, keys, opened, cursors, run)
+        live += 1
       run += 1
     }
-    RankScatter.scatter(rows, partitions, () => !heap.isEmpty) { sink =>
+    runsForTestCounter.set(live)
+    RankSplitTrace.addRuns(live.toLong)
+    val _ = mergesForTestCounter.incrementAndGet()
+    val scattered = RankScatter.scatter(rows, partitions, () => !heap.isEmpty) { sink =>
       val chosen = heap.pop()
       val cursor = cursors(chosen)
       val source = opened(chosen)
@@ -247,6 +220,8 @@ object RankSplit:
       cursors(chosen) = cursor + 1
       if (cursors(chosen) < source.length) then pushRun(heap, keys, opened, cursors, chosen)
     }
+    RankSplitTrace.addMerge(System.nanoTime() - started)
+    scattered
 
   /**
    * Snapshot the effective key, then push. The heap reads `keys(id)` and does not recompute it.

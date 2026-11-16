@@ -31,7 +31,21 @@ class TestSortByIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach
   "sortByIntKey" should "match the row path for distinct, duplicate, and negative keys" in {
     agree(Seq(4 -> 1, 1 -> 2, 3 -> 3, 2 -> 4))
     agree((0 until 40).map(index => (index % 3, index)))
+    agree((0 until 48).map(index => (index / 3, index)))
     agree(Seq(Int.MinValue -> 1, -1 -> 2, 0 -> 3, Int.MaxValue -> 4, -100 -> 5, 5 -> 6))
+  }
+
+  it should "keep an already-sorted run in one partition and in four" in {
+    val rows = (0 until 64).map(index => (index / 4, index))
+    val batch = BatchCodec.intPairs(rows)
+    val one = RankSplit.sortAndSplit(Vector(batch), partitions = 1, parallelism = 1)
+    val four = RankSplit.sortAndSplit(Vector(batch), partitions = 4, parallelism = 4)
+
+    one should have length 1
+    four should have length 4
+    val only = one.headOption.getOrElse(fail("expected one partition"))
+    BatchCodec.decodeIntPairs(only) shouldBe rows
+    four.flatMap(part => BatchCodec.decodeIntPairs(part)) shouldBe rows
   }
 
   it should "retain null keys and null values and order a null key as zero" in {
@@ -375,6 +389,40 @@ class TestSortByIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       serial.map(batch => BatchCodec.decodeIntPairs(batch))
     parallel.map(validityBits) shouldBe serial.map(validityBits)
     assertBoundaries(parallel)
+  }
+
+  it should "keep one run per input batch and one merge at 100000 rows and four threads" in {
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(
+        saved.copy(spillEnabled = true, threadPoolSize = 4, columnarExecution = true),
+      )
+      RankSplit.resetForTest()
+      RankSplitRuns.resetForTest()
+      val rows = 100000
+      val half = rows / 2
+      val left = BatchCodec.intPairs(Array.tabulate(half)(identity), Array.tabulate(half)(_ * 3))
+      val right = BatchCodec.intPairs(
+        Array.tabulate(half)(row => row + half),
+        Array.tabulate(half)(row => row - half),
+      )
+      val parts = RankSplitRuns.sortAndSplit(
+        Vector(left, right),
+        partitions = 4,
+        parallelism = 4,
+        ScarletConf.get,
+      )
+
+      RankSplit.runsForTest shouldBe 2
+      RankSplit.mergePassesForTest shouldBe 1
+      RankSplitRuns.filesWrittenForTest shouldBe 0L
+      RankSplitRuns.mergePassesForTest shouldBe 0L
+      parts should have length 4
+      parts.map(_.length).sum shouldBe rows
+    finally
+      RankSplit.resetForTest()
+      RankSplitRuns.resetForTest()
+      ScarletConf.set(saved)
   }
 
   private def agree(rows: Seq[(Int, Int)]): Unit =
