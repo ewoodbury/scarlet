@@ -70,23 +70,6 @@ private[execution] object PredicatePlan:
       Some(Compiled(found.map(layer => toAtom(op.kind, layer, strict)).toVector))
 
   /**
-   * One element predicate, classified from the function it declares. `None` means the declaration
-   * is not an element filter. Pair and triple slots stay on [[compile]].
-   */
-  def filterAtom(predicate: Any, ordinal: Int): Option[Atom] =
-    if (ColumnarPlanner.dictionaryStringLiterals(predicate).isDefined) then
-      Some(stringAtom(ordinal, predicate))
-    else if (declaresSpecialized(predicate, "apply$mcZI$sp", classOf[Int], classOf[Boolean])) then
-      Some(int32Atom(ordinal, predicate))
-    else if (declaresSpecialized(predicate, "apply$mcZJ$sp", classOf[Long], classOf[Boolean])) then
-      Some(int64Atom(ordinal, predicate))
-    else if (declaresSpecialized(predicate, "apply$mcZD$sp", classOf[Double], classOf[Boolean]))
-    then Some(float64Atom(ordinal, predicate))
-    else if (acceptsBoolean(predicate)) then Some(boolAtom(ordinal, predicate))
-    else if (specializedApply(predicate)) then None
-    else Some(stringAtom(ordinal, predicate))
-
-  /**
    * One kernel on `[start, start + length)`. The predicate was adapted when the atom was built.
    */
   def applyAtom(batch: ColumnBatch, start: Int, length: Int, atom: Atom): ColumnBatch =

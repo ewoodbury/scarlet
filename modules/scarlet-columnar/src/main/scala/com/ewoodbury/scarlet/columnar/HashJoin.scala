@@ -1,7 +1,6 @@
 package com.ewoodbury.scarlet.columnar
 
 import java.util.Arrays
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Inner hash join of `Int32` keys. Null keys are dropped on both sides. A null value is preserved
@@ -36,17 +35,6 @@ import java.util.concurrent.atomic.AtomicLong
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object HashJoin:
-
-  /** Slots allocated by build tables since the last [[resetBuiltSlots]]. */
-  private val builtSlots = new AtomicLong
-
-  private[scarlet] def resetBuiltSlots(): Unit =
-    builtSlots.set(0L)
-
-  private[scarlet] def builtSlotsTotal: Long = builtSlots.get()
-
-  private def noteSlots(slots: Int): Unit =
-    val _ = builtSlots.addAndGet(slots.toLong)
 
   /**
    * First open-addressed capacity. A build whose ideal table is smaller starts at that size and
@@ -192,7 +180,6 @@ object HashJoin:
       // An all-valid key column has nothing to skip. The bit test stays when a null is possible.
       if (Validity.livePresent(keyWords, rows)) then insertPresent()
       else insertSparse()
-      noteSlots(slots.slots)
 
     private def insertPresent(): Unit =
       var row = 0
@@ -404,7 +391,6 @@ object HashJoin:
             if (Validity.isSet(buildKeyWords, row)) then slots.insert(buildKeys(row), row)
             row += 1
           }
-          noteSlots(slots.slots)
 
     /** Slots in the open-addressed table. An empty build reports zero. */
     private[scarlet] def slotCount: Int =

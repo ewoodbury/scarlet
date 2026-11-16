@@ -41,10 +41,10 @@ limitations. Deferred work is tracked in the external roadmap.
   - [x] `runtime-local`: thread pool scheduler/executor
   - [x] `shuffle-local`: in-memory shuffle storage
 - [x] Multi-module sbt reorg
-  - SUPERSEDED module names: the build defines five modules — `scarlet-api`, `scarlet-core`,
-    `scarlet-execution`, `scarlet-runtime`, `scarlet-tests`. The planner and shuffle work
-    landed inside `scarlet-execution` and `scarlet-runtime` respectively; no
-    `scarlet-dataset` module exists.
+  - SUPERSEDED module names: the five-module list omitted `scarlet-columnar`. The build defines
+    six modules — `scarlet-api`, `scarlet-core`, `scarlet-execution`, `scarlet-runtime`,
+    `scarlet-columnar`, `scarlet-tests`. The planner and shuffle work landed inside
+    `scarlet-execution` and `scarlet-runtime` respectively; no `scarlet-dataset` module exists.
 
 ## Project 3 — Execution Correctness & Performance
 - [x] Iterator-based execution
@@ -62,9 +62,9 @@ limitations. Deferred work is tracked in the external roadmap.
   - [x] Shuffle-Hash Join (SHJ)
   - [x] Sort-Merge Join (SMJ)
   - [x] Add tests to cover all join strategies, and test automatic join strategy decisions
-  - NOTE: the sort-merge join implementation groups by key with a hash-code-based ordering
-    rather than consuming a real sort order; correctness is by key equality, not by merge.
-    A true typed sort-merge join is deferred.
+  - SUPERSEDED for the columnar path: `SortMerge`, `LongSortMerge`, and `StringSortMerge` are
+    typed sort-merge joins. The row path still groups by key with a hash-code-based ordering;
+    correctness there is by key equality, not by merge.
 
 ## Project 4 - Hygiene, Fault Tolerance, and Reliability
 
