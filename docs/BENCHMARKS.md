@@ -554,3 +554,63 @@ Shuffle-hash joins are absent from the table. The bench does not run them. Int, 
 build buckets do spill. The inner broadcast build does
 spill, and this bench does not run it. p95 is the largest of the five samples, so it is not a
 stable tail.
+
+## 2026-11-16 — Panama on the dense fold and the int join probe
+
+X2 (`b704c3c`, #234) is on `main`. The dense count and sum are one `while` over `int` arrays
+(`Selection.countTwoInt32Dense`, `Selection.sumTwo` with the bit test outside the loop). The int
+join probe is `JoinSlots.countLiveHits`: `locate`, then add the chain length, validity hoisted
+per batch. This sitting asks whether `jdk.incubator.vector` beats that scalar loop. It does not.
+Nothing in `src/main` imports the incubator module.
+
+The machine is this container: aarch64, 4 cores, Vendor ID Apple, OpenJDK 21.0.13, ASIMD, no SVE.
+`IntVector.SPECIES_PREFERRED` is 128 bits, 4 lanes. Input is the cross-engine pair: 1e6 rows,
+keys `row % 1024`, LCG values, seed `0x12345678`, predicates `key % 3 != 0` and `value >= 0`.
+The build side is 10240 rows, ten copies of each key. Four threads, warmup 80, rounds 30.
+`steady_ms` is the upper median of the last 10 rounds. A JVM whose last-10 halves differ by more
+than 10% is `machine` and dropped. `compilation` is kept. The published figure is the median of
+the kept JVMs. The set is dropped when fewer than three JVMs remain, or when `(max - min) / median`
+of the kept values is above 0.10. Checksums on every round: count `333036`, sum `166553391274`,
+join `3330360`.
+
+| action | path | kept | steady ms | verdict |
+| --- | --- | ---: | ---: | --- |
+| count | scalar | 3 | 0.948 | publish |
+| count | vector | 3 | 1.195 | publish, 0.79× the scalar |
+| sum | scalar | 5 | — | set dropped, span 0.70 |
+| sum | vector | 3 | 1.629 | publish |
+| join | scalar | 5 | 2.214 | publish |
+| join | vector | 2 | — | set dropped, fewer than 3 |
+
+Per JVM, in order, `steady_ms` and the steady tag. Count scalar: 0.948 ok, 0.970 compilation,
+0.939 machine, 1.566 machine, 0.930 ok. Count vector: 1.195 ok, 1.175 machine, 1.222 machine,
+1.190 ok, 1.218 ok. Sum scalar: 1.572 ok, 0.933 ok, 0.942 ok, 0.917 ok, 0.916 compilation.
+Sum vector: 1.747 ok, 2.682 machine, 1.619 compilation, 1.629 ok, 1.721 machine. Join scalar:
+2.195 ok, 2.261 ok, 2.239 ok, 2.214 ok, 2.196 ok. Join vector: 5.669 machine, 5.311 machine,
+4.216 machine, 4.161 ok, 4.530 compilation. Every join-vector sample is slower than every
+join-scalar sample. The fastest sum-scalar sample that the span rule threw out, 1.572 ms, is
+still under the published sum-vector median.
+
+Assembly, same JDK, `hsdis-aarch64.so` on `LD_LIBRARY_PATH`, `CompileCommand=print` without
+`PrintAssembly`. The positive control `out[i] = in[i] * 2` is C2 `shl v16.4s, v16.4s, #1`, the
+ASIMD form of the October `vpslld`. There is no `vpslld` on this CPU. The scalar count, the
+scalar sum, and the scalar probe have no packed arithmetic in the C2 nmethod. The product
+methods match that: `countTwoInt32Dense`, `sumTwo`, and `countLiveHits` are scalar. The
+predicate is inlined. `key % 3` is a scalar magic multiply (`mul` / `asr` / `add w, lsl #1` /
+`cmp`), not a packed compare. `countLiveHits` inlines `locate` into `cmn` / `cmp` / `b.ne`.
+The vector methods do emit NEON (`cmeq`, `cmge`, `mls`, `addv` on `v.4s`). Integer `DIV` is not
+a NEON op, so the remainder is a vector `mls` around a scalarized divide, and the hash probe is
+a gather. That is slower than the scalar loop the JIT already emits.
+
+No kernel change. The vector path is not 1.05× on a published pair, and an incubator import
+would need `--add-modules jdk.incubator.vector` on the JDK 17 CI compile.
+
+Reproduce the five JVMs from the throwaway harness (not in this tree):
+
+```shell
+cd /workspace/Projects/.scarlet-queue/x4-vector
+javac --add-modules jdk.incubator.vector -d classes VectorCheck.java
+for i in 1 2 3 4 5; do
+  java -Xmx1g --add-modules jdk.incubator.vector -cp classes VectorCheck time
+done
+```
