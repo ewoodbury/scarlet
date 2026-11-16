@@ -15,8 +15,8 @@ path and a typed columnar path for selected plans, with type erasure confined to
 | `scarlet-tests` | Aggregated ScalaTest suite (sequential by design; see Testing notes). |
 
 Dependency direction: `api -> core`; `execution -> api, core, runtime, columnar`; `runtime -> core`;
-`columnar` depends on nothing. The logical layer cannot name physical types — the split is
-enforced by the build.
+`columnar` depends on `core` for `ScarletConf` and does not name `Plan`. The logical layer cannot
+name physical types — the split is enforced by the build.
 
 ## Logical vs physical
 
@@ -396,8 +396,8 @@ The files below are that set. A new site needs the same suppression and comment.
 | `Partitioner` | `HashPartitioner` (`floorMod` — safe for negative hashes) | Key -> partition assignment |
 | `BroadcastService` | `LocalBroadcastService` | Broadcast join support |
 
-`ScarletRuntime` wires these into `RuntimeComponents` (a global holder with a thread-local
-override used by tests).
+`ScarletRuntime` wires these into `RuntimeComponents`, a global holder. Tests swap that global
+with `set`. `get` still prefers a thread-local override that nothing currently installs.
 
 ## Failure handling
 

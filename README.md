@@ -55,7 +55,7 @@ As the project matures, I plan to shift focus to optimizing performance. My stre
 - [x] Local Mode
 - [x] Partitions Support
 - [x] Shuffles
-- [x] Basic task retries using lineage recovery
+- [x] Basic task retries
 - [ ] Simulated Cluster Mode using threads
 - [ ] Basic Cluster Mode
 
@@ -78,7 +78,7 @@ As the project matures, I plan to shift focus to optimizing performance. My stre
 
 - [ ] Optimizations
   - [ ] Logical and physical plan optimizations for DataFrame/Dataset queries
-  - [ ] Columnar execution support
+  - [x] Columnar execution support
 
 
 ### Distributed System Features
