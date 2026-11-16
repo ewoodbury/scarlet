@@ -3,6 +3,7 @@ package com.ewoodbury.scarlet.execution
 import com.ewoodbury.scarlet.columnar.{
   AbsentSide,
   ColumnBatch,
+  ColumnBatches,
   ColumnarFallback,
   LongOuterPipeline,
 }
@@ -274,7 +275,7 @@ private[execution] object LongOuterArms:
       build: Vector[ColumnBatch],
   )(join: (Vector[ColumnBatch], Vector[ColumnBatch]) => Vector[ColumnBatch]): Columns =
     decline(probe, build, "a null value on a right outer join stays on the row path")
-    Columns.Outer(swapValueColumns(join(probe, build)), AbsentSide.Left)
+    Columns.Outer(ColumnBatches.swapValueColumns(join(probe, build)), AbsentSide.Left)
 
   /** The probe is the left input, so the kernel batch is already `(key, left, right)`. */
   private def full(
@@ -283,19 +284,3 @@ private[execution] object LongOuterArms:
   )(join: (Vector[ColumnBatch], Vector[ColumnBatch]) => Vector[ColumnBatch]): Columns =
     decline(probe, build, "a null value on a full outer join stays on the row path")
     Columns.Outer(join(probe, build), AbsentSide.Both)
-
-  /**
-   * Kernel output is `(key, probe value, build value)`. Swap the values to `(key, left, right)`.
-   */
-  private def swapValueColumns(batches: Vector[ColumnBatch]): Vector[ColumnBatch] =
-    batches.map { batch =>
-      batch.columns match
-        case Seq(key, probeValue, buildValue) =>
-          new ColumnBatch(
-            Vector(key.logicalType, buildValue.logicalType, probeValue.logicalType),
-            Vector(key, buildValue, probeValue),
-            batch.length,
-          )
-        case other =>
-          throw new IllegalArgumentException(s"join output has ${other.size} columns")
-    }

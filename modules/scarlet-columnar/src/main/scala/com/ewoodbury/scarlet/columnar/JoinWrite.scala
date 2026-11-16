@@ -340,7 +340,7 @@ private[columnar] object JoinWrite:
     def growTo(needed: Int): Unit =
       if (needed > capacity) then
         var next = if (capacity <= 0) then 1 else capacity
-        while (next < needed) do next = doubled(next)
+        while (next < needed) do next = ColumnHash.doubled(next)
         keys = Arrays.copyOf(keys, next)
         build = Arrays.copyOf(build, next)
         probe = Arrays.copyOf(probe, next)
@@ -351,11 +351,6 @@ private[columnar] object JoinWrite:
     var capacity = math.max(reserved, 0)
     if (rows > capacity) then
       var next = if (capacity <= 0) then 1 else capacity
-      while (next < rows) do next = doubled(next)
+      while (next < rows) do next = ColumnHash.doubled(next)
       next
     else capacity
-
-  private def doubled(capacity: Int): Int =
-    if (capacity >= ColumnHash.MaxCapacity) then
-      throw new IllegalStateException(s"join output reached $capacity rows")
-    capacity << 1

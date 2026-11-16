@@ -11,6 +11,12 @@ private[columnar] object ColumnHash:
 
   val MaxCapacity: Int = 1 << 30
 
+  /** Next power-of-two capacity. Throws when `capacity` is already [[MaxCapacity]]. */
+  def doubled(capacity: Int): Int =
+    if (capacity >= MaxCapacity) then
+      throw new IllegalStateException(s"join output reached $capacity rows")
+    capacity << 1
+
   def tableSize(rows: Int): Int =
     val need =
       if (rows > (MaxCapacity >>> 1)) MaxCapacity

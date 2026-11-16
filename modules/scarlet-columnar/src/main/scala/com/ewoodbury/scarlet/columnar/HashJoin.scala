@@ -269,12 +269,12 @@ object HashJoin:
               var buildRow = slots.headRow(slot)
               while (buildRow != -1) {
                 if (filled == outCapacity) then
-                  outCapacity = doubled(outCapacity)
+                  outCapacity = ColumnHash.doubled(outCapacity)
                   outKeys = Arrays.copyOf(outKeys, outCapacity)
                   outBuild = Arrays.copyOf(outBuild, outCapacity)
                   outProbe = Arrays.copyOf(outProbe, outCapacity)
-                  buildWords = growWords(buildWords, outCapacity)
-                  probeWords = growWords(probeWords, outCapacity)
+                  buildWords = Validity.growWords(buildWords, outCapacity)
+                  probeWords = Validity.growWords(probeWords, outCapacity)
                 outKeys(filled) = buildKeyValues(buildRow)
                 if (Validity.isSet(buildValueWords, buildRow)) then
                   outBuild(filled) = buildValueValues(buildRow)
@@ -350,11 +350,6 @@ object HashJoin:
         Int32Column.withAbsence(values, validity, Validity.fromWords(bits, capacity), rows)
       case _ => Int32Column.of(values, validity, rows)
 
-  private def doubled(capacity: Int): Int =
-    if (capacity >= ColumnHash.MaxCapacity) then
-      throw new IllegalStateException(s"join output reached $capacity rows")
-    capacity << 1
-
   /**
    * Rows to allocate before a probe writes. A chain longer than one stores a multiplicity, so the
    * reserve is the exact match count, including one row per miss when `keepMisses` is set. A
@@ -380,10 +375,6 @@ object HashJoin:
         case None =>
           val multiple = math.max(16, buildRows) << 1
           math.max(multiple, math.max(16, probeRows))
-
-  private def growWords(words: Array[Long], rowCapacity: Int): Array[Long] =
-    val needed = (rowCapacity + 63) >>> 6
-    if (words.length == needed) words else Arrays.copyOf(words, needed)
 
   /**
    * Build table shared by every probe. `probe` writes `(key, probe value, build value)`. An empty
@@ -497,14 +488,14 @@ object HashJoin:
       val probeRows = probeKeys.length
 
       def grow(): Unit =
-        outCapacity = doubled(outCapacity)
+        outCapacity = ColumnHash.doubled(outCapacity)
         outKeys = Arrays.copyOf(outKeys, outCapacity)
         outProbe = Arrays.copyOf(outProbe, outCapacity)
         outBuild = Arrays.copyOf(outBuild, outCapacity)
-        keyWords = growWords(keyWords, outCapacity)
-        probeWords = growWords(probeWords, outCapacity)
-        buildWords = growWords(buildWords, outCapacity)
-        buildAbsence = buildAbsence.map(bits => growWords(bits, outCapacity))
+        keyWords = Validity.growWords(keyWords, outCapacity)
+        probeWords = Validity.growWords(probeWords, outCapacity)
+        buildWords = Validity.growWords(buildWords, outCapacity)
+        buildAbsence = buildAbsence.map(bits => Validity.growWords(bits, outCapacity))
 
       def append(
           key: Int,
@@ -673,14 +664,14 @@ object HashJoin:
       val probeRows = probeKeys.length
 
       def grow(): Unit =
-        outCapacity = doubled(outCapacity)
+        outCapacity = ColumnHash.doubled(outCapacity)
         outKeys = Arrays.copyOf(outKeys, outCapacity)
         outProbe = Arrays.copyOf(outProbe, outCapacity)
         outBuild = Arrays.copyOf(outBuild, outCapacity)
-        keyWords = growWords(keyWords, outCapacity)
-        probeWords = growWords(probeWords, outCapacity)
-        buildWords = growWords(buildWords, outCapacity)
-        buildAbsence = growWords(buildAbsence, outCapacity)
+        keyWords = Validity.growWords(keyWords, outCapacity)
+        probeWords = Validity.growWords(probeWords, outCapacity)
+        buildWords = Validity.growWords(buildWords, outCapacity)
+        buildAbsence = Validity.growWords(buildAbsence, outCapacity)
 
       def append(
           key: Int,
@@ -826,7 +817,8 @@ object HashJoin:
       (keys, values)
     }
     val nullRows = columns.foldLeft(0L) { (total, column) =>
-      total + clearCount(column._1.validity.words, column._1.length).toLong
+      val keys = column._1
+      total + (keys.length - Validity.countSet(keys.validity.words, keys.length)).toLong
     }
     require(nullRows <= Int.MaxValue.toLong, s"null build keys has $nullRows rows")
     if (nullRows == 0L) then (sides, None)
@@ -884,37 +876,6 @@ object HashJoin:
         keyWords,
         firstAbsence = Some(probeAbsence),
       )
-
-  /**
-   * OR `bitsets` into the first array. The caller has joined the threads that wrote them, so the
-   * words are plain loads and stores.
-   */
-  private[scarlet] def orMatched(bitsets: Array[Array[Long]]): Array[Long] = {
-    require(bitsets.length > 0, "matched bitsets are empty")
-    val merged = bitsets(0)
-    var index = 1
-    while (index < bitsets.length) {
-      val from = bitsets(index)
-      require(from.length == merged.length, "matched bitsets differ in length")
-      var word = 0
-      while (word < merged.length) {
-        merged(word) = merged(word) | from(word)
-        word += 1
-      }
-      index += 1
-    }
-    merged
-  }
-
-  private def clearCount(words: Array[Long], live: Int): Int = {
-    var row = 0
-    var count = 0
-    while (row < live) {
-      if (!Validity.isSet(words, row)) then count += 1
-      row += 1
-    }
-    count
-  }
 
   private def copyBuildRows(
       columns: Vector[(Int32Column, Int32Column)],

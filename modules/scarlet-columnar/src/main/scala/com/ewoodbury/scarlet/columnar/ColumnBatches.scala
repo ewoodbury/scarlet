@@ -73,6 +73,48 @@ object ColumnBatches:
     if (batch.length <= batchSize) then Vector(batch)
     else cuts(batch.length, batchSize).map { case (start, length) => copy(batch, start, length) }
 
+  private[columnar] def sliceAll(
+      batches: Vector[ColumnBatch],
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    require(batches.nonEmpty, "pipeline needs at least one batch")
+    require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    batches.flatMap(batch => slice(batch, batchSize))
+
+  private[columnar] def bucketAt[A](buckets: Vector[A], part: Int): A =
+    buckets.lift(part).getOrElse {
+      throw new IllegalArgumentException(s"missing partition $part")
+    }
+
+  private[columnar] def withLeftovers(
+      probed: Vector[ColumnBatch],
+      leftovers: Vector[ColumnBatch],
+  ): Vector[ColumnBatch] =
+    val tail = leftovers.filter(_.length > 0)
+    if (tail.isEmpty) then probed
+    else
+      val extra = tail match
+        case Vector(only) => only
+        case many => concat(many)
+      if (probed.isEmpty) then Vector(extra) else probed :+ extra
+
+  /**
+   * Kernel output is `(key, probe value, build value)`. Swap the values to `(key, left, right)`.
+   */
+  private[scarlet] def swapValueColumns(batch: ColumnBatch): ColumnBatch =
+    batch.columns match
+      case Seq(key, probeValue, buildValue) =>
+        new ColumnBatch(
+          Vector(key.logicalType, buildValue.logicalType, probeValue.logicalType),
+          Vector(key, buildValue, probeValue),
+          batch.length,
+        )
+      case other =>
+        throw new IllegalArgumentException(s"join output has ${other.size} columns")
+
+  private[scarlet] def swapValueColumns(batches: Vector[ColumnBatch]): Vector[ColumnBatch] =
+    batches.map(swapValueColumns)
+
   /**
    * Rebuild each dictionary so it holds only codes this batch uses.
    *

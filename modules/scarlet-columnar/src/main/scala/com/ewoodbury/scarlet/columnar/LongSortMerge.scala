@@ -355,29 +355,9 @@ object LongSortMerge:
 
   /** Sort `order` by `keys(order(i))`. `order` holds only rows whose key is present. */
   private def sortIndices(keys: Array[Long], order: Array[Int]): Unit =
-    val rows = order.length
-    if (rows > 1) then
-      val buffer = new Array[Int](rows)
-      var src = order
-      var dst = buffer
-      var sortedInOrder = true
-      var width = 1
-      while (width < rows) {
-        var start = 0
-        while (start < rows) {
-          val mid = math.min(start.toLong + width.toLong, rows.toLong).toInt
-          val end = math.min(start.toLong + (width.toLong << 1), rows.toLong).toInt
-          mergeIndices(keys, src, dst, start, mid, end)
-          start = end
-        }
-        val previous = src
-        src = dst
-        dst = previous
-        sortedInOrder = !sortedInOrder
-        val grown = width.toLong << 1
-        width = if (grown >= rows.toLong) rows else grown.toInt
-      }
-      if (!sortedInOrder) then System.arraycopy(src, 0, order, 0, rows)
+    IndexMerge.sort(order) { (src, dst, start, mid, end) =>
+      mergeIndices(keys, src, dst, start, mid, end)
+    }
 
   private def mergeIndices(
       keys: Array[Long],
@@ -492,15 +472,7 @@ object LongSortMerge:
 
   /** Restores `(key, left, right)` after a right outer ran as a left outer on swapped inputs. */
   private def swapValues(batch: ColumnBatch): ColumnBatch =
-    batch.columns match
-      case Seq(key, leftValue, rightValue) =>
-        new ColumnBatch(
-          Vector(key.logicalType, rightValue.logicalType, leftValue.logicalType),
-          Vector(key, rightValue, leftValue),
-          batch.length,
-        )
-      case other =>
-        throw new IllegalArgumentException(s"join output has ${other.size} columns")
+    ColumnBatches.swapValueColumns(batch)
 
   private val joinSchema: Vector[LogicalType] =
     Vector(LogicalType.Int64, LogicalType.Int64, LogicalType.Int64)

@@ -127,29 +127,9 @@ object StringRankSplit:
       keyWords: Array[Long],
       order: Array[Int],
   ): Unit =
-    val rows = order.length
-    if (rows > 1) then
-      val buffer = new Array[Int](rows)
-      var src = order
-      var dst = buffer
-      var sortedInOrder = true
-      var width = 1
-      while (width < rows) {
-        var start = 0
-        while (start < rows) {
-          val mid = math.min(start.toLong + width.toLong, rows.toLong).toInt
-          val end = math.min(start.toLong + (width.toLong << 1), rows.toLong).toInt
-          mergeIndices(dictionary, codes, keyWords, src, dst, start, mid, end)
-          start = end
-        }
-        val previous = src
-        src = dst
-        dst = previous
-        sortedInOrder = !sortedInOrder
-        val grown = width.toLong << 1
-        width = if (grown >= rows.toLong) rows else grown.toInt
-      }
-      if (!sortedInOrder) then System.arraycopy(src, 0, order, 0, rows)
+    IndexMerge.sort(order) { (src, dst, start, mid, end) =>
+      mergeIndices(dictionary, codes, keyWords, src, dst, start, mid, end)
+    }
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def mergeIndices(

@@ -114,12 +114,12 @@ object LongHashJoin:
               var buildRow = head(slot)
               while (buildRow != -1) {
                 if (filled == outCapacity) then
-                  outCapacity = doubled(outCapacity)
+                  outCapacity = ColumnHash.doubled(outCapacity)
                   outKeys = Arrays.copyOf(outKeys, outCapacity)
                   outBuild = Arrays.copyOf(outBuild, outCapacity)
                   outProbe = Arrays.copyOf(outProbe, outCapacity)
-                  buildWords = growWords(buildWords, outCapacity)
-                  probeWords = growWords(probeWords, outCapacity)
+                  buildWords = Validity.growWords(buildWords, outCapacity)
+                  probeWords = Validity.growWords(probeWords, outCapacity)
                 outKeys(filled) = buildKeyValues(buildRow)
                 if (Validity.isSet(buildValueWords, buildRow)) then
                   outBuild(filled) = buildValueValues(buildRow)
@@ -159,12 +159,3 @@ object LongHashJoin:
       ),
       rows,
     )
-
-  private def doubled(capacity: Int): Int =
-    if (capacity >= ColumnHash.MaxCapacity) then
-      throw new IllegalStateException(s"join output reached $capacity rows")
-    capacity << 1
-
-  private def growWords(words: Array[Long], rowCapacity: Int): Array[Long] =
-    val needed = (rowCapacity + 63) >>> 6
-    if (words.length == needed) words else Arrays.copyOf(words, needed)

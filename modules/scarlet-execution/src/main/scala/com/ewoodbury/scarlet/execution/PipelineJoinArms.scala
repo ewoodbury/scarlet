@@ -135,7 +135,7 @@ private[execution] object PipelineJoinArms:
     // (key, right, left), so the value columns are swapped back to (key, left, right).
     val ordered = buildSide match
       case PhysicalOp.BuildSide.Right => joined
-      case PhysicalOp.BuildSide.Left => swapValueColumns(joined)
+      case PhysicalOp.BuildSide.Left => ColumnBatches.swapValueColumns(joined)
     Columns.Triples(ordered)
 
   def broadcastInnerLong(
@@ -179,7 +179,7 @@ private[execution] object PipelineJoinArms:
     // (key, probe value, build value), so this swap is the other way around: building the
     // right child publishes (key, right, left) and has to be swapped back to (key, left, right).
     val ordered = buildSide match
-      case PhysicalOp.BuildSide.Right => swapValueColumns(joined)
+      case PhysicalOp.BuildSide.Right => ColumnBatches.swapValueColumns(joined)
       case PhysicalOp.BuildSide.Left => joined
     Columns.LongTriples(ordered)
 
@@ -222,7 +222,7 @@ private[execution] object PipelineJoinArms:
     // joinBucket writes (key, build value, probe value). Building the right child publishes
     // (key, right, left), so the value columns are swapped back to (key, left, right).
     val ordered = buildSide match
-      case PhysicalOp.BuildSide.Right => swapValueColumns(joined)
+      case PhysicalOp.BuildSide.Right => ColumnBatches.swapValueColumns(joined)
       case PhysicalOp.BuildSide.Left => joined
     Columns.StringTriples(ordered)
 
@@ -512,7 +512,7 @@ private[execution] object PipelineJoinArms:
       probe: Vector[ColumnBatch],
       build: Vector[ColumnBatch],
   )(join: (Vector[ColumnBatch], Vector[ColumnBatch]) => Vector[ColumnBatch]): Columns =
-    Columns.Outer(swapValueColumns(join(probe, build)), AbsentSide.Left)
+    Columns.Outer(ColumnBatches.swapValueColumns(join(probe, build)), AbsentSide.Left)
 
   /**
    * Run a full outer join. The kernel writes `(key, probe value, build value)`. The probe is the
@@ -530,22 +530,3 @@ private[execution] object PipelineJoinArms:
         "a null value on a full outer join stays on the row path",
       )
     Columns.Outer(join(probe, build), AbsentSide.Both)
-
-  /**
-   * Kernel probe output is `(key, probe value, build value)`. Exchange the two value columns so a
-   * left-side build publishes `(key, left, right)`.
-   */
-  private def swapValueColumns(batches: Vector[ColumnBatch]): Vector[ColumnBatch] =
-    batches.map { batch =>
-      batch.columns match
-        case Seq(key, probeValue, buildValue) =>
-          new ColumnBatch(
-            Vector(key.logicalType, buildValue.logicalType, probeValue.logicalType),
-            Vector(key, buildValue, probeValue),
-            batch.length,
-          )
-        case other =>
-          throw new IllegalArgumentException(
-            s"join output has ${other.size} columns",
-          )
-    }

@@ -645,7 +645,7 @@ object ColumnPipeline:
         MorselScheduler.mapByThread(probe, parallelism) { (worker, probeBatch) =>
           table.probeFull(HashJoin.JoinSide(probeBatch, key = 0, value = 1), bitsets(worker))
         }
-    val matched = HashJoin.orMatched(bitsets)
+    val matched = Validity.orMatched(bitsets)
     withLeftovers(
       probed,
       table.unmatchedBuild(matched).toVector ++ nullKeys.toVector.map(emitNull),
@@ -723,13 +723,7 @@ object ColumnPipeline:
       probed: Vector[ColumnBatch],
       leftovers: Vector[ColumnBatch],
   ): Vector[ColumnBatch] =
-    val tail = leftovers.filter(_.length > 0)
-    if (tail.isEmpty) then probed
-    else
-      val extra = tail match
-        case Vector(only) => only
-        case many => ColumnBatches.concat(many)
-      if (probed.isEmpty) then Vector(extra) else probed :+ extra
+    ColumnBatches.withLeftovers(probed, leftovers)
 
   /**
    * True when every live value cell is present. Pair batches store the value at ordinal 1. The
@@ -789,11 +783,7 @@ object ColumnPipeline:
       }
 
   private def bucketAt(buckets: Vector[ColumnBatch], part: Int): ColumnBatch =
-    buckets.lift(part).getOrElse {
-      throw new IllegalArgumentException(s"missing partition $part")
-    }
+    ColumnBatches.bucketAt(buckets, part)
 
   private def sliceAll(batches: Vector[ColumnBatch], batchSize: Int): Vector[ColumnBatch] =
-    require(batches.nonEmpty, "pipeline needs at least one batch")
-    require(batchSize > 0, s"batch size must be positive, got $batchSize")
-    batches.flatMap(batch => ColumnBatches.slice(batch, batchSize))
+    ColumnBatches.sliceAll(batches, batchSize)
