@@ -7,8 +7,9 @@ import com.ewoodbury.scarlet.api.DistCollection
  *
  * `filter-distinct` is `keys.distinct.count`. `filter-twogroup` is one map over `groupByKey`
  * that keeps the count and the sum. `filter-topn` is a generic sort on `(v desc, sk asc)` plus
- * `take`. `filter-keymod` maps the key to `k % 100` and then `countByKey`. The sort and the
- * key-changing map are not columnar plans; the harness reports that decline instead of timing it.
+ * `take`. That sort lowers to a bounded heap, and `collect` stays on the row path.
+ * `filter-keymod` maps the key to `k % 100` and then `countByKey`. That map does not lower; the
+ * harness reports the decline instead of timing it.
  *
  * The checksum folds output columns left to right with `acc * 31 + field`, then sums those row
  * hashes. One column is the value. Two columns are `a * 31 + b`. Three columns are
@@ -22,7 +23,7 @@ object CrossEngineShapes:
   def distinct(data: DistCollection[(Int, Int)]): DistCollection[Int] =
     data.keys.distinct()
 
-  /** Global order is `v` descending, then `sk` ascending. Generic `sortBy` does not lower. */
+  /** Global order is `v` descending, then `sk` ascending. Take keeps a heap. Collect does not. */
   def sorted(data: DistCollection[(Int, Int)]): DistCollection[(Int, Int)] =
     data.sortBy(topKey)(using topOrdering)
 

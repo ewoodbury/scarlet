@@ -12,8 +12,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Known answers for the four added cross-engine shapes, on one small int table.
  *
  * The filter is `k % 3 != 0` and `v >= 0`, except the top-N shape, which filters `sk`. The
- * fallback test is the value sort: `tryRun` declines it, and the taken prefix is still the
- * global order.
+ * value sort lowers to a heap. `tryRun` declines it, and the taken prefix is still the global
+ * order.
  */
 class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -90,12 +90,16 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     sorted.take(3) shouldBe List(1 -> 100, 2 -> 99, 4 -> 10)
   }
 
-  "a value sort" should "decline tryRun and stay off the columnar arm" in {
+  "a value sort" should "lower to a top-n heap and decline tryRun" in {
     val data = filtered(topKeys, topValues)
-    val plan = CrossEngineShapes.sorted(data).plan
-    ColumnarPlanner.lower(plan).isEmpty shouldBe true
-    ColumnarPlanner.partitioning(plan).isEmpty shouldBe true
+    val sorted = CrossEngineShapes.sorted(data)
+    val plan = sorted.plan
+    ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
+      "TopN(FilterValue(FilterKey(Scan)))",
+    )
+    ColumnarPlanner.partitioning(plan).isDefined shouldBe true
     ColumnarPlanner.tryRun(plan).isEmpty shouldBe true
+    sorted.take(3) shouldBe sorted.collect().take(3)
   }
 
   private def filtered(keys: Array[Int], values: Array[Int]): DistCollection[(Int, Int)] =

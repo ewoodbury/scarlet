@@ -377,6 +377,46 @@ class TestSortByIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     assertBoundaries(parallel)
   }
 
+  it should "use two runs and one merge pass for 16384 rows on two partitions at four threads" in {
+    val rows = 16384
+    val keys = Array.tabulate(rows)(identity)
+    val values = Array.tabulate(rows)(row => rows - row)
+    val saved = ScarletConf.get
+    RankSplit.resetForTest()
+    try
+      ScarletConf.set(
+        saved.copy(
+          columnarExecution = true,
+          threadPoolSize = 4,
+          columnarBatchSize = 8192,
+          defaultShufflePartitions = 4,
+          spillEnabled = false,
+        ),
+      )
+      val sorted = DistCollection.ofIntPairs(keys, values, 2).sortByIntKey
+      collect(sorted).map(_._1) shouldBe keys.sorted.toSeq
+      RankSplit.runsForTest shouldBe 2L
+      RankSplit.mergePassesForTest shouldBe 1L
+    finally
+      RankSplit.resetForTest()
+      ScarletConf.set(saved)
+  }
+
+  it should "merge seventeen runs in one pass at four threads" in {
+    val count = 17
+    val batches = Vector.tabulate(count) { index =>
+      BatchCodec.intPairs(Seq((count - index, index), (index, index)))
+    }
+    RankSplit.resetForTest()
+    val parts = RankSplit.sortAndSplit(batches, partitions = 4, parallelism = 4)
+    val decoded = parts.flatMap(batch => BatchCodec.decodeIntPairs(batch))
+
+    RankSplit.runsForTest shouldBe count.toLong
+    RankSplit.mergePassesForTest shouldBe 1L
+    decoded.map(_._1) shouldBe decoded.map(_._1).sorted
+    parts.map(_.length).sum shouldBe count * 2
+  }
+
   private def agree(rows: Seq[(Int, Int)]): Unit =
     val source = DistCollection(rows, 4)
     val sorted = source.sortByIntKey

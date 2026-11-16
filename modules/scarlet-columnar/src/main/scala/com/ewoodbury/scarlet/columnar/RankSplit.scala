@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import java.util.concurrent.atomic.AtomicLong
+
 /**
  * Rank-split of int-pair partitions.
  *
@@ -7,10 +9,12 @@ package com.ewoodbury.scarlet.columnar
  * its value, and a null key orders as zero. The null payload is not read. Ties keep input order,
  * so the total order is (effective key, partition index, row index).
  *
- * The local sort is a bottom-up merge of row indexes. The merge is a binary min-heap of run
- * indexes, one cursor per input run, not a linear scan of those cursors and not `Ordering`. A heap
- * pop is logarithmic in the number of runs. There is one run per input batch. The heap stores at
- * most one int per run, including a run with no rows, which is never pushed.
+ * The local sort packs each live effective key and radix-sorts that packed column with the row id.
+ * The ids arrive in ascending order and the radix sort is stable, so equal keys keep the smaller
+ * id. The merge is a binary min-heap of run indexes, one cursor per input run, not a linear scan
+ * of those cursors and not `Ordering`. A heap pop is logarithmic in the number of runs. There is
+ * one run per input batch. The heap stores at most one int per run, including a run with no rows,
+ * which is never pushed.
  *
  * The row at global rank `r` is written into output partition `r * partitions / rows`. Both
  * factors are non-negative, and `/` is integer division. That quotient is the inverse of the
@@ -24,7 +28,7 @@ package com.ewoodbury.scarlet.columnar
  *
  * During the merge the retained batches are one sorted batch per input run plus the output
  * batches. A run of length 0 or 1 reuses its input batch. A longer run is a fresh batch, and its
- * index array and merge buffer are dropped when that batch is published. At most `parallelism`
+ * index array and radix buffers are dropped when that batch is published. At most `parallelism`
  * runs are sorted at once, so those transient buffers are bounded by `parallelism`. The caller may
  * still hold the input vector. No per-row object is allocated.
  *
@@ -34,8 +38,26 @@ package com.ewoodbury.scarlet.columnar
  * [[sortAndSplitSelected]] sorts the live prefix of each [[Selected]] and publishes a dense batch
  * of `count` rows. An empty prefix is an empty run. [[sortAndSplit]] and [[sortBatch]] are
  * unchanged.
+ *
+ * [[runsForTest]] is the number of input batches of the last split, one run per batch.
+ * [[mergePassesForTest]] is 1 when that split merged and 0 when every batch was empty. The
+ * in-memory merge is one pass at any run count. It does not fan in.
  */
 object RankSplit:
+
+  private val publishedRuns = new AtomicLong
+  private val publishedPasses = new AtomicLong
+
+  /** Input batches of the last [[sortAndSplit]] or [[sortAndSplitSelected]]. */
+  private[scarlet] def runsForTest: Long = publishedRuns.get
+
+  /** In-memory merge passes of that split. One pass, or zero when there were no rows. */
+  private[scarlet] def mergePassesForTest: Long = publishedPasses.get
+
+  /** Clears [[runsForTest]] and [[mergePassesForTest]]. */
+  private[scarlet] def resetForTest(): Unit =
+    publishedRuns.set(0L)
+    publishedPasses.set(0L)
 
   def sortAndSplit(
       batches: Vector[ColumnBatch],
@@ -48,8 +70,17 @@ object RankSplit:
     val rows = rowCount(batches)
     if (rows == 0) then
       batches.foreach(checkedPair)
+      publish(batches.length, 0)
       Vector.fill(partitions)(ColumnBatches.emptyIntPairs)
-    else merge(sortRuns(batches, parallelism), rows, partitions)
+    else
+      val runStart = SortPhases.begin()
+      val sorted = sortRuns(batches, parallelism)
+      SortPhases.endRun(runStart)
+      val mergeStart = SortPhases.begin()
+      val merged = merge(sorted, rows, partitions)
+      SortPhases.endMerge(mergeStart)
+      publish(sorted.length, 1)
+      merged
 
   /**
    * [[sortAndSplit]] for a survivor index. `rows` is the sum of the live prefixes. An empty
@@ -67,8 +98,22 @@ object RankSplit:
     val rows = selectedRows(selected)
     if (rows == 0) then
       selected.foreach(one => checkedPair(one.batch))
+      publish(selected.length, 0)
       Vector.fill(partitions)(ColumnBatches.emptyIntPairs)
-    else merge(sortRunsSelected(selected, parallelism), rows, partitions)
+    else
+      val runStart = SortPhases.begin()
+      val sorted = sortRunsSelected(selected, parallelism)
+      SortPhases.endRun(runStart)
+      val mergeStart = SortPhases.begin()
+      val merged = merge(sorted, rows, partitions)
+      SortPhases.endMerge(mergeStart)
+      publish(sorted.length, 1)
+      merged
+
+  private def publish(runCount: Int, passCount: Int): Unit =
+    publishedRuns.set(runCount.toLong)
+    publishedPasses.set(passCount.toLong)
+    SortPhases.note(runCount, passCount)
 
   private def selectedRows(selected: Vector[Selected]): Int =
     val total = selected.iterator.map(_.count.toLong).sum
@@ -123,78 +168,21 @@ object RankSplit:
     sortIndices(keys.values, keys.validity.words, order)
     gather(keys, values, order)
 
-  /** Sort `order` by effective key, then by the row index stored in `order`. */
+  /**
+   * Sort `order` by effective key. `order` arrives strictly ascending, and [[IntKeyRadix]] is
+   * stable, so an equal key keeps the smaller id.
+   */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def sortIndices(keys: Array[Int], keyWords: Array[Long], order: Array[Int]): Unit =
     val rows = order.length
     if (rows > 1) then
-      val buffer = new Array[Int](rows)
-      var src = order
-      var dst = buffer
-      var sortedInOrder = true
-      var width = 1
-      while (width < rows) {
-        var start = 0
-        while (start < rows) {
-          val mid = math.min(start.toLong + width.toLong, rows.toLong).toInt
-          val end = math.min(start.toLong + (width.toLong << 1), rows.toLong).toInt
-          mergeIndices(keys, keyWords, src, dst, start, mid, end)
-          start = end
-        }
-        val previous = src
-        src = dst
-        dst = previous
-        sortedInOrder = !sortedInOrder
-        val grown = width.toLong << 1
-        width = if (grown >= rows.toLong) rows else grown.toInt
+      val packed = new Array[Int](rows)
+      var slot = 0
+      while (slot < rows) {
+        packed(slot) = effective(keys, keyWords, order(slot))
+        slot += 1
       }
-      if (!sortedInOrder) then System.arraycopy(src, 0, order, 0, rows)
-
-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private def mergeIndices(
-      keys: Array[Int],
-      keyWords: Array[Long],
-      src: Array[Int],
-      dst: Array[Int],
-      start: Int,
-      mid: Int,
-      end: Int,
-  ): Unit =
-    var left = start
-    var right = mid
-    var out = start
-    while (left < mid && right < end) {
-      if (before(keys, keyWords, src(left), src(right))) then
-        dst(out) = src(left)
-        left += 1
-      else
-        dst(out) = src(right)
-        right += 1
-      out += 1
-    }
-    while (left < mid) {
-      dst(out) = src(left)
-      left += 1
-      out += 1
-    }
-    while (right < end) {
-      dst(out) = src(right)
-      right += 1
-      out += 1
-    }
-
-  /** Earlier effective key first. Equal keys keep the smaller input row index. */
-  private def before(
-      keys: Array[Int],
-      keyWords: Array[Long],
-      leftRow: Int,
-      rightRow: Int,
-  ): Boolean =
-    val order = Integer.compare(
-      effective(keys, keyWords, leftRow),
-      effective(keys, keyWords, rightRow),
-    )
-    order < 0 || (order == 0 && leftRow < rightRow)
+      IntKeyRadix.sort(packed, order)
 
   private def effective(keys: Array[Int], keyWords: Array[Long], row: Int): Int =
     if (Validity.isSet(keyWords, row)) keys(row) else 0

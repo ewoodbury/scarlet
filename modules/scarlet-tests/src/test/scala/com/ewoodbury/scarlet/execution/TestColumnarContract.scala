@@ -1000,7 +1000,8 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.LongBroadcastJoin(_, _, _) | PhysicalOp.StringBroadcastJoin(_, _, _) |
         PhysicalOp.BroadcastLeftOuter(_, _) | PhysicalOp.BroadcastRightOuter(_, _) |
         PhysicalOp.BroadcastFullOuter(_, _) | PhysicalOp.SortByIntKey(_) |
-        PhysicalOp.SortByLongKey(_) | PhysicalOp.SortByStringKey(_) | PhysicalOp.Union(_, _) |
+        PhysicalOp.SortByLongKey(_) | PhysicalOp.SortByStringKey(_) |
+        PhysicalOp.TopN(_) | PhysicalOp.Union(_, _) |
         PhysicalOp.Dedupe(_) | PhysicalOp.LongHashLeftOuter(_, _) |
         PhysicalOp.LongHashRightOuter(_, _) | PhysicalOp.LongHashFullOuter(_, _) |
         PhysicalOp.LongBroadcastLeftOuter(_, _) | PhysicalOp.LongBroadcastRightOuter(_, _) |
@@ -1013,10 +1014,10 @@ class TestColumnarContract extends AnyFlatSpec with Matchers with BeforeAndAfter
         PhysicalOp.StringSortMergeFullOuter(_, _) =>
       false
 
-  /** A key sort is not partition-preserving, and `tryTake` still runs it. */
+  /** A key sort or top-n is not partition-preserving, and `tryTake` still runs it. */
   private def acceptsTake(op: PhysicalOp): Boolean = op match
     case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey |
-        _: PhysicalOp.SortByStringKey =>
+        _: PhysicalOp.SortByStringKey | _: PhysicalOp.TopN =>
       true
     case other => preservesPartitions(other)
 

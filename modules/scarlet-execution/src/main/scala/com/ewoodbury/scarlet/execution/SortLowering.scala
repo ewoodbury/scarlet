@@ -15,7 +15,9 @@ import com.ewoodbury.scarlet.core.Plan
  * a long-pair row filter and a whole-row string filter, sorts the survivor index. Over the budget,
  * with spill on, that index is spilled. A long sort spills through the same budget as an int sort.
  * The physical op stays [[PhysicalOp.SortByLongKey]]. A string sort spills through that same
- * budget. The physical op stays [[PhysicalOp.SortByStringKey]].
+ * budget. The physical op stays [[PhysicalOp.SortByStringKey]]. A generic sort of int pairs by
+ * value descending, then key ascending, lowers to [[PhysicalOp.TopN]] for the same scan-or-filters
+ * child. Collect does not run that node. Take keeps a heap of the requested prefix.
  *
  * The sorts share one ordering tag: range distribution on the row key, ascending by effective key.
  * A null int or long key orders as zero and stays null. A null string key orders as `""` and stays
@@ -26,8 +28,8 @@ private[execution] object SortLowering:
 
   /** A parent cannot wrap a sort. The sort itself is lowered by [[ColumnarPlanner.lower]]. */
   def acceptsAsChild(op: PhysicalOp): Boolean = op match
-    case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey |
-        _: PhysicalOp.SortByStringKey =>
+    case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey | _: PhysicalOp.SortByStringKey |
+        _: PhysicalOp.TopN =>
       false
     case _ => true
 
@@ -57,6 +59,16 @@ private[execution] object SortLowering:
       case Some(child) if acceptsScanOrFilters(child, PhysicalOp.Kind.StringPairs) =>
         Some(PhysicalOp.SortByStringKey(child))
       case _ => None
+
+  /** Value descending, then key ascending, over a scan or filters of int pairs. */
+  def lowerTop(plan: Plan[_], lowerPlan: Plan[_] => Option[PhysicalOp]): Option[PhysicalOp] =
+    TopSignature.sourceOf(plan) match
+      case Some(source) =>
+        lowerPlan(source) match
+          case Some(child) if acceptsScanOrFilters(child, PhysicalOp.Kind.Pairs) =>
+            Some(PhysicalOp.TopN(child))
+          case _ => None
+      case None => None
 
   /**
    * A scan of `kind`, or filters over that scan. A map, aggregate, or join is not a sort child.

@@ -77,13 +77,16 @@ object ColumnarPlanner:
    * string filter sort that index too. A long sort spills when `spillEnabled` is on and the
    * retained estimate exceeds `spillBudgetBytes`. The physical op stays `SortByLongKey`. A string
    * sort spills on that same budget. The physical op stays `SortByStringKey`. At or under the
-   * budget, and whenever spill is off, the split stays in memory and writes nothing. One map
-   * directly above an int, string, or long `groupByKey` lowers to [[PhysicalOp.GroupedDecode]].
-   * The group runs once. [[ColumnarInterpreter.decodeFor]] yields `(K, Iterable[V])` and the
-   * logical function runs on those rows. The function is not inspected. `values`, `take`, a second
-   * map, and a filter above that map stay on the row path. Int `keys` stays a distinct-key scan.
-   * String and long `keys` stay on the row path. [[partitioning]] and [[tryRun]] follow a refusal.
-   * They also drop a lowered tree whose layout is invalid.
+   * budget, and whenever spill is off, the split stays in memory and writes nothing. A generic
+   * sort of int pairs by value descending then key ascending lowers to [[PhysicalOp.TopN]] when
+   * the child is a scan or filters of that scan. [[tryTake]] keeps a heap of `n`. [[tryRun]]
+   * declines, so collect stays the row-path full sort. One map directly above an int, string, or
+   * long `groupByKey` lowers to [[PhysicalOp.GroupedDecode]]. The group runs once.
+   * [[ColumnarInterpreter.decodeFor]] yields `(K, Iterable[V])` and the logical function runs on
+   * those rows. The function is not inspected. `values`, `take`, a second map, and a filter above
+   * that map stay on the row path. Int `keys` stays a distinct-key scan. String and long `keys`
+   * stay on the row path. [[partitioning]] and [[tryRun]] follow a refusal. They also drop a
+   * lowered tree whose layout is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -140,9 +143,9 @@ object ColumnarPlanner:
    * Run an accepted plan until its first `n` results are available. Partition-preserving plans
    * interpret one source partition at a time. An int-key, long-key, or string-key sort is not
    * partition-preserving: the whole sort runs, then only the requested prefix is decoded across
-   * the output partitions in order. An exchange, aggregate, or join is refused. `n <= 0` returns
-   * empty without running. The catch is the row-path fallback. [[ColumnarFallback]] is its named
-   * form.
+   * the output partitions in order. A top-n value sort keeps a heap of `n` and does not sort the
+   * rest. An exchange, aggregate, or join is refused. `n <= 0` returns empty without running. The
+   * catch is the row-path fallback. [[ColumnarFallback]] is its named form.
    */
   def tryTake[A](plan: Plan[A], n: Int): Option[Seq[A]] =
     if (n <= 0) then Some(Seq.empty[A])
@@ -161,6 +164,8 @@ object ColumnarPlanner:
         Some(
           ColumnarInterpreter.decodePrefixFor(ColumnarInterpreter.interpret(plan, op), n, op),
         )
+      case _: PhysicalOp.TopN =>
+        Some(ColumnarInterpreter.takeTop(plan, op, n))
       case other =>
         PartitionPreserving.of(other).map(count => prefixOf(plan, other, count, n))
 
@@ -788,6 +793,8 @@ object ColumnarPlanner:
       SortLowering.lowerLong(source, lowerPlan)
     case Plan.SortByStringKeyOp(source) =>
       SortLowering.lowerString(source, lowerPlan)
+    case sortBy: Plan.SortByOp[?, ?] =>
+      SortLowering.lowerTop(sortBy, lowerPlan)
     case _ => None
 
   private[execution] def elementSteps(
@@ -979,6 +986,12 @@ object ColumnarPlanner:
       SortLowering.info(shuffleWidth, layoutOf(PhysicalOp.Kind.Pairs))
     case _: PhysicalOp.SortByStringKey =>
       SortLowering.info(shuffleWidth, layoutOf(PhysicalOp.Kind.StringPairs))
+    case _: PhysicalOp.TopN =>
+      PartitioningInfo(
+        Distribution.Singleton,
+        OrderingTag.Sorted(Seq(1, 0), Seq(false, true)),
+        layoutOf(PhysicalOp.Kind.Pairs),
+      )
     case _: PhysicalOp.HashAggregate | _: PhysicalOp.LongHashAggregate =>
       hashed(PhysicalOp.Kind.Pairs)
     case _: PhysicalOp.StringHashAggregate =>

@@ -307,7 +307,7 @@ object CrossEngineBench:
 
   /**
    * Same pairs as [[sortQuery]]. The filter is `sk % 3 != 0` and `v >= 0`. Order is value
-   * descending, then `sk` ascending, then `take(100)`. Generic `sortBy` does not lower.
+   * descending, then `sk` ascending, then `take(100)`. The sort lowers to a bounded heap.
    */
   private def topQuery(rows: Int, filters: Int, nulls: Boolean): Built =
     val (data, encodeMs) = sortSource(rows, nulls)

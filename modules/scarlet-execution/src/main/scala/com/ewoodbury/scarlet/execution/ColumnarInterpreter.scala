@@ -212,6 +212,10 @@ private[execution] object ColumnarInterpreter:
   private[execution] def decodePrefixFor(columns: Columns, limit: Int, op: PhysicalOp): Seq[Any] =
     decodePrefixWith(columns, limit, intPairDecoder(op), longDecoder(op), tripleDecoder(op))
 
+  /** Heap prefix of a value sort. Collect declines this node and stays on the row path. */
+  private[execution] def takeTop(plan: Plan[_], op: PhysicalOp, n: Int): Seq[Any] =
+    SortArms.take(plan, op, n)
+
   /**
    * Long decoder for `op`. A key or value column of a long pair keeps a null. Every other long
    * column rejects one.
@@ -234,7 +238,8 @@ private[execution] object ColumnarInterpreter:
    */
   private def intPairDecoder(op: PhysicalOp): (ColumnBatch, Int) => Seq[(Int, Int)] =
     op match
-      case _: PhysicalOp.SortByIntKey => BatchCodec.decodeIntPairsPreservingAbsence
+      case _: PhysicalOp.SortByIntKey | _: PhysicalOp.TopN =>
+        BatchCodec.decodeIntPairsPreservingAbsence
       case _: PhysicalOp.SortByLongKey =>
         (_, _) =>
           throw new IllegalStateException(
@@ -817,6 +822,7 @@ private[execution] object ColumnarInterpreter:
       // index is written and dropped rows are not. Take decodes the prefix.
       val width = ColumnarPlanner.shuffleWidth
       val workers = ColumnarPlanner.parallelism
+      val scanStart = SortPhases.begin()
       val sorted = FilterChain.selected(
         source,
         child,
@@ -825,6 +831,7 @@ private[execution] object ColumnarInterpreter:
         ordinals,
       ) match
         case Some(parts) =>
+          SortPhases.endScan(scanStart)
           RankSplitRuns.sortAndSplitSelected(parts, width, workers, ScarletConf.get)
         case None =>
           val batches = pairsOf(
@@ -836,6 +843,7 @@ private[execution] object ColumnarInterpreter:
               ordinals,
             ),
           )
+          SortPhases.endScan(scanStart)
           RankSplitRuns.sortAndSplit(batches, width, workers, ScarletConf.get)
       Columns.Pairs(sorted)
     case (Plan.SortByLongKeyOp(source), PhysicalOp.SortByLongKey(child)) =>
@@ -907,6 +915,8 @@ private[execution] object ColumnarInterpreter:
     case (plan, op) if StringOuterArms.accepts(plan, op) =>
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       StringOuterArms.run(plan, op, selectedPartition, ordinals)
+    case (_: Plan.SortByOp[?, ?], _: PhysicalOp.TopN) =>
+      throw new ColumnarFallback("top-n is a take of the value order")
     case _ =>
       throw new IllegalStateException(
         s"physical tree does not match ${plan.getClass.getSimpleName}",

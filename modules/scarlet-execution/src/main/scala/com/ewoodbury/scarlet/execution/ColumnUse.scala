@@ -72,6 +72,8 @@ private[execution] object ColumnUse:
       walk(source, child, parent union Set(0, 1))
     case (Plan.SortByStringKeyOp(source), PhysicalOp.SortByStringKey(child)) =>
       walk(source, child, parent union Set(0, 1))
+    case (Plan.SortByOp(source, _, _), PhysicalOp.TopN(child)) =>
+      walk(source, child, parent union Set(0, 1))
     case _ =>
       joinSides(plan, op) match
         case Some((left, leftOp, right, rightOp)) =>

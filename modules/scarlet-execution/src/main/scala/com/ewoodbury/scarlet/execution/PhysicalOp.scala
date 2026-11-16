@@ -465,6 +465,15 @@ enum PhysicalOp:
    */
   case SortByStringKey(child: PhysicalOp)
 
+  /**
+   * Bounded take of int pairs. Order is value descending, then key ascending. A null orders as
+   * zero and stays null. Ties keep input order. [[ColumnarInterpreter.interpret]] declines this
+   * node, so collect stays the row-path full sort. [[ColumnarPlanner.tryTake]] keeps a heap of the
+   * requested prefix. Output kind is [[PhysicalOp.Kind.Pairs]]. The ordering tag is
+   * [[OrderingTag.Sorted]] with `Seq(1, 0)` and `Seq(false, true)`.
+   */
+  case TopN(child: PhysicalOp)
+
   def kind: PhysicalOp.Kind = this match
     case Scan(sourceKind, _) => sourceKind
     case Filter(child, _) => child.kind
@@ -487,6 +496,7 @@ enum PhysicalOp:
     case SortByIntKey(_) => PhysicalOp.Kind.Pairs
     case SortByLongKey(_) => PhysicalOp.Kind.LongPairs
     case SortByStringKey(_) => PhysicalOp.Kind.StringPairs
+    case TopN(_) => PhysicalOp.Kind.Pairs
     case HashAggregate(_) => PhysicalOp.Kind.Pairs
     case LongHashAggregate(_) => PhysicalOp.Kind.LongPairs
     case StringHashAggregate(_) => PhysicalOp.Kind.StringPairs
@@ -584,6 +594,7 @@ enum PhysicalOp:
     case SortByIntKey(child) => s"SortByIntKey(${child.shape})"
     case SortByLongKey(child) => s"SortByLongKey(${child.shape})"
     case SortByStringKey(child) => s"SortByStringKey(${child.shape})"
+    case TopN(child) => s"TopN(${child.shape})"
     case HashAggregate(child) => s"HashAggregate(${child.shape})"
     case LongHashAggregate(child) => s"LongHashAggregate(${child.shape})"
     case StringHashAggregate(child) => s"StringHashAggregate(${child.shape})"
