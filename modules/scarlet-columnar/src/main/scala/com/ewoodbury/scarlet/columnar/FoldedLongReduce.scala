@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.columnar
 
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 
 /**
  * Long `reduceByKey` over a filter stack, without a survivor index.
@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * set per worker. The merge and the exchange are unchanged, so first-seen order inside a bucket
  * stays the order of the source rows.
  */
-@SuppressWarnings(Array("org.wartremover.warts.Var"))
+@SuppressWarnings(Array("org.wartremover.warts.Var", "org.wartremover.warts.Null"))
 private[scarlet] object FoldedLongReduce:
 
   private val partialSets = new AtomicInteger
@@ -32,6 +32,27 @@ private[scarlet] object FoldedLongReduce:
   /** Clears [[partialSetsForTest]]. */
   def resetPartialSetsForTest(): Unit =
     partialSets.set(0)
+
+  private val insertNs = new AtomicLong
+  private val combineNs = new AtomicLong
+  private val exchangeNs = new AtomicLong
+
+  /**
+   * Clears the wall-clock phase counters [[insertNanos]], [[combineNanos]], and [[exchangeNanos]].
+   */
+  private[scarlet] def resetPhaseNanos(): Unit =
+    insertNs.set(0L)
+    combineNs.set(0L)
+    exchangeNs.set(0L)
+
+  /** Wall time of the last [[reduce]] partial fold, in nanoseconds. */
+  private[scarlet] def insertNanos: Long = insertNs.get
+
+  /** Wall time of the last [[reduce]] partial merge, in nanoseconds. */
+  private[scarlet] def combineNanos: Long = combineNs.get
+
+  /** Wall time of the last [[reduce]] exchange and bucket fold, in nanoseconds. */
+  private[scarlet] def exchangeNanos: Long = exchangeNs.get
 
   /**
    * Partial-reduce `batches` by applying `steps` inside each morsel, merge one batch at a time,
@@ -55,14 +76,23 @@ private[scarlet] object FoldedLongReduce:
       try
         val (counts, morsels) = pieces(batches, batchSize)
         val width = math.min(parallelism, morsels.length)
+        val insertStarted = System.nanoTime()
         val partials = partialsOf(morsels, width, steps, op)
+        val combineStarted = System.nanoTime()
         val combined = PartialCombine.mergeMorsels(
           overlapCounts(counts, width),
           partials,
           parallelism,
           batch => LongHashReduce.int64(batch, keyOrdinal = 0, valueOrdinal = 1, op),
         )
-        LongHashReduce.exchangeReduced(combined, numPartitions, parallelism, batchSize, op)
+        val exchangeStarted = System.nanoTime()
+        val reduced =
+          LongHashReduce.exchangeReduced(combined, numPartitions, parallelism, batchSize, op)
+        val finished = System.nanoTime()
+        insertNs.set(combineStarted - insertStarted)
+        combineNs.set(exchangeStarted - combineStarted)
+        exchangeNs.set(finished - exchangeStarted)
+        reduced
       finally LongHashReduce.releaseOversized()
 
   private def longStep(step: Selection.Step): Boolean = step match
@@ -143,7 +173,24 @@ private[scarlet] object FoldedLongReduce:
       lengths(cursor) = morsel.length
       cursor += 1
     val head = rows(from)
-    LongHashReduce.int64FilteredGroup(head.morsel.batch, head.dense, starts, lengths, steps, op)
+    DirectLongReduce.aggregateRanges(
+      head.morsel.batch,
+      head.dense,
+      starts,
+      lengths,
+      steps,
+      op,
+    ) match
+      case null =>
+        LongHashReduce.int64FilteredGroup(
+          head.morsel.batch,
+          head.dense,
+          starts,
+          lengths,
+          steps,
+          op,
+        )
+      case reduced => reduced
 
   /**
    * How many stripe partials each input batch owns. A stripe overlaps a batch in at most one run,
