@@ -20,6 +20,8 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * includes the scan encode. A columnar action that publishes no column batch and folds nothing
  * fails the process. A plan [[ColumnarPlanner]] declines is not timed: `batches`, `fused`, and
  * `arm` say `row`, and one execution supplies the checksum. That run is not a speed.
+ * `CROSS_TIME_ROW=true` times that decline with the same warmup, rounds, and steady window.
+ * The arm stays `row`. A published batch on a declined plan still fails the process.
  *
  * Owned int arrays use [[BatchCodec.intPairs]]. Owned long arrays use
  * [[BatchCodec.copiedLongPairs]], the scan's array encode. A null long value is timed with
@@ -77,6 +79,7 @@ object CrossEngineBench:
       query: Option[String],
       warmup: Int,
       rounds: Int,
+      timeRow: Boolean,
   )
 
   private final case class Built(action: () => Any, encodeMs: Double, plan: Plan[_])
@@ -142,7 +145,7 @@ object CrossEngineBench:
     val uptime = java.lang.management.ManagementFactory.getRuntimeMXBean.getUptime
     System.err.println(s"QUERY_BEGIN $name ${System.currentTimeMillis()} uptime=$uptime")
     val built = build(name, settings)
-    val sample = measure(name, built, settings.warmup, settings.rounds)
+    val sample = measure(name, built, settings.warmup, settings.rounds, settings.timeRow)
     val endUptime = java.lang.management.ManagementFactory.getRuntimeMXBean.getUptime
     System.err.println(
       s"QUERY_END $name ${System.currentTimeMillis()} uptime=$endUptime p50=${sample.p50Ms} checksum=${sample.checksum}",
@@ -334,10 +337,17 @@ object CrossEngineBench:
     if (filters == 1) then keyed
     else keyed.filterValues((value: Long) => value >= 0)
 
-  private def measure(name: String, built: Built, warmup: Int, rounds: Int): Sample =
+  private def measure(
+      name: String,
+      built: Built,
+      warmup: Int,
+      rounds: Int,
+      timeRow: Boolean,
+  ): Sample =
     armOf(built.plan) match
+      case None if timeRow => timedSample(name, built, "row", warmup, rounds, columnar = false)
       case None => rowSample(name, built)
-      case Some(shape) => columnarSample(name, built, shape, warmup, rounds)
+      case Some(shape) => timedSample(name, built, shape, warmup, rounds, columnar = true)
 
   /**
    * Physical shape when [[ColumnarPlanner]] accepts `plan`. `None` is the row path, including a
@@ -369,12 +379,13 @@ object CrossEngineBench:
       "row",
     )
 
-  private def columnarSample(
+  private def timedSample(
       name: String,
       built: Built,
       shape: String,
       warmup: Int,
       rounds: Int,
+      columnar: Boolean,
   ): Sample =
     var round = 0
     while (round < warmup) do
@@ -388,8 +399,11 @@ object CrossEngineBench:
     round = 0
     while (round < rounds) do
       val observed = observe(built.action)
-      if (observed.batches == 0L && observed.fused == 0L) then
-        refuse(s"$name published no column batch and folded nothing")
+      if (columnar) then
+        if (observed.batches == 0L && observed.fused == 0L) then
+          refuse(s"$name published no column batch and folded nothing")
+      else if (observed.batches != 0L || observed.fused != 0L) then
+        refuse(s"$name declined but published batches=${observed.batches} fused=${observed.fused}")
       samples(round) = observed.elapsedMs
       checksum = checksumOf(observed.value)
       batches = observed.batches
@@ -628,6 +642,7 @@ $body
       // last 10 rounds sit on the floor. See docs/CROSS-ENGINE.md.
       warmup = readInt("CROSS_WARMUP", 80),
       rounds = readInt("CROSS_ROUNDS", 30),
+      timeRow = readFlag("CROSS_TIME_ROW", false),
     )
 
   private def readInt(name: String, default: Int): Int =
