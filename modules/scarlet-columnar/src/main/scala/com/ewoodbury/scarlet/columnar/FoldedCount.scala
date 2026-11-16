@@ -40,6 +40,46 @@ import com.ewoodbury.scarlet.core.ScarletConf
 private[scarlet] object FoldedCount:
 
   private val passes = new AtomicInteger
+  private val insertNs = new AtomicLong
+  private val mergeNs = new AtomicLong
+  private val exchangeNs = new AtomicLong
+  private val encodeNs = new AtomicLong
+  private val stripeWorkers = new AtomicInteger
+  private val stripePartials = new AtomicInteger
+  private val denseSegments = new AtomicInteger
+
+  /** Clears the wall-clock phase counters from the last [[count]] call. */
+  private[scarlet] def resetPhaseNanos(): Unit =
+    insertNs.set(0L)
+    mergeNs.set(0L)
+    exchangeNs.set(0L)
+    encodeNs.set(0L)
+    stripeWorkers.set(0)
+    stripePartials.set(0)
+    denseSegments.set(0)
+
+  /** Wall time of the last partial fold, in nanoseconds. One table per stripe segment. */
+  private[scarlet] def insertNanos: Long = insertNs.get
+
+  /** Wall time of the last cross-worker partial merge, in nanoseconds. */
+  private[scarlet] def mergeNanos: Long = mergeNs.get
+
+  /** Wall time of the last key exchange, in nanoseconds. */
+  private[scarlet] def exchangeNanos: Long = exchangeNs.get
+
+  /**
+   * Wall time of the last post-exchange combine. That combine compacts the survivor keys.
+   */
+  private[scarlet] def encodeNanos: Long = encodeNs.get
+
+  /** Worker stripes of the last [[count]] call. */
+  private[scarlet] def stripesForTest: Int = stripeWorkers.get
+
+  /** Segment partials the last [[count]] call merged. */
+  private[scarlet] def partialsForTest: Int = stripePartials.get
+
+  /** Segments that counted with [[DirectCount]] on the last [[count]] call. */
+  private[scarlet] def denseSegmentsForTest: Int = denseSegments.get
 
   /**
    * True when every step is an int key or value slot. Empty, whole-row, and string steps are not.
@@ -176,19 +216,33 @@ private[scarlet] object FoldedCount:
   ): Vector[ColumnBatch] =
     try
       val (counts, morsels) = pieces(batches, batchSize)
-      if (morsels.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs)
+      if (morsels.isEmpty) then
+        recordFold(0L, 0L, 0, 0, 0)
+        recordExchange(0L, 0L)
+        Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs)
       else
         val width = math.min(parallelism, morsels.length)
+        denseSegments.set(0)
+        val insertStarted = System.nanoTime()
         val partials = MorselScheduler
           .map(stripes(morsels, width), width) { (_, pieces) =>
             foldStripe(pieces, steps)
           }
           .flatten
+        val mergeStarted = System.nanoTime()
         val combined = PartialCombine.mergeMorsels(
           overlapCounts(counts, width),
           partials,
           parallelism,
           HashCount.addCounts,
+        )
+        val merged = System.nanoTime()
+        recordFold(
+          mergeStarted - insertStarted,
+          merged - mergeStarted,
+          width,
+          partials.length,
+          denseSegments.get,
         )
         finish(combined, numPartitions, parallelism, batchSize)
     finally
@@ -237,6 +291,23 @@ private[scarlet] object FoldedCount:
       index = end
     }
     acc
+
+  private def recordFold(
+      insert: Long,
+      merge: Long,
+      workers: Int,
+      partials: Int,
+      dense: Int,
+  ): Unit =
+    insertNs.set(insert)
+    mergeNs.set(merge)
+    stripeWorkers.set(workers)
+    stripePartials.set(partials)
+    denseSegments.set(dense)
+
+  private def recordExchange(exchange: Long, encode: Long): Unit =
+    exchangeNs.set(exchange)
+    encodeNs.set(encode)
 
   /**
    * How many stripe partials each input batch owns. A stripe overlaps a batch in at most one run,
@@ -298,7 +369,9 @@ private[scarlet] object FoldedCount:
             index += 1
           }
           table.compact()
-        case counted => counted
+        case counted =>
+          val _ = denseSegments.incrementAndGet()
+          counted
 
   /**
    * One table per thread. A stripe clears it between source batches and not between morsels of one
@@ -369,13 +442,20 @@ private[scarlet] object FoldedCount:
       parallelism: Int,
       batchSize: Int,
   ): Vector[ColumnBatch] =
-    if (combined.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs)
+    if (combined.isEmpty) then
+      recordExchange(0L, 0L)
+      Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs)
     else
+      val exchangeStarted = System.nanoTime()
       val buckets = HashExchange.partitionAll(combined, keyOrdinal = 0, numPartitions, parallelism)
+      val exchanged = System.nanoTime()
       val conf = ScarletConf.get
-      if (buckets.exists(bucket => HashCountSpill.exceeds(bucket, conf))) then
-        buckets.map(bucket => HashCountSpill.finish(bucket, parallelism, batchSize, conf))
-      else MorselScheduler.map(buckets, parallelism)((_, bucket) => HashCount.addCounts(bucket))
+      val encoded =
+        if (buckets.exists(bucket => HashCountSpill.exceeds(bucket, conf))) then
+          buckets.map(bucket => HashCountSpill.finish(bucket, parallelism, batchSize, conf))
+        else MorselScheduler.map(buckets, parallelism)((_, bucket) => HashCount.addCounts(bucket))
+      recordExchange(exchanged - exchangeStarted, System.nanoTime() - exchanged)
+      encoded
 
   /**
    * Spill off charges every source row. Spill on charges one morsel: the partial grows with
