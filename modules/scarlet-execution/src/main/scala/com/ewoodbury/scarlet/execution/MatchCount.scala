@@ -6,8 +6,9 @@ import com.ewoodbury.scarlet.core.Plan
 /**
  * Scalar count of a finished plan.
  *
- * An int shuffle-hash inner join sums chain lengths and does not write the match columns. Every
- * other plan is interpreted, and the count is the lengths of the batches it publishes.
+ * An int shuffle-hash inner join does not write the match columns. Owned int pairs multiply
+ * per-key counts. Any other int shuffle-hash join sums chain lengths. Every other plan is
+ * interpreted, and the count is the lengths of the batches it publishes.
  */
 private[execution] object MatchCount:
 

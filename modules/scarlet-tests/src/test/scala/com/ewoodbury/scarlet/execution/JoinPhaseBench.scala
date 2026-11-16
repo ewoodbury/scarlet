@@ -37,14 +37,18 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * production count does not: an owned int-pair slot stack is folded into the encode, and that
  * cost is inside `action`. Four threads run before one thread, so the morsel pool is sized at 4.
  *
+ * `JOIN_PHASE_ROWS` selects the filtered side (default 1e6). The right side stays 10240 rows.
+ * At 1e7 the match count is about 33.3e6 and the output-row guard scales with that.
+ *
  * {{{
- * sbt -J-Xmx4g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.JoinPhaseBench"
+ * JOIN_PHASE_ROWS=10000000 JOIN_PHASE_WARMUP=80 JOIN_PHASE_ROUNDS=30 \
+ *   sbt -J-Xmx4g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.JoinPhaseBench"
  * }}}
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object JoinPhaseBench:
 
-  private val rows = 1000000
+  private val rows = readInt("JOIN_PHASE_ROWS", 1000000)
   private val groups = 1024
   private val joinRows = 10 * groups
   private val batchSize = 8192
@@ -193,8 +197,10 @@ object JoinPhaseBench:
     )
 
   private def accept(prepared: Prepared): Unit =
-    if (prepared.outputRows < 3000000L || prepared.outputRows > 3600000L) then
-      refuse(s"output rows ${prepared.outputRows} are outside 3.0e6 until 3.6e6")
+    val low = rows.toLong * 3L
+    val high = rows.toLong * 36L / 10L
+    if (prepared.outputRows < low || prepared.outputRows > high) then
+      refuse(s"output rows ${prepared.outputRows} are outside $low until $high")
     val selected = prepared.assembled.foldLeft(0L)((sum, one) => sum + one.count.toLong)
     if (selected * 10L != prepared.outputRows) then
       refuse(s"survivors $selected * 10 != ${prepared.outputRows}")

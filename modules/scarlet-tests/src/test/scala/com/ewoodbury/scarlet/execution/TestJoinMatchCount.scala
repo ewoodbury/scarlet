@@ -12,7 +12,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Row-path equality for an int shuffle-hash count.
  *
  * The cross-engine shape is the two filters, keys `row % 1024`, and ten probe copies of each
- * key. `count` sums chain lengths. `collect` still writes the matches.
+ * key. An owned int-pair count multiplies per-key counts. `collect` still writes the matches.
  */
 class TestJoinMatchCount extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -76,6 +76,11 @@ class TestJoinMatchCount extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     present.join(duplicated).count() shouldBe row(present.join(duplicated).count())
   }
 
+  it should "match the cross-engine cardinality at both scales" in {
+    counted(1000000) shouldBe 3330360L
+    counted(10000000) shouldBe 33281390L
+  }
+
   it should "count a null build value as a match" in {
     val left = DistCollection(
       Seq(intPair(boxedInt(1), boxedInt(10)), intPair(boxedInt(1), absentInt)),
@@ -88,6 +93,36 @@ class TestJoinMatchCount extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     joined.count() shouldBe row(joined.count())
     joined.collect().toSeq should contain theSameElementsAs row(joined.collect().toSeq)
   }
+
+  /** Same generator as [[CrossEngineBench]]: keys `row % 1024`, ten probe copies, two filters. */
+  private def counted(rows: Int): Long =
+    val groups = 1024
+    val keys = Array.tabulate(rows)(row => row % groups)
+    val values = lcg(rows)
+    val left = DistCollection
+      .ofIntPairs(keys, values, 2)
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+    val width = 10 * groups
+    val right = DistCollection.ofIntPairs(
+      Array.tabulate(width)(row => row % groups),
+      Array.tabulate(width)(row => row % 100),
+      2,
+    )
+    left.join(right).count()
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def lcg(count: Int): Array[Int] =
+    val generated = new Array[Int](count)
+    var index = 0
+    var state = 0x12345678
+    while (index < count) {
+      state = state * 1664525 + 1013904223
+      val mixed = state & 0x7fffffff
+      generated(index) = (mixed % 2000001) - 1000000
+      index += 1
+    }
+    generated
 
   private def row[A](body: => A): A =
     val saved = ScarletConf.get

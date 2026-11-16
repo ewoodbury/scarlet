@@ -17,8 +17,9 @@ import ColumnPipeline.JoinInput
  *
  * A null value is a clear bit in the output, including a selection. It is not an absence bit. A
  * null key is dropped by the exchange. A selected side skips the slice; both dense sides use the
- * caller's flag and slice. An owned filter copy is already dense and is not sliced. [[count]] uses
- * that same exchange and sums chain lengths.
+ * caller's flag and slice. An owned filter copy is already dense and is not sliced. [[count]] of
+ * two owned int-pair sides multiplies per-key counts and does not copy values. Any other count
+ * uses that same exchange and sums chain lengths.
  */
 private[execution] object JoinArms:
 
@@ -40,7 +41,12 @@ private[execution] object JoinArms:
       ColumnPipeline.innerJoin(build.batches, probe.batches, width, workers, batchSize)
     else ColumnPipeline.innerJoin(build.input, probe.input, width, workers)
 
-  /** Rows [[inner]] would publish. The match columns are not written. */
+  /**
+   * Rows [[inner]] would publish. The match columns are not written.
+   *
+   * Owned int pairs, filtered or not, multiply key counts. A boxed source, a null, or a slice of
+   * one partition still exchanges and sums chain lengths.
+   */
   def count(
       left: Plan[_],
       right: Plan[_],
@@ -50,14 +56,20 @@ private[execution] object JoinArms:
       preserveAbsence: Boolean,
       ordinals: Set[Int],
   ): Long =
-    val width = ColumnarPlanner.shuffleWidth
-    val workers = ColumnarPlanner.parallelism
-    val batchSize = ColumnarPlanner.batchSize
-    val build = arm(left, leftOp, selectedPartition, preserveAbsence, ordinals)
-    val probe = arm(right, rightOp, selectedPartition, preserveAbsence, ordinals)
-    if (build.slice && probe.slice) then
-      ColumnPipeline.countInner(build.batches, probe.batches, width, workers, batchSize)
-    else ColumnPipeline.countInner(build.input, probe.input, width, workers)
+    val multiplied =
+      if (selectedPartition.nonEmpty) then None
+      else IntPairFilterEncode.tryCount(left, leftOp, right, rightOp, ordinals)
+    multiplied match
+      case Some(total) => total
+      case None =>
+        val width = ColumnarPlanner.shuffleWidth
+        val workers = ColumnarPlanner.parallelism
+        val batchSize = ColumnarPlanner.batchSize
+        val build = arm(left, leftOp, selectedPartition, preserveAbsence, ordinals)
+        val probe = arm(right, rightOp, selectedPartition, preserveAbsence, ordinals)
+        if (build.slice && probe.slice) then
+          ColumnPipeline.countInner(build.batches, probe.batches, width, workers, batchSize)
+        else ColumnPipeline.countInner(build.input, probe.input, width, workers)
 
   private final case class Armed(
       input: JoinInput,
