@@ -20,8 +20,11 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * Each worker takes one contiguous stripe of the morsels. Every morsel of one source batch in that
  * stripe folds into a single table and compacts once, so a repeated key is updated instead of
  * inserted again. The table starts at the longest morsel, not the stripe's row count, and grows
- * only when a new key passes the load limit. A segment whose keys fit in a small span uses
- * [[DirectCount]], one dense slot per key in the span.
+ * only when a new key passes the load limit. A segment whose first keys fit in a small span uses
+ * [[DirectCount]], one dense slot per key in that prefix. A later key outside the prefix uses the
+ * hash table. Partials whose combined length is at most [[CallerRows]] merge, partition, and
+ * combine on the caller. The pool dispatch of a few hundred keys is larger than the combine, and
+ * the result order is the same index order the scheduler returns.
  *
  * [[count]] returns `None` before any table when `steps` is empty or is not a stack of
  * [[Selection.Step.Int32]] slot atoms. Spill off also returns `None` when the source-row estimate
@@ -230,12 +233,11 @@ private[scarlet] object FoldedCount:
           }
           .flatten
         val mergeStarted = System.nanoTime()
-        val combined = PartialCombine.mergeMorsels(
-          overlapCounts(counts, width),
-          partials,
-          parallelism,
-          HashCount.addCounts,
-        )
+        val groups = overlapCounts(counts, width)
+        val combined =
+          if (shortEnough(partials)) then
+            PartialCombine.mergeOnCaller(groups, partials, HashCount.addCounts)
+          else PartialCombine.mergeMorsels(groups, partials, parallelism, HashCount.addCounts)
         val merged = System.nanoTime()
         recordFold(
           mergeStarted - insertStarted,
@@ -433,6 +435,51 @@ private[scarlet] object FoldedCount:
         created
 
   /**
+   * Combined partials at or under this length stay on the caller. Above it the pool still merges
+   * and partitions. 8192 is one default morsel: a residue count such as `row % 1024` finishes
+   * under it, and a wide key domain does not.
+   */
+  private val CallerRows = 8192
+
+  private def shortEnough(batches: Vector[ColumnBatch]): Boolean =
+    var total = 0
+    val rows = batches.iterator
+    var fits = true
+    while (fits && rows.hasNext) {
+      total += rows.next().length
+      if (total > CallerRows) then fits = false
+    }
+    fits
+
+  /**
+   * [[HashExchange.partitionAll]] without a dispatch. One visit per input batch, then bucket `i`
+   * concatenated in batch order, matching the parallel exchange.
+   */
+  private def partitionHere(
+      batches: Vector[ColumnBatch],
+      numPartitions: Int,
+  ): Vector[ColumnBatch] =
+    val scattered = batches.map { batch =>
+      ColumnMetrics.visit()
+      HashExchange.partitionInt32(batch, keyOrdinal = 0, numPartitions)
+    }
+    Vector.tabulate(numPartitions) { part =>
+      val pieces = scattered.map { one =>
+        one.lift(part).getOrElse {
+          throw new IllegalArgumentException(s"missing partition $part")
+        }
+      }
+      ColumnBatches.concat(pieces)
+    }
+
+  /** [[HashCount.addCounts]] of each bucket, in partition order, with one visit per bucket. */
+  private def combineHere(buckets: Vector[ColumnBatch]): Vector[ColumnBatch] =
+    buckets.map { bucket =>
+      ColumnMetrics.visit()
+      HashCount.addCounts(bucket)
+    }
+
+  /**
    * Same exchange as [[HashCount]]. Spill stays on the post-exchange bucket. The partial combine
    * above has already refused any table that does not fit.
    */
@@ -447,12 +494,16 @@ private[scarlet] object FoldedCount:
       Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs)
     else
       val exchangeStarted = System.nanoTime()
-      val buckets = HashExchange.partitionAll(combined, keyOrdinal = 0, numPartitions, parallelism)
+      val onCaller = shortEnough(combined)
+      val buckets =
+        if (onCaller) then partitionHere(combined, numPartitions)
+        else HashExchange.partitionAll(combined, keyOrdinal = 0, numPartitions, parallelism)
       val exchanged = System.nanoTime()
       val conf = ScarletConf.get
       val encoded =
         if (buckets.exists(bucket => HashCountSpill.exceeds(bucket, conf))) then
           buckets.map(bucket => HashCountSpill.finish(bucket, parallelism, batchSize, conf))
+        else if (onCaller) then combineHere(buckets)
         else MorselScheduler.map(buckets, parallelism)((_, bucket) => HashCount.addCounts(bucket))
       recordExchange(exchanged - exchangeStarted, System.nanoTime() - exchanged)
       encoded
@@ -492,22 +543,39 @@ private[scarlet] object FoldedCount:
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
 
   /**
-   * One all-valid batch per partition. The columns keep the caller's arrays. Do not return this
-   * batch: the partition still owns those arrays for a later action.
+   * One all-valid bitmap per caller thread and row count. Owned pair arrays have no nulls, and the
+   * count only reads the bits, so the next action with the same length does not fill them again.
+   */
+  private val presentValid: ThreadLocal[Validity | Null] = new ThreadLocal[Validity | Null]()
+
+  /**
+   * One all-valid batch per partition. The columns keep the caller's arrays and share one bitmap
+   * for this length. Do not return this batch: the partition still owns those arrays, and a writer
+   * would change the shared bits. The count does not write them.
    */
   private def presentParts(parts: Vector[(Array[Int], Array[Int])]): Vector[ColumnBatch] =
     parts.map { (keys, values) =>
       require(keys.length == values.length, "key and value arrays differ in length")
       val rows = keys.length
+      val present = sharedPresent(rows)
       new ColumnBatch(
         Vector(LogicalType.Int32, LogicalType.Int32),
         Vector(
-          Int32Column.of(keys, Validity.allValid(rows), rows),
-          Int32Column.of(values, Validity.allValid(rows), rows),
+          Int32Column.of(keys, present, rows),
+          Int32Column.of(values, present, rows),
         ),
         rows,
       )
     }
+
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def sharedPresent(rows: Int): Validity =
+    presentValid.get() match
+      case current: Validity if current.capacity == rows => current
+      case _ =>
+        val created = Validity.allValid(rows)
+        presentValid.set(created)
+        created
 
   private def requireKey(batch: ColumnBatch): Unit =
     val keyType = batch.schema.headOption.getOrElse {

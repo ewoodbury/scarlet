@@ -12,6 +12,10 @@ import java.util.concurrent.atomic.AtomicInteger
  * null, a short morsel, or a wider span returns null and the caller keeps the hash table. A morsel
  * shorter than [[MinRows]] stays on that table: the reuse contract is pinned there, and the range
  * scan would not pay for itself.
+ *
+ * A segment takes its domain from the first [[DomainPrefix]] keys, then counts every range once. A
+ * later key outside that domain returns null. The prefix is one default morsel, so a residue such
+ * as `row % 1024` shows its whole set before the count and is not walked twice.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var", "org.wartremover.warts.Null"))
 private[columnar] object DirectCount:
@@ -21,6 +25,12 @@ private[columnar] object DirectCount:
 
   /** `max - min` must be strictly below this. The counter array is one longer. */
   private val SpanLimit = 4096
+
+  /**
+   * Keys read to choose the domain. A later key outside that domain declines to the hash table.
+   * 8192 is one default morsel, enough for `row % 1024` to show its whole residue set.
+   */
+  private val DomainPrefix = 8192
 
   def release(): Unit = locals.remove()
 
@@ -97,50 +107,28 @@ private[columnar] object DirectCount:
       val values =
         if ((leftOrdinal == 1) || (rightOrdinal == 1)) then ColumnHash.int32At(batch, 1).values
         else keys
-      var min = 0
-      var max = 0
-      var seen = false
-      var fits = true
-      cursor = 0
-      while (cursor < count && fits) {
-        val end = starts(cursor) + lengths(cursor)
-        var row = starts(cursor)
-        if (!seen && row < end) then
-          min = keys(row)
-          max = min
-          seen = true
-          row += 1
-        while (row < end && fits) {
-          val key = keys(row)
-          if (key < min) then min = key
-          else if (key > max) then max = key
-          if (max.toLong - min.toLong >= SpanLimit.toLong) then fits = false
-          row += 1
-        }
-        cursor += 1
-      }
-      if (!fits || !seen) then null
-      else
-        val span = (max - min) + 1
-        val buffer = borrow(span)
-        buffer.clear()
-        buffer.prepare(min, span)
-        notePeak(buffer.slotCount)
-        val left = if (leftOrdinal == 0) then keys else values
-        val right = if (rightOrdinal == 0) then keys else values
-        val keepLeft = function(leftKeep)
-        val keepRight = function(rightKeep)
-        cursor = 0
-        while (cursor < count) {
-          val end = starts(cursor) + lengths(cursor)
-          var row = starts(cursor)
-          while (row < end) {
-            if (keepLeft(left(row)) && keepRight(right(row))) then buffer.add(keys(row))
-            row += 1
-          }
-          cursor += 1
-        }
-        buffer.compact()
+      domain(keys, starts, lengths) match
+        case null => null
+        case bounds: Bounds =>
+          val buffer = borrow(bounds.span)
+          buffer.clear()
+          buffer.prepare(bounds.min, bounds.span)
+          notePeak(buffer.slotCount)
+          val left = if (leftOrdinal == 0) then keys else values
+          val right = if (rightOrdinal == 0) then keys else values
+          if (
+              buffer.count(
+                keys,
+                left,
+                right,
+                starts,
+                lengths,
+                function(leftKeep),
+                function(rightKeep),
+              )
+            )
+          then buffer.compact()
+          else null
 
   private def two(
       morsel: Morsel,
@@ -170,6 +158,43 @@ private[columnar] object DirectCount:
         rightOrdinal,
         function(rightKeep),
       )
+
+  /**
+   * Inclusive key domain of a prefix of the ranges, or null when that prefix is empty or at least
+   * [[SpanLimit]] wide. Only [[DomainPrefix]] keys are read. A wrapped `max - min` is too wide.
+   * The fill declines if a later key falls outside this domain.
+   */
+  private def domain(keys: Array[Int], starts: Array[Int], lengths: Array[Int]): Bounds | Null =
+    val count = starts.length
+    var cursor = 0
+    var seenRows = 0
+    var min = 0
+    var max = 0
+    var seen = false
+    var fits = true
+    while (cursor < count && fits && seenRows < DomainPrefix) {
+      val end = starts(cursor) + lengths(cursor)
+      var row = starts(cursor)
+      while (row < end && fits && seenRows < DomainPrefix) {
+        val key = keys(row)
+        if (!seen) then
+          min = key
+          max = key
+          seen = true
+        else
+          if (key < min) then min = key
+          else if (key > max) then max = key
+          val width = max.toLong - min.toLong
+          if (width < 0L || width >= SpanLimit.toLong) then fits = false
+        if (fits) then seenRows += 1
+        row += 1
+      }
+      cursor += 1
+    }
+    if (!fits || !seen) then null
+    else Bounds(min, (max - min) + 1)
+
+  private final class Bounds(val min: Int, val span: Int)
 
   private def columnReady(batch: ColumnBatch, ordinal: Int, start: Int, length: Int): Boolean =
     ordinal >= 0 && ordinal < batch.columns.length &&
@@ -254,26 +279,76 @@ private[columnar] object DirectCount:
     private var order: Array[Int] = new Array[Int](capacity)
     private var occupied: Int = 0
     private var min: Int = 0
+    private var span: Int = 0
 
-    def accepts(span: Int): Boolean = counts.length >= span
+    def accepts(width: Int): Boolean = counts.length >= width
 
     def slotCount: Int = counts.length
 
     def clear(): Unit =
       var cursor = 0
       val rows = occupied
+      val origin = min
+      val slots = counts
+      val seen = order
       while (cursor < rows) {
-        counts(order(cursor) - min) = 0
+        slots(seen(cursor) - origin) = 0
         cursor += 1
       }
       occupied = 0
 
-    def prepare(low: Int, span: Int): Unit =
-      if (counts.length < span) then
-        counts = new Array[Int](span)
-        order = new Array[Int](span)
+    def prepare(low: Int, width: Int): Unit =
+      if (counts.length < width) then
+        counts = new Array[Int](width)
+        order = new Array[Int](width)
         occupied = 0
       min = low
+      span = width
+
+    /**
+     * Counts every range. False when a survivor falls outside the prefix domain. A filtered row
+     * does not consult the domain: it adds nothing either way. Slots written so far stay occupied,
+     * so the next [[clear]] drops them. The signed range test is safe because the span is below
+     * [[SpanLimit]] and both ends are observed keys, so `key - origin` cannot wrap.
+     */
+    def count(
+        keys: Array[Int],
+        left: Array[Int],
+        right: Array[Int],
+        starts: Array[Int],
+        lengths: Array[Int],
+        keepLeft: Int => Boolean,
+        keepRight: Int => Boolean,
+    ): Boolean =
+      val origin = min
+      val high = (origin.toLong + span.toLong - 1L).toInt
+      val slots = counts
+      val seen = order
+      val ranges = starts.length
+      var cursor = 0
+      var filled = 0
+      var ok = true
+      while (cursor < ranges && ok) {
+        val end = starts(cursor) + lengths(cursor)
+        var row = starts(cursor)
+        while (row < end && ok) {
+          val key = keys(row)
+          if (keepLeft(left(row)) && keepRight(right(row))) then
+            if (key < origin || key > high) then ok = false
+            else
+              val index = key - origin
+              val current = slots(index)
+              if (current == 0) then
+                seen(filled) = key
+                filled += 1
+                slots(index) = 1
+              else slots(index) = current + 1
+          row += 1
+        }
+        cursor += 1
+      }
+      occupied = filled
+      ok
 
     def add(key: Int): Unit =
       val index = key - min
