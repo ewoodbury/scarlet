@@ -1,7 +1,10 @@
 # Benchmarks
 
 `QueryBench` is the measurement instrument for the engine. It is a `main` in `scarlet-tests`.
-`make test` does not run it, and it does not assert on timing.
+`make test` does not run it, and it does not assert on timing. A premise a command already
+killed is in `docs/NEGATIVE-RESULTS.md`: 1e7 sort `alloc_mb=702.096` at
+`SORT_ROWS=10000000 SORT_WARMUP=80 SORT_ROUNDS=30 SORT_THREADS=4`, and 1e7 `countByKey`
+`steady_ms=12.236` at `CROSS_ROWS=10000000 CROSS_WARMUP=80 CROSS_ROUNDS=30`.
 
 ## Run
 
@@ -126,7 +129,9 @@ rounds. At four threads `countByKey` is 7.050 ms and allocates 23.6 MB, against 
 47.5 MB for `groupByKey` after its groups are collected. The gap is the value arrays `groupByKey`
 has to build and the decode its result pays; the counts match (`10821571` and `166553187385` on the
 two checksums). At one thread the same pair is 13.025 ms and 18.432 ms. The row path for
-`filter-countbykey` is 112.869 ms at one thread and 76.223 ms at four.
+`filter-countbykey` is 112.869 ms at one thread and 76.223 ms at four. The 1e7 pair against the
+40.288 ms cell is `docs/NEGATIVE-RESULTS.md` (`steady_ms=12.236`, `alloc_mb=3.036`,
+`CROSS_ROWS=10000000 CROSS_WARMUP=80 CROSS_ROUNDS=30`, `taskset -c 0-3`).
 
 The harness checks the physical shape before timing. It also rejects a sample whose published
 batches disagree with the layout it is about to record.
@@ -369,6 +374,10 @@ production path. The timed action includes the plan and the rank split, then the
 checksum mix. A long-pair sort spills when `spillEnabled` is on and the retained estimate is over
 `spillBudgetBytes`. One input partition is still sorted in memory when spill is on. This run
 leaves spill off, so the timed path is the in-memory rank split.
+
+The 1e7 allocation sites are `docs/NEGATIVE-RESULTS.md` (`alloc_mb=702.096`,
+`RadixPass.sortInts` 0.95% of `jfr view allocation-by-site`, `SORT_ROWS=10000000
+SORT_WARMUP=80 SORT_ROUNDS=30`).
 
 ### Sort at scale
 

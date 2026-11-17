@@ -63,6 +63,7 @@ object CrossEngineBench:
     "filter-groupbykey",
     "filter-reducebykey",
     "filter-join",
+    "filter-joinsum",
     "filter-sort",
     "filter-countbykey",
     "filter-distinct",
@@ -188,6 +189,8 @@ object CrossEngineBench:
         }
       case "filter-join" =>
         joinQuery(rows, filters, nulls)
+      case "filter-joinsum" =>
+        joinSumQuery(rows, filters, nulls)
       case "filter-sort" =>
         sortQuery(rows, filters, nulls)
       case "filter-distinct" =>
@@ -261,6 +264,20 @@ object CrossEngineBench:
       (filterLongs(data, filters), encodeMs)
 
   private def joinQuery(rows: Int, filters: Int, nulls: Boolean): Built =
+    joinBuilt(rows, filters, nulls)(joined => () => joined.count())
+
+  /**
+   * Same inputs as [[joinQuery]]. The action sums `left * 31 + right` over the columns the join
+   * writes. The count action does not write those columns.
+   */
+  private def joinSumQuery(rows: Int, filters: Int, nulls: Boolean): Built =
+    joinBuilt(rows, filters, nulls)(joined => () => JoinValueSum.of(joined))
+
+  private def joinBuilt(
+      rows: Int,
+      filters: Int,
+      nulls: Boolean,
+  )(use: DistCollection[(Int, (Int, Int))] => () => Any): Built =
     val width = 10 * groups
     val joinKeys = Array.tabulate(width)(row => row % groups)
     val joinValues = Array.tabulate(width)(row => row % 100)
@@ -284,7 +301,7 @@ object CrossEngineBench:
         val data = DistCollection.ofIntPairs(keys, values, sourcePartitions)
         (filterInts(data, filters), elapsed)
     val joined = filtered.join(side)
-    Built(() => joined.count(), encodeMs, joined.plan)
+    Built(use(joined), encodeMs, joined.plan)
 
   /** Pairs are `(sk, v)`. `sk` is the Fisher-Yates permutation. `v` is the shared generator. */
   private def sortSource(rows: Int, nulls: Boolean): (DistCollection[(Int, Int)], Double) =
@@ -410,7 +427,7 @@ object CrossEngineBench:
       fused = observed.fused
       round += 1
     val steady = steadyOf(samples)
-    if (name == "filter-join" || name == "filter-count") then
+    if (name == "filter-join" || name == "filter-joinsum" || name == "filter-count") then
       val shown = samples.mkString(",")
       System.err.println(s"SAMPLES $name $shown")
     System.err.println(
