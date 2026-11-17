@@ -561,8 +561,85 @@ The table does not measure whole-operator memory. A spilled sort-merge merges at
 `spillFanIn` runs at a time, and the inputs and the joined result are still materialised.
 Shuffle-hash joins are absent from the table. The bench does not run them. Int, long, and string
 build buckets do spill. The inner broadcast build does
-spill, and this bench does not run it. p95 is the largest of the five samples, so it is not a
-stable tail.
+spill, and this bench does not run it. The sort-merge rows are the int kernel. A long or string
+inner sort-merge throws when the present-key estimate is over the budget and writes nothing.
+p95 is the largest of the five samples, so it is not a stable tail.
+
+## 2026-11-17 — spill at 1e7
+
+`SpillScaleBench` is a `main` in `scarlet-tests`. `make test` does not run it. It runs the
+cross-engine shapes at 1e7 rows and prints the spill publish counters. `filter-sort`,
+`filter-reducebykey`, and `filter-join` match `CrossEngineBench`: two filters, two source
+partitions, batch 8192, shuffle width 4, four threads. `filter-reducebykey` is the long-pair
+action. `filter-join` counts and does not build a table. `filter-joinsum` is the same join with
+the match columns summed, so the int shuffle-hash build runs. The filtered left side is the
+build. Spill files are deleted before the action returns. A file count is publishes from the
+last measured round, not bytes left on disk.
+
+A heap cap does not turn spill on. Spill compares a retained-size estimate with
+`spillBudgetBytes`. The default budget is 64 MiB (`67108864`). The forked test JVM is the heap
+below. The sbt JVM is `-J-Xmx1g`. `Test / javaOptions` is assigned with `:=`. Warmup 1 and rounds
+3 unless a row says otherwise. p50 is the middle of the three samples after sorting. The machine
+is this container: aarch64, 4 cores, OpenJDK 21.0.13. This is not the devbox scoreboard
+(`-Xmx10g`, warmup 80, rounds 30).
+
+```shell
+SPILL_SCALE_QUERY=<query> SPILL_SCALE_ROWS=10000000 SPILL_SCALE_SPILL=<true|false> \
+  SPILL_SCALE_BUDGET=<bytes> SPILL_SCALE_WARMUP=1 SPILL_SCALE_ROUNDS=3 \
+  sbt -J-Xmx1g \
+  'set LocalProject("scarlet-tests") / Test / fork := true' \
+  'set LocalProject("scarlet-tests") / Test / javaOptions := Seq("<heap>", "-XX:+ExitOnOutOfMemoryError")' \
+  'scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.SpillScaleBench'
+```
+
+`<heap>` is `-Xmx2g`, `-Xmx256m`, `-Xmx1g`, or `-Xmx3g` as in the table. The throw rows used
+warmup 0, rounds 1, and no `ExitOnOutOfMemoryError`.
+
+| query | spill | budget | heap | p50 ms | files | checksum |
+| --- | --- | --- | --- | ---: | --- | ---: |
+| filter-sort | off | 64 MiB | 2g | 117.508 | 0 | 518322534674927 |
+| filter-sort | on | 1 MiB | 256m | 504.817 | sort 3, 1 pass | 518322534674927 |
+| filter-reducebykey | off | 64 MiB | 2g | 16.268 | 0 | 1663934572679 |
+| filter-reducebykey | on | 4 KiB | 1g | 55.931 | reduce 28 | 1663934572679 |
+| filter-join | off | 64 MiB | 2g | 12.557 | 0 | 33281390 |
+| filter-join | on | 64 MiB | 256m | 13.548 | 0 | 33281390 |
+| filter-joinsum | off | 64 MiB | 3g | 128.310 | 0 | 515818008297280 |
+| filter-joinsum | on | 16 MiB | 3g | 445.721 | join 8 | 515818008297280 |
+
+Sort at 1 MiB is 4.30× the in-memory p50 (504.817 / 117.508). The heaps differ: 256m against 2g.
+Reduce at 4 KiB is 3.44× (55.931 / 16.268), 1g against 2g. A 256m heap cannot construct the 1e7
+long pairs, so that run is the smallest heap that reached the kernel. The join build at 16 MiB
+is 3.47× (445.721 / 128.310) on the same 3g heap, 8 files. The count at the default budget is
+1.08× (13.548 / 12.557) and writes nothing. The three published checksums match the 1e7
+cross-engine values. The joinsum checksum matched across the two arms.
+
+Spill on at the default 64 MiB budget does not spill these three scoreboard actions. At
+`-Xmx256m`, warmup 1, rounds 3, `filter-join` is the row above. `filter-sort` dies in
+`RadixPass.sortInts` (`RankSplit.sortSelectedDense`): the retained estimate is under 64 MiB, so
+the in-memory radix path runs, and its scratch does not fit. `filter-reducebykey` dies in
+`DistCollection.ofLongPairs` while the input is built, before the spill check. A one-round
+`filter-join` at budget 1 MiB (`1048576`) and `-Xmx256m` still published `join_files=0`.
+`JoinArms.count` tallies per key and skips the build.
+
+`filter-joinsum` at budget 1 MiB and `-Xmx3g` does not finish a spill. A piece still over the
+budget throws from `HashJoinSpill.refusePiece`:
+
+```text
+java.lang.IllegalStateException: shuffle-hash build piece retains about 1680021 bytes for 48553 rows, above the budget of 1048576 bytes
+```
+
+Long and string inner sort-merge throw by design and write nothing. At 1e6 rows, budget 1 byte,
+`-Xmx2g`, warmup 0, rounds 1, `merge_files=0`:
+
+```text
+java.lang.IllegalStateException: long inner sort-merge spill retains about 2830084 bytes, above the budget of 1 bytes
+java.lang.IllegalStateException: string inner sort-merge spill retains about 8501624 bytes, above the budget of 1 bytes
+```
+
+The same sentence at 1e5 rows and budget 1 byte names 281682 bytes (long) and 854956 bytes
+(string). At 1e7 rows the long join does not reach that check on this machine. With budget
+1 MiB it dies in `ColumnKernel.compactInt64` during the filter, at `-Xmx3g` and at `-Xmx4g`
+(`max_heap` 4294967296).
 
 ## 2026-11-16 — Panama on the dense fold and the int join probe
 
