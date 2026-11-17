@@ -236,9 +236,8 @@ enum PhysicalOp:
    * fills the hash table. The left input is the probe side and is probed in place. There is no
    * build side: building the left input would keep unmatched right rows. Output columns are
    * `(key, left, right)`. Absence is a probe-side row with no partner, and the right value's
-   * absence bit is set. A null value is not absence and is not representable on this path. A null
-   * value on either input stays on the row path. This is a different node from [[BroadcastJoin]],
-   * so the inner join does not carry an outer flag.
+   * absence bit is set. A null value is a clear validity bit and stays columnar. This is a
+   * different node from [[BroadcastJoin]], so the inner join does not carry an outer flag.
    */
   case BroadcastLeftOuter(left: PhysicalOp, right: PhysicalOp)
 

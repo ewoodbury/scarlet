@@ -35,9 +35,10 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * swaps the value columns back to `(key, left, right)`. A probe-side row with no partner is kept,
  * and the build value's absence bit is set. A null value is not absence. [[hashLeftOuterJoin]]
  * keeps a clear bit. A shuffle-hash right outer reuses that kernel, so the bit survives the swap.
- * [[broadcastOuterKeepNull]] keeps the same bit for a broadcast right outer join, and the caller
- * swaps the value columns. Broadcast left, sort-merge, and full outer still require every value to
- * be present. Match order is a kernel detail. The published multiset is multiplicity, values, and
+ * [[broadcastOuterKeepNull]] keeps the same bit for a broadcast left or right outer join. A
+ * broadcast right outer join swaps the value columns. A broadcast left outer join does not: the
+ * probe is already the left input. Sort-merge and full outer still require every value to be
+ * present. Match order is a kernel detail. The published multiset is multiplicity, values, and
  * null semantics. A full outer join probes the left input and also emits build rows no probe
  * matched. Broadcast gives each probe thread its own bitmap and ORs them after the probes join.
  * Shuffle keeps one bitmap per partition and finishes that partition immediately. Null build keys
@@ -516,13 +517,12 @@ object ColumnPipeline:
 
   /**
    * Left outer join with no exchange. `probe` is the probe side. A probe-side row with no partner
-   * is appended once, and the build value's absence bit is set. A null value is not absence. This
-   * method refuses one. [[valuesFullyPresent]] reads the validity words encoding already wrote. A
-   * broadcast right outer join calls [[broadcastOuterKeepNull]] instead, the same kernel without
-   * this check. A null probe key does not match and is kept. A null build key is not inserted, so
-   * it does not match probe key 0. Output columns are `(key, probe value, build value)`. An empty
-   * probe returns no batches. An empty build emits every probe-side row with the build value
-   * absent. `buildBudgetBytes` is the same budget as [[broadcastJoin]].
+   * is appended once, and the build value's absence bit is set. A null value is a clear validity
+   * bit on the probe column or the build column. It is not an absence bit. This method calls
+   * [[broadcastOuterKeepNull]]. A null probe key does not match and is kept. A null build key is
+   * not inserted, so it does not match probe key 0. Output columns are `(key, probe value, build
+   * value)`. An empty probe returns no batches. An empty build emits every probe-side row with the
+   * build value absent. `buildBudgetBytes` is the same budget as [[broadcastJoin]].
    */
   def broadcastLeftOuterJoin(
       probe: Vector[ColumnBatch],
@@ -530,21 +530,17 @@ object ColumnPipeline:
       parallelism: Int,
       buildBudgetBytes: Long,
   ): Vector[ColumnBatch] =
-    require(
-      valuesFullyPresent(probe) && valuesFullyPresent(build),
-      "a left outer join needs fully present value columns",
-    )
     broadcastOuterKeepNull(probe, build, parallelism, buildBudgetBytes)
 
   /**
    * Left-outer broadcast kernel. A null value is a clear validity bit on the probe column or the
-   * build column. It is not an absence bit. A broadcast right outer join passes the right input as
-   * the probe and the left input as the build, then swaps the value columns. The clear bit stays
-   * put. The absence bit stays on the build column, which is the left value after that swap.
-   * [[broadcastLeftOuterJoin]] refuses a null value before calling this, so a broadcast left outer
-   * join stays on the row path. Output columns are `(key, probe value, build value)`. An empty
-   * probe returns no batches. An empty build emits every probe-side row with the build value
-   * absent.
+   * build column. It is not an absence bit. A broadcast left outer join passes the left input as
+   * the probe and the right input as the build, and does not swap. A broadcast right outer join
+   * passes the right input as the probe and the left input as the build, then swaps the value
+   * columns. The clear bit stays put. The absence bit stays on the build column: the right value
+   * for a left outer join, and the left value after the right-outer swap. Output columns are
+   * `(key, probe value, build value)`. An empty probe returns no batches. An empty build emits
+   * every probe-side row with the build value absent.
    */
   private[scarlet] def broadcastOuterKeepNull(
       probe: Vector[ColumnBatch],

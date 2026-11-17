@@ -603,7 +603,7 @@ class TestRightOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
       .map(_.shape) shouldBe Some("SortMergeFullOuter(Exchange(Scan), Exchange(Scan))")
   }
 
-  "full outer, broadcast left, sort-merge left, and sort-merge right" should
+  "full outer, sort-merge left, and sort-merge right" should
     "decline a null value and match the row path" in {
       val left = source(Seq(Seq(1 -> 10, pair(Some(2), None))))
       val right = source(Seq(Seq(1 -> 100)))
@@ -612,11 +612,6 @@ class TestRightOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
           "full outer",
           Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.ShuffleHash)),
           "HashFullOuter(Exchange(Scan), Exchange(Scan))",
-        ),
-        (
-          "broadcast left",
-          Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
-          "BroadcastLeftOuter(Scan, Scan)",
         ),
         (
           "sort-merge left",
