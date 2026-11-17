@@ -561,13 +561,19 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     )
     val batch = parts.headOption.getOrElse(fail("missing probe batch"))
     batch.length should be > 3
-    ColumnMetrics.withSink(new CountingSink) {
-      val decoded = ColumnarInterpreter.decodePrefix(
-        ColumnarInterpreter.Columns.Outer(Vector(batch), AbsentSide.Right),
-        3,
-      )
-      decoded.length shouldBe 3
-      ColumnMetrics.decodedValueCount shouldBe 3L
+    val scan = PhysicalOp.Scan(PhysicalOp.Kind.Pairs, Seq.empty[Partition[_]])
+    val op = PhysicalOp.BroadcastLeftOuter(scan, scan)
+    // Outer rows share one decoder. The limit is what changes between the two calls.
+    Seq(1, 3).foreach { limit =>
+      ColumnMetrics.withSink(new CountingSink) {
+        val decoded = ColumnarInterpreter.decodePrefixFor(
+          ColumnarInterpreter.Columns.Outer(Vector(batch), AbsentSide.Right),
+          limit,
+          op,
+        )
+        decoded.length shouldBe limit
+        ColumnMetrics.decodedValueCount shouldBe limit.toLong
+      }
     }
   }
 

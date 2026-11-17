@@ -268,15 +268,6 @@ private[execution] object ColumnarInterpreter:
         BatchCodec.decodeIntTriplesPreservingAbsence
       case _ => (batch, rows) => BatchCodec.decodeIntTriples(batch, rows)
 
-  private[execution] def decodePrefix(columns: Columns, limit: Int): Seq[Any] =
-    decodePrefixWith(
-      columns,
-      limit,
-      (batch, rows) => BatchCodec.decodeIntPairs(batch, rows),
-      (batch, rows) => BatchCodec.decodeLongs(batch, rows),
-      (batch, rows) => BatchCodec.decodeIntTriples(batch, rows),
-    )
-
   private def decodePrefixWith(
       columns: Columns,
       limit: Int,

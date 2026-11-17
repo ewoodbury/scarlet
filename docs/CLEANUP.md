@@ -41,6 +41,9 @@ found. `pending` is a local name: a bit mask in `ColumnHash.scala:58`, an iterat
   APIs. `.github/copilot-instructions.md` points at `AGENTS.md`.
 - `docs/CROSS-ENGINE.md` lead table is the 2026-11-17 pinned run at `50591f6`. The `#233`
   table stops at `2b7b01e`. Reproduce uses warmup 80, rounds 30.
+- `ColumnarInterpreter.decodePrefix` is deleted. Prefix decode goes through `decodePrefixFor`.
+  The outer batch test calls it with `BroadcastLeftOuter`. A clear key bit on an int-pair sort
+  stays null there and matches `tryTake` and the row path. `decodeIntPairs` still rejects that bit.
 
 ## Ranked remainder
 
@@ -50,9 +53,7 @@ Kept, with the reason. Do not genericise a hot loop to make this list shorter.
   `clearThreadLocal` (`ScarletRuntime.scala:41`, `:45`): `get` still prefers the thread local.
   `Task.createStageTask`, `createShuffleHashJoinTask`, `createBroadcastHashJoinTask`, and
   `createSortMergeJoinTask` (`Task.scala:20`–`:58`): live code constructs the case classes.
-  `ColumnarInterpreter.decodePrefix` (`ColumnarInterpreter.scala:268`) has one caller,
-  `TestLeftOuterColumnar.scala:565`. `tryTake` uses `decodePrefixFor`. The one example does
-  not prove the two prefixes match. Public surface / one test caller.
+  Public surface / no product caller.
 
 - **`ElementPipeline` still matches the same 28 filter/project shapes three times.**
   `ElementPipeline.scala:28` (int), `:117` (float), `:192` (string). Each arm calls a typed
