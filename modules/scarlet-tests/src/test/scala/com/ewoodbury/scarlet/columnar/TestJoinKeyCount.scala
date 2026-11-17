@@ -48,3 +48,41 @@ class TestJoinKeyCount extends AnyFlatSpec with Matchers:
     merged.stored(3) shouldBe 5L
     merged.product(right) shouldBe 20L
   }
+
+  it should "count a negative key and a key outside the direct window" in {
+    val table = JoinKeyCount.fresh()
+    table.addOne(-1)
+    table.addOne(-1)
+    table.addOne(4096)
+    table.add(4096, 3L)
+    table.stored(-1) shouldBe 2L
+    table.stored(4096) shouldBe 4L
+    table.stored(0) shouldBe 0L
+
+    val probe = JoinKeyCount.fresh()
+    probe.addOne(-1)
+    probe.addOne(4096)
+    table.product(probe) shouldBe 6L
+  }
+
+  it should "match a filtered scan to one add per kept key" in {
+    val keys = Array(1, -4, 4096, 1, 2, 5000, 0)
+    val values = Array(1, 1, -1, 3, -2, 4, 8)
+    val keepKey: Int => Boolean = key => key % 3 != 0
+    val keepValue: Int => Boolean = value => value >= 0
+    val batched = JoinKeyCount.fresh()
+    batched.addFiltered(keys, values, 0, keys.length, keepKey, keepValue)
+
+    batched.stored(1) shouldBe 2L
+    batched.stored(-4) shouldBe 1L
+    batched.stored(5000) shouldBe 1L
+    batched.stored(4096) shouldBe 0L
+    batched.stored(2) shouldBe 0L
+    batched.stored(0) shouldBe 0L
+
+    val other = JoinKeyCount.fresh()
+    other.add(1, 2L)
+    other.addOne(-4)
+    other.addOne(5000)
+    batched.product(other) shouldBe 6L
+  }
