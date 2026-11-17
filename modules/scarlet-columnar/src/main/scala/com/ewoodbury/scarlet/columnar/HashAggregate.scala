@@ -446,6 +446,17 @@ object HashAggregate:
   private[columnar] def sumWorkerCapacity: Int =
     sumWorkers.get().table.currentCapacity
 
+  /**
+   * One group table for `body`. `add` updates the reused per-thread sum. The body finishes before
+   * this returns, and [[compact]] copies the groups out before the worker is released.
+   */
+  private[scarlet] def consume(body: ((Int, Long) => Unit) => Unit): ColumnBatch =
+    val worker = sumWorkers.get()
+    val table = worker.table
+    table.release()
+    body((key, value) => table.addSum(key, value))
+    table.compact()
+
   private def withSumTable(body: (GroupTable, PairSlot) => Unit): ColumnBatch =
     val worker = sumWorkers.get()
     val table = worker.table

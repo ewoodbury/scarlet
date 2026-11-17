@@ -16,8 +16,8 @@ import com.ewoodbury.scarlet.core.Partition
  * `(K, Iterable[V])`. [[PhysicalOp.Exchange]] sits under [[PhysicalOp.HashAggregate]],
  * [[PhysicalOp.LongHashAggregate]], [[PhysicalOp.StringHashAggregate]], [[PhysicalOp.GroupByKey]],
  * and [[PhysicalOp.CountByKey]], and on each side of [[PhysicalOp.HashJoin]],
- * [[PhysicalOp.LongHashJoin]], [[PhysicalOp.LongSortMergeJoin]], [[PhysicalOp.StringHashJoin]],
- * [[PhysicalOp.StringSortMergeJoin]], [[PhysicalOp.SortMergeJoin]],
+ * [[PhysicalOp.JoinProbeSum]], [[PhysicalOp.LongHashJoin]], [[PhysicalOp.LongSortMergeJoin]],
+ * [[PhysicalOp.StringHashJoin]], [[PhysicalOp.StringSortMergeJoin]], [[PhysicalOp.SortMergeJoin]],
  * [[PhysicalOp.SortMergeLeftOuter]], [[PhysicalOp.SortMergeRightOuter]],
  * [[PhysicalOp.SortMergeFullOuter]], [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]],
  * and [[PhysicalOp.HashFullOuter]]. Those kernels perform the shuffle. Interpreting the boundary
@@ -89,6 +89,18 @@ enum PhysicalOp:
    */
   case StringHashAggregate(child: PhysicalOp)
   case HashJoin(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * Sum of one int join column, grouped by the join key, updated from the probe.
+   *
+   * `left` and `right` are exchanges. The kernel builds the left bucket and probes the right. A
+   * null key is dropped. Each match adds the measured column as a `Long`. The match columns are
+   * not written. [[ProbeMeasure]] records which side. Output kind is
+   * [[PhysicalOp.Kind.IntLongSums]], schema `(Int32, Int64)`. A null measured value declines. An
+   * over-budget build bucket declines and does not write the matches. Broadcast, sort-merge, and
+   * outer joins do not use this node.
+   */
+  case JoinProbeSum(left: PhysicalOp, right: PhysicalOp, measure: PhysicalOp.ProbeMeasure)
 
   /**
    * Shuffle-hash inner join of `(Long, Long)` pairs. `left` and `right` are exchanges with the
@@ -545,6 +557,7 @@ enum PhysicalOp:
             s"countByKey column is $other, expected int, long, or string pairs",
           )
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
+    case JoinProbeSum(_, _, _) => PhysicalOp.Kind.IntLongSums
     case LongHashJoin(_, _) | LongBroadcastJoin(_, _, _) | LongSortMergeJoin(_, _) =>
       PhysicalOp.Kind.LongTriples
     case StringHashJoin(_, _) | StringBroadcastJoin(_, _, _) | StringSortMergeJoin(_, _) =>
@@ -628,6 +641,11 @@ enum PhysicalOp:
     case GroupedDecode(child) => s"GroupedDecode(${child.shape})"
     case CountByKey(child) => s"CountByKey(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
+    case JoinProbeSum(left, right, measure) =>
+      val side = measure match
+        case PhysicalOp.ProbeMeasure.Left => "Left"
+        case PhysicalOp.ProbeMeasure.Right => "Right"
+      s"JoinProbeSum$side(${left.shape}, ${right.shape})"
     case LongHashJoin(left, right) => s"LongHashJoin(${left.shape}, ${right.shape})"
     case LongBroadcastJoin(left, right, _) =>
       s"LongBroadcastJoin(${left.shape}, ${right.shape})"
@@ -684,7 +702,12 @@ enum PhysicalOp:
 object PhysicalOp:
   enum Kind:
     case Ints, Longs, Floats, Pairs, Triples, Strings, Bools, LongPairs, LongCounts, LongTriples,
-      StringPairs, StringTriples, GroupedInts, GroupedStrings, GroupedLongs, LongOuter, StringOuter
+      StringPairs, StringTriples, GroupedInts, GroupedStrings, GroupedLongs, LongOuter,
+      StringOuter, IntLongSums
+
+  /** Which value column [[JoinProbeSum]] adds. `Left` is the build side. */
+  enum ProbeMeasure:
+    case Left, Right
 
   /** Which logical child of a broadcast join fills the build table. */
   enum BuildSide:

@@ -58,6 +58,11 @@ private[execution] object ColumnUse:
       walk(source, child, parent union Set(0, 1))
     case (Plan.ReduceByKeyOp(source, _), PhysicalOp.StringHashAggregate(child)) =>
       walk(source, child, parent union Set(0, 1))
+    case (
+          Plan.ReduceByKeyOp(Plan.MapOp(Plan.JoinOp(left, right, _), _), _),
+          PhysicalOp.JoinProbeSum(leftOp, rightOp, _),
+        ) =>
+      walk(left, leftOp, Set(0, 1)) union walk(right, rightOp, Set(0, 1))
     case (Plan.GroupByKeyOp(source), PhysicalOp.GroupByKey(child)) =>
       walk(source, child, parent union Set(0, 1))
     case (
@@ -93,7 +98,8 @@ private[execution] object ColumnUse:
   private def consumedOrdinals(kind: PhysicalOp.Kind): Set[Int] = kind match
     case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.GroupedInts |
-        PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
+        PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs |
+        PhysicalOp.Kind.IntLongSums =>
       Set(0, 1)
     case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
         PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter =>
@@ -119,7 +125,7 @@ private[execution] object ColumnUse:
         PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools |
         PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
-        PhysicalOp.Kind.GroupedLongs =>
+        PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.IntLongSums =>
       Set(0, 1)
 
   private def planChild(plan: Plan[_]): Option[Plan[_]] = plan match

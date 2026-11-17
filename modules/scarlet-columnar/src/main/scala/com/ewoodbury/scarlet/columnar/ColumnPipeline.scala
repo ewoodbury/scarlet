@@ -274,6 +274,48 @@ object ColumnPipeline:
         }
         .foldLeft(0L)((total, matches) => total + matches.toLong)
 
+  /**
+   * [[innerJoin]] for a grouped sum of one int column. The exchange matches [[countInner]]. A
+   * build bucket over the spill budget declines before any match columns are written. A bucket
+   * that fits updates [[JoinProbeSum]] and does not call [[JoinWrite]].
+   */
+  def sumInner(
+      build: Vector[ColumnBatch],
+      probe: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+      measure: JoinProbeSum.Measure,
+  ): Vector[ColumnBatch] =
+    sumInner(
+      JoinInput.Dense(sliceAll(build, batchSize)),
+      JoinInput.Dense(sliceAll(probe, batchSize)),
+      numPartitions,
+      parallelism,
+      measure,
+    )
+
+  def sumInner(
+      build: JoinInput,
+      probe: JoinInput,
+      numPartitions: Int,
+      parallelism: Int,
+      measure: JoinProbeSum.Measure,
+  ): Vector[ColumnBatch] =
+    val buildBuckets = exchange(build, numPartitions, parallelism)
+    val probeBuckets = exchange(probe, numPartitions, parallelism)
+    val conf = ScarletConf.get
+    if (buildBuckets.exists(bucket => HashJoinSpill.exceeds(bucket, conf))) then
+      throw new ColumnarFallback("a join sum over the spill budget stays on the row path")
+    else
+      MorselScheduler.map(probeBuckets, parallelism) { (part, probeBatch) =>
+        JoinProbeSum.sum(
+          HashJoin.JoinSide(bucketAt(buildBuckets, part), key = 0, value = 1),
+          HashJoin.JoinSide(probeBatch, key = 0, value = 1),
+          measure,
+        )
+      }
+
   private def exchange(
       input: JoinInput,
       numPartitions: Int,

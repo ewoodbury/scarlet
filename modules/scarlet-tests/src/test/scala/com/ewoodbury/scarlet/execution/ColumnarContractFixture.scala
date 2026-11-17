@@ -170,7 +170,7 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
-        PhysicalOp.Kind.StringOuter =>
+        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.IntLongSums =>
       false
 
   protected def sumsLongs(op: PhysicalOp): Boolean = op.kind match
@@ -180,7 +180,7 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
-        PhysicalOp.Kind.StringOuter =>
+        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.IntLongSums =>
       false
 
   protected def sumsFloats(op: PhysicalOp): Boolean = op.kind match
@@ -190,7 +190,7 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
-        PhysicalOp.Kind.StringOuter =>
+        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.IntLongSums =>
       false
 
   protected def preservesPartitions(op: PhysicalOp): Boolean = op match
@@ -223,7 +223,8 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.StringHashRightOuter(_, _) | PhysicalOp.StringHashFullOuter(_, _) |
         PhysicalOp.StringBroadcastLeftOuter(_, _) | PhysicalOp.StringBroadcastRightOuter(_, _) |
         PhysicalOp.StringBroadcastFullOuter(_, _) | PhysicalOp.StringSortMergeLeftOuter(_, _) |
-        PhysicalOp.StringSortMergeRightOuter(_, _) | PhysicalOp.StringSortMergeFullOuter(_, _) =>
+        PhysicalOp.StringSortMergeRightOuter(_, _) | PhysicalOp.StringSortMergeFullOuter(_, _) |
+        PhysicalOp.JoinProbeSum(_, _, _) =>
       false
 
   /** A key sort is not partition-preserving, and `tryTake` still runs it. */

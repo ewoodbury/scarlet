@@ -118,8 +118,12 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
           .filterValues((value: Int) => value < 50),
       )
 
-    ColumnarPlanner.lower(aggregated.plan).isEmpty shouldBe true
-    ColumnarPlanner.partitioning(aggregated.plan).isEmpty shouldBe true
+    val shape =
+      "JoinProbeSumLeft(Exchange(FilterValue(FilterKey(Scan))), Exchange(FilterValue(FilterKey(Scan))))"
+    ColumnarPlanner.lower(aggregated.plan).map(_.shape) shouldBe Some(shape)
+    ColumnarPlanner.partitioning(aggregated.plan).isDefined shouldBe true
+    ColumnarPlanner.tryRun(aggregated.plan).isDefined shouldBe true
+    ColumnarPlanner.tryCount(aggregated.plan) shouldBe Some(2L)
     ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
       "HashJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(FilterValue(FilterKey(Scan))))",
     )
@@ -134,6 +138,103 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     CrossEngineShapes.sumChecksum(aggregated.collect()) shouldBe 133L
   }
 
+  "sumJoinRight" should "sum the right value once per filtered match" in {
+    val (left, right) = joinFixture
+    val summed = filteredJoin(left, right).sumJoinRight
+    ColumnarPlanner.tryRun(summed.plan).isDefined shouldBe true
+    summed.collect().toMap shouldBe Map(1 -> 30L, 2 -> 10L)
+  }
+
+  "an opaque join sum" should "stay on the row path" in {
+    val (left, right) = joinFixture
+    val opaque = filteredJoin(left, right)
+      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+      .reduceByKey((left: Long, right: Long) => left + right)
+    val multiplied = filteredJoin(left, right)
+      .sumJoinLeft
+      .mapValues((value: Long) => value)
+    ColumnarPlanner.lower(opaque.plan).isEmpty shouldBe true
+    ColumnarPlanner.tryRun(opaque.plan).isEmpty shouldBe true
+    opaque.collect().toMap shouldBe Map(1 -> 20L, 2 -> 20L)
+    ColumnarPlanner.lower(multiplied.plan).isEmpty shouldBe true
+  }
+
+  "sort-merge and broadcast join sums" should "stay on the row path" in {
+    val (left, right) = joinFixture
+    val (filteredLeft, filteredRight) = filteredSides(left, right)
+    val sortMerged = filteredLeft.sortMergeJoin(filteredRight).sumJoinLeft
+    val broadcast = filteredLeft.broadcastJoin(filteredRight).sumJoinLeft
+    val shuffled = filteredLeft.shuffleHashJoin(filteredRight).sumJoinLeft
+    ColumnarPlanner.lower(sortMerged.plan).isEmpty shouldBe true
+    ColumnarPlanner.lower(broadcast.plan).isEmpty shouldBe true
+    ColumnarPlanner.tryRun(shuffled.plan).isDefined shouldBe true
+    sortMerged.collect().toMap shouldBe Map(1 -> 20L, 2 -> 20L)
+    broadcast.collect().toMap shouldBe Map(1 -> 20L, 2 -> 20L)
+    shuffled.collect().toMap shouldBe Map(1 -> 20L, 2 -> 20L)
+  }
+
+  "a filter over a join sum" should "stay on the row path" in {
+    val (left, right) = joinFixture
+    val filtered = filteredJoin(left, right).sumJoinLeft.filter((row: (Int, Long)) => row._1 > 1)
+    ColumnarPlanner.lower(filtered.plan).isEmpty shouldBe true
+    ColumnarPlanner.tryRun(filtered.plan).isEmpty shouldBe true
+    filtered.collect().toMap shouldBe Map(2 -> 20L)
+  }
+
+  "duplicate build rows" should "add the left value once per match" in {
+    val left = DistCollection.ofIntPairs(Array(1, 1, 2), Array(10, 3, 4), partitions)
+    val right = DistCollection.ofIntPairs(Array(1, 1, 2), Array(8, 1, 5), partitions)
+    val summed = left.join(right).sumJoinLeft
+    val rowPath = left
+      .join(right)
+      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+      .reduceByKey((left: Long, right: Long) => left + right)
+    ColumnarPlanner.tryRun(summed.plan).isDefined shouldBe true
+    ColumnarPlanner.tryRun(rowPath.plan).isEmpty shouldBe true
+    summed.collect().toMap shouldBe Map(1 -> 26L, 2 -> 4L)
+    summed.collect().toMap shouldBe rowPath.collect().toMap
+    left.join(right).sumJoinRight.collect().toMap shouldBe Map(1 -> 18L, 2 -> 5L)
+  }
+
+  "a null key" should "drop out of a join sum" in {
+    val left = DistCollection(
+      Seq((1, 10), erased(None, Some(7)), (2, 4)),
+      partitions,
+    )
+    val right = DistCollection(
+      Seq((1, 3), erased(None, Some(9)), (2, 5)),
+      partitions,
+    )
+    val summed = left.join(right).sumJoinLeft
+    val rowPath = left
+      .join(right)
+      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+      .reduceByKey((left: Long, right: Long) => left + right)
+    ColumnarPlanner.tryRun(summed.plan).isDefined shouldBe true
+    summed.collect().toMap shouldBe rowPath.collect().toMap
+    summed.collect().toMap shouldBe Map(1 -> 10L, 2 -> 4L)
+  }
+
+  /**
+   * Named erasure boundary. The tuple has to carry a null key. `productElement` reads it without
+   * unboxing.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def erased(key: Option[Int], value: Option[Int]): (Int, Int) =
+    val left: AnyRef = key match
+      case Some(present) => Int.box(present)
+      case None => null
+    val right: AnyRef = value match
+      case Some(present) => Int.box(present)
+      case None => null
+    Tuple2(left, right).asInstanceOf[(Int, Int)]
+
   "a generic value sort" should "decline tryRun and stay off the columnar arm" in {
     val data = filtered(topKeys, topValues)
     val plan = data
@@ -145,6 +246,35 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     ColumnarPlanner.partitioning(plan).isEmpty shouldBe true
     ColumnarPlanner.tryRun(plan).isEmpty shouldBe true
   }
+
+  private def joinFixture: (DistCollection[(Int, Int)], DistCollection[(Int, Int)]) =
+    val left = DistCollection.ofIntPairs(
+      Array(1, 2, 3, 4, 5),
+      Array(10, 20, 5, -1, 7),
+      partitions,
+    )
+    val right = DistCollection.ofIntPairs(
+      Array(1, 1, 2, 3, 4, 5),
+      Array(10, 20, 10, 5, 0, 60),
+      partitions,
+    )
+    (left, right)
+
+  private def filteredSides(
+      left: DistCollection[(Int, Int)],
+      right: DistCollection[(Int, Int)],
+  ): (DistCollection[(Int, Int)], DistCollection[(Int, Int)]) =
+    (
+      left.filterKeys((key: Int) => key % 3 != 0).filterValues((value: Int) => value >= 0),
+      right.filterKeys((key: Int) => key % 3 != 0).filterValues((value: Int) => value < 50),
+    )
+
+  private def filteredJoin(
+      left: DistCollection[(Int, Int)],
+      right: DistCollection[(Int, Int)],
+  ): DistCollection[(Int, (Int, Int))] =
+    val (filteredLeft, filteredRight) = filteredSides(left, right)
+    filteredLeft.join(filteredRight)
 
   private def filtered(keys: Array[Int], values: Array[Int]): DistCollection[(Int, Int)] =
     DistCollection
