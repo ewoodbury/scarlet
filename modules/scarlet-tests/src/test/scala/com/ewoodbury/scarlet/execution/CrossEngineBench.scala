@@ -70,6 +70,7 @@ object CrossEngineBench:
     "filter-topn",
     "filter-twogroup",
     "filter-keymod",
+    "filter-joinagg",
   )
 
   private final case class Settings(
@@ -210,6 +211,8 @@ object CrossEngineBench:
           val counted = CrossEngineShapes.keyMod(data)
           Armed(() => CrossEngineShapes.pairChecksum(counted.collect()), counted.plan)
         }
+      case "filter-joinagg" =>
+        joinAggQuery(rows, filters, nulls)
       case other =>
         refuse(s"unknown query $other")
 
@@ -302,6 +305,31 @@ object CrossEngineBench:
         (filterInts(data, filters), elapsed)
     val joined = filtered.join(side)
     Built(use(joined), encodeMs, joined.plan)
+
+  /**
+   * Two int tables, the same generators as [[joinQuery]]. Both sides are filtered. The action
+   * groups by the join key and sums the left value once per match. Null values are refused: the
+   * sum reads that value as a `Long`, and a null would unbox on the row path.
+   */
+  private def joinAggQuery(rows: Int, filters: Int, nulls: Boolean): Built =
+    if (nulls) then refuse("filter-joinagg does not time null values")
+    val width = 10 * groups
+    val joinKeys = Array.tabulate(width)(row => row % groups)
+    val joinValues = Array.tabulate(width)(row => row % 100)
+    val keys = rowKeys(rows)
+    val values = lcgValues(rows)
+    val encodeMs = timedBoth(
+      BatchCodec.intPairs(keys, values),
+      BatchCodec.intPairs(joinKeys, joinValues),
+    )
+    val left = DistCollection.ofIntPairs(keys, values, sourcePartitions)
+    val right = DistCollection.ofIntPairs(joinKeys, joinValues, sourcePartitions)
+    val aggregated = CrossEngineShapes.joinAgg(left, right, filters)
+    Built(
+      () => CrossEngineShapes.sumChecksum(aggregated.collect()),
+      encodeMs,
+      aggregated.plan,
+    )
 
   /** Pairs are `(sk, v)`. `sk` is the Fisher-Yates permutation. `v` is the shared generator. */
   private def sortSource(rows: Int, nulls: Boolean): (DistCollection[(Int, Int)], Double) =
@@ -427,7 +455,11 @@ object CrossEngineBench:
       fused = observed.fused
       round += 1
     val steady = steadyOf(samples)
-    if (name == "filter-join" || name == "filter-joinsum" || name == "filter-count") then
+    if (
+        name == "filter-join" || name == "filter-joinsum" || name == "filter-count" ||
+        name == "filter-joinagg"
+      )
+    then
       val shown = samples.mkString(",")
       System.err.println(s"SAMPLES $name $shown")
     System.err.println(
