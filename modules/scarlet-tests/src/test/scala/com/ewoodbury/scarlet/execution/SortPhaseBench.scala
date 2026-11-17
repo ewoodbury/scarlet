@@ -17,12 +17,14 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  *
  * The input matches [[CrossEngineBench]]: permutation keys, the same LCG values, two source
  * partitions, batch 8192, shuffle width 4, two filters (`key % 3 != 0`, `value >= 0`), spill on.
- * The action is `collect` and the same `key * 31 + value` sum. `scan` is the encode and the
- * survivor index. `run` is the wall clock of the local sorts. `index` and `gather` are CPU time
- * inside that wall clock, summed across workers. `merge` is the k-way merge and the rank scatter.
- * `output` is the decode to pairs. `other` is the action minus those four wall times, which is the
- * checksum walk and the planner. `gc_ms` is the collector's own millisecond counter. `alloc_mb` is
- * the median of five process-wide thread-byte deltas after the timed rounds.
+ * The action is the sort. The checksum is the same `key * 31 + value` sum, read from the published
+ * int arrays by [[SortChecksum]]. It does not decode pairs. `scan` is the encode and the survivor
+ * index. `run` is the wall clock of the local sorts. `index` and `gather` are CPU time inside that
+ * wall clock, summed across workers. `merge` is the k-way merge and the rank scatter. `output` is
+ * the pair decoder's clock, which this harness does not enter. `other` is the action minus those
+ * four wall times: the checksum loop and the planner. `gc_ms` is the collector's own millisecond
+ * counter. `alloc_mb` is the median of five process-wide thread-byte deltas after the timed
+ * rounds.
  *
  * `steady_*` is the upper median of the last 10 rounds, with the same verdict rule as
  * [[CrossEngineBench]]. Runs and passes are read after the last measured round. One in-memory sort
@@ -93,7 +95,7 @@ object SortPhaseBench:
       .filterKeys((key: Int) => key % 3 != 0)
       .filterValues((value: Int) => value >= 0)
       .sortByIntKey
-    () => sorted.collect().map { case (key, value) => key * 31L + value }.sum
+    () => SortChecksum.of(sorted)
 
   private final class Samples(val rounds: Int):
     val action = new Array[Long](rounds)
