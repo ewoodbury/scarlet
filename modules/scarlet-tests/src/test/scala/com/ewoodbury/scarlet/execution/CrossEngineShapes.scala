@@ -5,8 +5,8 @@ import com.ewoodbury.scarlet.api.DistCollection
 /**
  * The cross-engine shapes that sit beside the original six.
  *
- * `filter-distinct` is `keys.distinct.count`. `filter-twogroup` is one map over `groupByKey` that
- * keeps the count and the sum. `filter-topn` is `sortByIntValueDesc` on `(v desc, sk asc)` plus
+ * `filter-distinct` is `keys.distinct.count`. `filter-twogroup` is `countSumByKey`, the count and
+ * the sum. `filter-topn` is `sortByIntValueDesc` on `(v desc, sk asc)` plus
  * `take`. `filter-keymod` maps the key with `mapIntKey` to `k % 100` and then `countByKey`. That
  * typed key map lowers. A generic pair `map` of the same arithmetic stays on the row path.
  * `filter-joinagg` filters both int tables, joins on the key, groups by that key, and sums the
@@ -29,15 +29,11 @@ object CrossEngineShapes:
     data.sortByIntValueDesc
 
   /**
-   * One map above `groupByKey`. The group lowers. The function is not a second aggregate kernel.
+   * Count and sum by key. [[com.ewoodbury.scarlet.api.DistCollection.countSumByKey]] is the
+   * witness. A generic `groupByKey.map` of the same fold stays a grouped decode.
    */
   def twoGroup(data: DistCollection[(Int, Int)]): DistCollection[(Int, Int, Long)] =
-    data.groupByKey.map { case (key, values) =>
-      val (count, sum) = values.iterator.foldLeft((0, 0L)) { case ((count, sum), value) =>
-        (count + 1, sum + value.toLong)
-      }
-      (key, count, sum)
-    }
+    data.countSumByKey
 
   /** `k % 100` changes the key. [[com.ewoodbury.scarlet.api.DistCollection.mapIntKey]] lowers. */
   def keyMod(data: DistCollection[(Int, Int)]): DistCollection[(Int, Int)] =

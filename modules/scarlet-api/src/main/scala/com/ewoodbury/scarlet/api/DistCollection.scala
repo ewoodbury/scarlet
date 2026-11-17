@@ -231,6 +231,17 @@ final case class DistCollection[A](plan: Plan[A]):
     DistCollection(Plan.CountByKeyOp(kvPlan))
 
   /**
+   * Counts and sums `(Int, Int)` values by key, requiring a shuffle. A null key is dropped. A null
+   * value is counted and not added. The count is an `Int` and wraps. The sum is a `Long`. One
+   * `(key, count, sum)` row per distinct key. Does not trigger computation.
+   *
+   * Generic `groupByKey.map` does not call this. The node is the witness, the way [[mapIntKey]]
+   * is, and the planner does not inspect a grouped map.
+   */
+  def countSumByKey(using ev: A =:= (Int, Int)): DistCollection[(Int, Int, Long)] =
+    DistCollection(Plan.CountSumByKeyOp(kvPlan))
+
+  /**
    * Transformation: Reduces values by key using the provided function, requiring a shuffle
    * operation. Returns a new DistCollection representing the reduced data. Does not trigger
    * computation.

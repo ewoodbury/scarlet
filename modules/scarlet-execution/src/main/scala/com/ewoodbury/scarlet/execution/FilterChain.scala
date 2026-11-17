@@ -55,8 +55,9 @@ private[execution] object FilterChain:
     // and it does not change the kernel.
     refuseNullSortKey(child, columns)
     columns match
-      case Columns.LongCounts(_) | Columns.LongTriples(_) | Columns.StringTriples(_) |
-          Columns.GroupedInts(_) | Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
+      case Columns.LongCounts(_) | Columns.CountSums(_) | Columns.LongTriples(_) |
+          Columns.StringTriples(_) | Columns.GroupedInts(_) | Columns.GroupedStrings(_) |
+          Columns.GroupedLongs(_) =>
         PredicatePlan.unsupported(opening(plan, op))
       // An outer batch is a triple with an absent side. This must stay an IllegalStateException:
       // the planner catches ClassCastException, including ColumnarFallback, and falls back to
@@ -206,9 +207,9 @@ private[execution] object FilterChain:
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Strings(_) |
         Columns.Bools(_) | Columns.StringPairs(_) =>
       ColumnarInterpreter.batchesOf(columns)
-    case Columns.LongCounts(_) | Columns.LongTriples(_) | Columns.StringTriples(_) |
-        Columns.Outer(_, _) | Columns.GroupedInts(_) | Columns.GroupedStrings(_) |
-        Columns.GroupedLongs(_) =>
+    case Columns.LongCounts(_) | Columns.CountSums(_) | Columns.LongTriples(_) |
+        Columns.StringTriples(_) | Columns.Outer(_, _) | Columns.GroupedInts(_) |
+        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
       missing
 
   private def copy(columns: Columns, parts: Vector[ColumnBatch]): Columns = columns match
@@ -221,9 +222,9 @@ private[execution] object FilterChain:
     case Columns.LongPairs(_) => Columns.LongPairs(parts)
     case Columns.Triples(_) => Columns.Triples(parts)
     case Columns.StringPairs(_) => Columns.StringPairs(parts)
-    case Columns.LongCounts(_) | Columns.LongTriples(_) | Columns.StringTriples(_) |
-        Columns.Outer(_, _) | Columns.GroupedInts(_) | Columns.GroupedStrings(_) |
-        Columns.GroupedLongs(_) =>
+    case Columns.LongCounts(_) | Columns.CountSums(_) | Columns.LongTriples(_) |
+        Columns.StringTriples(_) | Columns.Outer(_, _) | Columns.GroupedInts(_) |
+        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
       missing
 
   /**

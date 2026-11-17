@@ -22,5 +22,6 @@ private[execution] object ReduceByKeyLowering:
         PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.Strings |
         PhysicalOp.Kind.Bools | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.LongCounts |
         PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
-        PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter =>
+        PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter |
+        PhysicalOp.Kind.CountSums =>
       None

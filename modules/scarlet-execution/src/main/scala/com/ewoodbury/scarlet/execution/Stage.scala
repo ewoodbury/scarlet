@@ -168,6 +168,17 @@ object Stage {
   }
 
   /**
+   * Local count and sum on a single partition. A null key is dropped. A null value is counted and
+   * not added. The count is an `Int` and wraps. Used for shuffle-bypass and as the per-partition
+   * operator of a count-sum shuffle stage.
+   */
+  def countSumByKeyLocal: Stage[(Any, Any), (Int, Int, Long)] = {
+    SingleOpStage { p =>
+      Partition(CountSumRows.of(p.data))
+    }
+  }
+
+  /**
    * Local keyed reduce on a single partition. Used for shuffle-bypass reduceByKey and as the
    * per-partition operator of a reduceByKey shuffle stage (input is already key-partitioned). A
    * null key is dropped before reducing. `groupMapReduce` is a single pass; a key with one value

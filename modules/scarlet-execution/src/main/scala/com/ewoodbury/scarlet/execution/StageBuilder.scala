@@ -77,7 +77,7 @@ object StageBuilder:
    * Immutable stage draft for accumulating operations during stage construction. All fields are
    * immutable; mutations create new instances.
    */
-  private case class StageDraft(
+  private[execution] case class StageDraft(
       id: StageId,
       ops: Vector[Operation[Any, Any]],
       inputSources: Seq[InputSource],
@@ -89,7 +89,7 @@ object StageBuilder:
 
   // Per-build context to generate monotonically increasing stage IDs without global/shared state
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private final case class BuildContext(var nextId: Int):
+  private[execution] final case class BuildContext(var nextId: Int):
     def freshId(): StageId =
       val id = StageId(nextId)
       nextId = nextId + 1
@@ -267,6 +267,8 @@ object StageBuilder:
         Stage.groupByKeyLocal[Any, Any].asInstanceOf[Stage[Any, Any]]
       case _: CountByKeyLocalOp[_, _] =>
         Stage.countByKeyLocal[Any, Any].asInstanceOf[Stage[Any, Any]]
+      case _: CountSumByKeyLocalOp =>
+        Stage.countSumByKeyLocal.asInstanceOf[Stage[Any, Any]]
       case ReduceByKeyLocalOp(reduceFunc) =>
         Stage
           .reduceByKeyLocal[Any, Any](reduceFunc.asInstanceOf[(Any, Any) => Any])
@@ -377,7 +379,7 @@ object StageBuilder:
    * @note
    *   The return Plan is crucial for shuffle stages to preserve original operation metadata
    */
-  private def buildStagesFromPlan[A](
+  private[execution] def buildStagesFromPlan[A](
       ctx: BuildContext,
       plan: Plan[A],
       builderMap: mutable.Map[StageId, StageDraft],
@@ -623,6 +625,9 @@ object StageBuilder:
           )
           (shuffleId, Some(countByKey))
         }
+
+      case countSum: Plan.CountSumByKeyOp =>
+        CountSumStages.attach(ctx, countSum, builderMap, dependencies)
 
       case reduceByKey: Plan.ReduceByKeyOp[_, _] =>
         val (sourceStageId, _) =
@@ -886,7 +891,7 @@ object StageBuilder:
    * the logic of when operations can be chained vs when new stages are required. Returns the
    * StageId that will produce the result (could be the source stage or a new one).
    */
-  private def appendOperation(
+  private[execution] def appendOperation(
       ctx: BuildContext,
       sourceStageId: StageId,
       op: Operation[Any, Any],
@@ -1026,7 +1031,7 @@ object StageBuilder:
    * Creates a shuffle stage using the unified builder approach.
    */
   @SuppressWarnings(Array("org.wartremover.warts.SeqApply", "org.wartremover.warts.IterableOps"))
-  private def createShuffleStageUnified(
+  private[execution] def createShuffleStageUnified(
       ctx: BuildContext,
       upstreamIds: Seq[StageId],
       wideOp: WideOp,
@@ -1039,6 +1044,7 @@ object StageBuilder:
     val meta = wideOp match {
       case GroupByKeyWideOp(m) => m
       case CountByKeyWideOp(m) => m
+      case CountSumByKeyWideOp(m) => m
       case ReduceByKeyWideOp(m) => m
       case SortByWideOp(m) => m
       case PartitionByWideOp(m) => m
@@ -1147,7 +1153,8 @@ object StageBuilder:
 
       case _: FilterOp[_] | _: MapValuesOp[_, _, _] | _: FilterKeysOp[_, _] |
           _: FilterValuesOp[_, _] | _: FlatMapValuesOp[_, _, _] | _: DistinctOp[_] |
-          _: GroupByKeyLocalOp[_, _] | _: CountByKeyLocalOp[_, _] | _: ReduceByKeyLocalOp[_, _] =>
+          _: GroupByKeyLocalOp[_, _] | _: CountByKeyLocalOp[_, _] | _: CountSumByKeyLocalOp |
+          _: ReduceByKeyLocalOp[_, _] =>
         prev
     }
 

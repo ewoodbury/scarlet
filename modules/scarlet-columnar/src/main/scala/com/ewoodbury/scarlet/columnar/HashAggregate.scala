@@ -730,7 +730,7 @@ object HashAggregate:
       row += 1
     }
 
-  private final class GroupTable(initialCapacity: Int, aggs: Int32Aggs):
+  private[columnar] final class GroupTable(initialCapacity: Int, aggs: Int32Aggs):
     private var capacity: Int = initialCapacity
     private var mask: Int = initialCapacity - 1
     private var occupied: Int = 0
@@ -882,6 +882,29 @@ object HashAggregate:
         if (hasCount) then counts(slot) += 1L
         if (hasMin && value < mins(slot)) then mins(slot) = value
         if (hasMax && value > maxs(slot)) then maxs(slot) = value
+
+    /**
+     * Counts a missing value and does not add it. The sum stays `0` until a present value arrives,
+     * and that `0` is valid. [[observe]] would add the stored value, so it cannot express this.
+     * The plain aggregate leaves the count at `0` instead.
+     */
+    def countNull(slot: Int): Unit =
+      if (seen(slot) == 0) then
+        if (hasSum) then sums(slot) = 0L
+        if (hasCount) then counts(slot) = 1L
+        notice(slot)
+      else if (hasCount) then counts(slot) += 1L
+
+    /** Merges one partial count and sum. Both numbers are already present. */
+    def addCountSum(key: Int, count: Long, sum: Long): Unit =
+      val slot = ensure(key)
+      if (seen(slot) == 0) then
+        if (hasSum) then sums(slot) = sum
+        if (hasCount) then counts(slot) = count
+        notice(slot)
+      else
+        if (hasSum) then sums(slot) += sum
+        if (hasCount) then counts(slot) += count
 
     def compact(): ColumnBatch =
       val rows = occupied
