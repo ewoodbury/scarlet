@@ -20,7 +20,9 @@ There is no `scalar-*` module. The scalar kernels are `Int32Pipeline`, `Int64Pip
 `make test` does not run `runMain` benches. A move inside those files is not pinned by the
 suite. Do not delete them. `TestColumnarContract.excludedCases` is not a skipped test: each
 excluded plan is asserted to have no layout. No `ignore`, `pending`, or `cancel` suite was
-found. `pending` in the tree is a local bit mask.
+found. `pending` is a local name: a bit mask in `ColumnHash.scala:58`, an iterator in
+`RankSplitRuns.scala:282`, a boolean in `SpillStore.scala:591`, and a `Vector` in
+`SortScaleBench.scala:698`.
 
 ## Closed in this pass
 
@@ -55,16 +57,16 @@ Kept, with the reason. Do not genericise a hot loop to make this list shorter.
 - **`ElementPipeline` still matches the same 28 filter/project shapes three times.**
   `ElementPipeline.scala:28` (int), `:117` (float), `:192` (string). Each arm calls a typed
   unrolled kernel (`Int32Pipeline.FF`, `Float64Pipeline.FF`, `Utf8Pipeline.FF`, …). Longs
-  already build an `Int64Pipeline.Step` list (`:87`) and do not share that match. Finding:
+  already build an `Int64Pipeline.Step` list (`:93`) and do not share that match. Finding:
   longs diverged. Leave the unrolled `FF` / `PPPP` methods. A merged match would still have
   to call 28 typed methods per element type.
 
 - **Int open-addressed `add` / `locate` are not one table.** The probe
   (`ColumnHash.mix`, then linear) is the same in `HashCount.scala:383`,
   `StringHashCount.scala:379`, `HashReduce.scala:243`, and `StringHashReduce.scala:252`.
-  `FoldedCount.scala:830` grows and rehashes through `locateForInsert`; HashCount throws
-  when full. HashReduce carries a payload and `op`. Finding: the inventory missed the grow
-  policy. Long key tables stay specialized. Hot path.
+  `FoldedCount.scala:898` adds, `:912` locates for insert, and `:925` grows and rehashes.
+  HashCount throws when full. HashReduce carries a payload and `op`. Finding: the inventory
+  missed the grow policy. Long key tables stay specialized. Hot path.
 
 - **Rank-split spill control stays three files.** `RankSplitRuns.scala` (627),
   `RankSplitLongRuns.scala` (638), `StringRankSplitRuns.scala` (663). The long and string
@@ -105,11 +107,11 @@ JoinBuildBench) split in `c13`.
 | 1065 | `ColumnarPlanner.scala` | Accretion of gates | Action gates plus `lower` |
 | 1049 | `TestColumnFilterRange.scala` | Accretion | Same window cases per type |
 | 1040 | `HashAggregate.scala` | Structural | `GroupTable` owns the slots |
+| 1026 | `FoldedCount.scala` | Structural | Folded int count table and grow |
 | 998 | `TestRightOuterColumnar.scala` | Accretion | Strategy blocks |
 | 981 | `TestColumnarActions.scala` | Accretion | `take` / `count` / `sum` / grouped sum |
 | 976 | `DenseSum.scala` | Structural | Splitting the class splits the slot arrays |
 | 964 | `TestCountByKey.scala` | Accretion | Int, string, long, then builders |
-| 958 | `FoldedCount.scala` | Structural | Folded int count table and grow |
 | 950 | `TestSelectionBoundary.scala` | Accretion | Publish versus decode per kind |
 | 947 | `SortMergeRuns.scala` | Structural | Cursor and output buffer share the run |
 | 939 | `TestFullOuterColumnar.scala` | Accretion | Strategy blocks |
@@ -121,9 +123,9 @@ JoinBuildBench) split in `c13`.
 
 Next files under the line: `TestColumnarSelection.scala` 894, `TestLeftOuterColumnar.scala`
 884, `SpillStore.scala` 848, `TestSelection.scala` 844, `SpillBench.scala` 831,
-`ColumnPipeline.scala` 789, `HashExchange.scala` 754, `TestColumnarContract.scala` 739,
-`SortScaleBench.scala` 728, `DistCollection.scala` 715, `JoinBench.scala` 704,
-`JoinBuildFixture.scala` 697, `CrossEngineBench.scala` 680, `StringRankSplitRuns.scala` 663.
+`ColumnPipeline.scala` 789, `HashExchange.scala` 754, `SortScaleBench.scala` 741,
+`TestColumnarContract.scala` 739, `DistCollection.scala` 715, `JoinBench.scala` 713,
+`CrossEngineBench.scala` 698, `JoinBuildFixture.scala` 697, `StringRankSplitRuns.scala` 663.
 
 ## Specialization, not debt
 
@@ -146,12 +148,14 @@ Do not merge these. The bodies differ by primitive type, and each type has its o
 
 ## House rules that still match
 
-- `checkFileLength` fails above 1200. 1200 is allowed (`build.sbt:6`, `AGENTS.md:20`).
+- `checkFileLength` fails above 1200. 1200 is allowed (`build.sbt:6`, `AGENTS.md:21`).
 - `Test / parallelExecution := false` (`build.sbt:24`).
 - `spillEnabled` defaults to false (`ScarletConf.scala:67`).
-- `Wart.AsInstanceOf` and `Wart.Any` are errors. Other wartremover findings are warnings.
-  There is no `-Werror`, so a warning does not fail lint (`build.sbt:27`, `AGENTS.md:21`).
-- CI runs `make test-lint`, `sbt test`, PerfCheck, then `make test-spill` on JDK 21
+- `Wart.AsInstanceOf` and `Wart.Any` are errors (`build.sbt:27`). `wartremoverWarnings` is
+  `Warts.allBut` of the list at `build.sbt:28`, so those names are neither errors nor warnings.
+  There is no `-Werror`. A warning does not fail lint (`AGENTS.md:22`).
+- CI runs one sbt process for `checkFileLength`, `scalafixAll --check`, `scalafmtCheck`,
+  `test`, and PerfCheck, then `make test-spill`, on Temurin 21
   (`.github/workflows/test-sbt.yaml`).
 - `CrossEngineBench` defaults are warmup 80 and rounds 30.
 - Cats Effect is still on the row scheduler path.
