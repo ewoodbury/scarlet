@@ -91,7 +91,10 @@ and #236 landed after `b704c3c`.
   physical cores.
 - Pin: `taskset -c 0,2,4,6` on every Scarlet JVM, every DuckDB process, and every DataFusion
   process.
-- Scarlet: 4 threads, 2 filters, no nulls, spill on. Classes compiled with sbt 1.10.11. The timed
+- Scarlet: 4 threads, 2 filters, no nulls, spill on. The harness sets `spillEnabled` and leaves
+  `spillBudgetBytes` at 64 MiB. A later counter run of filter-sort, filter-reducebykey, and
+  filter-join at 1e7 with that budget wrote no spill files, so these times are the in-memory
+  path (`docs/BENCHMARKS.md`, "2026-11-17 — spill at 1e7"). Classes compiled with sbt 1.10.11. The timed
   process is `java -Xmx10g -cp` on that classpath, not an sbt JVM. Warmup 80. `steady_ms` is the
   upper median of the last 10 rounds, index `n/2` after sorting. `compilation` is kept.
   `machine` (the two halves of those last 10 differ by more than 10%) is dropped. The row is the
@@ -548,10 +551,11 @@ Run as in Setup, with `CROSS_WARMUP=3` and `CROSS_ROUNDS=10` as stated for this 
 ## Setup
 
 Canonical reproduction. `CrossEngineBench` defaults are warmup 80, rounds 30, `CROSS_ROWS=1000000`,
-`CROSS_FILTERS=2`, `CROSS_NULLS=false`, `CROSS_THREADS=4`, spill on for this harness only. That is
-the protocol of the 2026-11-17 pinned table, the 2026-11-16 pinned table, and the 2026-11-15
-steady-window table, except the deltas those sections name (pin, heap, `java -cp` vs sbt, and
-rounds on the short rows). Current ratios are in "2026-11-17 — devbox, pinned". The 2026-11-07
+`CROSS_FILTERS=2`, `CROSS_NULLS=false`, `CROSS_THREADS=4`, spill on for this harness only, budget
+left at 64 MiB. That is the protocol of the 2026-11-17 pinned table, the 2026-11-16 pinned
+table, and the 2026-11-15 steady-window table, except the deltas those sections name (pin,
+heap, `java -cp` vs sbt, and rounds on the short rows). Current ratios are in "2026-11-17 —
+devbox, pinned". The 2026-11-07
 table below is a one-time Apple M1 Pro run, warmup 3,
 measured 10, p50. It is not this command and is not comparable with the container or the devbox.
 The 2026-11-13 table used warmup 3, rounds 10 on the devbox.
