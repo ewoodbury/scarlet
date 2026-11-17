@@ -108,13 +108,7 @@ private[execution] object IntPairFilterEncode:
             fillGenericKeys(job, other.slots, table)
 
   private def fillAll(job: Job, table: JoinKeyCount.Table): Unit =
-    val keys = job.keys
-    var row = job.start
-    val end = job.end
-    while (row < end) {
-      table.addOne(keys(row))
-      row += 1
-    }
+    table.addAll(job.keys, job.start, job.end)
 
   private def fillKept(
       job: Job,
@@ -122,15 +116,7 @@ private[execution] object IntPairFilterEncode:
       keepValue: Int => Boolean,
       table: JoinKeyCount.Table,
   ): Unit =
-    val keys = job.keys
-    val values = job.values
-    var row = job.start
-    val end = job.end
-    while (row < end) {
-      val key = keys(row)
-      if (keepKey(key) && keepValue(values(row))) then table.addOne(key)
-      row += 1
-    }
+    table.addFiltered(job.keys, job.values, job.start, job.end, keepKey, keepValue)
 
   private def fillGenericKeys(
       job: Job,
