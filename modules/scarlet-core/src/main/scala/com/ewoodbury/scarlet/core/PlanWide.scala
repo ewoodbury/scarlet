@@ -40,6 +40,7 @@ object PlanWide {
     case Plan.KeysOp(source) => isWide(source)
     case Plan.ValuesOp(source) => isWide(source)
     case Plan.MapValuesOp(source, _) => isWide(source)
+    case Plan.MapIntKeyOp(source, _) => isWide(source)
     case Plan.FilterKeysOp(source, _) => isWide(source)
     case Plan.FilterValuesOp(source, _) => isWide(source)
     case Plan.FlatMapValuesOp(source, _) => isWide(source)

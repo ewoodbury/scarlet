@@ -89,6 +89,32 @@ object Stage {
     }
   }
 
+  /**
+   * Maps an int key. `productElement` reads a null key without unboxing it. The function is not
+   * called for that row, and the value is left as stored.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  def mapIntKey(f: Int => Int): Stage[(Any, Any), (Any, Any)] = {
+    SingleOpStage { partition =>
+      val mapped = partition.data.iterator.map { row =>
+        val product = row.asInstanceOf[Product]
+        product.productElement(0) match {
+          case null => row
+          case present =>
+            Tuple2(Int.box(f(present.asInstanceOf[Int])), product.productElement(1))
+              .asInstanceOf[(Any, Any)]
+        }
+      }
+      Partition(IterUtil.iterableOf(mapped))
+    }
+  }
+
   def filterKeys[K, V](predicate: K => Boolean): Stage[(K, V), (K, V)] = {
     SingleOpStage { p =>
       val it = p.data.iterator.filter { case (k, _) => predicate(k) }

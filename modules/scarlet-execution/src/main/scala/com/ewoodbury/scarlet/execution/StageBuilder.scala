@@ -249,6 +249,8 @@ object StageBuilder:
         Stage
           .mapValues[Any, Any, Any](f.asInstanceOf[Any => Any])
           .asInstanceOf[Stage[Any, Any]]
+      case MapIntKeyOp(f) =>
+        Stage.mapIntKey(f).asInstanceOf[Stage[Any, Any]]
       case FilterKeysOp(p) =>
         Stage
           .filterKeys[Any, Any](p.asInstanceOf[Any => Boolean])
@@ -468,6 +470,17 @@ object StageBuilder:
         (resultId, Some(plan))
 
       case Plan.MapValuesOp(sourcePlan, f) =>
+        val (sourceStageId, _) = buildStagesFromPlan(ctx, sourcePlan, builderMap, dependencies)
+        val resultId = appendOperation(
+          ctx,
+          sourceStageId,
+          Operation.fromPlan(plan),
+          builderMap,
+          dependencies,
+        )
+        (resultId, Some(plan))
+
+      case Plan.MapIntKeyOp(sourcePlan, _) =>
         val (sourceStageId, _) = buildStagesFromPlan(ctx, sourcePlan, builderMap, dependencies)
         val resultId = appendOperation(
           ctx,
@@ -1103,17 +1116,18 @@ object StageBuilder:
    * How a narrow operation changes partitioning metadata.
    *
    * Filter and the pair-key ops keep range and ordering: they do not replace the element or
-   * reorder the partition. `map`, `flatMap`, and `mapPartitions` drop both. `keys` and `values`
-   * drop hash as well, because the output is no longer a pair. A bypassed `repartition` is an
-   * identity, so it keeps the upstream description. True shuffle stages set theirs in
-   * `createShuffleStageUnified`. A new [[Operation]] subtype has to be handled here.
+   * reorder the partition. `map`, `flatMap`, and `mapPartitions` drop both and keep hash.
+   * `mapIntKey` drops hash as well, because the key changed. `keys` and `values` drop hash because
+   * the output is no longer a pair. A bypassed `repartition` is an identity, so it keeps the
+   * upstream description. True shuffle stages set theirs in `createShuffleStageUnified`. A new
+   * [[Operation]] subtype has to be handled here.
    */
   private def updatePartitioning(
       prev: Option[PartitioningInfo],
       op: Operation[Any, Any],
   ): Option[PartitioningInfo] = {
     val result = op match {
-      case _: KeysOp[_, _] | _: ValuesOp[_, _] =>
+      case _: KeysOp[_, _] | _: ValuesOp[_, _] | _: MapIntKeyOp =>
         prev.map(_.withoutPairDistribution)
 
       case _: MapOp[_, _] | _: FlatMapOp[_, _] | _: MapPartitionsOp[_, _] =>

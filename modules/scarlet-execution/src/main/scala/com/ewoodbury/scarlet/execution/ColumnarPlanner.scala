@@ -764,7 +764,10 @@ object ColumnarPlanner:
     lowerPlan(plan).filter(SortLowering.acceptsAsChild)
 
   private def lowerPlanNode(plan: Plan[_]): Option[PhysicalOp] = plan match
-    case Plan.UnionOp(left, right) => UnionLowering.lower(left, right, lowerChild)
+    case Plan.UnionOp(left, right) =>
+      // A key map can still hold a null key. Union would publish it, and the pair decoder
+      // rejects a clear bit. That shape stays on the row path.
+      UnionLowering.lower(left, right, lowerChild).filterNot(MapIntKey.inTree)
     case Plan.DistinctOp(source) =>
       lowerChild(source) match
         case Some(child) =>
@@ -789,6 +792,12 @@ object ColumnarPlanner:
       if (returnsUnboxedInt(mapper)) then mapValue(source, PhysicalOp.Kind.Pairs)
       else if (returnsUnboxedLong(mapper)) then mapValue(source, PhysicalOp.Kind.LongPairs)
       else None
+    case Plan.MapIntKeyOp(source, _) =>
+      lowerChild(source).flatMap { child =>
+        child.kind match
+          case PhysicalOp.Kind.Pairs => Some(PhysicalOp.MapKey(child))
+          case _ => None
+      }
     case Plan.ReduceByKeyOp(source, _) =>
       lowerChild(source).flatMap(ReduceByKeyLowering.apply)
     case Plan.GroupByKeyOp(source) =>
@@ -857,22 +866,25 @@ object ColumnarPlanner:
       case ElementStep.Project(_) => None
 
   private def lowerElementStep(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
-    step match
-      case ElementStep.Filter(predicate) =>
-        child.kind match
-          case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs =>
-            Some(PhysicalOp.Filter(child, PhysicalOp.Slot.Row))
-          case PhysicalOp.Kind.Triples =>
-            tripleFilterSlot(predicate) match
-              case Some(slot) => Some(PhysicalOp.Filter(child, slot))
-              case None if child.isInnerTriple =>
-                Some(PhysicalOp.Filter(child, PhysicalOp.Slot.TripleRow))
-              case None => None
-          case _ => None
-      case ElementStep.Project(_) =>
-        Option.when(child.kind == PhysicalOp.Kind.Triples && child.isInnerTriple)(
-          PhysicalOp.Project(child),
-        )
+    // A filter or project above a key map sees a null key the row path unboxes. Decline.
+    if (MapIntKey.inTree(child)) then None
+    else
+      step match
+        case ElementStep.Filter(predicate) =>
+          child.kind match
+            case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs =>
+              Some(PhysicalOp.Filter(child, PhysicalOp.Slot.Row))
+            case PhysicalOp.Kind.Triples =>
+              tripleFilterSlot(predicate) match
+                case Some(slot) => Some(PhysicalOp.Filter(child, slot))
+                case None if child.isInnerTriple =>
+                  Some(PhysicalOp.Filter(child, PhysicalOp.Slot.TripleRow))
+                case None => None
+            case _ => None
+        case ElementStep.Project(_) =>
+          Option.when(child.kind == PhysicalOp.Kind.Triples && child.isInnerTriple)(
+            PhysicalOp.Project(child),
+          )
 
   private def tripleFilterSlot(predicate: Any): Option[PhysicalOp.Slot] = predicate match
     case recognized: IntJoinTriplePredicate[?] =>
@@ -939,20 +951,26 @@ object ColumnarPlanner:
 
   private def pairColumn(source: Plan[_], ordinal: Int): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
-      child.kind match
-        case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs =>
-          Some(PhysicalOp.Column(child, ordinal))
-        case _ => None
+      // `keys` and `values` unbox. A null key from a key map stays on the row path.
+      if (MapIntKey.inTree(child)) then None
+      else
+        child.kind match
+          case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs =>
+            Some(PhysicalOp.Column(child, ordinal))
+          case _ => None
     }
 
   private def mapValue(source: Plan[_], kind: PhysicalOp.Kind): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
-      (child.kind, kind) match
-        case (PhysicalOp.Kind.Pairs | PhysicalOp.Kind.StringPairs, PhysicalOp.Kind.Pairs) =>
-          Some(PhysicalOp.MapValue(child))
-        case (PhysicalOp.Kind.LongPairs, PhysicalOp.Kind.LongPairs) =>
-          Some(PhysicalOp.MapValue(child))
-        case _ => None
+      // mapValues keeps a null key. The pair decoder of that parent rejects the clear bit.
+      if (MapIntKey.inTree(child)) then None
+      else
+        (child.kind, kind) match
+          case (PhysicalOp.Kind.Pairs | PhysicalOp.Kind.StringPairs, PhysicalOp.Kind.Pairs) =>
+            Some(PhysicalOp.MapValue(child))
+          case (PhysicalOp.Kind.LongPairs, PhysicalOp.Kind.LongPairs) =>
+            Some(PhysicalOp.MapValue(child))
+          case _ => None
     }
 
   /** Unboxed `Int => Int` via [[FunctionWitness]], same as an int element project. */
@@ -975,10 +993,13 @@ object ColumnarPlanner:
 
   private def columnFilter(source: Plan[_], slot: PhysicalOp.Slot): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
-      child.kind match
-        case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.LongPairs =>
-          Some(PhysicalOp.Filter(child, slot))
-        case _ => None
+      // A key or value filter above a key map drops or keeps a null the row path unboxes.
+      if (MapIntKey.inTree(child)) then None
+      else
+        child.kind match
+          case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.LongPairs =>
+            Some(PhysicalOp.Filter(child, slot))
+          case _ => None
     }
 
   private[execution] def infoOf(op: PhysicalOp): PartitioningInfo = op match
@@ -991,6 +1012,7 @@ object ColumnarPlanner:
     case column @ PhysicalOp.Column(child, _) =>
       infoOf(child).withoutPairDistribution.copy(layout = layoutOf(column.kind))
     case PhysicalOp.MapValue(child) => infoOf(child)
+    case PhysicalOp.MapKey(child) => infoOf(child).withoutPairDistribution
     case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey =>
       SortLowering.info(shuffleWidth, layoutOf(PhysicalOp.Kind.Pairs))
     case _: PhysicalOp.SortByIntValueDesc =>

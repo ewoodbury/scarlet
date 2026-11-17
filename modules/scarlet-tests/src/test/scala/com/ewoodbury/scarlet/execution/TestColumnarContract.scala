@@ -25,11 +25,11 @@ class TestColumnarContract
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    accepted.size shouldBe 214
+    accepted.size shouldBe 216
     // A null key refuses the shape rather than excluding it. Outer joins are covered by execution
     // tests, not contract fixtures, because the contract does not track the int refusals either.
     excluded.size shouldBe 35
-    (accepted.size + excluded.size) shouldBe 249
+    (accepted.size + excluded.size) shouldBe 251
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -93,6 +93,7 @@ class TestColumnarContract
     val keys = Plan.KeysOp(pairSource)
     val values = Plan.ValuesOp(pairSource)
     val mapValues = Plan.MapValuesOp(pairSource, (value: Int) => value + 1)
+    val mapIntKey = Plan.MapIntKeyOp(pairSource, (key: Int) => key % 100)
     val mappedKeys = Plan.MapOp(keys, (key: Int) => key + 1)
     val mappedValues = Plan.MapOp(values, (value: Int) => value + 1)
     val filteredMapValues = Plan.FilterValuesOp(mapValues, (value: Int) => value > 0)
@@ -250,6 +251,7 @@ class TestColumnarContract
       AcceptedCase("int pair keys", keys, narrowInfo(2, layout), Some("Key(Scan)")),
       AcceptedCase("int pair values", values, narrowInfo(2, layout), Some("Value(Scan)")),
       AcceptedCase("int mapValues", mapValues, narrowInfo(2, layout), Some("MapValue(Scan)")),
+      AcceptedCase("int mapIntKey", mapIntKey, narrowInfo(2, layout), Some("MapKey(Scan)")),
       AcceptedCase(
         "keys of string pairs",
         stringKeys,
@@ -347,6 +349,12 @@ class TestColumnarContract
         Plan.CountByKeyOp(pairSource),
         hashedInfo(layout),
         Some("CountByKey(Exchange(Scan))"),
+      ),
+      AcceptedCase(
+        "countByKey of mapIntKey",
+        Plan.CountByKeyOp(mapIntKey),
+        hashedInfo(layout),
+        Some("CountByKey(Exchange(MapKey(Scan)))"),
       ),
       AcceptedCase(
         "countByKey long",
