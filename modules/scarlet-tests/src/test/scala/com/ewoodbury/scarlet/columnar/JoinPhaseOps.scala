@@ -27,6 +27,66 @@ private[scarlet] object JoinPhaseOps:
     }
     new Table(slots, rows)
 
+  /**
+   * Insert [[HashJoin]] uses for an in-memory build. An all-valid key column skips the bit test. A
+   * null key stays out, matching the sparse arm.
+   */
+  def insertKernel(batch: ColumnBatch): Table =
+    val keys = ColumnHash.int32At(batch, 0)
+    val rows = keys.length
+    val slots = new JoinSlots(rows, Long.MaxValue)
+    val values = keys.values
+    if (Validity.livePresent(keys.validity, rows)) then insertAll(slots, values, rows)
+    else insertSparse(slots, values, keys.validity.words, rows)
+    new Table(slots, rows)
+
+  /** Longest chain in `table`. One means every inserted key is unique. */
+  def longestChain(table: Table): Int = table.slots.maxChain
+
+  /**
+   * Writer [[HashJoin.innerInt32]] selects. `grouped` is [[JoinWrite.writeGrouped]], `dense` is
+   * [[JoinWrite.writeDense]], and `row` is the per-row loop [[append]] copies. `empty` writes
+   * nothing.
+   */
+  def writer(table: Table, build: ColumnBatch, probe: ColumnBatch): String =
+    val probeKeys = ColumnHash.int32At(probe, 0)
+    val probeValues = ColumnHash.int32At(probe, 1)
+    val buildValues = ColumnHash.int32At(build, 1)
+    val present = JoinWrite.dense(probeKeys, probeValues, buildValues)
+    val probeRows = probeKeys.length
+    if (table.rows == 0 || probeRows == 0) then "empty"
+    else if (table.slots.maxChain > 1 && probeRows <= JoinWrite.MaxProbeRows && present) then
+      "grouped"
+    else if (present) then "dense"
+    else "row"
+
+  /**
+   * Match columns [[HashJoin.innerInt32]] writes after insert. The reserve walk is included: the
+   * kernel counts matches, then copies. `grouped`, `dense`, and `row` are the three arms.
+   */
+  def write(table: Table, build: ColumnBatch, probe: ColumnBatch): ColumnBatch =
+    val reserved = reserve(table, probe)
+    if (reserved == 0) then ColumnBatches.emptyIntJoin
+    else
+      writer(table, build, probe) match
+        case "grouped" => appendGrouped(table, build, probe, reserved)
+        case "dense" =>
+          val probeKeys = ColumnHash.int32At(probe, 0)
+          JoinWrite.writeDense(
+            table.slots,
+            ColumnHash.int32At(build, 0).values,
+            ColumnHash.int32At(build, 1).values,
+            probeKeys.values,
+            ColumnHash.int32At(probe, 1).values,
+            probeKeys.length,
+            reserved,
+            probeBeforeBuild = false,
+          )
+        case "row" => append(table, build, probe, reserved)
+        case "empty" => ColumnBatches.emptyIntJoin
+        case other =>
+          throw new IllegalStateException(s"unknown join writer $other")
+
   /** Probe rows that hit, counted by chain length. Does not write. */
   def walk(table: Table, probe: ColumnBatch): Int =
     val keys = ColumnHash.int32At(probe, 0)
@@ -134,6 +194,35 @@ private[scarlet] object JoinPhaseOps:
       }
       hash
 
+  private def insertAll(slots: JoinSlots, values: Array[Int], rows: Int): Unit =
+    var row = 0
+    while (row < rows) {
+      slots.insert(values(row), row)
+      row += 1
+    }
+
+  private def insertSparse(
+      slots: JoinSlots,
+      values: Array[Int],
+      words: Array[Long],
+      rows: Int,
+  ): Unit =
+    var row = 0
+    while (row < rows) {
+      if (Validity.isSet(words, row)) then slots.insert(values(row), row)
+      row += 1
+    }
+
+  /** Rows reserved before a write. Same cases as the kernel's match reserve, misses dropped. */
+  private def reserve(table: Table, probe: ColumnBatch): Int =
+    val keys = ColumnHash.int32At(probe, 0)
+    val probeRows = keys.length
+    if (probeRows == 0 || table.rows == 0) then 0
+    else if (table.slots.maxChain > 1) then
+      table.slots.countOutput(keys.values, keys.validity.words, probeRows, keepMisses = false)
+    else if (table.slots.maxChain == 0) then 0
+    else math.max(16, probeRows)
+
   private def publish(
       keys: Array[Int],
       buildValues: Array[Int],
@@ -173,4 +262,3 @@ private[scarlet] object JoinPhaseOps:
       ),
       rows,
     )
-

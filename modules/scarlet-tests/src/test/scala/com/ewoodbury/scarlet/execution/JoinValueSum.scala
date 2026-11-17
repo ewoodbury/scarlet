@@ -20,6 +20,10 @@ private[execution] object JoinValueSum:
   def of(joined: DistCollection[(Int, (Int, Int))]): Long =
     arrays(joined).getOrElse(collected(joined.collect()))
 
+  /** Sum of triples the join already wrote. [[of]] interprets, then uses this arithmetic. */
+  private[execution] def ofColumns(parts: Vector[ColumnBatch]): Long =
+    sumParts(parts)
+
   /** Columnar sum. `None` keeps the collected recipe. */
   private def arrays(joined: DistCollection[(Int, (Int, Int))]): Option[Long] =
     if (!ScarletConf.get.columnarExecution) then None

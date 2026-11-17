@@ -35,17 +35,20 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * `JOIN_PHASE_WARMUP` warmups (default 5). `steady_ms` is the upper median of the last 10 rounds,
  * with the same `ok` / `compilation` / `machine` rule as [[CrossEngineBench]]. Phases are not
  * subtracted. `build-selection` still times [[Selection.applySelected]] and the id copy. The
- * production count does not: an owned int-pair slot stack is folded into the encode, and that
- * cost is inside `action`. Four threads run before one thread, so the morsel pool is sized at 4.
+ * production count does not: an owned int-pair slot stack is folded into the encode, and that cost
+ * is inside `action`. Four threads run before one thread, so the morsel pool is sized at 4.
  *
- * `JOIN_PHASE_ROWS` selects the filtered side (default 1e6). The right side stays 10240 rows.
- * At 1e7 the match count is about 33.3e6 and the output-row guard scales with that.
+ * `JOIN_PHASE_ROWS` selects the filtered side (default 1e6). The right side stays 10240 rows. At
+ * 1e7 the match count is about 33.3e6 and the output-row guard scales with that.
  *
  * `JOIN_PHASE_THREADS`, when set, is the only pool width, and it is installed before the first
  * dispatch so the morsel pool is that size. Unset keeps the historical four-then-one run, which
  * sizes the pool at four. `JOIN_PHASE_ONLY=action` times the real `count` and the phases
  * [[JoinCountTrace]] records on that call. It does not time the hash-join replicas. The count
  * multiplies key tallies. It does not exchange. Submits are `pool.execute` calls on the caller.
+ *
+ * `JOIN_PHASE_ONLY=joinsum` does not time the count. [[JoinSumPhase]] splits `filter-joinsum`:
+ * encode, filters, exchange, insert, the writer the kernel selects, and the value-pair sum.
  *
  * {{{
  * JOIN_PHASE_ROWS=10000000 JOIN_PHASE_WARMUP=80 JOIN_PHASE_ROUNDS=30 \
@@ -128,6 +131,10 @@ object JoinPhaseBench:
   )
 
   def main(args: Array[String]): Unit =
+    if (sys.env.get("JOIN_PHASE_ONLY").contains("joinsum")) then JoinSumPhase.run()
+    else countMain()
+
+  private def countMain(): Unit =
     val savedConf = ScarletConf.get
     val savedRuntime = ScarletRuntime.get
     val lead = requestedThreads.getOrElse(width)
@@ -140,7 +147,8 @@ object JoinPhaseBench:
       accept(prepared)
       preamble(prepared)
       val readings = requestedThreads match
-        case Some(threads) => runWidths(savedConf, savedRuntime, schedulers, prepared, Vector(threads))
+        case Some(threads) =>
+          runWidths(savedConf, savedRuntime, schedulers, prepared, Vector(threads))
         case None => runWidths(savedConf, savedRuntime, schedulers, prepared, Vector(width, 1))
       System.err.println(table(readings))
     catch
@@ -186,9 +194,8 @@ object JoinPhaseBench:
     }
     val kernel = parts.map(part => JoinPhaseOps.kernel(part.build, part.probe))
     val outputRows = ColumnReduce.count(kernel)
-    if (
-      outputRows != ColumnReduce.count(written) || outputRows != ColumnReduce.count(grouped)
-    ) then refuse("writer row count drifted from the kernel")
+    if (outputRows != ColumnReduce.count(written) || outputRows != ColumnReduce.count(grouped))
+    then refuse("writer row count drifted from the kernel")
     if (kernel.zip(written).exists((left, right) => !JoinPhaseOps.same(left, right))) then
       refuse("replica bytes drifted from the kernel")
     if (kernel.zip(grouped).exists((left, right) => !JoinPhaseOps.same(left, right))) then
@@ -438,11 +445,14 @@ object JoinPhaseBench:
         val probe = HashExchange.partitionAll(prepared.rightBatches, 0, width, threads)
         (build, probe)
       } { case (build, probe) =>
-        if (rowCount(build) * 10L != prepared.outputRows) then refuse("exchange dropped a survivor")
+        if (rowCount(build) * 10L != prepared.outputRows) then
+          refuse("exchange dropped a survivor")
         if (rowCount(probe) != joinRows.toLong) then refuse("exchange dropped a probe row")
       },
       time("insert", threads) {
-        MorselScheduler.map(prepared.buildBuckets, threads)((_, batch) => JoinPhaseOps.insert(batch))
+        MorselScheduler.map(prepared.buildBuckets, threads)((_, batch) =>
+          JoinPhaseOps.insert(batch),
+        )
       } { tables =>
         val built = tables.foldLeft(0L)((sum, table) => sum + table.rows.toLong)
         if (built * 10L != prepared.outputRows) then refuse(s"insert built $built rows")
@@ -563,7 +573,8 @@ object JoinPhaseBench:
     val (left, groups) = sizes.foldLeft(seed) { (state, count) =>
       val (rest, acc) = state
       val (group, tail) = rest.splitAt(count)
-      if (group.length != count) then refuse(s"selection group has ${group.length}, expected $count")
+      if (group.length != count) then
+        refuse(s"selection group has ${group.length}, expected $count")
       (tail, acc :+ group)
     }
     if (left.nonEmpty) then refuse(s"${left.length} selection morsels were not grouped")
