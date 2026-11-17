@@ -420,14 +420,12 @@ private[execution] object ColumnarInterpreter:
       // Boundary guard: take refuses an aggregate, so a selector never reaches this arm.
       // The count node is the typed witness. This arm publishes distinct keys, not counts.
       require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
-      Columns.Ints(
-        GroupByKeyKeysArms.columns(
-          source,
-          child,
-          selectedPartition,
-          preserveAbsence,
-          ordinals,
-        ),
+      GroupByKeyKeysArms.columns(
+        source,
+        child,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
       )
     case (Plan.KeysOp(source), PhysicalOp.Column(child, 0)) =>
       pairProjection(
