@@ -301,8 +301,9 @@ object CrossEngineBench:
   private def sortQuery(rows: Int, filters: Int, nulls: Boolean): Built =
     val (data, encodeMs) = sortSource(rows, nulls)
     val sorted = filterInts(data, filters).sortByIntKey
+    // Same sum as `collect().map(key * 31 + value).sum`. Present columns are read in place.
     Built(
-      () => sorted.collect().map { case (key, value) => key * 31L + value }.sum,
+      () => SortChecksum.of(sorted),
       encodeMs,
       sorted.plan,
     )

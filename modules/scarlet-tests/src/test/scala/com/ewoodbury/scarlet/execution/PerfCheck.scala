@@ -78,7 +78,7 @@ object PerfCheck:
       ),
       (
         "filter-sort",
-        () => sorted.collect().map { case (key, value) => key * 31L + value }.sum,
+        () => SortChecksum.of(sorted),
       ),
     )
 
