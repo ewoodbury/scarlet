@@ -3,7 +3,6 @@ package com.ewoodbury.scarlet.execution
 import java.lang.management.ManagementFactory
 import java.nio.file.{Files, Path}
 import java.util.Locale
-import java.util.concurrent.locks.LockSupport
 
 import scala.util.Random
 import scala.util.control.NonFatal
@@ -12,7 +11,12 @@ import cats.effect.unsafe.implicits.global
 import com.sun.management.ThreadMXBean
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, RankSplitLongRuns, RankSplitRuns}
+import com.ewoodbury.scarlet.columnar.{
+  ColumnMetrics,
+  CountingSink,
+  RankSplitLongRuns,
+  RankSplitRuns,
+}
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
@@ -21,10 +25,10 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * Sort-at-scale mode of [[QueryBench]]. Not a test, and not part of `make test`.
  *
  * Two cases sort 5e6 rows on the columnar path at widths 1 and 4: `int-sort-key-large` and
- * `long-sort-key-large`. Construction matches the default sort queries, with the row count set
- * to 5e6. Two warmup rounds are discarded. Ten rounds are measured, fewer than the default forty.
- * A local stable sort produces the checksum. That comparison runs before warmup and again after
- * the measured rounds, outside the timer, and again after every sample.
+ * `long-sort-key-large`. Construction matches the default sort queries, with the row count set to
+ * 5e6. Two warmup rounds are discarded. Ten rounds are measured, fewer than the default forty. A
+ * local stable sort produces the checksum. That comparison runs before warmup and again after the
+ * measured rounds, outside the timer, and again after every sample.
  *
  * The row path is not run at 5e6. That is a scope decision. The existing 1e6 row results are the
  * row figures. Scaling those per-type allocation numbers by five is an extrapolated cumulative
@@ -36,10 +40,10 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * and passes come from the two source partitions and `spillFanIn`: each partition is one run, and
  * runs merge until one file remains. With the default fan-in that is 3 files and 1 pass. A stress
  * case that does not match fails the run, including one that wrote a file and recorded 0 passes,
- * and no table is printed. Scale cases leave spill off and must write nothing.
- * [[RankSplitRuns]] and [[RankSplitLongRuns]] are reset before every attempt, and again after
- * [[ScarletConf]] and [[ScarletRuntime]] are restored. `files_written` is a publish count. The
- * rank-split store deletes every run at close.
+ * and no table is printed. Scale cases leave spill off and must write nothing. [[RankSplitRuns]]
+ * and [[RankSplitLongRuns]] are reset before every attempt, and again after [[ScarletConf]] and
+ * [[ScarletRuntime]] are restored. `files_written` is a publish count. The rank-split store
+ * deletes every run at close.
  *
  * `alloc_mb` uses the same process-wide estimate as [[QueryBench]]. Nearest-rank percentiles use
  * 1-based rank `ceil(p / 100 * n)` with no interpolation.
@@ -108,7 +112,10 @@ object SortScaleBench:
    * construction failure still reaches the matching cleanup. `wall_s` is printed after this
    * returns, which includes that cleanup.
    */
-  private def execute(savedConf: ScarletConf, savedRuntime: ScarletRuntime.RuntimeComponents): Unit =
+  private def execute(
+      savedConf: ScarletConf,
+      savedRuntime: ScarletRuntime.RuntimeComponents,
+  ): Unit =
     val directory = freshSpillDirectory()
     try
       val schedulers = startSchedulers()
@@ -200,8 +207,8 @@ object SortScaleBench:
 
   /**
    * Same inputs as the default sort queries: a Fisher-Yates permutation of `0` until `rows`,
-   * seeded by `0x12345678`, and values from the shared generator. Long pairs widen those ints.
-   * The keys are unique.
+   * seeded by `0x12345678`, and values from the shared generator. Long pairs widen those ints. The
+   * keys are unique.
    */
   private def pairSorts(rows: Int, spills: Boolean): Vector[BenchCase] =
     val generated = generate(rows)
@@ -370,7 +377,10 @@ object SortScaleBench:
     val longFiles = RankSplitLongRuns.filesWrittenForTest
     val longPasses = RankSplitLongRuns.mergePassesForTest
     if (bench.intKey) then
-      require(longFiles == 0L && longPasses == 0L, s"${bench.name} touched the long spill counters")
+      require(
+        longFiles == 0L && longPasses == 0L,
+        s"${bench.name} touched the long spill counters",
+      )
       Counts(intFiles, intPasses)
     else
       require(intFiles == 0L && intPasses == 0L, s"${bench.name} touched the int spill counters")
@@ -680,7 +690,9 @@ object SortScaleBench:
         val detail = Option(thrown.getMessage).getOrElse(thrown.getClass.getName)
         System.err.println(s"spill directory delete failed: $directory ($detail)")
 
-  /** Opens one scheduler per width. A later constructor failure shuts down the ones already open. */
+  /**
+   * Opens one scheduler per width. A later constructor failure shuts down the ones already open.
+   */
   private def startSchedulers(): Map[Int, LocalTaskScheduler] =
     def open(
         pending: Vector[Int],
@@ -727,110 +739,3 @@ object SortScaleBench:
     ManagementFactory.getThreadMXBean match
       case bean: ThreadMXBean => Some(bean)
       case _ => None
-
-  /**
-   * Sums bytes on every live thread except the probe. Morsel workers have exited when the action
-   * returns, so a before/after pair on the caller misses them. The watch reads while the action
-   * runs. A worker that is never seen is missing. The caller's before/after pair is included
-   * because the caller is one of the live threads.
-   */
-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private final class AllocProbe(bean: ThreadMXBean):
-    private val capacity = 1024
-    private val ids = new Array[Long](capacity)
-    private val baseline = new Array[Long](capacity)
-    private val high = new Array[Long](capacity)
-    private var count = 0
-    @volatile private var running = true
-    @volatile private var probeId = 0L
-    private val thread = new Thread(() => watch(), "scarlet-alloc-probe")
-
-    thread.setDaemon(true)
-    thread.start()
-    while (probeId == 0L) LockSupport.parkNanos(10000L)
-
-    def stop(): Unit =
-      running = false
-      LockSupport.unpark(thread)
-      thread.join(1000L)
-      ()
-
-    def account[A](body: => A): (A, Long) =
-      open()
-      try
-        val value = body
-        (value, close())
-      catch
-        case thrown: Throwable =>
-          closeQuietly()
-          throw thrown
-
-    private def watch(): Unit =
-      probeId = Thread.currentThread().getId
-      while (running) {
-        observe(setBaseline = false)
-        LockSupport.parkNanos(50000L)
-      }
-
-    private def open(): Unit = this.synchronized {
-      count = 0
-      observe(setBaseline = true)
-    }
-
-    private def close(): Long = this.synchronized {
-      observe(setBaseline = false)
-      var index = 0
-      var total = 0L
-      while (index < count) {
-        if (ids(index) != probeId) then
-          val base = if (baseline(index) < 0L) 0L else baseline(index)
-          val delta = high(index) - base
-          if (delta > 0L) then total += delta
-        index += 1
-      }
-      total
-    }
-
-    private def closeQuietly(): Unit =
-      try
-        val _ = close()
-      catch
-        case _: IllegalStateException => ()
-
-    private def observe(setBaseline: Boolean): Unit = this.synchronized {
-      val live = bean.getAllThreadIds
-      var index = 0
-      while (index < live.length) {
-        val id = live(index)
-        val bytes = bean.getThreadAllocatedBytes(id)
-        if (bytes >= 0L) then note(id, bytes, setBaseline)
-        index += 1
-      }
-    }
-
-    private def note(id: Long, bytes: Long, setBaseline: Boolean): Unit =
-      val at = slot(id)
-      if (bytes > high(at)) then high(at) = bytes
-      if (setBaseline) then baseline(at) = bytes
-
-    private def slot(id: Long): Int =
-      val existing = indexOf(id)
-      if (existing >= 0) then existing
-      else if (count >= capacity) then
-        throw new IllegalStateException(s"alloc probe filled $capacity thread slots")
-      else
-        val placed = count
-        ids(placed) = id
-        baseline(placed) = -1L
-        high(placed) = 0L
-        count = placed + 1
-        placed
-
-    private def indexOf(id: Long): Int =
-      var index = 0
-      var found = -1
-      while (index < count && found < 0) {
-        if (ids(index) == id) then found = index
-        index += 1
-      }
-      found

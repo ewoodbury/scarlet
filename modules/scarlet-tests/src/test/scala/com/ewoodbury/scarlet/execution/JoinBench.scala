@@ -2,7 +2,6 @@ package com.ewoodbury.scarlet.execution
 
 import java.lang.management.ManagementFactory
 import java.util.Locale
-import java.util.concurrent.locks.LockSupport
 
 import scala.util.control.NonFatal
 
@@ -15,25 +14,24 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
- * Times broadcast and hash joins built through [[com.ewoodbury.scarlet.api.DistCollection]].
- * Not a test, and not part of `make test`.
+ * Times broadcast and hash joins built through [[com.ewoodbury.scarlet.api.DistCollection]]. Not a
+ * test, and not part of `make test`.
  *
  * The timed region is the action. Warmup rounds are discarded. The multiset digest is compared
  * outside the timer: per-key pair counts and a checksum over `(key, leftValue, rightValue)`. An
  * outer join's missing side is `None` in that mix. Row and columnar digests must agree whenever
- * both paths return. A mismatch fails the run. A case that cannot show that equality fails
- * instead of printing a time. Raw order is not compared.
+ * both paths return. A mismatch fails the run. A case that cannot show that equality fails instead
+ * of printing a time. Raw order is not compared.
  *
  * The printed `strategy` column is the path that layout ran. For an inner join the row-path value
  * comes from the case's declared hint and sizes. The columnar value is `broadcast` when the
  * physical tree is a broadcast join, and `shuffle-hash` otherwise. An outer join's row path is
  * always `shuffle-hash`: the row executor ignores the hint. The columnar path follows the hint.
  * Absent is `unhinted` and still shuffle-hashes. These cases do not exercise an outer sort-merge;
- * that hint lowers on the columnar path now, and the row path still shuffle-hashes it.
- * A null value on a full, broadcast left, or sort-merge outer join stays on the row path. That
- * case publishes no column batch, so the run fails it instead of labeling the row path as
- * columnar. An int shuffle-hash left or right outer join, and an int broadcast right outer join,
- * keep the null.
+ * that hint lowers on the columnar path now, and the row path still shuffle-hashes it. A null
+ * value on a full, broadcast left, or sort-merge outer join stays on the row path. That case
+ * publishes no column batch, so the run fails it instead of labeling the row path as columnar. An
+ * int shuffle-hash left or right outer join, and an int broadcast right outer join, keep the null.
  * `broadcastJoinThreshold` and `enableSortMergeJoin` are restored after every case.
  *
  * `runMain` executes in the sbt JVM. `Test / fork` is left false, so absolute times carry sbt and
@@ -77,7 +75,11 @@ object JoinBench:
 
     def runnable: Boolean = failure.isEmpty
 
-  private[execution] final case class Observation(digest: JoinDigest.Digest, batches: Long, visits: Long)
+  private[execution] final case class Observation(
+      digest: JoinDigest.Digest,
+      batches: Long,
+      visits: Long,
+  )
 
   def main(args: Array[String]): Unit =
     val started = System.nanoTime()
@@ -185,7 +187,9 @@ object JoinBench:
         ),
       )
 
-  /** One execution. The caller restores the process conf if this changed more than join settings. */
+  /**
+   * One execution. The caller restores the process conf if this changed more than join settings.
+   */
   private[execution] def digestOf(
       spec: JoinCases.JoinSpec,
       threads: Int,
@@ -484,7 +488,9 @@ object JoinBench:
     }
     val notes = checksumNotes(cases) ++ blockedNotes(blocked)
     val soFar = System.nanoTime() - started
-    System.err.println((header ++ body ++ notes ++ Vector(s"wall_s=${seconds(soFar)}")).mkString("\n"))
+    System.err.println(
+      (header ++ body ++ notes ++ Vector(s"wall_s=${seconds(soFar)}")).mkString("\n"),
+    )
     cases.foreach { item =>
       layouts.foreach { columnar =>
         if (!(columnar && !item.accepted)) then
@@ -495,9 +501,11 @@ object JoinBench:
     }
 
   private def failClosed(blocked: Vector[Measured]): Nothing =
-    val text = blocked.map { item =>
-      s"${item.spec.name}: ${item.failure.fold("unspecified")(showFailure)}"
-    }.mkString("; ")
+    val text = blocked
+      .map { item =>
+        s"${item.spec.name}: ${item.failure.fold("unspecified")(showFailure)}"
+      }
+      .mkString("; ")
     throw new IllegalStateException(text)
 
   private def tableRow(
@@ -703,108 +711,3 @@ object JoinBench:
     ManagementFactory.getThreadMXBean match
       case bean: ThreadMXBean => Some(bean)
       case _ => None
-
-  /**
-   * Sums bytes on every live thread except the probe. The watch reads while the action runs.
-   * A worker that is never seen is missing. The caller's before/after pair is included.
-   */
-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private final class AllocProbe(bean: ThreadMXBean):
-    private val capacity = 1024
-    private val ids = new Array[Long](capacity)
-    private val baseline = new Array[Long](capacity)
-    private val high = new Array[Long](capacity)
-    private var count = 0
-    @volatile private var running = true
-    @volatile private var probeId = 0L
-    private val thread = new Thread(() => watch(), "scarlet-alloc-probe")
-
-    thread.setDaemon(true)
-    thread.start()
-    while (probeId == 0L) LockSupport.parkNanos(10000L)
-
-    def stop(): Unit =
-      running = false
-      LockSupport.unpark(thread)
-      thread.join(1000L)
-      ()
-
-    def account[A](body: => A): (A, Long) =
-      open()
-      try
-        val value = body
-        (value, close())
-      catch
-        case thrown: Throwable =>
-          closeQuietly()
-          throw thrown
-
-    private def watch(): Unit =
-      probeId = Thread.currentThread().getId
-      while (running) {
-        observe(setBaseline = false)
-        LockSupport.parkNanos(50000L)
-      }
-
-    private def open(): Unit = this.synchronized {
-      count = 0
-      observe(setBaseline = true)
-    }
-
-    private def close(): Long = this.synchronized {
-      observe(setBaseline = false)
-      var index = 0
-      var total = 0L
-      while (index < count) {
-        if (ids(index) != probeId) then
-          val base = if (baseline(index) < 0L) 0L else baseline(index)
-          val delta = high(index) - base
-          if (delta > 0L) then total += delta
-        index += 1
-      }
-      total
-    }
-
-    private def closeQuietly(): Unit =
-      try
-        val _ = close()
-      catch
-        case _: IllegalStateException => ()
-
-    private def observe(setBaseline: Boolean): Unit = this.synchronized {
-      val live = bean.getAllThreadIds
-      var index = 0
-      while (index < live.length) {
-        val id = live(index)
-        val bytes = bean.getThreadAllocatedBytes(id)
-        if (bytes >= 0L) then note(id, bytes, setBaseline)
-        index += 1
-      }
-    }
-
-    private def note(id: Long, bytes: Long, setBaseline: Boolean): Unit =
-      val at = slot(id)
-      if (bytes > high(at)) then high(at) = bytes
-      if (setBaseline) then baseline(at) = bytes
-
-    private def slot(id: Long): Int =
-      val existing = indexOf(id)
-      if (existing >= 0) then existing
-      else if (count >= capacity) then
-        throw new IllegalStateException(s"alloc probe filled $capacity thread slots")
-      else
-        val placed = count
-        ids(placed) = id
-        baseline(placed) = -1L
-        high(placed) = 0L
-        count = placed + 1
-        placed
-
-    private def indexOf(id: Long): Int =
-      var index = 0
-      var found = -1
-      while (index < count && found < 0) {
-        if (ids(index) == id) then found = index
-        index += 1
-      }
-      found

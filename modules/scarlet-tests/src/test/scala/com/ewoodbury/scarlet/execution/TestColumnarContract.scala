@@ -25,10 +25,6 @@ class TestColumnarContract
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    // 214 accepted fixtures, 35 exclusions, 249 covered. Additions since 205: int filter on
-    // sortByIntKey (206), long inner broadcast (207), string inner broadcast (208), int keys of
-    // groupByKey (209), long inner sort-merge (210), maps above int/string/long groupByKey (213),
-    // explicit string inner sort-merge (214).
     accepted.size shouldBe 214
     // A null key refuses the shape rather than excluding it. Outer joins are covered by execution
     // tests, not contract fixtures, because the contract does not track the int refusals either.

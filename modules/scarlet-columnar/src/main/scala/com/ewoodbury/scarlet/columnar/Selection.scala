@@ -189,16 +189,7 @@ private[scarlet] object Selection:
 
   /** One [[Validity.rangePresent]] per ordinal named by `mask`. Unset bits are not read. */
   private def denseRange(batch: ColumnBatch, start: Int, length: Int, mask: Int): Boolean =
-    var pending = mask
-    var ordinal = 0
-    var dense = true
-    while (dense && pending != 0) {
-      if ((pending & 1) != 0) then
-        dense = Validity.rangePresent(int32At(batch, ordinal).validity, start, length)
-      pending >>>= 1
-      ordinal += 1
-    }
-    dense
+    ColumnHash.denseRange(batch, start, length, mask)
 
   private def tally(
       start: Int,

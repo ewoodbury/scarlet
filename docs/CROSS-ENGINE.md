@@ -2,8 +2,8 @@
 
 Not a CI gate. The CI gate is `PerfCheck`, which compares the columnar path with the row path in
 the same run. The decision table is the 2026-11-17 pinned run at `50591f6`. The 2026-11-16 pinned
-run at `b704c3c` (#234) is the previous scoreboard. The 2026-11-15 steady-window run at `2b7b01e`
-(#233) stops before #234. The warmup-5 full-window run at `8958ac9` is the one before that. The
+run at `b704c3c` (#234) is the previous scoreboard. The 2026-11-15 steady-window table (#233)
+stops at `2b7b01e`, before #234. The warmup-5 full-window run at `8958ac9` is the one before that. The
 2026-11-14 second run is at `ffca249`. The 2026-11-13 devbox section is the earlier warmup-3,
 rounds-10 protocol. The Apple M1 Pro table is history from 2026-11-07. It is not comparable with
 the container or the devbox.

@@ -233,7 +233,8 @@ double keys, `mapValues` to string or double, double-pair `keys`, `values`,
 single-precision `Float` sources and maps, all-null strings, an empty int source without
 a witness, and element maps that do not preserve the column type (`boolean` to `boolean`, `int`
 to `long`, `string`, or a pair, `long` to `int` or `string`, and `double` to `int`).
-That is 35 exclusions, and 205 accepted, for 240 covered shapes. String `groupByKey` moved from the excluded list, so 36 - 1 = 35 excluded. Long `groupByKey` is a new accepted fixture, so 199 + 1 = 200 and 234 + 1 = 235. Long `filterKeys` and `filterValues` are new accepted fixtures, so 200 + 2 = 202 and 235 + 2 = 237. Int `countByKey` is a new accepted fixture that adds no exclusion, so 202 + 1 = 203 and 237 + 1 = 238. Long `countByKey` is a new accepted fixture that adds no exclusion, so 203 + 1 = 204 and 238 + 1 = 239. String `countByKey` is a new accepted fixture that adds no exclusion, so 204 + 1 = 205 and 239 + 1 = 240. A filter over `sortByIntKey` stays accepted because that fixture's int key column is fully present, so it adds no exclusion: 205 + 1 = 206 and 240 + 1 = 241. A null key on that shape is refused and is not one of the 35 exclusions. Explicit long inner broadcast is a new accepted fixture, so 206 + 1 = 207 and 241 + 1 = 242. Explicit string inner broadcast is a new accepted fixture, so 207 + 1 = 208 and 242 + 1 = 243. Int `keys` of `groupByKey` is a new accepted fixture, so 208 + 1 = 209 and 243 + 1 = 244. Explicit long inner sort-merge is a new accepted fixture, so 209 + 1 = 210 and 244 + 1 = 245. Excluded stays 35. A map directly above int, string, and long `groupByKey` is three new accepted fixtures, so 210 + 3 = 213 and 245 + 3 = 248. Explicit string inner sort-merge is a new accepted fixture, so 213 + 1 = 214 and 248 + 1 = 249. Excluded stays 35.
+Those 35 exclusions plus the 214 accepted fixtures are the 249 covered shapes. The contract table
+above is the inventory; `TestColumnarContract` holds the three count assertions.
 Long outer joins are covered
 by execution tests, not contract fixtures, because the contract does not track the int refusals either.
 That last group is an `Int` mapped to `Long`, to a pair, or to `String` (including a filter then
@@ -362,12 +363,10 @@ as wide plans.
 
 ## Shuffle write policy
 
-`ExecutionPlanner` writes a stage's output only when a dependent stage is a shuffle stage, and
-the write shape is a value: `ShuffleWriteReason.forDependents` picks, by priority — sortBy
-(range partitioned to preserve global order), then partitionBy (key-hashed into its target
-count), then repartition/coalesce, then a combine-then-hash write when every dependent is the
-same `reduceByKey`, then a generic keyed write. Shuffle IDs come from the `ShuffleService`,
-never from stage IDs. `reduceByKey`'s function is treated as associative and commutative.
+The row path writes a stage only when a dependent is a shuffle stage. The write-shape
+priority is in `docs/DAGScheduler.md` ("Shuffle writes between stages") and
+`TestShuffleWriteReason`. Shuffle IDs come from the `ShuffleService`, never from stage IDs.
+`reduceByKey`'s function is treated as associative and commutative.
 
 ## Type erasure policy
 
