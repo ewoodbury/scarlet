@@ -108,6 +108,7 @@ private[execution] object StringPairWalk:
       preserveAbsence,
       ordinals,
     )
+    FilterChain.refuseNullSortKey(child, input)
     val filtered = ColumnarInterpreter.onEachMorsel(batches(input)) { morsel =>
       applyFilter(plan, morsel.batch, morsel.start, morsel.length)
     }
@@ -133,6 +134,8 @@ private[execution] object StringPairWalk:
       preserveAbsence,
       ordinals,
     )
+    // The selected path refuses in [[FilterChain]]. This is the interpret path.
+    FilterChain.refuseNullSortKey(child, input)
     val filtered = ColumnarInterpreter.onEachMorsel(batches(input)) { morsel =>
       Selection(morsel.batch, morsel.start, morsel.length, steps)
     }

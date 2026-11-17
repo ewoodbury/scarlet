@@ -242,13 +242,6 @@ class TestSortByIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val twice = sorted
       .filter((pair: (Int, Int)) => pair._2 != 20)
       .filter((pair: (Int, Int)) => pair._1 > 0)
-    val longs = DistCollection
-      .ofLongPairs(Array(3L, 1L, 2L), Array(30L, 10L, 20L), 2)
-      .sortByLongKey
-      .filter((pair: (Long, Long)) => pair._2 != 20L)
-    val strings = DistCollection(Seq("b" -> 2, "a" -> 1), 2)
-      .sortByStringKey
-      .filter((pair: (String, Int)) => pair._2 != 1)
 
     ColumnarPlanner.partitioning(mapped.plan) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.partitioning(rewritten.plan) shouldBe Option.empty[PartitioningInfo]
@@ -268,8 +261,6 @@ class TestSortByIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       sorted.filterValues[Int, Int]((value: Int) => value > 0).plan,
     ) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.partitioning(twice.plan) shouldBe Option.empty[PartitioningInfo]
-    ColumnarPlanner.partitioning(longs.plan) shouldBe Option.empty[PartitioningInfo]
-    ColumnarPlanner.partitioning(strings.plan) shouldBe Option.empty[PartitioningInfo]
   }
 
   it should "write no spill file for a filter that drops rows over an in-budget sort" in {

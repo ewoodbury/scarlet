@@ -68,22 +68,23 @@ object ColumnarPlanner:
    * full outer join, a broadcast left outer join, or a sort-merge outer join makes [[tryRun]]
    * return `None`. [[SortLowering]] accepts an int, long, or string key sort of a scan, or of
    * filters over that scan. A map, aggregate, or join under the sort stays on the row path. One
-   * filter above an int sort lowers to [[PhysicalOp.Filter]] on [[PhysicalOp.Slot.Row]] around
-   * [[PhysicalOp.SortByIntKey]], and only for a fully present key column: the pair-row filter atom
-   * drops a null key while the row path keeps it. The sort is [[SortLowering.lowerInt]].
-   * [[SortLowering.acceptsAsChild]] stays false, so a null key, a second filter, a long or string
-   * sort, and every other parent stay on the row path. A slot filter sorts the survivor index.
-   * Over the budget, with spill on, that index is spilled. A long-pair row filter and a whole-row
-   * string filter sort that index too. A long sort spills when `spillEnabled` is on and the
-   * retained estimate exceeds `spillBudgetBytes`. The physical op stays `SortByLongKey`. A string
-   * sort spills on that same budget. The physical op stays `SortByStringKey`. At or under the
-   * budget, and whenever spill is off, the split stays in memory and writes nothing. One map
-   * directly above an int, string, or long `groupByKey` lowers to [[PhysicalOp.GroupedDecode]].
-   * The group runs once. [[ColumnarInterpreter.decodeFor]] yields `(K, Iterable[V])` and the
-   * logical function runs on those rows. The function is not inspected. `values`, `take`, a second
-   * map, and a filter above that map stay on the row path. Int `keys` stays a distinct-key scan.
-   * String and long `keys` stay on the row path. [[partitioning]] and [[tryRun]] follow a refusal.
-   * They also drop a lowered tree whose layout is invalid.
+   * filter above an int, long, or string key sort lowers to [[PhysicalOp.Filter]] on
+   * [[PhysicalOp.Slot.Row]] around that sort, and only for a fully present key column. The
+   * pair-row filter drops a null key while the row path keeps it. The sort is
+   * [[SortLowering.lowerInt]], [[SortLowering.lowerLong]], or [[SortLowering.lowerString]], not
+   * [[lowerChild]]. [[SortLowering.acceptsAsChild]] stays false, so a null key, a second filter, a
+   * key or value filter above the sort, and every other parent stay on the row path. A slot filter
+   * sorts the survivor index. Over the budget, with spill on, that index is spilled. A long-pair
+   * row filter and a whole-row string filter sort that index too. A long sort spills when
+   * `spillEnabled` is on and the retained estimate exceeds `spillBudgetBytes`. The physical op
+   * stays `SortByLongKey`. A string sort spills on that same budget. The physical op stays
+   * `SortByStringKey`. At or under the budget, and whenever spill is off, the split stays in
+   * memory and writes nothing. One map directly above an int, string, or long `groupByKey` lowers
+   * to [[PhysicalOp.GroupedDecode]]. The group runs once. [[ColumnarInterpreter.decodeFor]] yields
+   * `(K, Iterable[V])` and the logical function runs on those rows. The function is not inspected.
+   * `values`, `take`, a second map, and a filter above that map stay on the row path. Int `keys`
+   * stays a distinct-key scan. String and long `keys` stay on the row path. [[partitioning]] and
+   * [[tryRun]] follow a refusal. They also drop a lowered tree whose layout is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -706,49 +707,65 @@ object ColumnarPlanner:
     steps match
       case Nil => lowerPlanNode(base)
       case List(ElementStep.Filter(_)) =>
-        filterOverIntSort(base).orElse(lowerSteps(base, steps))
+        filterOverKeySort(base).orElse(lowerSteps(base, steps))
       case List(ElementStep.Project(_)) =>
         GroupedDecode.lower(base, lowerPlanNode).orElse(lowerSteps(base, steps))
       case _ => lowerSteps(base, steps)
 
   /**
-   * One row filter whose base is an int sort. The shape is admitted only for a fully present key
-   * column, because the pair-row filter atom drops a null key while the row path keeps it. The
-   * sort is [[SortLowering.lowerInt]], not [[lowerChild]]. [[presentIntKeyColumn]] is
-   * [[groupedPairSource]]'s pair of checks, [[ScanLowering.classify]] and the
-   * [[nullablePairWitness]] walk, and it accepts only the strict side. A null key, a stack of two,
+   * One row filter whose base is an int, long, or string key sort. The shape is admitted only for
+   * a fully present key column, because the pair-row filter drops a null key while the row path
+   * keeps it. The sort is [[SortLowering.lowerInt]], [[SortLowering.lowerLong]], or
+   * [[SortLowering.lowerString]], not [[lowerChild]]. A null key, a stack of two, a slot filter,
    * and every non-sort base return `None` or use [[lowerSteps]].
    */
-  private def filterOverIntSort(base: Plan[_]): Option[PhysicalOp] = base match
-    case Plan.SortByIntKeyOp(source) if presentIntKeyColumn(source) =>
-      SortLowering.lowerInt(source, lowerPlan).map { sorted =>
-        PhysicalOp.Filter(sorted, PhysicalOp.Slot.Row)
-      }
+  private def filterOverKeySort(base: Plan[_]): Option[PhysicalOp] = base match
+    case Plan.SortByIntKeyOp(source) if presentSortKey(source, PhysicalOp.Kind.Pairs) =>
+      SortLowering.lowerInt(source, lowerPlan).map(rowFilter)
+    case Plan.SortByLongKeyOp(source) if presentSortKey(source, PhysicalOp.Kind.LongPairs) =>
+      SortLowering.lowerLong(source, lowerPlan).map(rowFilter)
+    case Plan.SortByStringKeyOp(source) if presentSortKey(source, PhysicalOp.Kind.StringPairs) =>
+      SortLowering.lowerString(source, lowerPlan).map(rowFilter)
     case _ => None
 
+  private def rowFilter(sorted: PhysicalOp): PhysicalOp =
+    PhysicalOp.Filter(sorted, PhysicalOp.Slot.Row)
+
   /**
-   * True when every pair under `plan` has a present int key. A filter does not invent a key, so
-   * the scan is the witness. [[groupedPairSource]] is [[ScanLowering.classify]] or
-   * [[nullablePairWitness]]. This shape needs the strict side: classify of a
-   * [[Plan.SourceDescriptor.Pairs]] scan already requires every cell to be an `Int`, and an owned
-   * array has no null. An unknown scan classifies from the first row, so the same walk as
-   * [[nullablePairWitness]] checks every key.
+   * True when every pair under `plan` has a present key of `kind`. A filter does not invent a key,
+   * so the scan is the witness. An owned int-pair or long-pair array has no null. An unknown scan
+   * is checked row by row, the same walk as [[nullablePairWitness]] on the strict side. A string
+   * pair has no owned descriptor. A null key is false. A map under the sort is false.
    */
-  private def presentIntKeyColumn(plan: Plan[_]): Boolean = plan match
+  private def presentSortKey(plan: Plan[_], kind: PhysicalOp.Kind): Boolean = plan match
     case source: Plan.Source[_] =>
-      if (!ScanLowering.classify(source).contains(PhysicalOp.Kind.Pairs)) then false
-      else
-        source.descriptor match
-          case Plan.SourceDescriptor.Pairs => true
-          case Plan.SourceDescriptor.Unknown =>
-            source.partitions.iterator.flatMap(_.data.iterator).forall(IntPairCells.presentKey)
-          case Plan.SourceDescriptor.Ints | Plan.SourceDescriptor.Longs |
-              Plan.SourceDescriptor.Doubles | Plan.SourceDescriptor.Bools |
-              Plan.SourceDescriptor.Strings | Plan.SourceDescriptor.LongPairs =>
-            false
-    case Plan.FilterOp(child, _) => presentIntKeyColumn(child)
-    case Plan.FilterKeysOp(child, _) => presentIntKeyColumn(child)
-    case Plan.FilterValuesOp(child, _) => presentIntKeyColumn(child)
+      if (!ScanLowering.classify(source).contains(kind)) then false
+      else presentSourceKey(source, kind)
+    case Plan.FilterOp(child, _) => presentSortKey(child, kind)
+    case Plan.FilterKeysOp(child, _) => presentSortKey(child, kind)
+    case Plan.FilterValuesOp(child, _) => presentSortKey(child, kind)
+    case _ => false
+
+  private def presentSourceKey(source: Plan.Source[_], kind: PhysicalOp.Kind): Boolean =
+    (kind, source.descriptor) match
+      case (PhysicalOp.Kind.Pairs, Plan.SourceDescriptor.Pairs) => true
+      case (PhysicalOp.Kind.LongPairs, Plan.SourceDescriptor.LongPairs) => true
+      case (_, Plan.SourceDescriptor.Unknown) =>
+        source.partitions.iterator.flatMap(_.data.iterator).forall(presentKeyRow(_, kind))
+      case _ => false
+
+  private def presentKeyRow(row: Any, kind: PhysicalOp.Kind): Boolean = kind match
+    case PhysicalOp.Kind.Pairs => IntPairCells.presentKey(row)
+    case PhysicalOp.Kind.LongPairs => presentLongKey(row)
+    case PhysicalOp.Kind.StringPairs => StringPairPlan.presentKey(row)
+    case _ => false
+
+  /** True when the key cell is a `Long`. A null key, or a non-pair, is false. */
+  private def presentLongKey(row: Any): Boolean = row match
+    case pair: Tuple2[?, ?] =>
+      pair.productElement(0) match
+        case _: Long => true
+        case _ => false
     case _ => false
 
   private def lowerSteps(base: Plan[_], steps: List[ElementStep]): Option[PhysicalOp] =
@@ -756,9 +773,9 @@ object ColumnarPlanner:
 
   /**
    * Lower `plan` when a parent can wrap it. [[SortLowering.acceptsAsChild]] refuses a sort, so
-   * this does not wrap one. [[filterOverIntSort]] is the exception for one filter over an int
-   * sort, and only when that key column is fully present. A join, aggregate, or projection above a
-   * sort stays on the row path.
+   * this does not wrap one. [[filterOverKeySort]] is the exception for one filter over an int,
+   * long, or string key sort, and only when that key column is fully present. A join, aggregate,
+   * or projection above a sort stays on the row path.
    */
   private def lowerChild(plan: Plan[_]): Option[PhysicalOp] =
     lowerPlan(plan).filter(SortLowering.acceptsAsChild)
