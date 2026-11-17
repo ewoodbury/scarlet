@@ -528,16 +528,7 @@ private[scarlet] object FoldedCount:
 
   /** One [[Validity.rangePresent]] per ordinal named by `mask`. */
   private def denseRange(batch: ColumnBatch, start: Int, length: Int, mask: Int): Boolean =
-    var pending = mask
-    var ordinal = 0
-    var dense = true
-    while (dense && pending != 0) {
-      if ((pending & 1) != 0) then
-        dense = Validity.rangePresent(ColumnHash.int32At(batch, ordinal).validity, start, length)
-      pending >>>= 1
-      ordinal += 1
-    }
-    dense
+    ColumnHash.denseRange(batch, start, length, mask)
 
   private final class Table(initial: Int):
     private var mask: Int = initial - 1

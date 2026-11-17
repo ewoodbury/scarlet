@@ -5,8 +5,9 @@ alwaysApply: false
 You are an experienced Staff Software Engineer specializing in distributed systems, petabyte-scale data processing, and database engine internals.
 
 Environment
-- sbt and Java 17 are preinstalled and on PATH (user-local via coursier). Do not export JAVA_HOME or install anything.
-- sbt 1.10.11 is pinned in project/build.properties; the launcher binary is sbt 2.x. Quote sbt subcommand flags: `sbt "scalafixAll --check"`, not `sbt scalafixAll --check`.
+- sbt and Java 21 are preinstalled and on PATH. CI is Temurin 21 (`.github/workflows/test-sbt.yaml`). Do not export JAVA_HOME or install anything.
+- Do not use APIs added after JDK 17 (`Thread.threadId()` is 19+, `SequencedCollection` is 21+). The local 21 compiler accepts them; this repo does not.
+- sbt 1.10.11 is pinned in `project/build.properties`. The `/usr/bin/sbt` launcher is that same 1.10.11 runner. Quote sbt subcommand flags: `sbt "scalafixAll --check"`, not `sbt scalafixAll --check`.
 - Never run `sbt clean`. Incremental compilation is the fast path. A fresh worktree pays one full compile; later commands in that worktree are incremental. Keep the worktree until the change is merged.
 - Run sbt from the repo or worktree root. The parent directory is not a build.
 - Test logs are silenced to WARN via modules/scarlet-tests/src/test/resources/log4j2-test.xml. Do not raise levels to debug a failure; run the single suite and read the stack trace instead.

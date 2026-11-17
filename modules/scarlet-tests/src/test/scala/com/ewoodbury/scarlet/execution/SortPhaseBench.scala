@@ -2,7 +2,6 @@ package com.ewoodbury.scarlet.execution
 
 import java.lang.management.ManagementFactory
 import java.util.Locale
-import java.util.concurrent.locks.LockSupport
 
 import cats.effect.unsafe.implicits.global
 import com.sun.management.ThreadMXBean
@@ -21,13 +20,13 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * The action is `collect` and the same `key * 31 + value` sum. `scan` is the encode and the
  * survivor index. `run` is the wall clock of the local sorts. `index` and `gather` are CPU time
  * inside that wall clock, summed across workers. `merge` is the k-way merge and the rank scatter.
- * `output` is the decode to pairs. `other` is the action minus those four wall times, which is
- * the checksum walk and the planner. `gc_ms` is the collector's own millisecond counter.
- * `alloc_mb` is the median of five process-wide thread-byte deltas after the timed rounds.
+ * `output` is the decode to pairs. `other` is the action minus those four wall times, which is the
+ * checksum walk and the planner. `gc_ms` is the collector's own millisecond counter. `alloc_mb` is
+ * the median of five process-wide thread-byte deltas after the timed rounds.
  *
  * `steady_*` is the upper median of the last 10 rounds, with the same verdict rule as
- * [[CrossEngineBench]]. Runs and passes are read after the last measured round. One in-memory
- * sort records one merge. Spill passes stay on [[RankSplitRuns]].
+ * [[CrossEngineBench]]. Runs and passes are read after the last measured round. One in-memory sort
+ * records one merge. Spill passes stay on [[RankSplitRuns]].
  *
  * {{{
  * SORT_ROWS=10000000 SORT_WARMUP=80 SORT_ROUNDS=30 \
@@ -261,7 +260,7 @@ object SortPhaseBench:
     var state = shuffleSeed
     var index = count - 1
     while (index > 0) do
-      state = (state * 1664525 + 1013904223) & 0xFFFFFFFFL
+      state = (state * 1664525 + 1013904223) & 0xffffffffL
       val other = (state % (index + 1)).toInt
       val held = order(index)
       order(index) = order(other)
@@ -271,104 +270,3 @@ object SortPhaseBench:
 
   private def readInt(name: String, default: Int): Int =
     sys.env.get(name).flatMap(_.toIntOption).getOrElse(default)
-
-  /**
-   * Sums bytes on every live thread except the probe. The watch reads while the action runs, so a
-   * morsel worker that has already exited is still counted if it was seen.
-   */
-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private final class AllocProbe(bean: ThreadMXBean):
-    private val capacity = 1024
-    private val ids = new Array[Long](capacity)
-    private val baseline = new Array[Long](capacity)
-    private val high = new Array[Long](capacity)
-    private var count = 0
-    @volatile private var running = true
-    @volatile private var probeId = 0L
-    private val thread = new Thread(() => watch(), "scarlet-alloc-probe")
-
-    thread.setDaemon(true)
-    thread.start()
-    while (probeId == 0L) do LockSupport.parkNanos(10000L)
-
-    def stop(): Unit =
-      running = false
-      LockSupport.unpark(thread)
-      thread.join(1000L)
-      ()
-
-    def account[A](body: => A): (A, Long) =
-      open()
-      try
-        val value = body
-        (value, close())
-      catch
-        case thrown: Throwable =>
-          closeQuietly()
-          throw thrown
-
-    private def watch(): Unit =
-      probeId = Thread.currentThread().getId
-      while (running) do
-        observe(setBaseline = false)
-        LockSupport.parkNanos(50000L)
-
-    private def open(): Unit = this.synchronized {
-      count = 0
-      observe(setBaseline = true)
-    }
-
-    private def close(): Long = this.synchronized {
-      observe(setBaseline = false)
-      var index = 0
-      var total = 0L
-      while (index < count) do
-        if (ids(index) != probeId) then
-          val base = if (baseline(index) < 0L) 0L else baseline(index)
-          val delta = high(index) - base
-          if (delta > 0L) then total += delta
-        index += 1
-      total
-    }
-
-    private def closeQuietly(): Unit =
-      try
-        val _ = close()
-      catch
-        case _: IllegalStateException => ()
-
-    private def observe(setBaseline: Boolean): Unit = this.synchronized {
-      val live = bean.getAllThreadIds
-      var index = 0
-      while (index < live.length) do
-        val id = live(index)
-        val bytes = bean.getThreadAllocatedBytes(id)
-        if (bytes >= 0L) then note(id, bytes, setBaseline)
-        index += 1
-    }
-
-    private def note(id: Long, bytes: Long, setBaseline: Boolean): Unit =
-      val at = slot(id)
-      if (bytes > high(at)) then high(at) = bytes
-      if (setBaseline) then baseline(at) = bytes
-
-    private def slot(id: Long): Int =
-      val existing = indexOf(id)
-      if (existing >= 0) then existing
-      else if (count >= capacity) then
-        throw new IllegalStateException(s"alloc probe filled $capacity thread slots")
-      else
-        val placed = count
-        ids(placed) = id
-        baseline(placed) = -1L
-        high(placed) = 0L
-        count = placed + 1
-        placed
-
-    private def indexOf(id: Long): Int =
-      var index = 0
-      var found = -1
-      while (index < count && found < 0) do
-        if (ids(index) == id) then found = index
-        index += 1
-      found

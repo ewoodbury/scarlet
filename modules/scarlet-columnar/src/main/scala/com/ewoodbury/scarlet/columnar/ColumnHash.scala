@@ -7,7 +7,7 @@ package com.ewoodbury.scarlet.columnar
  * table that holds one slot per input row then stays at or under half full, so a single batch does
  * not rehash.
  */
-private[columnar] object ColumnHash:
+private[scarlet] object ColumnHash:
 
   val MaxCapacity: Int = 1 << 30
 
@@ -51,3 +51,17 @@ private[columnar] object ColumnHash:
 
   def int64At(batch: ColumnBatch, ordinal: Int): Int64Column =
     ColumnKernel.asInt64(ColumnKernel.columnAt(batch, ordinal), ordinal)
+
+  /** One [[Validity.rangePresent]] per ordinal named by `mask`. Unset bits are not read. */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  def denseRange(batch: ColumnBatch, start: Int, length: Int, mask: Int): Boolean =
+    var pending = mask
+    var ordinal = 0
+    var dense = true
+    while (dense && pending != 0) {
+      if ((pending & 1) != 0) then
+        dense = Validity.rangePresent(int32At(batch, ordinal).validity, start, length)
+      pending >>>= 1
+      ordinal += 1
+    }
+    dense

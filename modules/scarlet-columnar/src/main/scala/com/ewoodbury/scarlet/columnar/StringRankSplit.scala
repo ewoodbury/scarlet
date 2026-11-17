@@ -213,7 +213,7 @@ object StringRankSplit:
     val opened: Array[Run] = runs.iterator.map(openRun).toArray
     val cursors = new Array[Int](opened.length)
     val keys = Array.fill(opened.length)("")
-    val heap = new StringRunHeap(keys)
+    val heap = new OrderedRunHeapString(keys)
     var run = 0
     while (run < opened.length) {
       if (opened(run).length > 0) then pushRun(heap, keys, opened, cursors, run)
@@ -239,7 +239,7 @@ object StringRankSplit:
    * Snapshot the effective key, then push. The heap reads `keys(id)` and does not recompute it.
    */
   private def pushRun(
-      heap: StringRunHeap,
+      heap: OrderedRunHeapString,
       keys: Array[String],
       opened: Array[Run],
       cursors: Array[Int],
@@ -283,63 +283,3 @@ object StringRankSplit:
       val length: Int,
   ):
     def text(row: Int): String = dictionary(codes(row))
-
-  /** Min-heap of run ids. Order is the snapshotted effective string, then the smaller id. */
-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private final class StringRunHeap(keys: Array[String]):
-
-    private val nodes = new Array[Int](keys.length)
-    private var size: Int = 0
-
-    def isEmpty: Boolean = size == 0
-
-    def pop(): Int =
-      val chosen = nodes(0)
-      size -= 1
-      if (size > 0) then
-        nodes(0) = nodes(size)
-        siftDown(0)
-      chosen
-
-    /**
-     * `keys(id)` is already the effective string. Leave it unchanged until [[pop]] returns `id`.
-     */
-    def push(id: Int): Unit =
-      nodes(size) = id
-      siftUp(size)
-      size += 1
-
-    private def less(leftId: Int, rightId: Int): Boolean =
-      val order = keys(leftId).compareTo(keys(rightId))
-      order < 0 || (order == 0 && leftId < rightId)
-
-    private def siftUp(start: Int): Unit =
-      var at = start
-      var moved = true
-      while (moved && at > 0) {
-        val parent = (at - 1) >>> 1
-        if (less(nodes(at), nodes(parent))) then
-          swap(at, parent)
-          at = parent
-        else moved = false
-      }
-
-    private def siftDown(start: Int): Unit =
-      var at = start
-      var moved = true
-      while (moved) {
-        val left = at * 2 + 1
-        val right = left + 1
-        var best = at
-        if (left < size && less(nodes(left), nodes(best))) then best = left
-        if (right < size && less(nodes(right), nodes(best))) then best = right
-        if (best == at) then moved = false
-        else
-          swap(at, best)
-          at = best
-      }
-
-    private def swap(left: Int, right: Int): Unit =
-      val held = nodes(left)
-      nodes(left) = nodes(right)
-      nodes(right) = held

@@ -1,7 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
 import java.lang.management.ManagementFactory
-import java.util.concurrent.locks.LockSupport
 
 import cats.effect.unsafe.implicits.global
 import com.sun.management.ThreadMXBean
@@ -20,8 +19,8 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * includes the scan encode. A columnar action that publishes no column batch and folds nothing
  * fails the process. A plan [[ColumnarPlanner]] declines is not timed: `batches`, `fused`, and
  * `arm` say `row`, and one execution supplies the checksum. That run is not a speed.
- * `CROSS_TIME_ROW=true` times that decline with the same warmup, rounds, and steady window.
- * The arm stays `row`. A published batch on a declined plan still fails the process.
+ * `CROSS_TIME_ROW=true` times that decline with the same warmup, rounds, and steady window. The
+ * arm stays `row`. A published batch on a declined plan still fails the process.
  *
  * Owned int arrays use [[BatchCodec.intPairs]]. Owned long arrays use
  * [[BatchCodec.copiedLongPairs]], the scan's array encode. A null long value is timed with
@@ -34,9 +33,9 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * budget stays the 64 MiB default.
  *
  * `STEADY` is the median of the last 10 rounds. `compilation` means the first 10 are still above
- * that floor, so publish `steady_ms` rather than the full-window `p50_ms`. `machine` means the
- * two halves of those last 10 differ by more than 10 percent: drop the JVM. The threshold and
- * the five-JVM rule are in `docs/CROSS-ENGINE.md`.
+ * that floor, so publish `steady_ms` rather than the full-window `p50_ms`. `machine` means the two
+ * halves of those last 10 differ by more than 10 percent: drop the JVM. The threshold and the
+ * five-JVM rule are in `docs/CROSS-ENGINE.md`.
  *
  * `CROSS_THREADS` selects the scheduler width. It defaults to 4. Allocation is a separate pass
  * after the timed rounds, the nearest-rank middle sample of [[allocRounds]] process-wide thread
@@ -431,8 +430,8 @@ object CrossEngineBench:
 
   /**
    * Last 10 rounds are the steady floor. The first 10 are the compile slope when they are still
-   * high. The two halves of the last 10 catch a stall that a single median would hide. Fewer
-   * than 20 rounds leaves no separate tail, so the line is `short`.
+   * high. The two halves of the last 10 catch a stall that a single median would hide. Fewer than
+   * 20 rounds leaves no separate tail, so the line is `short`.
    */
   private def steadyOf(samples: Array[Double]): Steady =
     val n = samples.length
@@ -516,7 +515,7 @@ object CrossEngineBench:
     var state = shuffleSeed
     var index = count - 1
     while (index > 0) do
-      state = (state * 1664525 + 1013904223) & 0xFFFFFFFFL
+      state = (state * 1664525 + 1013904223) & 0xffffffffL
       val other = (state % (index + 1)).toInt
       val held = order(index)
       order(index) = order(other)
@@ -528,7 +527,7 @@ object CrossEngineBench:
    * Value is null when `index` is 1 mod 4096. Row 0 stays a present pair so the source classifies.
    * A dense key is `index % 1024`, so that null row's key is 1 and the key filter keeps it. Sort
    * keys are the permutation, so a sort null stays only when the permuted key is not divisible by
-   * 3. The key itself stays present.
+   *   3. The key itself stays present.
    */
   private def nullableInts(rows: Int, keys: Array[Int]): IndexedSeq[(Int, Int)] =
     val values = lcgValues(rows)
@@ -675,112 +674,6 @@ $body
   private def envError(message: String): Nothing =
     System.err.println(message)
     sys.exit(1)
-
-  /**
-   * Sums bytes on every live thread except the probe. The watch reads while the action runs, so a
-   * morsel worker that has already exited is still counted if it was seen. The caller's bytes are
-   * included. Unrelated JVM threads are included too.
-   */
-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private final class AllocProbe(bean: ThreadMXBean):
-    private val capacity = 1024
-    private val ids = new Array[Long](capacity)
-    private val baseline = new Array[Long](capacity)
-    private val high = new Array[Long](capacity)
-    private var count = 0
-    @volatile private var running = true
-    @volatile private var probeId = 0L
-    private val thread = new Thread(() => watch(), "scarlet-alloc-probe")
-
-    thread.setDaemon(true)
-    thread.start()
-    while (probeId == 0L) LockSupport.parkNanos(10000L)
-
-    def stop(): Unit =
-      running = false
-      LockSupport.unpark(thread)
-      thread.join(1000L)
-      ()
-
-    def account[A](body: => A): (A, Long) =
-      open()
-      try
-        val value = body
-        (value, close())
-      catch
-        case thrown: Throwable =>
-          closeQuietly()
-          throw thrown
-
-    private def watch(): Unit =
-      probeId = Thread.currentThread().getId
-      while (running) {
-        observe(setBaseline = false)
-        LockSupport.parkNanos(50000L)
-      }
-
-    private def open(): Unit = this.synchronized {
-      count = 0
-      observe(setBaseline = true)
-    }
-
-    private def close(): Long = this.synchronized {
-      observe(setBaseline = false)
-      var index = 0
-      var total = 0L
-      while (index < count) {
-        if (ids(index) != probeId) then
-          val base = if (baseline(index) < 0L) 0L else baseline(index)
-          val delta = high(index) - base
-          if (delta > 0L) then total += delta
-        index += 1
-      }
-      total
-    }
-
-    private def closeQuietly(): Unit =
-      try
-        val _ = close()
-      catch
-        case _: IllegalStateException => ()
-
-    private def observe(setBaseline: Boolean): Unit = this.synchronized {
-      val live = bean.getAllThreadIds
-      var index = 0
-      while (index < live.length) {
-        val id = live(index)
-        val bytes = bean.getThreadAllocatedBytes(id)
-        if (bytes >= 0L) then note(id, bytes, setBaseline)
-        index += 1
-      }
-    }
-
-    private def note(id: Long, bytes: Long, setBaseline: Boolean): Unit =
-      val at = slot(id)
-      if (bytes > high(at)) then high(at) = bytes
-      if (setBaseline) then baseline(at) = bytes
-
-    private def slot(id: Long): Int =
-      val existing = indexOf(id)
-      if (existing >= 0) then existing
-      else if (count >= capacity) then
-        throw new IllegalStateException(s"alloc probe filled $capacity thread slots")
-      else
-        val placed = count
-        ids(placed) = id
-        baseline(placed) = -1L
-        high(placed) = 0L
-        count = placed + 1
-        placed
-
-    private def indexOf(id: Long): Int =
-      var index = 0
-      var found = -1
-      while (index < count && found < 0) {
-        if (ids(index) == id) then found = index
-        index += 1
-      }
-      found
 
   private def refuse(message: String): Nothing =
     System.err.println(message)
