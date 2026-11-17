@@ -8,6 +8,11 @@ is specialization, not a merge.
 1200-line splits, and the dead code that had no caller. This file lists only what is still
 true in the tree.
 
+Measurements that already killed a premise are in `docs/NEGATIVE-RESULTS.md`: the 1e7
+sort printed `alloc_mb=702.096` (`SORT_ROWS=10000000 SORT_WARMUP=80 SORT_ROUNDS=30
+SORT_THREADS=4`, `taskset -c 0,1,2,3`) and `countByKey` at `CROSS_ROWS=10000000` printed
+`steady_ms=12.236` (`CROSS_WARMUP=80 CROSS_ROUNDS=30`, `taskset -c 0-3`).
+
 There is no `scalar-*` module. The scalar kernels are `Int32Pipeline`, `Int64Pipeline`,
 `Float64Pipeline`, `Utf8Pipeline`, and the int/long/string hash, join, and sort twins under
 `scarlet-columnar`.
