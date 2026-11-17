@@ -42,8 +42,9 @@ enum PhysicalOp:
   case Project(child: PhysicalOp)
 
   /**
-   * One column of an int, long, or string pair. Kind is [[PhysicalOp.Kind.Ints]] or
-   * [[PhysicalOp.Kind.Longs]], or [[PhysicalOp.Kind.Strings]] for a string key.
+   * One column of an int, long, or string pair, or the key of a `countByKey` witness. Kind is
+   * [[PhysicalOp.Kind.Ints]], [[PhysicalOp.Kind.Longs]] for a long pair or the key of a long
+   * count, or [[PhysicalOp.Kind.Strings]] for a string key.
    */
   case Column(child: PhysicalOp, columnOrdinal: Int)
 
@@ -407,8 +408,8 @@ enum PhysicalOp:
    * logical plan. Execution decodes `child` once through
    * [[com.ewoodbury.scarlet.execution.ColumnarInterpreter.decodeFor]] and runs the function on
    * each `(K, Iterable[V])`. The function is not a columnar map and is not inspected. Output kind
-   * stays the grouped kind of `child`. `values` and `take` do not use this node. Int `keys` stays
-   * a distinct-key scan. String and long `keys` stay on the row path.
+   * stays the grouped kind of `child`. `values` and `take` do not use this node. Int, long, and
+   * string `keys` stay a distinct-key scan.
    */
   case GroupedDecode(child: PhysicalOp)
 
@@ -507,6 +508,7 @@ enum PhysicalOp:
     case Column(child, ordinal) =>
       child.kind match
         case PhysicalOp.Kind.LongPairs => PhysicalOp.Kind.Longs
+        case PhysicalOp.Kind.LongCounts if ordinal == 0 => PhysicalOp.Kind.Longs
         case PhysicalOp.Kind.StringPairs if ordinal == 0 => PhysicalOp.Kind.Strings
         case PhysicalOp.Kind.StringPairs => PhysicalOp.Kind.Ints
         case _ => PhysicalOp.Kind.Ints

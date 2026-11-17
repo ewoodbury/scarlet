@@ -237,7 +237,7 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     ColumnarPlanner.tryCount(grouped.plan) shouldBe Some(0L)
   }
 
-  it should "lower a filterValues child, decode a map, and refuse keys, values, and take" in {
+  it should "lower a filterValues child and keys, decode a map, and refuse values and take" in {
     val filtered = stringSource.filterValues((value: Int) => value > 4).groupByKey
     val grouped = stringSource.groupByKey
 
@@ -252,7 +252,10 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
       emoji -> Seq(7),
       "red" -> Seq(5, 6),
     )
-    ColumnarPlanner.lower(grouped.keys.plan) shouldBe None
+    ColumnarPlanner.lower(grouped.keys.plan).map(_.shape) shouldBe Some(
+      "Key(CountByKey(Exchange(Scan)))",
+    )
+    assertKeysMatch(grouped.keys)
     ColumnarPlanner.lower(grouped.values.plan) shouldBe None
     ColumnarPlanner
       .lower(grouped.map((row: (String, Iterable[Int])) => row._1).plan)
@@ -356,7 +359,7 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     grouped.count() shouldBe 2L
   }
 
-  it should "lower a whole-row filter and a slot filter, decode a map, and refuse projections" in {
+  it should "lower a whole-row filter and a slot filter, decode a map, and lower keys" in {
     val source = DistCollection.ofLongPairs(longKeys, longPayloads, 4)
     val filtered = source.filter((pair: (Long, Long)) => pair._2 > 10L).groupByKey
     val keyed = source.filterKeys[Long, Long](_ > 0L).groupByKey
@@ -376,7 +379,10 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     )
     longByKey(keyed.collect()) shouldBe longByKey(row(keyed.collect()))
     longByKey(valued.collect()) shouldBe longByKey(row(valued.collect()))
-    ColumnarPlanner.lower(grouped.keys.plan) shouldBe None
+    ColumnarPlanner.lower(grouped.keys.plan).map(_.shape) shouldBe Some(
+      "Key(CountByKey(Exchange(Scan)))",
+    )
+    assertKeysMatch(grouped.keys)
     ColumnarPlanner.lower(grouped.values.plan) shouldBe None
     ColumnarPlanner
       .lower(grouped.map((row: (Long, Iterable[Long])) => row._1).plan)
@@ -468,6 +474,17 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
 
   private def valuesByKey(rows: Iterable[(Int, Iterable[Int])]): Map[Int, Seq[Int]] =
     rows.map { case (key, values) => key -> values.toSeq }.toMap
+
+  /** Per-partition sequence, then the concatenation. Columnar `keys` builds no value lists. */
+  private def assertKeysMatch[A](keys: DistCollection[A]): Unit =
+    GroupByKey.resetValueListsBuilt()
+    val found = keyPartitions(keys.plan)
+    GroupByKey.valueListsBuilt shouldBe 0L
+    found shouldBe row(keyPartitions(keys.plan))
+    keys.collect().toList shouldBe row(keys.collect().toList)
+
+  private def keyPartitions[A](plan: Plan[A]): Seq[Seq[A]] =
+    ExecutionService.get.executePartitions(plan).map(_.data.toSeq)
 
   private def row[A](body: => A): A =
     val saved = ScarletConf.get

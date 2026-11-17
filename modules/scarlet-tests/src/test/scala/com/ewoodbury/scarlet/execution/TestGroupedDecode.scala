@@ -8,16 +8,16 @@ import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.GroupByKey
-import com.ewoodbury.scarlet.core.ScarletConf
+import com.ewoodbury.scarlet.core.{ExecutionService, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
  * One map directly above `groupByKey` decodes the grouped batch once.
  *
- * The function still sees `(K, Iterable[V])`. `values` and `take` stay on the row path. Int
- * `keys` stays `Key(CountByKey(Exchange(Scan)))`. String and long `keys` stay on the row path.
- * A map above a sort stays on the row path. A map above a long join stays on the row path. A map
- * above an int inner join stays the triple project it already was.
+ * The function still sees `(K, Iterable[V])`. `values` and `take` stay on the row path. Int,
+ * long, and string `keys` stay `Key(CountByKey(Exchange(Scan)))`. A second map stays on the row
+ * path. A map above a sort stays on the row path. A map above a long join stays on the row path.
+ * A map above an int inner join stays the triple project it already was.
  */
 class TestGroupedDecode extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -120,7 +120,7 @@ class TestGroupedDecode extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some(
       "GroupedDecode(GroupByKey(Exchange(Scan)))",
     )
-    ColumnarPlanner.lower(source.groupByKey.keys.plan) shouldBe None
+    assertKeys(source.groupByKey.keys)
     val found = mapped.collect().toMap
     found shouldBe row(mapped.collect().toMap)
     found shouldBe Map("a" -> Seq(1, 2), "b" -> Seq(3))
@@ -143,7 +143,7 @@ class TestGroupedDecode extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some(
       "GroupedDecode(GroupByKey(Exchange(Scan)))",
     )
-    ColumnarPlanner.lower(grouped.keys.plan) shouldBe None
+    assertKeys(grouped.keys)
     val found = mapped.collect().toMap
     found shouldBe row(mapped.collect().toMap)
     found shouldBe Map(1L -> 21L, 8L -> 40L)
@@ -238,6 +238,20 @@ class TestGroupedDecode extends AnyFlatSpec with Matchers with BeforeAndAfterEac
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def nullKey(value: Int): (String, Int) = (null: String) -> value
+
+  /** Shape, per-partition sequence, and concatenation. Columnar `keys` builds no value lists. */
+  private def assertKeys[A](keys: DistCollection[A]): Unit =
+    ColumnarPlanner.lower(keys.plan).map(_.shape) shouldBe Some(
+      "Key(CountByKey(Exchange(Scan)))",
+    )
+    GroupByKey.resetValueListsBuilt()
+    val found = keyPartitions(keys.plan)
+    GroupByKey.valueListsBuilt shouldBe 0L
+    found shouldBe row(keyPartitions(keys.plan))
+    keys.collect().toList shouldBe row(keys.collect().toList)
+
+  private def keyPartitions[A](plan: Plan[A]): Seq[Seq[A]] =
+    ExecutionService.get.executePartitions(plan).map(_.data.toSeq)
 
   private def row[A](body: => A): A =
     val saved = ScarletConf.get

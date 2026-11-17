@@ -11,10 +11,10 @@ package com.ewoodbury.scarlet.execution
  * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] before that table. The appended groups
  * are not bounded by the budget. Key order inside a partition is first-seen. Value order inside a
  * key is input order. `values` and `take` stay on the row path. One map directly above the group
- * is [[GroupedDecode]]: the group runs once and the function sees the decoded rows. String and
- * long `keys` stay on the row path. Int `keys` lowers separately and does not build value lists.
- * `count` is the number of groups. [[PhysicalOp.Kind.Pairs]], [[PhysicalOp.Kind.LongPairs]], and
- * [[PhysicalOp.Kind.StringPairs]] lower. Every other kind stays on the row path.
+ * is [[GroupedDecode]]: the group runs once and the function sees the decoded rows. Int, long, and
+ * string `keys` lower separately and do not build value lists. `count` is the number of groups.
+ * [[PhysicalOp.Kind.Pairs]], [[PhysicalOp.Kind.LongPairs]], and [[PhysicalOp.Kind.StringPairs]]
+ * lower. Every other kind stays on the row path.
  */
 private[execution] object GroupByKeyLowering:
 

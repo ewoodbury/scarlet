@@ -8,8 +8,8 @@ import com.ewoodbury.scarlet.core.{Partition, Plan}
  * The child is a grouped int, string, or long batch. [[ColumnarInterpreter.decodeFor]] turns that
  * batch into `(K, Iterable[V])` once, and the logical function runs on those rows. The function
  * stays on [[Plan.MapOp]] and is not inspected. This is not a columnar map. `values` and `take` do
- * not use this node. Int `keys` stays the distinct-key scan. String and long `keys` stay on the
- * row path. A second map, or a filter above the map, stays on the row path.
+ * not use this node. Int, long, and string `keys` stay the distinct-key scan. A second map, or a
+ * filter above the map, stays on the row path.
  */
 @SuppressWarnings(
   Array(

@@ -82,9 +82,9 @@ object ColumnarPlanner:
    * memory and writes nothing. One map directly above an int, string, or long `groupByKey` lowers
    * to [[PhysicalOp.GroupedDecode]]. The group runs once. [[ColumnarInterpreter.decodeFor]] yields
    * `(K, Iterable[V])` and the logical function runs on those rows. The function is not inspected.
-   * `values`, `take`, a second map, and a filter above that map stay on the row path. Int `keys`
-   * stays a distinct-key scan. String and long `keys` stay on the row path. [[partitioning]] and
-   * [[tryRun]] follow a refusal. They also drop a lowered tree whose layout is invalid.
+   * `values`, `take`, a second map, and a filter above that map stay on the row path. Int, long,
+   * and string `keys` stay a distinct-key scan. [[partitioning]] and [[tryRun]] follow a refusal.
+   * They also drop a lowered tree whose layout is invalid.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -954,14 +954,14 @@ object ColumnarPlanner:
     case _ => true
 
   /**
-   * Int `keys` of `groupByKey`. [[CountByKeyLowering]] is the typed witness: the key column of
-   * that shape is [[PhysicalOp.Kind.Ints]]. The interpreter does not run the count kernel. String
-   * and long groups stay on the row path.
+   * Int, long, and string `keys` of `groupByKey`. [[CountByKeyLowering]] is the typed witness. The
+   * interpreter does not run the count kernel and does not build value lists. A long key column is
+   * [[PhysicalOp.Kind.Longs]]. A string key column is [[PhysicalOp.Kind.Strings]].
    */
   private def lowerGroupKeys(source: Plan[_]): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
       child.kind match
-        case PhysicalOp.Kind.Pairs =>
+        case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs =>
           CountByKeyLowering(child).map(counted => PhysicalOp.Column(counted, 0))
         case _ => None
     }
