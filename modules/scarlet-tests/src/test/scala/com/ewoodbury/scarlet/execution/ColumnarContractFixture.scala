@@ -200,6 +200,7 @@ trait ColumnarContractFixture extends Matchers:
     case PhysicalOp.Pipeline(child, _) => preservesPartitions(child)
     case PhysicalOp.Column(child, _) => preservesPartitions(child)
     case PhysicalOp.MapValue(child) => preservesPartitions(child)
+    case PhysicalOp.MapKey(child) => preservesPartitions(child)
     case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.LongHashAggregate(_) |
         PhysicalOp.StringHashAggregate(_) | PhysicalOp.GroupByKey(_) |
         PhysicalOp.GroupedDecode(_) | PhysicalOp.CountByKey(_) | PhysicalOp.HashJoin(_, _) |
@@ -347,6 +348,8 @@ trait ColumnarContractFixture extends Matchers:
     case Plan.PartitionByOp(_, _) => PlanNode.PartitionBy
     case Plan.Source(_, _) => PlanNode.Source
     case Plan.MapOp(_, _) => PlanNode.Map
+    // The typed key map shares the generic map label. The physical shape is MapKey.
+    case Plan.MapIntKeyOp(_, _) => PlanNode.Map
     case Plan.FilterOp(_, _) => PlanNode.Filter
     case Plan.FlatMapOp(_, _) => PlanNode.FlatMap
     case Plan.DistinctOp(_) => PlanNode.Distinct

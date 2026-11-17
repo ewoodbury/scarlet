@@ -12,8 +12,11 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * inside the key scan and no survivor index is built. An owned int-pair scan is hashed from those
  * arrays. The encoded copy remains for a boxed row, a null, a sort, and a budget miss. One
  * [[Plan.MapValuesOp]] above that source is skipped when its child is not a map: the keys are
- * unchanged, so the scan reads the source key column and does not run the value function. A filter
- * above that map must be an int key slot. A value or row filter above the map, a second map, a
+ * unchanged, so the scan reads the source key column and does not run the value function.
+ * [[Plan.MapIntKeyOp]] changes the key. Int-slot filters under that one map are counted from the
+ * source: the function runs once on each present survivor and is not inspected. A null key is
+ * dropped and is not passed in. Any other key map is interpreted, then counted. A filter above the
+ * value map must be an int key slot. A value or row filter above that map, a second map, a
  * [[Plan.MapOp]], a flatMap, and a mapPartitions stay on the old path. The plan node decides that.
  * The function is not inspected. No filters and no such map, a whole-row or string step, a non-int
  * slot, and a null component the encoder throws on stay on the old path. That path partial-counts
@@ -117,12 +120,13 @@ private[execution] object CountByKeyArms:
 
   /**
    * True when [[tryFold]] has a source scan. That is a non-empty int slot stack whose child is not
-   * a map, or one [[Plan.MapValuesOp]] whose child is not a map. A value or row filter above that
-   * map, a second map, and a dense scan with no map are false. Budget, a null sort key, and a null
-   * the encoder throws are decided in [[columns]], which returns to the index path.
+   * a map, one [[Plan.MapValuesOp]] whose child is not a map, or one [[Plan.MapIntKeyOp]] whose
+   * filters are int slots and whose child is not a map. A value or row filter above the value map,
+   * a second map, and a dense scan with no map are false. Budget, a null sort key, and a null the
+   * encoder throws are decided in [[columns]], which returns to the index path.
    */
   private[execution] def folds(source: Plan[_], child: PhysicalOp, ordinals: Set[Int]): Boolean =
-    foldTarget(source, child, ordinals).nonEmpty
+    foldTarget(source, child, ordinals).nonEmpty || mappedKey(source, child, ordinals).nonEmpty
 
   private def tryFold(
       source: Plan[_],
@@ -134,16 +138,46 @@ private[execution] object CountByKeyArms:
       workers: Int,
       batchSize: Int,
   ): Option[Vector[ColumnBatch]] =
-    foldTarget(source, child, ordinals).flatMap { (plan, op, steps) =>
+    val mapped = mappedKey(source, child, ordinals).flatMap { (plan, op, steps, fn) =>
       ownedPairs(plan, op) match
-        case Some(parts) => countOwned(parts, steps, width, workers, batchSize)
+        case Some(parts) =>
+          FoldedCount.countOwnedMapped(parts, steps, fn, width, workers, batchSize)
         case None =>
           scanned(plan, op, selectedPartition, preserveAbsence, ordinals).flatMap {
             (under, batches) =>
               if (sortDropsNullKey(under, batches)) then None
-              else countEncoded(batches, steps, width, workers, batchSize)
+              else FoldedCount.countMapped(batches, steps, fn, width, workers, batchSize)
           }
     }
+    mapped.orElse {
+      foldTarget(source, child, ordinals).flatMap { (plan, op, steps) =>
+        ownedPairs(plan, op) match
+          case Some(parts) => countOwned(parts, steps, width, workers, batchSize)
+          case None =>
+            scanned(plan, op, selectedPartition, preserveAbsence, ordinals).flatMap {
+              (under, batches) =>
+                if (sortDropsNullKey(under, batches)) then None
+                else countEncoded(batches, steps, width, workers, batchSize)
+            }
+      }
+    }
+
+  /**
+   * One [[Plan.MapIntKeyOp]] over an int-slot filter stack. The filters stay on the source. The
+   * function is the witness and is not read here. `None` when a second map sits under the filters,
+   * or when the steps are not int slots.
+   */
+  private def mappedKey(
+      source: Plan[_],
+      child: PhysicalOp,
+      ordinals: Set[Int],
+  ): Option[(Plan[_], PhysicalOp, List[Selection.Step], Int => Int)] =
+    (source, child) match
+      case (Plan.MapIntKeyOp(inner, fn), PhysicalOp.MapKey(mapped)) =>
+        val (underPlan, underOp) = PredicatePlan.childOf(inner, mapped)
+        if (pastMap(underPlan)) then None
+        else admitted(inner, mapped, ordinals).map(steps => (underPlan, underOp, steps, fn))
+      case _ => None
 
   /** Fully present int pairs. Anything else, including one boxed partition, stays on encode. */
   private def ownedPairs(
@@ -292,8 +326,8 @@ private[execution] object CountByKeyArms:
 
   /** A map under the filters is interpreted by the index path. The steps would see its output. */
   private def pastMap(plan: Plan[_]): Boolean = plan match
-    case Plan.MapOp(_, _) | Plan.MapValuesOp(_, _) | Plan.FlatMapOp(_, _) |
-        Plan.FlatMapValuesOp(_, _) | Plan.MapPartitionsOp(_, _) =>
+    case Plan.MapOp(_, _) | Plan.MapValuesOp(_, _) | Plan.MapIntKeyOp(_, _) |
+        Plan.FlatMapOp(_, _) | Plan.FlatMapValuesOp(_, _) | Plan.MapPartitionsOp(_, _) =>
       true
     case _ => false
 

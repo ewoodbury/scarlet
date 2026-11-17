@@ -169,6 +169,39 @@ private[scarlet] object FoldedCount:
     else counted(presentParts(parts), steps, numPartitions, parallelism, batchSize)
 
   /**
+   * [[countOwned]] after an int key function. The steps still see the source key and value.
+   * `mapKey` runs once on each present survivor and is not inspected. A null key is not passed in.
+   * `None` has the same meaning as [[count]].
+   */
+  def countOwnedMapped(
+      parts: Vector[(Array[Int], Array[Int])],
+      steps: List[Selection.Step],
+      mapKey: Int => Int,
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    requirePositive(numPartitions, parallelism, batchSize)
+    if (!admits(steps)) then None
+    else countedMapped(presentParts(parts), steps, mapKey, numPartitions, parallelism, batchSize)
+
+  /**
+   * [[count]] after an int key function. See [[countOwnedMapped]]. Encoded batches keep their
+   * nulls: a missing key is dropped and `mapKey` is not called.
+   */
+  def countMapped(
+      batches: Vector[ColumnBatch],
+      steps: List[Selection.Step],
+      mapKey: Int => Int,
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    requirePositive(numPartitions, parallelism, batchSize)
+    if (!admits(steps)) then None
+    else countedMapped(batches, steps, mapKey, numPartitions, parallelism, batchSize)
+
+  /**
    * [[countUnmapped]] for fully present arrays. `steps` may be empty. The input columns alias the
    * arrays and are not returned. See [[countOwned]].
    */
@@ -200,6 +233,27 @@ private[scarlet] object FoldedCount:
         notePass()
         Some(execute(batches, steps, numPartitions, parallelism, batchSize))
 
+  /** [[counted]] with [[MappedKeyFold]]. The dense source-key counter does not apply. */
+  private def countedMapped(
+      batches: Vector[ColumnBatch],
+      steps: List[Selection.Step],
+      mapKey: Int => Int,
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    if (batches.isEmpty) then
+      notePass()
+      Some(Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs))
+    else
+      batches.foreach(requireKey)
+      if (!withinBudget(batches, batchSize)) then None
+      else
+        notePass()
+        Some(
+          execute(batches, steps, numPartitions, parallelism, batchSize, mapKey, mapping = true),
+        )
+
   /** Int key or value slots, including none. A whole-row or string step is false. */
   private def slotSteps(steps: Seq[Selection.Step]): Boolean =
     steps.forall {
@@ -217,6 +271,21 @@ private[scarlet] object FoldedCount:
       parallelism: Int,
       batchSize: Int,
   ): Vector[ColumnBatch] =
+    execute(batches, steps, numPartitions, parallelism, batchSize, unchangedKey, mapping = false)
+
+  /**
+   * `mapping` is false for a source-key count. [[DirectCount]] indexes that key, so a mapped count
+   * skips it and applies `mapKey` inside the hash scan instead. `unchangedKey` is not called.
+   */
+  private def execute(
+      batches: Vector[ColumnBatch],
+      steps: List[Selection.Step],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+      mapKey: Int => Int,
+      mapping: Boolean,
+  ): Vector[ColumnBatch] =
     try
       val (counts, morsels) = pieces(batches, batchSize)
       if (morsels.isEmpty) then
@@ -229,7 +298,7 @@ private[scarlet] object FoldedCount:
         val insertStarted = System.nanoTime()
         val partials = MorselScheduler
           .map(stripes(morsels, width), width) { (_, pieces) =>
-            foldStripe(pieces, steps)
+            foldStripe(pieces, steps, mapKey, mapping)
           }
           .flatten
         val mergeStarted = System.nanoTime()
@@ -278,7 +347,12 @@ private[scarlet] object FoldedCount:
     }
 
   /** One compact per contiguous run of a source batch. Runs stay in batch order. */
-  private def foldStripe(pieces: Vector[Piece], steps: List[Selection.Step]): Vector[ColumnBatch] =
+  private def foldStripe(
+      pieces: Vector[Piece],
+      steps: List[Selection.Step],
+      mapKey: Int => Int,
+      mapping: Boolean,
+  ): Vector[ColumnBatch] =
     val rows = pieces.toArray
     val total = rows.length
     var index = 0
@@ -289,7 +363,7 @@ private[scarlet] object FoldedCount:
       while (end < total && rows(end).batchId == batchId) {
         end += 1
       }
-      acc = acc :+ foldSegment(rows, index, end, steps)
+      acc = acc :+ foldSegment(rows, index, end, steps, mapKey, mapping)
       index = end
     }
     acc
@@ -345,6 +419,8 @@ private[scarlet] object FoldedCount:
       from: Int,
       until: Int,
       steps: List[Selection.Step],
+      mapKey: Int => Int,
+      mapping: Boolean,
   ): ColumnBatch =
     val count = until - from
     val starts = new Array[Int](count)
@@ -361,19 +437,46 @@ private[scarlet] object FoldedCount:
     if (maxLength == 0) then ColumnBatches.emptyIntPairs
     else
       val batch = rows(from).morsel.batch
-      DirectCount.aggregateRanges(batch, starts, lengths, steps) match
-        case null =>
-          val table = borrow(maxLength)
-          var index = 0
-          while (index < count) {
-            val length = lengths(index)
-            if (length > 0) then table.scan(batch, starts(index), length, steps)
-            index += 1
-          }
-          table.compact()
-        case counted =>
-          val _ = denseSegments.incrementAndGet()
-          counted
+      if (mapping) then scanMapped(batch, starts, lengths, count, maxLength, steps, mapKey)
+      else
+        DirectCount.aggregateRanges(batch, starts, lengths, steps) match
+          case null =>
+            val table = borrow(maxLength)
+            var index = 0
+            while (index < count) {
+              val length = lengths(index)
+              if (length > 0) then table.scan(batch, starts(index), length, steps)
+              index += 1
+            }
+            table.compact()
+          case counted =>
+            val _ = denseSegments.incrementAndGet()
+            counted
+
+  /**
+   * Hash scan of one source batch. [[DirectCount]] is indexed by the source key, so it cannot
+   * store `mapKey`. One table covers every morsel of the batch inside this stripe.
+   */
+  private def scanMapped(
+      batch: ColumnBatch,
+      starts: Array[Int],
+      lengths: Array[Int],
+      count: Int,
+      maxLength: Int,
+      steps: List[Selection.Step],
+      mapKey: Int => Int,
+  ): ColumnBatch =
+    val table = borrow(maxLength)
+    var index = 0
+    while (index < count) {
+      val length = lengths(index)
+      if (length > 0) then table.scanMapped(batch, starts(index), length, steps, mapKey)
+      index += 1
+    }
+    table.compact()
+
+  /** Passed when `mapping` is false. [[foldSegment]] does not call it. */
+  private val unchangedKey: Int => Int = key => key
 
   /**
    * One table per thread. A stripe clears it between source batches and not between morsels of one
@@ -623,6 +726,15 @@ private[scarlet] object FoldedCount:
         cursor += 1
       }
       occupied = 0
+
+    def scanMapped(
+        batch: ColumnBatch,
+        start: Int,
+        length: Int,
+        steps: List[Selection.Step],
+        mapKey: Int => Int,
+    ): Unit =
+      MappedKeyFold.scan(batch, start, length, steps, (key, weight) => add(key, weight), mapKey)
 
     def scan(batch: ColumnBatch, start: Int, length: Int, steps: List[Selection.Step]): Unit =
       val readMask = ordinalMask(steps)

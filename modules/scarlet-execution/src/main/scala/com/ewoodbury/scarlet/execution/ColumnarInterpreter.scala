@@ -183,13 +183,13 @@ private[execution] object ColumnarInterpreter:
     case Some(index) => partitions.slice(index, index + 1)
 
   /**
-   * Decode `columns`. Int pairs use [[BatchCodec.decodeIntPairsPreservingAbsence]] only for
-   * [[PhysicalOp.SortByIntKey]] and [[PhysicalOp.SortByIntValueDesc]]. Every other int-pair op
-   * uses [[BatchCodec.decodeIntPairs]], which rejects a clear bit. Long pairs use
-   * [[BatchCodec.decodeLongPairs]], which already keeps a clear bit. [[PhysicalOp.SortByLongKey]]
-   * returns long pairs, so collect and take use that decoder and do not call the int-pair
-   * function. A long column projected from a long pair keeps a clear bit via
-   * [[BatchCodec.decodeLongsPreservingAbsence]]. An element long scan still uses
+   * Decode `columns`. Int pairs use [[BatchCodec.decodeIntPairsPreservingAbsence]] for
+   * [[PhysicalOp.SortByIntKey]], [[PhysicalOp.SortByIntValueDesc]], and [[PhysicalOp.MapKey]]. A
+   * key map keeps a null key. Every other int-pair op uses [[BatchCodec.decodeIntPairs]], which
+   * rejects a clear bit. Long pairs use [[BatchCodec.decodeLongPairs]], which already keeps a
+   * clear bit. [[PhysicalOp.SortByLongKey]] returns long pairs, so collect and take use that
+   * decoder and do not call the int-pair function. A long column projected from a long pair keeps
+   * a clear bit via [[BatchCodec.decodeLongsPreservingAbsence]]. An element long scan still uses
    * [[BatchCodec.decodeLongs]], which rejects a clear bit. Int triples use
    * [[BatchCodec.decodeIntTriplesPreservingAbsence]] for a [[PhysicalOp.Project]] and for an int
    * inner join: [[PhysicalOp.HashJoin]], [[PhysicalOp.BroadcastJoin]], or
@@ -231,10 +231,13 @@ private[execution] object ColumnarInterpreter:
   /**
    * Int-pair decoder for `op`. [[PhysicalOp.SortByLongKey]] and [[PhysicalOp.SortByStringKey]] are
    * their own arms. Those decoders do not call the returned function, and these arms must not fall
-   * through to [[BatchCodec.decodeIntPairs]], which rejects a clear bit.
+   * through to [[BatchCodec.decodeIntPairs]], which rejects a clear bit. [[PhysicalOp.MapKey]]
+   * keeps a null key or value, so it uses the absence-preserving decoder.
    */
   private def intPairDecoder(op: PhysicalOp): (ColumnBatch, Int) => Seq[(Int, Int)] =
     op match
+      case _: PhysicalOp.MapKey =>
+        (batch, rows) => BatchCodec.decodeIntPairsPreservingAbsence(batch, rows)
       case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByIntValueDesc =>
         (batch, rows) =>
           val started = System.nanoTime()
@@ -459,6 +462,11 @@ private[execution] object ColumnarInterpreter:
         case PhysicalOp.Kind.LongPairs => mapLongValues(input, mapper)
         case PhysicalOp.Kind.StringPairs => StringPairWalk.mapValues(input, mapper)
         case _ => mapIntValues(input, mapper)
+    case (Plan.MapIntKeyOp(source, mapper), PhysicalOp.MapKey(child)) =>
+      MapIntKey.columns(
+        interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),
+        mapper,
+      )
     case (
           Plan.ReduceByKeyOp(source, reduceFunc),
           PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)),

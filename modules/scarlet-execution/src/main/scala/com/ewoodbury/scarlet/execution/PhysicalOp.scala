@@ -54,6 +54,12 @@ enum PhysicalOp:
   case MapValue(child: PhysicalOp)
 
   /**
+   * `mapIntKey` rewrites column 0. Kind stays [[PhysicalOp.Kind.Pairs]]. A null key stays null and
+   * the function is not called. The plan node is the witness. The function is not inspected.
+   */
+  case MapKey(child: PhysicalOp)
+
+  /**
    * An element pipeline for the outer `length` consecutive logical FilterOp/MapOp nodes.
    * Interpretation re-derives their kinds and reads their functions from Plan.
    */
@@ -476,6 +482,20 @@ enum PhysicalOp:
    */
   case SortByStringKey(child: PhysicalOp)
 
+  /**
+   * Direct physical children. A scan has none. Every operator stores its children as constructor
+   * arguments, so a new case cannot hide a key map from [[MapIntKey.inTree]].
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Product",
+    ),
+  )
+  def children: List[PhysicalOp] =
+    this.productIterator.collect { case child: PhysicalOp => child }.toList
+
   def kind: PhysicalOp.Kind = this match
     case Scan(sourceKind, _) => sourceKind
     case Filter(child, _) => child.kind
@@ -495,6 +515,7 @@ enum PhysicalOp:
         case PhysicalOp.Kind.LongPairs => PhysicalOp.Kind.LongPairs
         case PhysicalOp.Kind.StringPairs => PhysicalOp.Kind.StringPairs
         case _ => PhysicalOp.Kind.Pairs
+    case MapKey(_) => PhysicalOp.Kind.Pairs
     case SortByIntKey(_) => PhysicalOp.Kind.Pairs
     case SortByIntValueDesc(_) => PhysicalOp.Kind.Pairs
     case SortByLongKey(_) => PhysicalOp.Kind.LongPairs
@@ -593,6 +614,7 @@ enum PhysicalOp:
         case other => s"Column$other"
       s"$label(${child.shape})"
     case MapValue(child) => s"MapValue(${child.shape})"
+    case MapKey(child) => s"MapKey(${child.shape})"
     case SortByIntKey(child) => s"SortByIntKey(${child.shape})"
     case SortByIntValueDesc(child) => s"SortByIntValueDesc(${child.shape})"
     case SortByLongKey(child) => s"SortByLongKey(${child.shape})"

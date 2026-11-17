@@ -93,6 +93,9 @@ final case class DistinctOp[A]() extends Operation[A, A]
 final case class KeysOp[K, V]() extends Operation[(K, V), K]
 final case class ValuesOp[K, V]() extends Operation[(K, V), V]
 final case class MapValuesOp[K, V, V2](f: V => V2) extends Operation[(K, V), (K, V2)]
+
+/** Int-key map. A null key stays null and `f` is not called. The output is still a pair. */
+final case class MapIntKeyOp(f: Int => Int) extends Operation[(Int, Int), (Int, Int)]
 final case class FilterKeysOp[K, V](p: K => Boolean) extends Operation[(K, V), (K, V)]
 final case class FilterValuesOp[K, V](p: V => Boolean) extends Operation[(K, V), (K, V)]
 final case class FlatMapValuesOp[K, V, V2](f: V => IterableOnce[V2])
@@ -131,6 +134,8 @@ object Operation {
     case Plan.ValuesOp(_) => ValuesOp[Any, Any]().asInstanceOf[Operation[Any, Any]]
     case Plan.MapValuesOp(_, f) =>
       MapValuesOp[Any, Any, Any](f.asInstanceOf[Any => Any]).asInstanceOf[Operation[Any, Any]]
+    case Plan.MapIntKeyOp(_, f) =>
+      MapIntKeyOp(f).asInstanceOf[Operation[Any, Any]]
     case Plan.FilterKeysOp(_, p) =>
       FilterKeysOp[Any, Any](p.asInstanceOf[Any => Boolean]).asInstanceOf[Operation[Any, Any]]
     case Plan.FilterValuesOp(_, p) =>

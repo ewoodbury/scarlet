@@ -75,7 +75,9 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
   "filter-keymod" should "count rows by key modulo 100" in {
     val data = filtered(groupKeys, groupValues)
     val counted = CrossEngineShapes.keyMod(data)
-    ColumnarPlanner.lower(counted.plan).isEmpty shouldBe true
+    ColumnarPlanner.lower(counted.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(MapKey(FilterValue(FilterKey(Scan)))))",
+    )
     counted.collect().toMap shouldBe Map(1 -> 1, 2 -> 1, 4 -> 1, 5 -> 1)
     CrossEngineShapes.pairChecksum(counted.collect()) shouldBe 376L
   }

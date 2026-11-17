@@ -7,10 +7,10 @@ import com.ewoodbury.scarlet.api.DistCollection
  *
  * `filter-distinct` is `keys.distinct.count`. `filter-twogroup` is one map over `groupByKey` that
  * keeps the count and the sum. `filter-topn` is `sortByIntValueDesc` on `(v desc, sk asc)` plus
- * `take`. `filter-keymod` maps the key to `k % 100` and then `countByKey`. The key-changing map is
- * not a columnar plan; the harness reports that decline and does not time it unless
- * `CROSS_TIME_ROW` is set. `filter-joinagg` filters both int tables, joins on the key, groups by
- * that key, and sums the left value.
+ * `take`. `filter-keymod` maps the key with `mapIntKey` to `k % 100` and then `countByKey`. That
+ * typed key map lowers. A generic pair `map` of the same arithmetic stays on the row path.
+ * `filter-joinagg` filters both int tables, joins on the key, groups by that key, and sums the
+ * left value.
  *
  * The checksum folds output columns left to right with `acc * 31 + field`, then sums those row
  * hashes. One column is the value. Two columns are `a * 31 + b`. Three columns are
@@ -39,9 +39,9 @@ object CrossEngineShapes:
       (key, count, sum)
     }
 
-  /** `k % 100` changes the key, so `countByKey` on this map does not lower. */
+  /** `k % 100` changes the key. [[com.ewoodbury.scarlet.api.DistCollection.mapIntKey]] lowers. */
   def keyMod(data: DistCollection[(Int, Int)]): DistCollection[(Int, Int)] =
-    data.map { case (key, value) => (key % bucket, value) }.countByKey
+    data.mapIntKey(key => key % bucket).countByKey
 
   /**
    * Filter both sides, join on the key, group by that key, and sum the left value.

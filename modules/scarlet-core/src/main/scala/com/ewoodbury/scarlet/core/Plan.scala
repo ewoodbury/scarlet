@@ -165,6 +165,15 @@ object Plan {
   case class MapValuesOp[K, V, B](source: Plan[(K, V)], mapFunction: V => B) extends Plan[(K, B)]
 
   /**
+   * Maps an int key and keeps the value.
+   *
+   * A null key stays null and `mapFunction` is not called. The node is the witness that the
+   * function is `Int => Int`. The planner does not inspect the function.
+   */
+  case class MapIntKeyOp(source: Plan[(Int, Int)], mapFunction: Int => Int)
+      extends Plan[(Int, Int)]
+
+  /**
    * Represents a filterKeys transformation.
    * @param source
    *   The preceding plan node (producing elements of type (K, A)).

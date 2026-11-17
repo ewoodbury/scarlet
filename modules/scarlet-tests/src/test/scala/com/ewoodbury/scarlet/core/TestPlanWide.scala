@@ -59,6 +59,8 @@ class TestPlanWide extends AnyFlatSpec with Matchers {
     PlanWide.isWide(Plan.KeysOp(kvSource)) shouldBe false
     PlanWide.isWide(Plan.ValuesOp(kvSource)) shouldBe false
     PlanWide.isWide(Plan.MapValuesOp(kvSource, (s: String) => s.toUpperCase(java.util.Locale.ENGLISH))) shouldBe false
+    PlanWide.isWide(Plan.MapIntKeyOp(intPairs, (key: Int) => key + 1)) shouldBe false
+    PlanWide.isWide(Plan.CountByKeyOp(Plan.MapIntKeyOp(intPairs, (key: Int) => key + 1))) shouldBe true
     PlanWide.isWide(Plan.FilterKeysOp(kvSource, (k: Int) => k > 0)) shouldBe false
     PlanWide.isWide(Plan.FilterValuesOp(kvSource, (v: String) => v.nonEmpty)) shouldBe false
     PlanWide.isWide(Plan.FlatMapValuesOp(kvSource, (s: String) => Seq(s, s + "!"))) shouldBe false

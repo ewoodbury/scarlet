@@ -16,6 +16,7 @@ private[execution] object PartitionPreserving:
     case PhysicalOp.Pipeline(child, _) => of(child)
     case PhysicalOp.Column(child, _) => of(child)
     case PhysicalOp.MapValue(child) => of(child)
+    case PhysicalOp.MapKey(child) => of(child)
     // Every other op re-partitions. Unlisted future ops land here too, so a new op refuses take
     // instead of silently reading one input partition.
     case _ => None
