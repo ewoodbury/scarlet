@@ -1,17 +1,122 @@
 # Cross-engine checks: DuckDB and Spark
 
 Not a CI gate. The CI gate is `PerfCheck`, which compares the columnar path with the row path in
-the same run. The decision table is the 2026-11-16 pinned run at `b704c3c`. The 2026-11-15
-steady-window run at `2b7b01e` (#233) is the previous scoreboard. That table stops at `2b7b01e`;
-later kernels (`HashJoin`, `Selection`, `JoinWrite`, `Validity`, `Int32Select`, `SlotFold` from
-#234) are not in it. The protocol difference from the pinned table is the pinning. The warmup-5
-full-window run at `8958ac9` is the one before that. The 2026-11-14 second run is at `ffca249`.
-The 2026-11-13 devbox section is the earlier warmup-3, rounds-10 protocol. The Apple M1 Pro table
-is history from 2026-11-07. It is not comparable with the container or the devbox.
+the same run. The decision table is the 2026-11-17 pinned run at `50591f6`. The 2026-11-16 pinned
+run at `b704c3c` (#234) is the previous scoreboard. The 2026-11-15 steady-window run at `2b7b01e`
+(#233) stops before #234. The warmup-5 full-window run at `8958ac9` is the one before that. The
+2026-11-14 second run is at `ffca249`. The 2026-11-13 devbox section is the earlier warmup-3,
+rounds-10 protocol. The Apple M1 Pro table is history from 2026-11-07. It is not comparable with
+the container or the devbox.
+
+## 2026-11-17 — devbox, pinned
+
+Decision table. Commit `50591f6` (#258). The box clock at the start was 2026-11-16 17:03 PT.
+Same machine as the 2026-11-16 section. That section is not this binary: #239, #240, #243, #247,
+and #236 landed after `b704c3c`.
+
+- Machine: `sjc-gpu-01` (`nixos`), x86_64, AMD Ryzen 9 5900XT, 32 threads, 62 GB, OpenJDK
+  21.0.13.0.2. The CPU governor was `powersave` and was left. Cores 0, 2, 4, and 6 are distinct
+  physical cores.
+- Pin: `taskset -c 0,2,4,6` on every Scarlet JVM, every DuckDB process, and every DataFusion
+  process.
+- Scarlet: 4 threads, 2 filters, no nulls, spill on. Classes compiled with sbt 1.10.11. The timed
+  process is `java -Xmx10g -cp` on that classpath, not an sbt JVM. Warmup 80. `steady_ms` is the
+  upper median of the last 10 rounds, index `n/2` after sorting. `compilation` is kept.
+  `machine` (the two halves of those last 10 differ by more than 10%) is dropped. The row is the
+  upper median of the kept values. Span is `(max - min) / median` of those values.
+- Rows under 2 ms, and any 1e6 row whose rounds-30 window was not flat, were taken at rounds 100
+  across nine JVMs. Sort at 1e6, and the 1e7 rows, stay at rounds 30. Count and sum at 1e7, and
+  join at 1e7, are nine JVMs because the first five missed the 10% span or kept fewer than five.
+  The other 1e7 rows are five JVMs.
+- DuckDB 2.0.0, in memory, same rows, threads, filters, and pin. Warmup 5, rounds 30. Nine
+  processes at 1e6, five at 1e7. Each process ran the six decision queries, in order: count, sum,
+  countByKey, reduceByKey, join, sort. The steady tags are not applied. `p50_ms` is the mean of
+  the two central round times, then the column is the upper median of those process p50s.
+- DataFusion 55.0.0, in memory, same shape and the same process counts. The timer is `collect()`.
+  DuckDB's timer is `fetchall()`. Sort is the row where that difference is the result size.
+
+Checksums matched on every kept JVM and every DuckDB and DataFusion process.
+
+### 1e6 rows
+
+| query | DuckDB | span | Scarlet | span | ratio | kept | checksum | alloc |
+| --- | ---: | ---: | ---: | ---: | --- | --- | ---: | ---: |
+| filter + count | 0.941 ms | 3.9% | 0.731 ms | 9.8% | 1.29x ahead | 8 of 9 | 333036 | 0.052 MB |
+| filter + sum | 0.995 ms | 1.8% | 0.732 ms | 12.7% | 1.36x ahead | 6 of 9 | 166553391274 | 0.052 MB |
+| filter + countByKey | 1.524 ms | 2.8% | 2.099 ms | 9.1% | 1.38x behind | 7 of 9 | 11147169 | 0.680 MB |
+| filter + reduceByKey | 2.023 ms | 3.1% | 1.757 ms | 42.4% | 1.15x ahead | 5 of 9 | 166564205407 | 0.600 MB |
+| filter + join | 4.163 ms | 0.8% | 1.077 ms | 10.4% | 3.86x ahead | 5 of 9 | 3330360 | 0.449 MB |
+| filter + sort | 70.735 ms | 3.4% | 13.898 ms | 5.5% | 5.09x ahead | 9 of 9 | 5343278082631 | 70.296 MB |
+
+Count, sum, countByKey, reduceByKey, and join are rounds 100. Sort is rounds 30. Sum's kept
+windows run 0.695–0.788 ms, so the span stays over 10% after nine JVMs at 100 rounds. Join's five
+kept windows run 1.059–1.172 ms, just over the line. `reduceByKey`'s five kept windows are 1.024,
+1.736, 1.757, 1.768, and 1.770 ms. A further nine JVMs at rounds 200 were not flat (eight
+`machine`), and those tails sat near 1.2 ms, so 1.757 ms is the rounds-100 median and not a
+settled floor.
+
+### 1e7 rows
+
+| query | DuckDB | span | Scarlet | span | ratio | kept | checksum | alloc |
+| --- | ---: | ---: | ---: | ---: | --- | --- | ---: | ---: |
+| filter + count | 7.018 ms | 0.8% | 6.188 ms | 12.9% | 1.13x ahead | 9 of 9 | 3328139 | 0.477 MB |
+| filter + sum | 7.547 ms | 1.9% | 6.052 ms | 11.4% | 1.25x ahead | 9 of 9 | 1663923758546 | 0.477 MB |
+| filter + countByKey | 10.242 ms | 0.8% | 9.905 ms | 3.9% | 1.03x ahead | 4 of 5 | 14142272 | 3.119 MB |
+| filter + reduceByKey | 11.100 ms | 0.8% | 8.476 ms | 1.8% | 1.31x ahead | 5 of 5 | 1663934572679 | 3.038 MB |
+| filter + join | 35.769 ms | 1.0% | 9.158 ms | 8.6% | 3.91x ahead | 7 of 9 | 33281390 | 0.652 MB |
+| filter + sort | 687.482 ms | 0.8% | 139.173 ms | 1.3% | 4.94x ahead | 5 of 5 | 518322534674927 | 702.038 MB |
+
+Count and sum are over the 10% line. Both medians are about 6 ms, so the under-2 ms rule does
+not apply. Two count windows sit near 5.6 ms and the other seven sit at 6.10–6.35 ms. Sum is the
+same shape: two near 5.7 ms, seven at 6.02–6.41 ms.
+
+### DataFusion
+
+| query | 1e6 | span | 1e7 | span | checksum 1e6 | checksum 1e7 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| filter + count | 1.295 ms | 8.3% | 8.276 ms | 7.1% | 333036 | 3328139 |
+| filter + sum | 1.328 ms | 6.5% | 9.141 ms | 5.3% | 166553391274 | 1663923758546 |
+| filter + countByKey | 2.173 ms | 9.4% | 13.416 ms | 3.2% | 11147169 | 14142272 |
+| filter + reduceByKey | 2.209 ms | 11.7% | 14.415 ms | 3.2% | 166564205407 | 1663934572679 |
+| filter + join | 3.972 ms | 3.0% | 32.281 ms | 1.8% | 3330360 | 33281390 |
+| filter + sort | 10.033 ms | 2.9% | 100.381 ms | 1.9% | 5343278082631 | 518322534674927 |
+
+`reduceByKey` at 1e6 spans 11.7%. Sort is not a DuckDB ratio: DuckDB materialises the ordered
+rows into Python on every round, and DataFusion does not.
+
+### Against the `b704c3c` table
+
+Count and sum stayed within a few tenths of a millisecond. No count or sum kernel landed after
+that table.
+
+- filter + countByKey, 1e6: 2.945 ms, 1.95x behind, to 2.099 ms, 1.38x behind. At 1e7: 40.288 ms,
+  3.91x behind, to 9.905 ms, 1.03x ahead. Alloc on the 1e7 row is 3.119 MB. #239.
+- filter + reduceByKey, 1e6: 2.694 ms, 1.33x behind, to 1.757 ms at the rounds-100 median, with
+  the 42% span above. At 1e7: 13.109 ms, 1.18x behind, to 8.476 ms, 1.31x ahead. #243.
+- filter + join, 1e6: 5.062 ms, 1.22x behind, to 1.077 ms, 3.86x ahead. At 1e7: 52.703 ms, 1.47x
+  behind, to 9.158 ms, 3.91x ahead. #236 selects the build. #240 counts matches and does not copy
+  the values.
+- filter + sort, 1e6: 34.527 ms, 2.04x ahead, to 13.898 ms, 5.09x ahead. At 1e7: 476.492 ms,
+  1.44x ahead, to 139.173 ms, 4.94x ahead. #247 radix-sorts present pairs. This query has no
+  nulls, so it takes that path.
+
+```shell
+# One DuckDB process. DataFusion is the same flags on cross_engine_datafusion.py.
+# This table's processes ran only the six names above, in that order.
+LD_LIBRARY_PATH=$(ls -d /nix/store/*gcc-15.3.0-lib/lib | head -1) \
+  taskset -c 0,2,4,6 ~/ce/bin/python ~/cross_engine_duckdb.py \
+  --rows 1000000 --threads 4 --warmup 5 --rounds 30
+
+# One Scarlet JVM. 1e6 count, sum, countByKey, reduceByKey, and join used rounds 100.
+CROSS_ROWS=1000000 CROSS_FILTERS=2 CROSS_NULLS=false CROSS_THREADS=4 \
+  CROSS_QUERY=filter-count CROSS_WARMUP=80 CROSS_ROUNDS=100 \
+  taskset -c 0,2,4,6 java -Xmx10g -cp "$CP" \
+  com.ewoodbury.scarlet.execution.CrossEngineBench
+```
 
 ## 2026-11-16 — devbox, pinned
 
-Decision table. Commit `b704c3c` (#234). Same machine as the steady-window section below. The
+Previous scoreboard. Commit `b704c3c` (#234). Same machine as the steady-window section below. The
 protocol difference from that section is the pinning. `b704c3c` is the straight-line dense scan,
 which lands after `2b7b01e`. The JVM was `java -cp` on those classes. #233 booted sbt in the bench JVM.
 #236 is not in these numbers.
@@ -118,7 +223,7 @@ is the `b704c3c` test classpath.
 
 Previous scoreboard, #233. The table stops at `2b7b01e`. Later kernels are not in it: #234
 changed `HashJoin`, `Selection`, `JoinWrite`, and `Validity`, and added `Int32Select` and
-`SlotFold`. Not the decision table. The difference from this run to the pinned table above is
+`SlotFold`. Not the decision table. The difference from this run to the 2026-11-16 pinned table is
 `taskset -c 0,2,4,6`. Same machine as the warmup-5 section below.
 
 - Machine: `sjc-gpu-01` (`nixos`), x86_64, AMD Ryzen 9 5900XT, 32 threads, 62 GB, OpenJDK
@@ -372,9 +477,10 @@ Run as in Setup, with `CROSS_WARMUP=3` and `CROSS_ROUNDS=10` as stated for this 
 
 Canonical reproduction. `CrossEngineBench` defaults are warmup 80, rounds 30, `CROSS_ROWS=1000000`,
 `CROSS_FILTERS=2`, `CROSS_NULLS=false`, `CROSS_THREADS=4`, spill on for this harness only. That is
-the protocol of the 2026-11-16 pinned table and the 2026-11-15 steady-window table, except the
-deltas those sections name (pin, heap, `java -cp` vs sbt). Current ratios are in
-"2026-11-16 — devbox, pinned". The 2026-11-07 table below is a one-time Apple M1 Pro run, warmup 3,
+the protocol of the 2026-11-17 pinned table, the 2026-11-16 pinned table, and the 2026-11-15
+steady-window table, except the deltas those sections name (pin, heap, `java -cp` vs sbt, and
+rounds on the short rows). Current ratios are in "2026-11-17 — devbox, pinned". The 2026-11-07
+table below is a one-time Apple M1 Pro run, warmup 3,
 measured 10, p50. It is not this command and is not comparable with the container or the devbox.
 The 2026-11-13 table used warmup 3, rounds 10 on the devbox.
 
@@ -405,7 +511,7 @@ One-time comparison, 2026-11-07. Apple M1 Pro, warmup 3, measured 10. Not the co
 ## Queries at 1M rows
 
 Historical Apple M1 Pro table, 2026-11-07. Not comparable with the container or the devbox.
-Current ratios are in "2026-11-16 — devbox, pinned".
+Current ratios are in "2026-11-17 — devbox, pinned".
 
 Measured again after the scan-path work (2026-11-07, `main` @ `05d1faf`). DuckDB and Spark columns
 are unchanged from the original run. The `countByKey` row was added on 2026-11-08 (`main` @
@@ -427,7 +533,7 @@ not the decision table: Scarlet was 1.9x slower on the sum, 2.6x on the count, 4
 per key, 3.3-4.8x on the reduce, 4.6x on the join, and 0.78x on the sort. The 2026-11-13
 shorter-protocol ratios were count 2.4x behind, sum 2.6x behind, countByKey 3.0x behind,
 reduceByKey 4.8x behind, join 5.8x behind, sort 1.13x ahead. Current ratios are in
-"2026-11-16 — devbox, pinned".
+"2026-11-17 — devbox, pinned".
 
 **The `groupByKey` row is not the same query on the two sides, and the `countByKey` row is.**
 DuckDB runs `SELECT k, count(*) ... GROUP BY k` and never materialises the values. For the
@@ -541,7 +647,7 @@ not show that the null was kept.
 ## Reading
 
 The 2-5x gap here is the 2026-11-07 M1 Pro history, not the decision table. Current ratios are in
-"2026-11-16 — devbox, pinned". On that M1 run the gap to DuckDB on scans,
+"2026-11-17 — devbox, pinned". On that M1 run the gap to DuckDB on scans,
 aggregates and joins was the scalar JVM kernel plus the source encode, not representation. Two
 measured spikes killed the earlier explanations: a 10-bit packed column scans slower than a raw
 int array at this size (1.91 vs 0.84 ns/row), and the Panama
