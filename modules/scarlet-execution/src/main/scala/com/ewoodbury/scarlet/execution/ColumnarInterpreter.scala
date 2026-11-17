@@ -817,68 +817,13 @@ private[execution] object ColumnarInterpreter:
     case (Plan.SortByIntKeyOp(source), PhysicalOp.SortByIntKey(child)) =>
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
-      // preserveAbsence keeps a null key and a null value. A null key still orders as zero.
-      // A slot-filter stack sorts survivor ids, including one filter, and does not gather first.
-      // The `None` path is the only one that interprets that child. RankSplitRuns chooses the
-      // in-memory split or a spill of the survivor index. Over the budget, with spill on, that
-      // index is written and dropped rows are not. Take decodes the prefix.
-      val width = ColumnarPlanner.shuffleWidth
-      val workers = ColumnarPlanner.parallelism
-      val scanStarted = System.nanoTime()
-      val sorted = FilterChain.selected(
-        source,
-        child,
-        selectedPartition = None,
-        preserveAbsence = true,
-        ordinals,
-      ) match
-        case Some(parts) =>
-          RankSplitTrace.addScan(System.nanoTime() - scanStarted)
-          RankSplitRuns.sortAndSplitSelected(parts, width, workers, ScarletConf.get)
-        case None =>
-          val batches = pairsOf(
-            interpretAt(
-              source,
-              child,
-              selectedPartition = None,
-              preserveAbsence = true,
-              ordinals,
-            ),
-          )
-          RankSplitTrace.addScan(System.nanoTime() - scanStarted)
-          RankSplitRuns.sortAndSplit(batches, width, workers, ScarletConf.get)
-      Columns.Pairs(sorted)
+      // The handoff copies the survivor index, drops those source batches, then radix-sorts.
+      SelectedSort.intKey(source, child, ordinals)
     case (Plan.SortByLongKeyOp(source), PhysicalOp.SortByLongKey(child)) =>
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
-      // Long-pair encode always keeps a null key and a null value. preserveAbsence is passed for
-      // symmetry with the int sort. It does not change the long encode. A null key orders as zero
-      // and stays null. A key, value, or row filter sorts survivor ids and does not gather first.
-      // The physical op stays SortByLongKey. RankSplitLongRuns chooses the in-memory split
-      // or a spill of the survivor index. Take decodes the prefix.
-      val width = ColumnarPlanner.shuffleWidth
-      val workers = ColumnarPlanner.parallelism
-      val sorted = FilterChain.selected(
-        source,
-        child,
-        selectedPartition = None,
-        preserveAbsence = true,
-        ordinals,
-      ) match
-        case Some(parts) =>
-          RankSplitLongRuns.sortAndSplitSelected(parts, width, workers, ScarletConf.get)
-        case None =>
-          val batches = longPairsOf(
-            interpretAt(
-              source,
-              child,
-              selectedPartition = None,
-              preserveAbsence = true,
-              ordinals,
-            ),
-          )
-          RankSplitLongRuns.sortAndSplit(batches, width, workers, ScarletConf.get)
-      Columns.LongPairs(sorted)
+      // Same handoff as the int sort: copy the prefix, drop the source batches, then radix-sort.
+      SelectedSort.longKey(source, child, ordinals)
     case (Plan.SortByStringKeyOp(source), PhysicalOp.SortByStringKey(child)) =>
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")

@@ -39,8 +39,11 @@ import java.util.concurrent.atomic.AtomicInteger
  * `parallelism <= 0`, and an empty `batches` vector are rejected.
  *
  * [[sortAndSplitSelected]] sorts the live prefix of each [[Selected]] and publishes a dense batch
- * of `count` rows. An empty prefix is an empty run. [[sortAndSplit]] and [[sortBatch]] are
- * unchanged.
+ * of `count` rows. An empty prefix is an empty run. A dense prefix is copied first.
+ * [[finishSelected]] runs [[RadixPass]] on those arrays, using them as the ping-pong source, and
+ * then merges. The radix scratch is allocated in that second step, so a caller that drops the
+ * selections after [[stageSelected]] does not keep the source batches beside the scratch or the
+ * merge. [[sortAndSplit]] and [[sortBatch]] are unchanged.
  */
 object RankSplit:
 
@@ -77,7 +80,11 @@ object RankSplit:
   /**
    * [[sortAndSplit]] for a survivor index. `rows` is the sum of the live prefixes. An empty
    * selection publishes `partitions` empty int-pair batches and does not sort. Each other prefix
-   * is one sorted run of `count` rows. The merge is [[merge]].
+   * is one sorted run of `count` rows.
+   *
+   * This keeps `selected` live through the radix scratch and the merge. [[stageSelected]] copies
+   * the prefix and returns. [[finishSelected]] allocates the scratch and merges. Drop the
+   * selections between those calls when the source batches must not sit beside that scratch.
    */
   def sortAndSplitSelected(
       selected: Vector[Selected],
@@ -87,13 +94,52 @@ object RankSplit:
     require(partitions > 0, s"numPartitions must be positive, got $partitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(selected.nonEmpty, "sortAndSplitSelected needs at least one batch")
+    finishSelected(stageSelected(selected, parallelism), partitions)
+
+  /**
+   * Copy each live prefix. A dense prefix is key and value arrays of `count` rows, not a sorted
+   * batch. A prefix that is not dense is already a sorted batch. The selections are not retained.
+   */
+  private[scarlet] def stageSelected(
+      selected: Option[Vector[Selected]],
+      parallelism: Int,
+  ): SelectedRun =
+    selected match
+      case Some(parts) => stageSelected(parts, parallelism)
+      case None =>
+        throw new IllegalArgumentException("sortAndSplitSelected needs at least one batch")
+
+  /** [[stageSelected]] for a vector the caller still holds. */
+  private[scarlet] def stageSelected(
+      selected: Vector[Selected],
+      parallelism: Int,
+  ): SelectedRun =
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(selected.nonEmpty, "sortAndSplitSelected needs at least one batch")
     val rows = selectedRows(selected)
     if (rows == 0) then
       selected.foreach(one => checkedPair(one.batch))
-      Vector.fill(partitions)(ColumnBatches.emptyIntPairs)
+      new EmptyRun
     else if (denseSelected(selected)) then
-      mergeDense(sortRunsSelectedDense(selected, parallelism), rows, partitions)
-    else merge(sortRunsSelected(selected, parallelism), rows, partitions)
+      new DenseRun(gatherDense(selected, parallelism), rows, parallelism)
+    else new SparseRun(sortRunsSelected(selected, parallelism), rows)
+
+  /**
+   * Sort staged dense prefixes and merge. [[RadixPass]] ping-pongs the gathered arrays with its
+   * scratch. Those arrays are the only run storage. Sparse runs are merged as they were staged.
+   */
+  private[scarlet] def finishSelected(
+      staged: SelectedRun,
+      partitions: Int,
+  ): Vector[ColumnBatch] =
+    require(partitions > 0, s"numPartitions must be positive, got $partitions")
+    staged match
+      case _: EmptyRun =>
+        Vector.fill(partitions)(ColumnBatches.emptyIntPairs)
+      case dense: DenseRun =>
+        mergeDense(radixPrefixes(dense.prefixes, dense.parallelism), dense.rows, partitions)
+      case sparse: SparseRun =>
+        merge(sparse.runs, sparse.rows, partitions)
 
   private def selectedRows(selected: Vector[Selected]): Int =
     val total = selected.iterator.map(_.count.toLong).sum
@@ -168,12 +214,15 @@ object RankSplit:
     RankSplitTrace.addRun(System.nanoTime() - started)
     sorted
 
-  private def sortRunsSelectedDense(
-      selected: Vector[Selected],
-      parallelism: Int,
-  ): Vector[ColumnBatch] =
+  private def gatherDense(selected: Vector[Selected], parallelism: Int): Vector[IntPrefix] =
     val started = System.nanoTime()
-    val sorted = MorselScheduler.map(selected, parallelism)((_, one) => sortSelectedDense(one))
+    val gathered = MorselScheduler.map(selected, parallelism)((_, one) => copyPrefix(one))
+    RankSplitTrace.addRun(System.nanoTime() - started)
+    gathered
+
+  private def radixPrefixes(prefixes: Vector[IntPrefix], parallelism: Int): Vector[ColumnBatch] =
+    val started = System.nanoTime()
+    val sorted = MorselScheduler.map(prefixes, parallelism)((_, prefix) => radixPrefix(prefix))
     RankSplitTrace.addRun(System.nanoTime() - started)
     sorted
 
@@ -194,13 +243,14 @@ object RankSplit:
       presentInts(sorted.keys, sorted.values, rows)
 
   /**
-   * One dense run of a present live prefix. Ties keep the smaller id, which is input order. The
-   * batch has `count` rows. The source still holds dropped rows, so it is not reused.
+   * One dense prefix. Ties are still input order because the ids are ascending and [[RadixPass]]
+   * is stable. The source batch is not reused: it still holds dropped rows. The copy is what
+   * [[RadixPass]] ping-pongs, so this does not allocate the scratch.
    */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private def sortSelectedDense(selected: Selected): ColumnBatch =
+  private def copyPrefix(selected: Selected): IntPrefix =
     val count = selected.count
-    if (count == 0) then ColumnBatches.emptyIntPairs
+    if (count == 0) then emptyPrefix
     else
       val (keys, values) = checkedPair(selected.batch)
       val gatherStarted = System.nanoTime()
@@ -214,13 +264,19 @@ object RankSplit:
         slot += 1
       }
       RankSplitTrace.addGather(System.nanoTime() - gatherStarted)
-      if (count == 1) then presentInts(copiedKeys, copiedValues, count)
-      else
-        val indexStarted = System.nanoTime()
-        val sorted = RadixPass.sortInts(copiedKeys, copiedValues, count)
-        RankSplitTrace.addIndex(System.nanoTime() - indexStarted)
-        RankSplitTrace.notePasses(sorted.passes)
-        presentInts(sorted.keys, sorted.values, count)
+      new IntPrefix(copiedKeys, copiedValues, count)
+
+  /** Sort one copied prefix. `count <= 1` publishes the copy and does not allocate scratch. */
+  private def radixPrefix(prefix: IntPrefix): ColumnBatch =
+    val count = prefix.count
+    if (count == 0) then ColumnBatches.emptyIntPairs
+    else if (count == 1) then presentInts(prefix.keys, prefix.values, count)
+    else
+      val indexStarted = System.nanoTime()
+      val sorted = RadixPass.sortInts(prefix.keys, prefix.values, count)
+      RankSplitTrace.addIndex(System.nanoTime() - indexStarted)
+      RankSplitTrace.notePasses(sorted.passes)
+      presentInts(sorted.keys, sorted.values, count)
 
   private def presentInts(keys: Array[Int], values: Array[Int], rows: Int): ColumnBatch =
     val keyWords = Validity.allValid(rows).words
@@ -524,6 +580,29 @@ object RankSplit:
       s"key length ${keys.length}, value length ${values.length}, and batch length ${batch.length} disagree",
     )
     (keys, values)
+
+  private val emptyPrefix = new IntPrefix(new Array[Int](0), new Array[Int](0), 0)
+
+  /** Gathered dense prefix. [[RadixPass]] uses `keys` and `values` as ping-pong storage. */
+  private[scarlet] final class IntPrefix(
+      val keys: Array[Int],
+      val values: Array[Int],
+      val count: Int,
+  )
+
+  /** Live prefix copied off the source selections. No field points at a [[Selected]]. */
+  private[scarlet] sealed trait SelectedRun
+
+  private[scarlet] final class EmptyRun extends SelectedRun
+
+  private[scarlet] final class DenseRun(
+      val prefixes: Vector[IntPrefix],
+      val rows: Int,
+      val parallelism: Int,
+  ) extends SelectedRun
+
+  private[scarlet] final class SparseRun(val runs: Vector[ColumnBatch], val rows: Int)
+      extends SelectedRun
 
   private final class Run(
       val keys: Array[Int],
