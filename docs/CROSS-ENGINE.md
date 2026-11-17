@@ -1,12 +1,84 @@
 # Cross-engine checks: DuckDB and Spark
 
 Not a CI gate. The CI gate is `PerfCheck`, which compares the columnar path with the row path in
-the same run. The decision table is the 2026-11-17 pinned run at `50591f6`. The 2026-11-16 pinned
+the same run. The decision table for the original six is the 2026-11-17 pinned run at
+`50591f6`. The four shapes added in #242 are the section at `8bfc7ca`. The 2026-11-16 pinned
 run at `b704c3c` (#234) is the previous scoreboard. The 2026-11-15 steady-window table (#233)
 stops at `2b7b01e`, before #234. The warmup-5 full-window run at `8958ac9` is the one before that. The
 2026-11-14 second run is at `ffca249`. The 2026-11-13 devbox section is the earlier warmup-3,
 rounds-10 protocol. The Apple M1 Pro table is history from 2026-11-07. It is not comparable with
 the container or the devbox.
+
+## 2026-11-17 — four shapes, pinned
+
+`distinct`, `topn`, `twogroup`, and `keymod` on `sjc-gpu-01`, commit `8bfc7ca` (#264). The
+six-query section below is the earlier binary, `50591f6`. The box clock at the start was 2026-11-17
+01:18 PT. Governor `powersave`, left. Pin `taskset -c 0,2,4,6`. OpenJDK 21.0.13.0.2, sbt 1.10.11.
+The timed Scarlet process is `java -Xmx10g -cp` on that classpath, not an sbt JVM. Four threads,
+two filters, no nulls, spill on for the process.
+
+Scarlet is five fresh JVMs per query, one query per JVM. Warmup 80, rounds 30. `steady_ms` is the
+upper median of the last 10 rounds, index `n/2` after sorting. `compilation` is kept. `machine`
+is dropped. The row is the upper median of the kept values. Span is `(max - min) / median` of
+those values. A set with fewer than three kept JVMs, or a span above 10%, is dropped.
+
+DuckDB 2.0.0, in memory, warmup 5, rounds 30, five processes at each size. Each process ran the
+four statements in `cross_engine_duckdb.py`, in order: `filter-distinct`, `filter-topn`,
+`filter-twogroup`, `filter-keymod`. `p50_ms` is the mean of the two central round times, then the
+column is the upper median of those five p50s. The steady tags are not applied.
+
+`filter-distinct` is `keys.distinct.count`. The arm is
+`Dedupe(Exchange(Key(FilterValue(FilterKey(Scan)))))`. `filter-topn` times `take(100)` on
+`sortByIntValueDesc`. The harness records the sort plan as the arm,
+`SortByIntValueDesc(FilterValue(FilterKey(Scan)))`; the action is the bounded heap, not the full
+sort. `filter-twogroup` is the count and the sum over `groupByKey`. The arm is
+`GroupedDecode(GroupByKey(Exchange(FilterValue(FilterKey(Scan)))))`. `filter-keymod` maps the key
+to `k % 100` and then `countByKey`. That map changes the key, so the planner declines and the arm
+is `row`. `CROSS_TIME_ROW=true` times the decline. The other three lower, so their arm stays the
+columnar shape.
+
+Checksums matched on every JVM and every DuckDB process, including the JVMs the steady rule
+dropped. The first `distinct` window at 1e6 kept 5 of 5 and spanned 116%: one JVM at 11.664 ms,
+the other four at 5.340–5.492 ms. That set is dropped. The row below is a second five, same
+warmup and rounds, span 5.5%. `machine` dropped two `twogroup` JVMs at 1e6, one `twogroup` JVM
+at 1e7, and one `keymod` JVM at 1e7.
+
+### 1e6 rows
+
+| query | DuckDB | span | Scarlet | span | ratio | kept | checksum | alloc |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| filter + distinct | 1.300 ms | 3.5% | 5.218 ms | 5.5% | 4.01x behind | 5 of 5 | 682 | 31.524 MB |
+| filter + topn | 1.599 ms | 0.5% | 4.557 ms | 4.2% | 2.85x behind | 5 of 5 | 1460799775 | 16.315 MB |
+| filter + twogroup | 1.859 ms | 1.8% | 8.928 ms | 4.0% | 4.80x behind | 3 of 5 | 166898953513 | 73.129 MB |
+| filter + keymod | 1.744 ms | 1.3% | 66.547 ms | 9.9% | 38.16x behind, row path | 5 of 5 | 486486 | 233.939 MB |
+
+### 1e7 rows
+
+| query | DuckDB | span | Scarlet | span | ratio | kept | checksum | alloc |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| filter + distinct | 9.681 ms | 0.9% | 62.095 ms | 5.4% | 6.41x behind | 5 of 5 | 682 | 309.608 MB |
+| filter + topn | 9.622 ms | 2.8% | 47.137 ms | 8.4% | 4.90x behind | 5 of 5 | 15750242131 | 162.907 MB |
+| filter + twogroup | 11.304 ms | 0.5% | 89.736 ms | 4.8% | 7.94x behind | 4 of 5 | 1664362168978 | 705.531 MB |
+| filter + keymod | 12.387 ms | 0.8% | 1203.643 ms | 5.8% | 97.17x behind, row path | 4 of 5 | 3481589 | 2331.177 MB |
+
+`keymod` is the row the columnar path refuses. At 1e6 the row path is 38x DuckDB. At 1e7 it is
+97x, and it allocates 2331 MB where the DuckDB query is a grouped count.
+
+```shell
+# DuckDB. Five processes. --query four runs the four statements above, in that order.
+# The stock script's --query takes one name; the run used a copy whose only change is that
+# selection. The SQL and the checksum are the script's.
+LD_LIBRARY_PATH=$(ls -d /nix/store/*gcc-15.3.0-lib/lib | head -1) \
+  taskset -c 0,2,4,6 ~/ce/bin/python ~/cross_engine_duckdb.py \
+  --rows 1000000 --threads 4 --warmup 5 --rounds 30 --query four
+
+# Scarlet. One query per JVM. Repeat for each shape and for CROSS_ROWS=10000000.
+# CROSS_TIME_ROW times a decline. A plan that lowers ignores it.
+CROSS_ROWS=1000000 CROSS_FILTERS=2 CROSS_NULLS=false CROSS_THREADS=4 \
+  CROSS_QUERY=filter-distinct CROSS_WARMUP=80 CROSS_ROUNDS=30 CROSS_TIME_ROW=true \
+  taskset -c 0,2,4,6 java -Xmx10g -cp "$CP" \
+  com.ewoodbury.scarlet.execution.CrossEngineBench
+```
 
 ## 2026-11-17 — devbox, pinned
 
