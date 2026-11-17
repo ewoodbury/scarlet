@@ -2,12 +2,76 @@
 
 Not a CI gate. The CI gate is `PerfCheck`, which compares the columnar path with the row path in
 the same run. The decision table for the original six is the 2026-11-17 pinned run at
-`50591f6`. The four shapes added in #242 are the section at `8bfc7ca`. The 2026-11-16 pinned
+`50591f6`. The materialising join is the section at `7955dca`. The four shapes added in #242
+are the section at `8bfc7ca`. The 2026-11-16 pinned
 run at `b704c3c` (#234) is the previous scoreboard. The 2026-11-15 steady-window table (#233)
 stops at `2b7b01e`, before #234. The warmup-5 full-window run at `8958ac9` is the one before that. The
 2026-11-14 second run is at `ffca249`. The 2026-11-13 devbox section is the earlier warmup-3,
 rounds-10 protocol. The Apple M1 Pro table is history from 2026-11-07. It is not comparable with
 the container or the devbox.
+
+## 2026-11-17 — materialising join, pinned
+
+`filter-joinsum` on `sjc-gpu-01`, commit `7955dca`. This is not the count row in the decision
+table. That row is `MatchCount`: it sums chain lengths and writes no columns, on an earlier
+binary (`50591f6`). This action is the same int inner join, then `sum(left * 31 + right)` over
+the value columns the join writes. The box clock at the start of the timed runs was 2026-11-17
+08:38 PT. Governor `powersave`, left. Pin `taskset -c 0,2,4,6`. OpenJDK 21.0.13.0.2, classes
+from sbt 1.10.11. The timed Scarlet process is `java -Xmx10g -cp` on that classpath, not an sbt
+JVM. Four threads, two filters, no nulls, spill on for the process.
+
+Scarlet is five fresh JVMs. Warmup 80, rounds 30. `steady_ms` is the upper median of the last
+10 rounds, index `n/2` after sorting. `compilation` is kept. `machine` is dropped. The row is
+the upper median of the kept values. Span is `(max - min) / median` of those values. DuckDB
+2.0.0, in memory, warmup 5, rounds 30, five processes. `p50_ms` is the mean of the two central
+round times, then the column is the upper median of those five. The steady tags are not applied
+to DuckDB.
+
+The plan that ran, on every JVM, is
+`HashJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(Scan))`. `batches` was 32 and
+`fused` was 0, so the count fold did not run and the row path did not run. DuckDB's statement
+is `SELECT sum(t.v::BIGINT * 31 + u.w::BIGINT) FROM t JOIN u ON t.k = u.j WHERE t.k % 3 != 0 AND t.v >= 0`.
+The build keys are `row % 1024`, the probe is ten copies of those keys, and the filters are
+`k % 3 != 0` and `v >= 0`, the same inputs as `filter-join`.
+
+Checksums matched on every JVM and every DuckDB process, including the first 1e7 set. That
+first five kept 5 of 5 and spanned 14.2%: one JVM at 126.581 ms, the other four at
+110.494–114.173 ms. A second five, started at load 0.48, spans 14.0% for the same reason, one
+JVM at 125.253 ms, and the other four at 109.806–113.919 ms. Both sets stay over the 10% line,
+so the row is published with that span. The value is the second five's upper median, 110.700 ms,
+which sits in the cluster of four. 1e6 kept 5 of 5 and spanned 7.9%.
+
+### 1e6 rows
+
+| query | DuckDB | span | Scarlet | span | ratio | kept | checksum | alloc |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| filter + join sum | 5.979 ms | 0.4% | 8.897 ms | 7.9% | 1.49x behind | 5 of 5 | 51631715699610 | 60.191 MB |
+
+### 1e7 rows
+
+| query | DuckDB | span | Scarlet | span | ratio | kept | checksum | alloc |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| filter + join sum | 55.522 ms | 0.1% | 110.700 ms | 14.0% | 1.99x behind | 5 of 5 | 515818008297280 | 593.811 MB |
+
+The count row on `50591f6` is 3.86x ahead at 1e6 and 3.91x ahead at 1e7. Those times are a
+different action on an earlier binary. This row is the join that returns its values: 1.49x
+behind DuckDB at 1e6, 1.99x behind at 1e7. The action writes the match columns and sums the
+value pair. The count row does not write those columns.
+
+```shell
+# DuckDB. Five processes. --query filter-joinsum is the statement above.
+# Repeat with --rows 10000000.
+LD_LIBRARY_PATH=$(ls -d /nix/store/*gcc-15.3.0-lib/lib | head -1) \
+  taskset -c 0,2,4,6 ~/ce/bin/python ~/cross_engine_duckdb.py \
+  --rows 1000000 --threads 4 --warmup 5 --rounds 30 --query filter-joinsum
+
+# Scarlet. One JVM. Repeat five times, and again at CROSS_ROWS=10000000.
+# The 1e7 row is the second five.
+CROSS_ROWS=1000000 CROSS_FILTERS=2 CROSS_NULLS=false CROSS_THREADS=4 \
+  CROSS_QUERY=filter-joinsum CROSS_WARMUP=80 CROSS_ROUNDS=30 CROSS_TIME_ROW=true \
+  taskset -c 0,2,4,6 java -Xmx10g -cp "$CP" \
+  com.ewoodbury.scarlet.execution.CrossEngineBench
+```
 
 ## 2026-11-17 — four shapes, pinned
 
@@ -772,10 +836,11 @@ the kept values is above 0.10. The decision table pins the process with `taskset
 and records the governor (`powersave` on the devbox; `sudo -n true` failed, so it was left).
 Set `CROSS_QUERY`
 to one of `filter-count`, `filter-sum`, `filter-groupbykey`, `filter-reducebykey`, `filter-join`,
-`filter-sort`, `filter-countbykey`, `filter-distinct`, `filter-topn`, `filter-twogroup`, or
-`filter-keymod`. Omit it to run all eleven in that process, dropping each
-query's input before the next. `filter-distinct` is `count(DISTINCT k)` and `filter-twogroup` is
-`count` plus `sum(v)` grouped by `k`; both lower. `filter-topn` is the sort-key table (`sk`, `v`)
+`filter-joinsum`, `filter-sort`, `filter-countbykey`, `filter-distinct`, `filter-topn`,
+`filter-twogroup`, or `filter-keymod`. Omit it to run all twelve in that process, dropping each
+query's input before the next. `filter-joinsum` sums `left * 31 + right` over the value columns
+the int inner join writes. It lowers to the same hash join as `filter-join`. `filter-distinct`
+is `count(DISTINCT k)` and `filter-twogroup` is `count` plus `sum(v)` grouped by `k`; both lower. `filter-topn` is the sort-key table (`sk`, `v`)
 ordered by `v` descending, `sk` ascending, limited to 100. `filter-keymod` groups by `k % 100`.
 `filter-keymod` does not lower: `batches`, `fused`, and `arm` are `row`, and the row is one checksum
 execution, not a timed p50. `encode_ms` is reported separately and is not subtracted from the
