@@ -61,6 +61,22 @@ object PartialCombine:
     }
     (groups.map(_.length), partials)
 
+  /**
+   * [[mergeMorsels]] on the calling thread. Same grouping, same merge, same visit per gathered
+   * piece. A handful of short partials costs more to dispatch than to combine.
+   */
+  def mergeOnCaller(
+      sizes: Vector[Int],
+      partials: Vector[ColumnBatch],
+      merge: ColumnBatch => ColumnBatch,
+  ): Vector[ColumnBatch] =
+    if (sizes.isEmpty) then Vector.empty
+    else
+      gather(sizes, partials).map { piece =>
+        ColumnMetrics.visit()
+        if (piece.combine) then merge(piece.batch) else piece.batch
+      }
+
   /** Merge the morsel partials of each input batch. A single morsel stays as it is. */
   def mergeMorsels(
       sizes: Vector[Int],
