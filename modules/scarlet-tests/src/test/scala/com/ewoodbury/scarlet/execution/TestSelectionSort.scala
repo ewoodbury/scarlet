@@ -251,6 +251,23 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     }
   }
 
+  it should "match the in-memory sort when spill is on and the prefix fits" in {
+    val source = pairs
+    val sorted = source
+      .filterKeys((key: Int) => key > 0)
+      .filterValues((value: Int) => value > 15)
+      .sortByIntKey
+    val inMemory = collect(sorted)
+
+    withSpill(budget = 64L * 1024L * 1024L) { _ =>
+      val stayed = collect(sorted)
+      stayed shouldBe inMemory
+      stayed shouldBe kept
+      stayed shouldBe row(sorted.collect().toSeq)
+      RankSplitRuns.filesWrittenForTest shouldBe 0L
+    }
+  }
+
   "a single filter" should "sort the survivor index and skip the compact" in {
     val source = pairs
     val filtered = source.filterKeys((key: Int) => key > 0)
@@ -431,6 +448,42 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     )
     identical(stayed, memory)
     RankSplitRuns.filesWrittenForTest shouldBe 0L
+  }
+
+  it should "match the in-memory split when the prefix fits the budget" in {
+    val batch = BatchCodec.intPairs(Seq(4 -> 1, 1 -> 2, 3 -> 3, 1 -> 4))
+    val selected = Vector(Selected(batch, Array(0, 1, 3), 3))
+    val memory = RankSplit.sortAndSplitSelected(selected, partitions = 2, parallelism = 1)
+    val nullKeys = Int32Column.of(Array(4, 1, 3, 1), Validity.pack(4, row => row != 1), 4)
+    val nullValues = Int32Column.of(Array(1, 2, 3, 4), Validity.pack(4, row => row != 3), 4)
+    val nullBatch = new ColumnBatch(
+      Vector(LogicalType.Int32, LogicalType.Int32),
+      Vector(nullKeys, nullValues),
+      4,
+    )
+    val nullSelected = Vector(Selected(nullBatch, Array(0, 1, 3), 3))
+    val nullMemory = RankSplit.sortAndSplitSelected(nullSelected, partitions = 2, parallelism = 1)
+
+    withSpill(budget = 64L * 1024L * 1024L) { _ =>
+      val stayed = RankSplitRuns.sortAndSplitSelected(
+        selected,
+        partitions = 2,
+        parallelism = 2,
+        ScarletConf.get,
+      )
+      identical(stayed, memory)
+      RankSplitRuns.filesWrittenForTest shouldBe 0L
+
+      RankSplitRuns.resetForTest()
+      val nullStayed = RankSplitRuns.sortAndSplitSelected(
+        nullSelected,
+        partitions = 2,
+        parallelism = 1,
+        ScarletConf.get,
+      )
+      identical(nullStayed, nullMemory)
+      RankSplitRuns.filesWrittenForTest shouldBe 0L
+    }
   }
 
   private def pairs: DistCollection[(Int, Int)] =

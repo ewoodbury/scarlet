@@ -177,6 +177,20 @@ private[scarlet] object RankSplitRuns:
     conf.spillEnabled &&
       selected.iterator.map(one => partitionBytes(one.count)).sum > conf.spillBudgetBytes
 
+  /**
+   * True when [[sortAndSplitSelected]] would sort in memory. Spill off, an empty prefix, and an
+   * estimate at or under the budget all fit. The charge is [[exceedsSelected]].
+   */
+  private[scarlet] def fitsSelected(
+      selected: Option[Vector[Selected]],
+      conf: ScarletConf,
+  ): Boolean =
+    selected match
+      case Some(parts) =>
+        val rows = selectedRows(parts)
+        rows == 0 || !exceedsSelected(parts, conf)
+      case None => true
+
   /** Spill files published since the last [[resetForTest]], including intermediate runs. */
   private[scarlet] def filesWrittenForTest: Long = filesWritten.get
 

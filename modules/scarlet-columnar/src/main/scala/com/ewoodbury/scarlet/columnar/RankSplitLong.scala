@@ -61,7 +61,11 @@ object RankSplitLong:
   /**
    * [[sortAndSplit]] for a survivor index. `rows` is the sum of the live prefixes. An empty
    * selection publishes `partitions` empty long-pair batches and does not sort. Each other prefix
-   * is one sorted run of `count` rows. The merge is [[merge]].
+   * is one sorted run of `count` rows.
+   *
+   * Same handoff as [[RankSplit.sortAndSplitSelected]]. [[stageSelected]] copies a dense prefix.
+   * [[finishSelected]] allocates the [[RadixPass]] scratch and merges. Drop the selections between
+   * the two calls so the source batches are not live beside that scratch.
    */
   def sortAndSplitSelected(
       selected: Vector[Selected],
@@ -71,13 +75,46 @@ object RankSplitLong:
     require(partitions > 0, s"numPartitions must be positive, got $partitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(selected.nonEmpty, "sortAndSplitSelected needs at least one batch")
+    finishSelected(stageSelected(selected, parallelism), partitions)
+
+  /** Copy each live prefix. The selections are not retained. See [[RankSplit.stageSelected]]. */
+  private[scarlet] def stageSelected(
+      selected: Option[Vector[Selected]],
+      parallelism: Int,
+  ): SelectedRun =
+    selected match
+      case Some(parts) => stageSelected(parts, parallelism)
+      case None =>
+        throw new IllegalArgumentException("sortAndSplitSelected needs at least one batch")
+
+  /** [[stageSelected]] for a vector the caller still holds. */
+  private[scarlet] def stageSelected(
+      selected: Vector[Selected],
+      parallelism: Int,
+  ): SelectedRun =
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(selected.nonEmpty, "sortAndSplitSelected needs at least one batch")
     val rows = selectedRows(selected)
     if (rows == 0) then
       selected.foreach(one => checkedPair(one.batch))
-      Vector.fill(partitions)(ColumnBatches.emptyLongPairs)
+      new EmptyRun
     else if (denseSelected(selected)) then
-      mergeDense(sortRunsSelectedDense(selected, parallelism), rows, partitions)
-    else merge(sortRunsSelected(selected, parallelism), rows, partitions)
+      new DenseRun(gatherDense(selected, parallelism), rows, parallelism)
+    else new SparseRun(sortRunsSelected(selected, parallelism), rows)
+
+  /** Sort staged dense prefixes with [[RadixPass]] and merge. Sparse runs are already sorted. */
+  private[scarlet] def finishSelected(
+      staged: SelectedRun,
+      partitions: Int,
+  ): Vector[ColumnBatch] =
+    require(partitions > 0, s"numPartitions must be positive, got $partitions")
+    staged match
+      case _: EmptyRun =>
+        Vector.fill(partitions)(ColumnBatches.emptyLongPairs)
+      case dense: DenseRun =>
+        mergeDense(radixPrefixes(dense.prefixes, dense.parallelism), dense.rows, partitions)
+      case sparse: SparseRun =>
+        merge(sparse.runs, sparse.rows, partitions)
 
   private def selectedRows(selected: Vector[Selected]): Int =
     val total = selected.iterator.map(_.count.toLong).sum
@@ -143,11 +180,11 @@ object RankSplitLong:
   private def sortRunsDense(batches: Vector[ColumnBatch], parallelism: Int): Vector[ColumnBatch] =
     MorselScheduler.map(batches, parallelism)((_, batch) => sortBatchDense(batch))
 
-  private def sortRunsSelectedDense(
-      selected: Vector[Selected],
-      parallelism: Int,
-  ): Vector[ColumnBatch] =
-    MorselScheduler.map(selected, parallelism)((_, one) => sortSelectedDense(one))
+  private def gatherDense(selected: Vector[Selected], parallelism: Int): Vector[LongPrefix] =
+    MorselScheduler.map(selected, parallelism)((_, one) => copyPrefix(one))
+
+  private def radixPrefixes(prefixes: Vector[LongPrefix], parallelism: Int): Vector[ColumnBatch] =
+    MorselScheduler.map(prefixes, parallelism)((_, prefix) => radixPrefix(prefix))
 
   private def sortBatchDense(batch: ColumnBatch): ColumnBatch =
     val rows = batch.length
@@ -160,13 +197,13 @@ object RankSplitLong:
       presentLongs(sorted.keys, sorted.values, rows)
 
   /**
-   * One dense run of a present live prefix. Ties keep the smaller id, which is input order. The
-   * batch has `count` rows. The source still holds dropped rows, so it is not reused.
+   * One dense prefix. Ties keep the smaller id. The source still holds dropped rows, so it is not
+   * reused. The copy is the [[RadixPass]] ping-pong source. This does not allocate the scratch.
    */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private def sortSelectedDense(selected: Selected): ColumnBatch =
+  private def copyPrefix(selected: Selected): LongPrefix =
     val count = selected.count
-    if (count == 0) then ColumnBatches.emptyLongPairs
+    if (count == 0) then emptyPrefix
     else
       val (keys, values) = checkedPair(selected.batch)
       val copiedKeys = new Array[Long](count)
@@ -178,10 +215,16 @@ object RankSplitLong:
         copiedValues(slot) = values.values(row)
         slot += 1
       }
-      if (count == 1) then presentLongs(copiedKeys, copiedValues, count)
-      else
-        val sorted = RadixPass.sortLongs(copiedKeys, copiedValues, count)
-        presentLongs(sorted.keys, sorted.values, count)
+      new LongPrefix(copiedKeys, copiedValues, count)
+
+  /** Sort one copied prefix. `count <= 1` publishes the copy and does not allocate scratch. */
+  private def radixPrefix(prefix: LongPrefix): ColumnBatch =
+    val count = prefix.count
+    if (count == 0) then ColumnBatches.emptyLongPairs
+    else if (count == 1) then presentLongs(prefix.keys, prefix.values, count)
+    else
+      val sorted = RadixPass.sortLongs(prefix.keys, prefix.values, count)
+      presentLongs(sorted.keys, sorted.values, count)
 
   private def presentLongs(keys: Array[Long], values: Array[Long], rows: Int): ColumnBatch =
     val keyWords = Validity.allValid(rows).words
@@ -507,6 +550,29 @@ object RankSplitLong:
       s"key length ${keys.length}, value length ${values.length}, and batch length ${batch.length} disagree",
     )
     (keys, values)
+
+  private val emptyPrefix = new LongPrefix(new Array[Long](0), new Array[Long](0), 0)
+
+  /** Gathered dense prefix. [[RadixPass]] uses `keys` and `values` as ping-pong storage. */
+  private[scarlet] final class LongPrefix(
+      val keys: Array[Long],
+      val values: Array[Long],
+      val count: Int,
+  )
+
+  /** Live prefix copied off the source selections. No field points at a [[Selected]]. */
+  private[scarlet] sealed trait SelectedRun
+
+  private[scarlet] final class EmptyRun extends SelectedRun
+
+  private[scarlet] final class DenseRun(
+      val prefixes: Vector[LongPrefix],
+      val rows: Int,
+      val parallelism: Int,
+  ) extends SelectedRun
+
+  private[scarlet] final class SparseRun(val runs: Vector[ColumnBatch], val rows: Int)
+      extends SelectedRun
 
   private final class Run(
       val keys: Array[Long],
