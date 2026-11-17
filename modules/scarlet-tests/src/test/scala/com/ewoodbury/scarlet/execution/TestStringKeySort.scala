@@ -159,19 +159,48 @@ class TestStringKeySort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     }
   }
 
-  it should "leave keys, values, filterKeys, and a filter above the sort on the row path" in {
+  it should "lower one present-key filter above the sort and leave null keys on the row path" in {
+    val present = DistCollection(Seq("b" -> 2, "" -> 4, "a" -> 1, "a" -> 3), 2)
+    val above = present.sortByStringKey.filter((pair: (String, Int)) => pair._2 != 1)
+    val twice = above.filter((pair: (String, Int)) => pair._2 != 2)
     val sorted = mixed.sortByStringKey
-    val projections = Seq(
+    val nullAbove = sorted.filter((pair: (String, Int)) => pair._2 > 2)
+    val stayed = Seq(
       sorted.keys,
       sorted.values,
       sorted.filterKeys(blankKey),
-      sorted.filter((pair: (String, Int)) => pair._2 > 2),
+      sorted.filterValues[String, Int]((value: Int) => value > 0),
+      nullAbove,
+      twice,
     )
-    projections.foreach { collection =>
+
+    ColumnarPlanner.lower(above.plan).map(_.shape) shouldBe Some(
+      "FilterRow(SortByStringKey(Scan))",
+    )
+    ColumnarPlanner.tryTake(above.plan, 1) shouldBe None
+    collect(above) shouldBe rowOf(above)
+    collect(above) shouldBe Seq("" -> 4, "a" -> 3, "b" -> 2)
+    stayed.foreach { collection =>
       ColumnarPlanner.lower(collection.plan) shouldBe None
       collect(collection) shouldBe rowOf(collection)
     }
     collect(sorted.values) shouldBe Seq(5, 6, 12, 13, 2, 8, 14, 1, 3, 9, 10, 4, 7, 11)
+  }
+
+  it should "fall back when a filter over the sort sees a null string key" in {
+    val batch = BatchCodec.stringIntPairs(Seq(nullKey(1), "a" -> 2))
+    val sort = PhysicalOp.SortByStringKey(PhysicalOp.Scan(PhysicalOp.Kind.StringPairs, Seq.empty))
+    val thrown = the[ColumnarFallback] thrownBy {
+      FilterChain.refuseNullSortKey(
+        sort,
+        ColumnarInterpreter.Columns.StringPairs(Vector(batch)),
+      )
+    }
+    thrown.getMessage shouldBe "filter over sortByStringKey saw a null key the row path keeps"
+    FilterChain.refuseNullSortKey(
+      sort,
+      ColumnarInterpreter.Columns.StringPairs(Vector(BatchCodec.stringIntPairs(Seq("" -> 1)))),
+    )
   }
 
   it should "sort a whole-row filter and leave a map under the sort on the row path" in {

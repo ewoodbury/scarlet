@@ -164,19 +164,28 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     prefix.exists(pair => !present(pair, 1)) shouldBe true
   }
 
-  it should "leave a filter above the sort, and a non-filter child, on the row path" in {
+  it should "filter one present-key row predicate over the sort and match the row path" in {
     val source = DistCollection.ofLongPairs(Array(3L, 1L, 2L, 2L), Array(30L, 10L, 20L, 21L), 2)
     val above = source.sortByLongKey.filter((pair: (Long, Long)) => pair._2 != 20L)
     val below = source.filter((pair: (Long, Long)) => pair._1 > 0L).sortByLongKey
     val mapped = source.map((pair: (Long, Long)) => (pair._1, pair._2)).sortByLongKey
     val rewritten = source.mapValues((value: Long) => value + 1L).sortByLongKey
+    val twice = above.filter((pair: (Long, Long)) => pair._1 > 0L)
+    val byValue = source.sortByLongKey.filterValues[Long, Long]((value: Long) => value > 0L)
 
-    ColumnarPlanner.partitioning(above.plan) shouldBe Option.empty[PartitioningInfo]
-    ColumnarPlanner.lower(above.plan) shouldBe Option.empty[PhysicalOp]
+    ColumnarPlanner.lower(above.plan).map(_.shape) shouldBe Some(
+      "FilterRow(SortByLongKey(Scan))",
+    )
+    ColumnarPlanner.tryTake(above.plan, 1) shouldBe None
     collect(above) shouldBe rowCollect(above)
-    // A long-pair row filter lowers and sorts the survivor index.
+    collect(above) shouldBe Seq(1L -> 10L, 2L -> 21L, 3L -> 30L)
+    // A long-pair row filter under the sort still sorts the survivor index.
     ColumnarPlanner.lower(below.plan).map(_.shape) shouldBe Some("SortByLongKey(FilterRow(Scan))")
     collect(below) shouldBe rowCollect(below)
+    ColumnarPlanner.lower(twice.plan) shouldBe None
+    collect(twice) shouldBe rowCollect(twice)
+    ColumnarPlanner.lower(byValue.plan) shouldBe None
+    collect(byValue) shouldBe rowCollect(byValue)
     ColumnarPlanner.partitioning(mapped.plan) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.partitioning(rewritten.plan) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.partitioning(source.sortByLongKey.keys.plan) shouldBe
@@ -188,6 +197,43 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.partitioning(source.sortByLongKey.join(source).plan) shouldBe
       Option.empty[PartitioningInfo]
+  }
+
+  it should "keep a null key on the row path and not lower one filter above the sort" in {
+    val rows = Seq(
+      longPair(boxedLong(2L), boxedLong(20L)),
+      longPair(noLong, boxedLong(5L)),
+      longPair(boxedLong(-4L), boxedLong(1L)),
+      longPair(boxedLong(0L), boxedLong(8L)),
+    )
+    val filtered =
+      DistCollection(rows, 2).sortByLongKey.filter((pair: (Long, Long)) => pair._2 < 20L)
+    val row = rowCollect(filtered)
+    val keptNull = row.lift(1).getOrElse(fail("missing null-key row"))
+
+    ColumnarPlanner.lower(filtered.plan) shouldBe None
+    ColumnarPlanner.partitioning(filtered.plan) shouldBe None
+    collect(filtered) shouldBe row
+    row shouldBe Seq(
+      longPair(boxedLong(-4L), boxedLong(1L)),
+      longPair(noLong, boxedLong(5L)),
+      longPair(boxedLong(0L), boxedLong(8L)),
+    )
+    present(keptNull, 0) shouldBe false
+    storedLong(keptNull, 1) shouldBe 5L
+  }
+
+  it should "fall back when a filter over the sort sees a null long key" in {
+    val batch = longNullable(Seq((None, Some(1)), (Some(2), Some(3))))
+    val sort = PhysicalOp.SortByLongKey(PhysicalOp.Scan(PhysicalOp.Kind.LongPairs, Seq.empty))
+    val thrown = the[ColumnarFallback] thrownBy {
+      FilterChain.refuseNullSortKey(sort, ColumnarInterpreter.Columns.LongPairs(Vector(batch)))
+    }
+    thrown.getMessage shouldBe "filter over sortByLongKey saw a null key the row path keeps"
+    FilterChain.refuseNullSortKey(
+      sort,
+      ColumnarInterpreter.Columns.LongPairs(Vector(BatchCodec.longPairs(Seq(1L -> 2L)))),
+    )
   }
 
   it should "lower filterKeys then sortByLongKey and match the row path" in {

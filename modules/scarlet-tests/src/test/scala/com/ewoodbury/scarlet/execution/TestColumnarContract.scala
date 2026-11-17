@@ -25,11 +25,11 @@ class TestColumnarContract
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    accepted.size shouldBe 216
+    accepted.size shouldBe 218
     // A null key refuses the shape rather than excluding it. Outer joins are covered by execution
     // tests, not contract fixtures, because the contract does not track the int refusals either.
     excluded.size shouldBe 35
-    (accepted.size + excluded.size) shouldBe 251
+    (accepted.size + excluded.size) shouldBe 253
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -243,10 +243,28 @@ class TestColumnarContract
         Some("SortByLongKey(Scan)"),
       ),
       AcceptedCase(
+        "filter over sortByLongKey",
+        Plan.FilterOp(
+          Plan.SortByLongKeyOp(longPairSource),
+          (pair: (Long, Long)) => pair._2 > 0L,
+        ),
+        rangeSortedInfo(layout),
+        Some("FilterRow(SortByLongKey(Scan))"),
+      ),
+      AcceptedCase(
         "sortByStringKey of a string-pair scan",
         Plan.SortByStringKeyOp(stringKeySource),
         rangeSortedInfo(stringPairLayout),
         Some("SortByStringKey(Scan)"),
+      ),
+      AcceptedCase(
+        "filter over sortByStringKey",
+        Plan.FilterOp(
+          Plan.SortByStringKeyOp(stringKeySource),
+          (pair: (String, Int)) => pair._2 > 0,
+        ),
+        rangeSortedInfo(stringPairLayout),
+        Some("FilterRow(SortByStringKey(Scan))"),
       ),
       AcceptedCase("int pair keys", keys, narrowInfo(2, layout), Some("Key(Scan)")),
       AcceptedCase("int pair values", values, narrowInfo(2, layout), Some("Value(Scan)")),
