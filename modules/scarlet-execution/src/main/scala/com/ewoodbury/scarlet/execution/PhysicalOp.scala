@@ -15,9 +15,9 @@ import com.ewoodbury.scarlet.core.Partition
  * stays on the logical plan. Execution decodes the grouped batch once and applies it to each
  * `(K, Iterable[V])`. [[PhysicalOp.Exchange]] sits under [[PhysicalOp.HashAggregate]],
  * [[PhysicalOp.LongHashAggregate]], [[PhysicalOp.StringHashAggregate]], [[PhysicalOp.GroupByKey]],
- * and [[PhysicalOp.CountByKey]], and on each side of [[PhysicalOp.HashJoin]],
- * [[PhysicalOp.LongHashJoin]], [[PhysicalOp.LongSortMergeJoin]], [[PhysicalOp.StringHashJoin]],
- * [[PhysicalOp.StringSortMergeJoin]], [[PhysicalOp.SortMergeJoin]],
+ * [[PhysicalOp.CountByKey]], and [[PhysicalOp.CountSum]], and on each side of
+ * [[PhysicalOp.HashJoin]], [[PhysicalOp.LongHashJoin]], [[PhysicalOp.LongSortMergeJoin]],
+ * [[PhysicalOp.StringHashJoin]], [[PhysicalOp.StringSortMergeJoin]], [[PhysicalOp.SortMergeJoin]],
  * [[PhysicalOp.SortMergeLeftOuter]], [[PhysicalOp.SortMergeRightOuter]],
  * [[PhysicalOp.SortMergeFullOuter]], [[PhysicalOp.HashLeftOuter]], [[PhysicalOp.HashRightOuter]],
  * and [[PhysicalOp.HashFullOuter]]. Those kernels perform the shuffle. Interpreting the boundary
@@ -432,6 +432,15 @@ enum PhysicalOp:
   case CountByKey(child: PhysicalOp)
 
   /**
+   * Count and sum of `(Int, Int)` pairs. The child is an [[Exchange]]. The kernel shuffles. A null
+   * key is dropped. A null value is counted and not added. One `(key, count, sum)` row per
+   * distinct key, including an empty bucket. Output kind is [[PhysicalOp.Kind.CountSums]]. The
+   * schema is `[Int32, Int64, Int64]`. The count narrows to `Int` at decode and wraps. The table
+   * grows from a small capacity with the distinct keys.
+   */
+  case CountSum(child: PhysicalOp)
+
+  /**
    * Global sort of an int-pair scan. Each source partition is sorted by effective key, then the
    * sorted runs are rank-merged into `defaultShufflePartitions`. A null key orders as zero and
    * stays null. A null value stays null. Ties keep input order. Output kind is
@@ -544,6 +553,7 @@ enum PhysicalOp:
           throw new IllegalStateException(
             s"countByKey column is $other, expected int, long, or string pairs",
           )
+    case CountSum(_) => PhysicalOp.Kind.CountSums
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
     case LongHashJoin(_, _) | LongBroadcastJoin(_, _, _) | LongSortMergeJoin(_, _) =>
       PhysicalOp.Kind.LongTriples
@@ -627,6 +637,7 @@ enum PhysicalOp:
     case GroupByKey(child) => s"GroupByKey(${child.shape})"
     case GroupedDecode(child) => s"GroupedDecode(${child.shape})"
     case CountByKey(child) => s"CountByKey(${child.shape})"
+    case CountSum(child) => s"CountSum(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
     case LongHashJoin(left, right) => s"LongHashJoin(${left.shape}, ${right.shape})"
     case LongBroadcastJoin(left, right, _) =>
@@ -684,7 +695,9 @@ enum PhysicalOp:
 object PhysicalOp:
   enum Kind:
     case Ints, Longs, Floats, Pairs, Triples, Strings, Bools, LongPairs, LongCounts, LongTriples,
-      StringPairs, StringTriples, GroupedInts, GroupedStrings, GroupedLongs, LongOuter, StringOuter
+      StringPairs, StringTriples, GroupedInts, GroupedStrings, GroupedLongs, LongOuter,
+      StringOuter,
+      CountSums
 
   /** Which logical child of a broadcast join fills the build table. */
   enum BuildSide:

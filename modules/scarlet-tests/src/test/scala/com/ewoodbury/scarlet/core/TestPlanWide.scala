@@ -206,6 +206,7 @@ class TestPlanWide extends AnyFlatSpec with Matchers {
     val wideOperations = Seq(
       Plan.GroupByKeyOp(kvSource),
       Plan.CountByKeyOp(kvSource),
+      Plan.CountSumByKeyOp(intPairs),
       Plan.ReduceByKeyOp(kvSource, (a: String, b: String) => a + b),
       Plan.SortByOp(source, identity, Ordering.Int),
       Plan.SortByIntKeyOp(intPairs),

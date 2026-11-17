@@ -25,11 +25,11 @@ class TestColumnarContract
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    accepted.size shouldBe 220
+    accepted.size shouldBe 221
     // A null key refuses the shape rather than excluding it. Outer joins are covered by execution
     // tests, not contract fixtures, because the contract does not track the int refusals either.
     excluded.size shouldBe 35
-    (accepted.size + excluded.size) shouldBe 255
+    (accepted.size + excluded.size) shouldBe 256
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -379,6 +379,12 @@ class TestColumnarContract
         Plan.CountByKeyOp(pairSource),
         hashedInfo(layout),
         Some("CountByKey(Exchange(Scan))"),
+      ),
+      AcceptedCase(
+        "countSumByKey int",
+        Plan.CountSumByKeyOp(pairSource),
+        hashedInfo(layout),
+        Some("CountSum(Exchange(Scan))"),
       ),
       AcceptedCase(
         "countByKey of mapIntKey",

@@ -69,6 +69,8 @@ private[execution] object ColumnUse:
       walk(source, child, parent union Set(0))
     case (Plan.CountByKeyOp(source), PhysicalOp.CountByKey(child)) =>
       walk(source, child, parent union Set(0, 1))
+    case (Plan.CountSumByKeyOp(source), PhysicalOp.CountSum(child)) =>
+      walk(source, child, parent union Set(0, 1))
     case (Plan.SortByIntKeyOp(source), PhysicalOp.SortByIntKey(child)) =>
       walk(source, child, parent union Set(0, 1))
     case (Plan.SortByIntValueDescOp(source), PhysicalOp.SortByIntValueDesc(child)) =>
@@ -96,7 +98,7 @@ private[execution] object ColumnUse:
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs =>
       Set(0, 1)
     case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
-        PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter =>
+        PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums =>
       Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools =>
@@ -113,7 +115,7 @@ private[execution] object ColumnUse:
 
   private def fullWidth(op: PhysicalOp): Set[Int] = op.kind match
     case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
-        PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter =>
+        PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums =>
       Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts |
@@ -140,6 +142,7 @@ private[execution] object ColumnUse:
     case Plan.PartitionByOp(source, _) => Some(source)
     case Plan.GroupByKeyOp(source) => Some(source)
     case Plan.CountByKeyOp(source) => Some(source)
+    case Plan.CountSumByKeyOp(source) => Some(source)
     case Plan.ReduceByKeyOp(source, _) => Some(source)
     case Plan.SortByOp(source, _, _) => Some(source)
     case Plan.SortByIntKeyOp(source) => Some(source)

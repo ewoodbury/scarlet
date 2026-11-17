@@ -60,7 +60,7 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     val data = filtered(groupKeys, groupValues)
     val grouped = CrossEngineShapes.twoGroup(data)
     ColumnarPlanner.lower(grouped.plan).map(_.shape) shouldBe Some(
-      "GroupedDecode(GroupByKey(Exchange(FilterValue(FilterKey(Scan)))))",
+      "CountSum(Exchange(FilterValue(FilterKey(Scan))))",
     )
     val rows = grouped.collect()
     rows.map { case (key, count, sum) => key -> (count, sum) }.toMap shouldBe Map(

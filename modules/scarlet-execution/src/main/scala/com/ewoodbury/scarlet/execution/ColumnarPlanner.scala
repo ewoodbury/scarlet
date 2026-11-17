@@ -821,6 +821,8 @@ object ColumnarPlanner:
       lowerChild(source).flatMap(GroupByKeyLowering.apply)
     case Plan.CountByKeyOp(source) =>
       lowerChild(source).flatMap(CountByKeyLowering.apply)
+    case Plan.CountSumByKeyOp(source) =>
+      lowerChild(source).flatMap(CountSumLowering.apply)
     case plan if JoinLowering.isJoin(plan) => JoinLowering.lower(plan, lowerChild)
     case Plan.SortByIntKeyOp(source) =>
       SortLowering.lowerInt(source, lowerPlan)
@@ -873,7 +875,8 @@ object ColumnarPlanner:
       }
     case PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
         PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
-        PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter =>
+        PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter |
+        PhysicalOp.Kind.CountSums =>
       None
 
   /** A whole-row string filter. A project still refuses the chain. */
@@ -1045,6 +1048,8 @@ object ColumnarPlanner:
     case PhysicalOp.GroupedDecode(child) => infoOf(child)
     case count: PhysicalOp.CountByKey =>
       hashed(count.kind)
+    case _: PhysicalOp.CountSum =>
+      hashed(PhysicalOp.Kind.CountSums)
     case PhysicalOp.Exchange(_) =>
       throw new IllegalStateException("exchange is only a child of aggregate or join")
     case PhysicalOp.Scan(kind, partitions) =>
@@ -1085,7 +1090,7 @@ object ColumnarPlanner:
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Bools | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
-        PhysicalOp.Kind.LongOuter =>
+        PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.CountSums =>
       Layout.Columnar(ScarletConf.get.columnarBatchSize)
 
   private[execution] def batchSize: Int =
