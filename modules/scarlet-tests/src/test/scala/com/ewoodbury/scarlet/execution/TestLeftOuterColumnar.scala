@@ -88,29 +88,63 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     canonical(collect(emptyProbe, columnar = false)) shouldBe empty
   }
 
-  it should "stay on the row path when a build value is null" in {
-    // A present pair comes first, so lowering still records the op. The null value is later.
-    val plan = outerPlan(
-      Seq(Seq(1 -> 10, 2 -> 20)),
-      Seq(Seq(pair(Some(2), Some(200)), pair(Some(1), None))),
+  it should "keep a null value columnar and match the row path" in {
+    val noRows = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 1).plan
+    // A present pair comes first, so the source still witnesses int pairs. The null value is later.
+    val nullProbe = source(
+      Seq(Seq(pair(Some(2), Some(0)), pair(Some(1), None), pair(None, Some(7)))),
     )
-    ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some("BroadcastLeftOuter(Scan, Scan)")
-    ColumnarPlanner.tryRun(plan) shouldBe None
-    val row = collect(plan, columnar = false)
-    nullPartner(row, ordinal = 1) shouldBe true
-    sameRows(collect(plan, columnar = true), row)
-  }
-
-  it should "stay on the row path when a probe value is null" in {
-    val plan = outerPlan(
-      Seq(Seq(pair(Some(2), Some(20)), pair(Some(1), None))),
-      Seq(Seq(1 -> 100, 2 -> 200)),
+    val nullBuild = source(Seq(Seq(pair(Some(0), Some(0)), pair(Some(1), None))))
+    val cases = Seq(
+      "null probe value" -> (
+        Seq(Seq(pair(Some(2), Some(20)), pair(Some(1), None))),
+        Seq(Seq(1 -> 100, 2 -> 200)),
+      ),
+      "null build value" -> (
+        Seq(Seq(1 -> 10, 2 -> 20)),
+        Seq(Seq(pair(Some(2), Some(200)), pair(Some(1), None))),
+      ),
+      "missing partner" -> (
+        Seq(Seq(1 -> 10, 2 -> 20)),
+        Seq(Seq(1 -> 100)),
+      ),
+      "null probe key and dropped null build key" -> (
+        Seq(Seq(pair(Some(1), Some(10)), pair(None, Some(7)), 0 -> 5)),
+        Seq(Seq(pair(Some(1), Some(100)), pair(None, Some(99)), 0 -> 50)),
+      ),
+      "real zero" -> (
+        Seq(Seq(pair(Some(1), Some(0)), pair(Some(3), Some(0)))),
+        Seq(Seq(pair(Some(1), Some(0)))),
+      ),
     )
-    ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some("BroadcastLeftOuter(Scan, Scan)")
-    ColumnarPlanner.tryRun(plan) shouldBe None
-    val row = collect(plan, columnar = false)
-    nullPartner(row, ordinal = 0) shouldBe true
-    sameRows(collect(plan, columnar = true), row)
+    cases.foreach { case (label, (leftParts, rightParts)) =>
+      withClue(s"$label: ") {
+        ScarletConf.set(originalConf.copy(columnarExecution = true))
+        val plan = outerPlan(leftParts, rightParts)
+        ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some("BroadcastLeftOuter(Scan, Scan)")
+        ColumnarPlanner.tryRun(plan).isDefined shouldBe true
+        val columnar = collect(plan, columnar = true)
+        agree(columnar, collect(plan, columnar = false))
+        if (label.contains("dropped null build")) then
+          containsInt(columnar, 99) shouldBe false
+      }
+    }
+    withClue("empty build keeps a null probe value: ") {
+      ScarletConf.set(originalConf.copy(columnarExecution = true))
+      val plan = Plan.LeftOuterJoinOp(nullProbe, noRows, Some(Plan.JoinStrategy.Broadcast))
+      ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some("BroadcastLeftOuter(Scan, Scan)")
+      ColumnarPlanner.tryRun(plan).isDefined shouldBe true
+      agree(collect(plan, columnar = true), collect(plan, columnar = false))
+    }
+    withClue("empty probe drops a null build value: ") {
+      ScarletConf.set(originalConf.copy(columnarExecution = true))
+      val plan = Plan.LeftOuterJoinOp(noRows, nullBuild, Some(Plan.JoinStrategy.Broadcast))
+      ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some("BroadcastLeftOuter(Scan, Scan)")
+      ColumnarPlanner.tryRun(plan).isDefined shouldBe true
+      val row = collect(plan, columnar = false)
+      agree(collect(plan, columnar = true), row)
+      JoinDigest.fromOuter(row).total shouldBe 0L
+    }
   }
 
   it should "not match a null build key to probe key 0" in {
@@ -183,18 +217,44 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     )
   }
 
-  it should "refuse a null value before the kernel runs" in {
-    val probe = BatchCodec.nullableIntPairs(Seq((Some(1), Some(10)), (Some(2), None)))
-    val build = BatchCodec.nullableIntPairs(Seq((Some(1), Some(100))))
-    val refused = intercept[IllegalArgumentException] {
-      ColumnPipeline.broadcastLeftOuterJoin(
-        Vector(probe),
-        Vector(build),
-        parallelism = 1,
-        ScarletConf.get.broadcastBuildBudgetBytes,
-      )
-    }
-    refused.getMessage should include("fully present")
+  it should "publish a null value as a clear bit and a missing partner as absence" in {
+    val probe = BatchCodec.nullableIntPairs(
+      Seq(
+        (Some(1), None),
+        (Some(2), Some(20)),
+        (Some(3), Some(30)),
+        (None, Some(7)),
+        (Some(0), Some(0)),
+        (Some(4), Some(40)),
+        (Some(5), Some(0)),
+      ),
+    )
+    val build = BatchCodec.nullableIntPairs(
+      Seq(
+        (Some(1), Some(100)),
+        (Some(2), None),
+        (None, Some(99)),
+        (Some(0), Some(0)),
+        (Some(4), Some(0)),
+        (Some(8), Some(80)),
+      ),
+    )
+    val parts = ColumnPipeline.broadcastLeftOuterJoin(
+      Vector(probe),
+      Vector(build),
+      parallelism = 1,
+      ScarletConf.get.broadcastBuildBudgetBytes,
+    )
+    parts.flatMap(bitMarks) should contain theSameElementsAs Seq(
+      "key=1 left=null right=present:100",
+      "key=2 left=present:20 right=null",
+      "key=3 left=present:30 right=absent",
+      "key=null left=present:7 right=absent",
+      "key=0 left=present:0 right=present:0",
+      "key=4 left=present:40 right=present:0",
+      "key=5 left=present:0 right=absent",
+    )
+    agree(decodedRight(parts), expectedNullBits)
   }
 
   it should "never record a left build for an outer join" in {
@@ -494,7 +554,7 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     )
   }
 
-  "full outer, broadcast left, and sort-merge left" should "decline a null value and match the row path" in {
+  "full outer and sort-merge left" should "decline a null value and match the row path" in {
     val left = source(Seq(Seq(1 -> 10, pair(Some(2), None))))
     val right = source(Seq(Seq(1 -> 100)))
     val plans = Seq(
@@ -502,11 +562,6 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
         "full outer",
         Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.ShuffleHash)),
         "HashFullOuter(Exchange(Scan), Exchange(Scan))",
-      ),
-      (
-        "broadcast left",
-        Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
-        "BroadcastLeftOuter(Scan, Scan)",
       ),
       (
         "sort-merge left",
@@ -706,10 +761,6 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     Plan.Source(parts.map(rows => Partition(rows)))
 
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
-  private def sameRows(actual: Seq[Any], expected: Seq[Any]): org.scalatest.Assertion =
-    actual should contain theSameElementsAs expected
-
-  @SuppressWarnings(Array("org.wartremover.warts.Any"))
   private def agree(actual: Seq[Any], expected: Seq[Any]): org.scalatest.Assertion =
     val left = JoinDigest.fromOuter(actual)
     val right = JoinDigest.fromOuter(expected)
@@ -810,30 +861,6 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
       case Some(present) => Int.box(present)
       case None => null
     Tuple2(boxedKey, Tuple2(left.asInstanceOf[AnyRef], right.asInstanceOf[AnyRef]))
-
-  /**
-   * True when a collected outer row has a null at `ordinal` of the value pair. Ordinal 0 is the
-   * probe value. Ordinal 1 is the build value, which the row path wraps in `Some`.
-   */
-  @SuppressWarnings(
-    Array(
-      "org.wartremover.warts.Any",
-      "org.wartremover.warts.AsInstanceOf",
-      "org.wartremover.warts.Null",
-      "org.wartremover.warts.Product",
-    ),
-  )
-  private def nullPartner(rows: Seq[Any], ordinal: Int): Boolean =
-    rows.exists { row =>
-      val values = row.asInstanceOf[Product].productElement(1).asInstanceOf[Product]
-      values.productElement(ordinal) match
-        case null => true
-        case Some(value) =>
-          value match
-            case null => true
-            case _ => false
-        case _ => false
-    }
 
   @SuppressWarnings(
     Array(
