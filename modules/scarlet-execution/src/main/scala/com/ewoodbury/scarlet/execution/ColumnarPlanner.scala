@@ -264,9 +264,11 @@ object ColumnarPlanner:
    * [[TrailingProject.count]] folds an int, long, or dictionary-literal string chain without
    * writing it. A filter stack over an int-pair scan counts the source columns in
    * [[FusedPairFold]] and does not build a survivor index or a gathered batch. An int-key
-   * `distinct` over that stack counts groups in [[DistinctKeyCount]]. Any other accepted plan
-   * reads finished batch lengths. A string shape that is not the literal chain is that second
-   * strategy. The catch is the row-path fallback. [[ColumnarFallback]] is its named form.
+   * `distinct` over that stack counts groups in [[DistinctKeyCount]]. Int, long, and string
+   * `groupByKey` counts occupied groups in [[GroupByKeyCount]] and does not build value lists. A
+   * null key is dropped. Any other accepted plan reads finished batch lengths. A string shape that
+   * is not the literal chain is that second strategy. The catch is the row-path fallback.
+   * [[ColumnarFallback]] is its named form.
    */
   def tryCount(plan: Plan[_]): Option[Long] =
     accepted(plan) match
@@ -329,8 +331,8 @@ object ColumnarPlanner:
         Some(GroupedDecode.count(plan, child))
       case sum: PhysicalOp.JoinProbeSum =>
         Some(JoinProbeAggregate.count(plan, sum))
-      case _: PhysicalOp.GroupByKey =>
-        Some(ColumnarInterpreter.groupCount(ColumnarInterpreter.interpret(plan, op)))
+      case group: PhysicalOp.GroupByKey =>
+        Some(GroupByKeyCount.of(plan, group))
       case _ =>
         Some(MatchCount.of(plan, op))
 
