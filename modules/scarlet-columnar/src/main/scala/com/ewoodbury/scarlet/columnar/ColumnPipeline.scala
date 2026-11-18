@@ -303,8 +303,21 @@ object ColumnPipeline:
       numPartitions: Int,
       parallelism: Int,
   ): Long =
-    val buildBuckets = exchange(build, numPartitions, parallelism)
-    val probeBuckets = exchange(probe, numPartitions, parallelism)
+    sumValuePairBuckets(
+      exchange(build, numPartitions, parallelism),
+      exchange(probe, numPartitions, parallelism),
+      parallelism,
+    )
+
+  /**
+   * [[sumValuePair]] when both sides are already `floorMod` buckets. [[HashExchange.partitionAll]]
+   * is not called again, so a bucket array is not concatenated into a second copy.
+   */
+  private[scarlet] def sumValuePairBuckets(
+      buildBuckets: Vector[ColumnBatch],
+      probeBuckets: Vector[ColumnBatch],
+      parallelism: Int,
+  ): Long =
     val conf = ScarletConf.get
     if (buildBuckets.exists(bucket => HashJoinSpill.exceeds(bucket, conf))) then
       HashJoin.sumWrittenPairs(HashJoinSpill.finish(buildBuckets, probeBuckets, parallelism, conf))
@@ -339,7 +352,6 @@ object ColumnPipeline:
       measure,
     )
 
-  @SuppressWarnings(Array("org.wartremover.warts.Throw"))
   def sumInner(
       build: JoinInput,
       probe: JoinInput,
@@ -347,8 +359,25 @@ object ColumnPipeline:
       parallelism: Int,
       measure: JoinProbeSum.Measure,
   ): Vector[ColumnBatch] =
-    val buildBuckets = exchange(build, numPartitions, parallelism)
-    val probeBuckets = exchange(probe, numPartitions, parallelism)
+    sumInnerBuckets(
+      exchange(build, numPartitions, parallelism),
+      exchange(probe, numPartitions, parallelism),
+      parallelism,
+      measure,
+    )
+
+  /**
+   * [[sumInner]] when both sides are already `floorMod` buckets. [[HashExchange.partitionAll]] is
+   * not called again. A build bucket over the spill budget still declines before
+   * [[JoinProbeSum.sum]] allocates a table.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Throw"))
+  private[scarlet] def sumInnerBuckets(
+      buildBuckets: Vector[ColumnBatch],
+      probeBuckets: Vector[ColumnBatch],
+      parallelism: Int,
+      measure: JoinProbeSum.Measure,
+  ): Vector[ColumnBatch] =
     val conf = ScarletConf.get
     if (buildBuckets.exists(bucket => HashJoinSpill.exceeds(bucket, conf))) then
       throw new ColumnarFallback("a join sum over the spill budget stays on the row path")

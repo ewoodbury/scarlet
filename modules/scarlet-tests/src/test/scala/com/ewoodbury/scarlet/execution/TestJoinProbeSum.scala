@@ -399,6 +399,45 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.tryRun(broadcast.plan).isDefined shouldBe true
   }
 
+  it should "match batch size 1 to the 8192 filtered sum" in {
+    val left = pairs(Array(1, 2, 3, 4, 5, 8), Array(10, -1, 7, 8, 0, 4))
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+    val right = pairs(Array(1, 2, 4, 5, 8), Array(3, 60, 1, 9, 2))
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value < 50)
+    val summed = left.join(right).sumJoinLeft
+    val wide = summed.collect().toMap
+    wide shouldBe rowMap(summed)
+    val rightWide = left.join(right).sumJoinRight.collect().toMap
+    rightWide shouldBe rowMap(left.join(right).sumJoinRight)
+    val plain = pairs(Array(0, 80, 1), Array(5, 7, 9))
+      .join(pairs(Array(0, 80), Array(4, 3)))
+      .sumJoinLeft
+    val plainWide = plain.collect().toMap
+    plainWide shouldBe Map(0 -> 5L, 80 -> 7L)
+    plainWide shouldBe rowMap(plain)
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(saved.copy(columnarBatchSize = 1))
+      ScarletRuntime.get.shuffle.clear()
+      summed.collect().toMap shouldBe wide
+      left.join(right).sumJoinRight.collect().toMap shouldBe rightWide
+      plain.collect().toMap shouldBe plainWide
+      ScarletConf.set(saved.copy(defaultShufflePartitions = 1))
+      ScarletRuntime.get.shuffle.clear()
+      summed.collect().toMap shouldBe wide
+      plain.collect().toMap shouldBe plainWide
+      val single = DistCollection
+        .ofIntPairs(Array(1, 1, 2), Array(10, 20, 3), 1)
+        .join(DistCollection.ofIntPairs(Array(1, 2), Array(4, 5), 1))
+        .sumJoinLeft
+      single.collect().toMap shouldBe rowMap(single)
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
+  }
+
   "decodeSums" should "reject a hole and a short column" in {
     val present = new ColumnBatch(
       Vector(LogicalType.Int32, LogicalType.Int64),

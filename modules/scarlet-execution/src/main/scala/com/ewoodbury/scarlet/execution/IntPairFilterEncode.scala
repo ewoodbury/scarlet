@@ -36,6 +36,37 @@ private[execution] object IntPairFilterEncode:
         case _ => None
 
   /**
+   * Shuffle buckets for an owned int-pair slot stack or a dense owned scan.
+   *
+   * Survivors are scattered once into `numPartitions` buckets. There is no survivor batch, so
+   * [[tryBatches]] does not run and the source arrays are not copied first. `None` when this side
+   * is boxed, null, or not an int slot stack on an owned scan. The caller then keeps
+   * [[tryBatches]] or [[FilterChain.selected]]. A whole-row filter is that `None`.
+   */
+  def tryExchange(
+      plan: Plan[_],
+      op: PhysicalOp,
+      ordinals: Set[Int],
+      numPartitions: Int,
+      parallelism: Int,
+  ): Option[Vector[ColumnBatch]] =
+    if (!ordinals.contains(0) || !ordinals.contains(1)) then None
+    else
+      op.kind match
+        case PhysicalOp.Kind.Pairs =>
+          owned(plan, op).flatMap { parts =>
+            classify(plan, op, ordinals).map { mode =>
+              OwnedPairExchange.partition(
+                parts.map(part => (part.keys, part.values)),
+                keepOf(mode),
+                numPartitions,
+                parallelism,
+              )
+            }
+          }
+        case _ => None
+
+  /**
    * Inner-join cardinality of two owned int-pair sides. A slot filter is applied while the keys
    * are counted. Values are read only by the predicate and are not copied. `None` when either side
    * is boxed, null, or not an int slot stack on an owned scan: the caller keeps the exchange.
@@ -53,6 +84,25 @@ private[execution] object IntPairFilterEncode:
       case (Some(built), Some(probed)) =>
         Some(JoinCountTrace.time("product")(JoinKeyCount.multiply(built, probed)))
       case _ => None
+
+  private def keepOf(mode: Mode): OwnedPairExchange.Keep = mode match
+    case Mode.All => OwnedPairExchange.AllRows
+    case Mode.Filtered(gate) =>
+      gate match
+        case fast: KeyThenValue =>
+          OwnedPairExchange.keyThenValue(fast.keepKey, fast.keepValue)
+        case other: Generic =>
+          val count = other.slots.length
+          val columns = new Array[Int](count)
+          val keeps = new Array[Int => Boolean](count)
+          var index = 0
+          while (index < count) {
+            val slot = other.slots(index)
+            columns(index) = slot.column
+            keeps(index) = slot.keep
+            index += 1
+          }
+          OwnedPairExchange.generic(columns, keeps)
 
   private def countSide(
       plan: Plan[_],
