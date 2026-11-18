@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import java.util.concurrent.atomic.AtomicInteger
+
 /**
  * Count and sum of `Int32` values grouped by an `Int32` key.
  *
@@ -23,12 +25,18 @@ package com.ewoodbury.scarlet.columnar
  * does not copy either column and it does not build a survivor index. A null key or a null value
  * never reaches that walk. The encoded scans below still drop a null key and count a null value
  * without adding it.
+ *
+ * [[byKeyOwnedMapped]] is [[byKeyOwned]] after an int key function. [[byKeyMapped]] is the same
+ * aggregate over encoded morsels: a null key is not passed to the function, and a null value is
+ * counted and not added. Neither calls [[byKey]], so a published pair batch is not the input.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object CountSum:
 
   private val Aggs =
     HashAggregate.Int32Aggs(sum = true, count = true, min = false, max = false)
+
+  private val byKeyCalls = new AtomicInteger
 
   private val Schema = Vector(LogicalType.Int32, LogicalType.Int64, LogicalType.Int64)
 
@@ -61,6 +69,7 @@ object CountSum:
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    val _ = byKeyCalls.incrementAndGet()
     if (batches.isEmpty) then Vector.fill(numPartitions)(emptyBatch())
     else
       val combined = PartialCombine.perBatch(
@@ -118,6 +127,72 @@ object CountSum:
     val partials = OwnedCountSum.fold(parts, steps, parallelism, () => open(), publish)
     if (partials.isEmpty) then Vector.fill(numPartitions)(emptyBatch())
     else finish(partials, numPartitions, parallelism)
+
+  /**
+   * [[byKeyOwned]] after an int key function. Filters see the source key. `mapKey` runs once on
+   * each survivor and is not inspected. This does not call [[byKey]].
+   */
+  private[scarlet] def byKeyOwnedMapped(
+      parts: Vector[(Array[Int], Array[Int])],
+      steps: List[Selection.Step],
+      mapKey: Int => Int,
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    val partials =
+      OwnedMappedCountSum.fold(parts, steps, mapKey, parallelism, () => open(), publish)
+    if (partials.isEmpty) then Vector.fill(numPartitions)(emptyBatch())
+    else finish(partials, numPartitions, parallelism)
+
+  /**
+   * [[byKey]] for encoded morsels under an int key function. `steps` may be empty. A null key is
+   * dropped and `mapKey` is not called. A null value is counted and not added. This does not call
+   * [[byKey]]: the morsel is the source, not a published map.
+   */
+  private[scarlet] def byKeyMapped(
+      batches: Vector[ColumnBatch],
+      steps: List[Selection.Step],
+      mapKey: Int => Int,
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    if (batches.isEmpty) then Vector.fill(numPartitions)(emptyBatch())
+    else
+      val slots = MappedCountSum.prepare(steps)
+      val combined = PartialCombine.perBatch(
+        batches,
+        batchSize,
+        parallelism,
+        batch => mappedPartial(batch, slots, mapKey),
+        merge,
+      )
+      finish(combined, numPartitions, parallelism)
+
+  /** [[byKey]] entries since the last [[resetByKeyForTest]]. */
+  private[scarlet] def byKeyCallsForTest: Int = byKeyCalls.get
+
+  /** Clears [[byKeyCallsForTest]]. */
+  private[scarlet] def resetByKeyForTest(): Unit =
+    byKeyCalls.set(0)
+
+  private def mappedPartial(
+      batch: ColumnBatch,
+      slots: Array[MappedCountSum.Slot],
+      mapKey: Int => Int,
+  ): ColumnBatch =
+    if (batch.length == 0) then emptyBatch()
+    else
+      val table = open()
+      MappedCountSum.scan(batch, slots, mapKey, table)
+      publish(table)
 
   private def finish(
       combined: Vector[ColumnBatch],
