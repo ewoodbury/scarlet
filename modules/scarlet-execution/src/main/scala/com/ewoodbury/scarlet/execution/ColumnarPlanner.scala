@@ -261,8 +261,9 @@ object ColumnarPlanner:
    * [[PhysicalOp.GroupedDecode]] is the exception: the count is the mapped rows after one decode.
    * [[TrailingProject.count]] folds an int, long, or dictionary-literal string chain without
    * writing it. A filter stack over an int-pair scan counts the source columns in
-   * [[FusedPairFold]] and does not build a survivor index or a gathered batch. Any other accepted
-   * plan reads finished batch lengths. A string shape that is not the literal chain is that second
+   * [[FusedPairFold]] and does not build a survivor index or a gathered batch. An int-key
+   * `distinct` over that stack counts groups in [[DistinctKeyCount]]. Any other accepted plan
+   * reads finished batch lengths. A string shape that is not the literal chain is that second
    * strategy. The catch is the row-path fallback. [[ColumnarFallback]] is its named form.
    */
   def tryCount(plan: Plan[_]): Option[Long] =

@@ -7,13 +7,14 @@ import com.ewoodbury.scarlet.core.Plan
  * Scalar count of a finished plan.
  *
  * An int shuffle-hash inner join does not write the match columns. Owned int pairs multiply
- * per-key counts. Any other int shuffle-hash join sums chain lengths. Every other plan is
- * interpreted, and the count is the lengths of the batches it publishes.
+ * per-key counts. Any other int shuffle-hash join sums chain lengths. An int-key distinct over an
+ * int-pair filter stack counts [[DistinctKeyCount]] groups and does not publish those keys. Every
+ * other plan is interpreted, and the count is the lengths of the batches it publishes.
  */
 private[execution] object MatchCount:
 
   def of(plan: Plan[_], op: PhysicalOp): Long =
-    joinMatches(plan, op).getOrElse(published(plan, op))
+    joinMatches(plan, op).orElse(DistinctKeyCount.of(plan, op)).getOrElse(published(plan, op))
 
   private def joinMatches(plan: Plan[_], op: PhysicalOp): Option[Long] =
     (plan, op) match

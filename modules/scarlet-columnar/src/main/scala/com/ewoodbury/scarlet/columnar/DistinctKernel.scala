@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import java.util.concurrent.atomic.AtomicInteger
+
 /**
  * Whole-row dedupe for a single-column int or string source.
  *
@@ -19,8 +21,18 @@ package com.ewoodbury.scarlet.columnar
 )
 object DistinctKernel:
 
+  private val intsCalls = new AtomicInteger
+
+  /** [[ints]] calls since the last [[resetIntsForTest]]. */
+  private[scarlet] def intsCallsForTest: Int = intsCalls.get
+
+  /** Clears [[intsCallsForTest]]. */
+  private[scarlet] def resetIntsForTest(): Unit =
+    intsCalls.set(0)
+
   /** Scatter `batches` by value and dedupe each output partition. */
   def ints(batches: Vector[ColumnBatch], partitions: Int): Vector[ColumnBatch] =
+    val _ = intsCalls.incrementAndGet()
     require(partitions > 0, s"partitions must be positive, got $partitions")
     val buckets = Array.fill(partitions)(Vector.empty[ColumnBatch])
     batches.foreach { batch =>

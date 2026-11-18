@@ -5,7 +5,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.{ColumnarFallback, LogicalType}
+import com.ewoodbury.scarlet.columnar.{ColumnarFallback, DistinctKernel, LogicalType}
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -55,6 +55,68 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
       "Dedupe(Exchange(Key(FilterValue(FilterKey(Scan)))))",
     )
     distinct.count() shouldBe 4L
+    ColumnarPlanner.tryCount(distinct.plan) shouldBe Some(4L)
+    DistinctKernel.resetIntsForTest()
+    distinct.count() shouldBe 4L
+    ColumnarPlanner.tryCount(distinct.plan) shouldBe Some(4L)
+    DistinctKernel.intsCallsForTest shouldBe 0
+    distinct.collect().toSeq.sorted shouldBe Seq(1, 2, 4, 5)
+    DistinctKernel.intsCallsForTest should be > 0
+    data.countByKey.collect().toMap shouldBe Map(1 -> 1, 2 -> 1, 4 -> 1, 5 -> 1)
+    val saved = ScarletConf.get
+    ScarletConf.set(saved.copy(columnarBatchSize = 1))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      DistinctKernel.resetIntsForTest()
+      distinct.count() shouldBe 4L
+      ColumnarPlanner.tryCount(distinct.plan) shouldBe Some(4L)
+      DistinctKernel.intsCallsForTest shouldBe 0
+    finally ScarletConf.set(saved)
+  }
+
+  it should "count one null key and keep zero distinct from it" in {
+    // Partition split puts one null in each half. Value filter keeps both. Key filter drops them.
+    val rows = Seq(
+      erased(Some(0), Some(5)),
+      erased(None, Some(8)),
+      erased(Some(2), Some(3)),
+      erased(Some(1), Some(-3)),
+      erased(None, Some(2)),
+      erased(Some(4), Some(9)),
+      erased(Some(2), Some(7)),
+    )
+    val data = DistCollection(rows, partitions)
+    val byValue = data.filterValues((value: Int) => value >= 0).keys.distinct()
+    ColumnarPlanner.lower(byValue.plan).map(_.shape) shouldBe Some(
+      "Dedupe(Exchange(Key(FilterValue(Scan))))",
+    )
+    byValue.count() shouldBe 4L
+    ColumnarPlanner.tryCount(byValue.plan) shouldBe Some(4L)
+    DistinctKernel.resetIntsForTest()
+    ColumnarPlanner.tryCount(byValue.plan) shouldBe Some(4L)
+    DistinctKernel.intsCallsForTest shouldBe 0
+    val saved = ScarletConf.get
+    ScarletConf.set(saved.copy(columnarBatchSize = 1))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      byValue.count() shouldBe 4L
+      ColumnarPlanner.tryCount(byValue.plan) shouldBe Some(4L)
+    finally ScarletConf.set(saved)
+    val both = data
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+      .keys
+      .distinct()
+    ColumnarPlanner.lower(both.plan).map(_.shape) shouldBe Some(
+      "Dedupe(Exchange(Key(FilterValue(FilterKey(Scan)))))",
+    )
+    both.count() shouldBe 2L
+    ColumnarPlanner.tryCount(both.plan) shouldBe Some(2L)
+    ScarletConf.set(saved.copy(columnarBatchSize = 1))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      both.count() shouldBe 2L
+    finally ScarletConf.set(saved)
   }
 
   "filter-twogroup" should "return the count and the sum of each surviving key" in {
@@ -325,3 +387,18 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
       .ofIntPairs(keys, values, partitions)
       .filterKeys((key: Int) => key % 3 != 0)
       .filterValues((value: Int) => value >= 0)
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def erased(key: Option[Int], value: Option[Int]): (Int, Int) =
+    val left: AnyRef = key match
+      case Some(presentKey) => Int.box(presentKey)
+      case None => null
+    val right: AnyRef = value match
+      case Some(presentValue) => Int.box(presentValue)
+      case None => null
+    Tuple2(left, right).asInstanceOf[(Int, Int)]
