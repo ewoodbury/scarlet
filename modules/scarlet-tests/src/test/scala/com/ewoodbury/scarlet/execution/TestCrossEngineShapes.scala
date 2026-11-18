@@ -151,6 +151,32 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
       ScarletRuntime.get.shuffle.clear()
       generic.collect().toMap shouldBe summed
     finally ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 8192))
+    val counted = projected.countByKey
+    val countedOp = ColumnarPlanner.lower(counted.plan).get
+    countedOp.shape should include("CountByKey(Exchange(Project(HashJoin")
+    countedOp.shape should not include "SortMergeJoin"
+    countedOp.shape should not include "JoinProbeSum"
+    ColumnarPlanner.tryRun(counted.plan).isDefined shouldBe true
+    val counts = counted.collect().toMap
+    counts shouldBe Map(1 -> 2, 2 -> 1)
+    CrossEngineShapes.pairChecksum(counts) shouldBe 96L
+    ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 1))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      counted.collect().toMap shouldBe counts
+    finally ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 8192))
+    val kept = ScarletConf.get
+    ScarletConf.set(kept.copy(columnarExecution = false))
+    val rowCounts = counted.collect().toMap
+    ScarletConf.set(kept)
+    counts shouldBe rowCounts
+    val countedChanged = joined
+      .map { case (key, (leftValue, _)) => (leftValue, key.toLong) }
+      .countByKey
+    ColumnarPlanner.lower(countedChanged.plan).map(_.shape).get should include(
+      "CountByKey(Exchange(Project(",
+    )
+    countedChanged.collect().toMap shouldBe Map(10 -> 2, 20 -> 1)
     val changed = joined
       .map { case (key, (leftValue, _)) => (leftValue, key.toLong) }
       .reduceByKey((left: Long, right: Long) => left + right)
@@ -168,6 +194,13 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
       ColumnarInterpreter.interpret(nested.plan, ColumnarPlanner.lower(nested.plan).get)
     }
     declined.getMessage should include("(Int, Long)")
+    val nestedCount = joined.map { case (key, pair) => (key, pair) }.countByKey
+    ColumnarPlanner.lower(nestedCount.plan).isDefined shouldBe true
+    ColumnarPlanner.tryRun(nestedCount.plan).isEmpty shouldBe true
+    val countDeclined = intercept[ColumnarFallback] {
+      ColumnarInterpreter.interpret(nestedCount.plan, ColumnarPlanner.lower(nestedCount.plan).get)
+    }
+    countDeclined.getMessage should include("(Int, Long)")
     val columnarOn = ScarletConf.get
     ScarletConf.set(columnarOn.copy(columnarExecution = false))
     val rowPairs = nested.collect().toMap

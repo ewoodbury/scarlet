@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import com.typesafe.scalalogging.{Logger, StrictLogging}
 
 import com.ewoodbury.scarlet.core.Partition
@@ -15,6 +17,14 @@ sealed trait Task[A, B] extends RunnableTask[A, B]:
 
 object Task extends StrictLogging:
   private val taskLogger: Logger = logger
+  private val sortMergeJoinRuns = new AtomicInteger
+
+  /** Clears [[sortMergeJoinRunsForTest]]. */
+  private[execution] def resetSortMergeJoinRunsForTest(): Unit =
+    sortMergeJoinRuns.set(0)
+
+  /** Times [[SortMergeJoinTask.run]] has been entered since the last reset. */
+  private[execution] def sortMergeJoinRunsForTest: Int = sortMergeJoinRuns.get
 
   /** Creates a StageTask from a partition and stage. */
   def createStageTask[A, B](partition: Partition[A], stage: Stage[A, B]): StageTask[A, B] =
@@ -227,6 +237,7 @@ object Task extends StrictLogging:
   )(using keyOrdering: Ordering[K])
       extends RunnableTask[Any, (K, (L, R))]:
     override def run(): Partition[(K, (L, R))] = {
+      val _ = sortMergeJoinRuns.incrementAndGet()
       taskLogger.debug(s"[${Thread.currentThread().getName}] SortMergeJoinTask on partition")
 
       // Sort both sides by key if they're not already sorted. Null keys are dropped first.
