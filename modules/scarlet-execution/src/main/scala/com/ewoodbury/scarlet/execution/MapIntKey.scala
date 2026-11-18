@@ -13,6 +13,7 @@ private[execution] object MapIntKey:
 
   /**
    * True when `op` still carries a key map. A parent that would publish that null key declines.
+   * [[JoinProbeAggregate]] does not: the exchange drops the key and the sum does not publish it.
    */
   def inTree(op: PhysicalOp): Boolean = op match
     case _: PhysicalOp.MapKey => true
