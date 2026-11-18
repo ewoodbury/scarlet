@@ -46,6 +46,16 @@ object LongPairProject:
     def applyNulls(): Any
 
   /**
+   * One present projected pair, or a present key whose value is null.
+   *
+   * A null key is not passed. [[addMissing]] is the [[LongHashReduce]] null group: it stays
+   * missing until another value arrives, and a later combine unboxes that null to `0`.
+   */
+  private[scarlet] trait LongPairSink:
+    def add(key: Long, value: Long): Unit
+    def addMissing(key: Long): Unit
+
+  /**
    * Adapts a `Tuple2 => Tuple2`. The cast is not a call. A hidden lambda and an anonymous
    * `Function1` both land here after the declared `apply` check. Each absent apply builds the pair
    * the row path would pass, so a null stays null instead of unboxing to `0`.
@@ -221,6 +231,102 @@ object LongPairProject:
       offer(projected, add)
       row += 1
     }
+
+  /**
+   * Runs `mapper` on `[start, start + length)` and passes each projected pair to `sink`.
+   *
+   * The calls match [[project]]: a null key and a null value are passed in, and an empty range
+   * does not call `mapper`. A null projected key is dropped. A null projected value is
+   * [[LongPairSink.addMissing]]. A result that is not a pair of longs throws [[ColumnarFallback]]
+   * and publishes nothing. This does not allocate an output column. [[visitKeys]] stays
+   * count-only.
+   */
+  private[scarlet] def visitPairs(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      mapper: LongPairMap,
+      sink: LongPairSink,
+  ): Unit =
+    require(
+      batch.columns.length == 2,
+      s"pair project expected 2 columns, got ${batch.columns.length}",
+    )
+    val keys = int64At(batch, 0)
+    val values = int64At(batch, 1)
+    require(keys.length == values.length, "key and value columns differ in length")
+    Ranges.check(start, length, keys.length)
+    if (length == 0) then ()
+    else if (
+        Validity.rangePresent(keys.validity, start, length) &&
+        Validity.rangePresent(values.validity, start, length)
+      )
+    then visitPairsDense(keys, values, start, length, mapper, sink)
+    else visitPairsSparse(keys, values, start, length, mapper, sink)
+
+  private def visitPairsDense(
+      keys: Int64Column,
+      values: Int64Column,
+      start: Int,
+      length: Int,
+      mapper: LongPairMap,
+      sink: LongPairSink,
+  ): Unit =
+    val keyArr = keys.values
+    val valueArr = values.values
+    val end = start + length
+    var row = start
+    while (row < end) {
+      offerPair(mapper(keyArr(row), valueArr(row)), sink)
+      row += 1
+    }
+
+  private def visitPairsSparse(
+      keys: Int64Column,
+      values: Int64Column,
+      start: Int,
+      length: Int,
+      mapper: LongPairMap,
+      sink: LongPairSink,
+  ): Unit =
+    val keyArr = keys.values
+    val valueArr = values.values
+    val keyIn = keys.validity.words
+    val valueIn = values.validity.words
+    val end = start + length
+    var row = start
+    while (row < end) {
+      val keyOn = Validity.isSet(keyIn, row)
+      val valueOn = Validity.isSet(valueIn, row)
+      val projected =
+        if (keyOn && valueOn) then mapper(keyArr(row), valueArr(row))
+        else if (keyOn) then mapper.applyNullValue(keyArr(row))
+        else if (valueOn) then mapper.applyNullKey(valueArr(row))
+        else mapper.applyNulls()
+      offerPair(projected, sink)
+      row += 1
+    }
+
+  /**
+   * Keeps a present key. A null key is dropped. A null value is a null group. A cell that is not a
+   * long declines, and the value is checked first.
+   */
+  private def offerPair(projected: Any, sink: LongPairSink): Unit =
+    projected match
+      case null => decline("null")
+      case row: Product if row.productArity == 2 =>
+        val valueCell = row.productElement(1)
+        valueCell match
+          case null | _: Long => ()
+          case other => decline(foundName(other))
+        row.productElement(0) match
+          case null => ()
+          case key: Long =>
+            valueCell match
+              case value: Long => sink.add(key, value)
+              case _ => sink.addMissing(key)
+          case other => decline(foundName(other))
+      case other => decline(foundName(other))
 
   /** Keeps a present key. A null key is dropped. The value is only a type check. */
   private def offer(projected: Any, add: Long => Unit): Unit =
