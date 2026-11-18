@@ -30,10 +30,11 @@ object ColumnarPlanner:
    * function declares `apply(Tuple2): Tuple2` is accepted and stays [[PhysicalOp.Kind.Pairs]]. A
    * `(Long, Long)` map with that witness is a project and stays [[PhysicalOp.Kind.LongPairs]]. A
    * `(String, Int)` map with that witness is a project and stays [[PhysicalOp.Kind.StringPairs]].
-   * The child kind selects the cell. A filter above that string-pair project is `None`. Erasure
-   * also accepts `(Long, Int)`; the int-pair kernel declines that cell, a long-pair project
-   * declines a cell that is not a long, and a string-pair project declines a cell that is not a
-   * string or an int.
+   * The child kind selects the cell. One key or value filter above one such project, on a scan or
+   * a string-pair filter stack, lowers. A second slot, a whole-row filter, and a second map stay
+   * `None`. Erasure also accepts `(Long, Int)`; the int-pair kernel declines that cell, a
+   * long-pair project declines a cell that is not a long, and a string-pair project declines a
+   * cell that is not a string or an int.
    */
   def partitioning[A](plan: Plan[A]): Option[PartitioningInfo] =
     accepted(plan).map(infoOf)
@@ -903,15 +904,16 @@ object ColumnarPlanner:
       None
 
   /**
-   * A whole-row string filter, or one `(String, Int) => (String, Int)` project. A filter above
-   * that project stays on the row path: the predicate would see the new key. A map under
-   * [[SortLowering.lowerString]] never reaches this method.
+   * A whole-row string filter, or one `(String, Int) => (String, Int)` project. A whole-row filter
+   * above a string-pair project stays on the row path. A project above a slot filter on that
+   * project stays there too. A map under [[SortLowering.lowerString]] never reaches this method.
    */
   private def lowerStringRow(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
     step match
-      case ElementStep.Filter(_) if stringPairProject(child) => None
+      case ElementStep.Filter(_) if StringPairSlot.containsProject(child) => None
       case ElementStep.Filter(_) => Some(PhysicalOp.Filter(child, PhysicalOp.Slot.Row))
-      case ElementStep.Project(mapper) if returnsIntPair(mapper) =>
+      case ElementStep.Project(mapper)
+          if returnsIntPair(mapper) && !StringPairSlot.filterCoversProject(child) =>
         Some(PhysicalOp.Project(child))
       case ElementStep.Project(_) => None
 
@@ -1069,12 +1071,16 @@ object ColumnarPlanner:
 
   private def columnFilter(source: Plan[_], slot: PhysicalOp.Slot): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
-      // One key or value slot above one int key map. The key predicate sees the mapped key and
-      // is not called on a null. A value predicate sees the original value. A second slot, and
-      // the same filter above a long-pair or string-pair project, stays empty.
-      if (MapIntKey.slotAbove(child, slot)) then Some(PhysicalOp.Filter(child, slot))
-      else if (MapIntKey.inTree(child) || longPairProject(child) || stringPairProject(child)) then
-        None
+      // One key or value slot above one int key map, or above one string-pair project on a scan
+      // or a string-pair filter stack. The predicate is not read. A second slot, a long-pair
+      // project, and a second string-pair project stay empty.
+      if (MapIntKey.slotAbove(child, slot) || StringPairSlot.oneProject(child)) then
+        Some(PhysicalOp.Filter(child, slot))
+      else if (
+          MapIntKey
+            .inTree(child) || longPairProject(child) || StringPairSlot.containsProject(child)
+        )
+      then None
       else
         child.kind match
           case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.LongPairs =>
@@ -1087,14 +1093,6 @@ object ColumnarPlanner:
     case PhysicalOp.Project(child) =>
       child.kind match
         case PhysicalOp.Kind.LongPairs => true
-        case _ => false
-    case _ => false
-
-  /** A string-pair [[PhysicalOp.Project]]. A filter above that project stays on the row path. */
-  private def stringPairProject(op: PhysicalOp): Boolean = op match
-    case PhysicalOp.Project(child) =>
-      child.kind match
-        case PhysicalOp.Kind.StringPairs => true
         case _ => false
     case _ => false
 

@@ -87,8 +87,10 @@ private[execution] object FilterChain:
       ordinals: Set[Int],
   ): Option[Vector[Selected]] =
     // A slot filter above a key map keeps a null the index decoder rejects. Collect interprets
-    // the map, writes both columns, and decodes with [[MapIntKey.keepsNull]].
-    if (MapIntKey.inTree(op)) then None
+    // the map, writes both columns, and decodes with [[MapIntKey.keepsNull]]. A slot filter
+    // above a string-pair project publishes both columns. The index would hash the project
+    // output instead of those batches, so [[StringHashCount.byKey]] is the count.
+    if (MapIntKey.inTree(op) || StringPairSlot.filterCoversProject(op)) then None
     else selectIndexed(plan, op, selectedPartition, preserveAbsence, ordinals)
 
   private def selectIndexed(
