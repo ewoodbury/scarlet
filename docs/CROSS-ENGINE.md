@@ -1,15 +1,149 @@
 # Cross-engine checks: DuckDB and Spark
 
 Not a CI gate. The CI gate is `PerfCheck`, which compares the columnar path with the row path in
-the same run. The decision table for the original six is the 2026-11-17 pinned run at
-`50591f6`. The materialising join is the section at `7955dca`. The four shapes added in #242
-are the section at `8bfc7ca`. The 2026-11-16 pinned
-run at `b704c3c` (#234) is the previous scoreboard. The 2026-11-15 steady-window table (#233)
-stops at `2b7b01e`, before #234. The warmup-5 full-window run at `8958ac9` is the one before that. The
-2026-11-14 second run is at `ffca249`. The 2026-11-13 devbox section is the earlier warmup-3,
-rounds-10 protocol. The Apple M1 Pro table is history from 2026-11-07. It is not comparable with
-the container or the devbox. What the six-row board hid, and the measured pairs from #281–#283,
-is `docs/FOUNDATION.md`.
+the same run. The decision table is the full board below, commit `22e90dc`. The materialising
+join at `7955dca`, the four shapes at `8bfc7ca`, and the six-query table published in #259
+(measured at `50591f6`) are the previous board. The 2026-11-16 pinned run at `b704c3c` (#234)
+is the scoreboard before that. The 2026-11-15 steady-window table (#233) stops at `2b7b01e`,
+before #234. The warmup-5 full-window run at `8958ac9` is the one before that. The 2026-11-14
+second run is at `ffca249`. The 2026-11-13 devbox section is the earlier warmup-3, rounds-10
+protocol. The Apple M1 Pro table is history from 2026-11-07. It is not comparable with the
+container or the devbox.
+
+## 2026-11-17 — full board, pinned
+
+Twelve queries on `sjc-gpu-01`, commit `22e90dc`. The box clock at the first Scarlet JVM was
+2026-11-17 19:05 PT. Governor `powersave`, left. Pin `taskset -c 0,2,4,6`. OpenJDK 21.0.13.0.2.
+Classes compiled with sbt 2.0.12. The timed process is `java -Xmx10g -cp` on that classpath, not
+an sbt JVM. Four threads, two filters, no nulls, spill on, budget left at 64 MiB.
+
+Scarlet is one query per JVM. Warmup 80. `steady_ms` is the upper median of the last 10 rounds,
+index `n/2` after sorting. `compilation` is kept. `machine` (the two halves of those last 10
+differ by more than 10%) is dropped. The row is the upper median of the kept values. Span is
+`(max - min) / median` of those values. An action whose kept median is under 2 ms was retaken at
+rounds 100. Count and `countByKey` at 1e6 are nine JVMs at rounds 100, because five left fewer
+than three flat windows. Sum, `reduceByKey`, and join at 1e6 are five JVMs at rounds 100.
+`twogroup` at 1e6 is nine JVMs at rounds 30 and still kept two. Every other cell is five JVMs
+at rounds 30.
+
+DuckDB 2.0.0, in memory, warmup 5, rounds 30, five processes at each size. Each process ran the
+stock script's full list, in definition order, including `filter-groupbykey`, which is not a row
+here. `p50_ms` is the mean of the two central round times, rounded to 3 decimals by the script.
+The column is the upper median of those five. The steady tags are not applied. DataFusion was
+not rerun.
+
+`CROSS_TIME_ROW=true` on every JVM. No scored plan declined. The arm is never `row`.
+
+Checksums matched on every successful JVM, including JVMs the steady rule dropped, and on every
+DuckDB process.
+
+### 1e6 rows
+
+| query | DuckDB | span | Scarlet | span | ratio | kept | checksum | alloc |
+| --- | ---: | ---: | ---: | ---: | --- | --- | ---: | ---: |
+| filter + count | 0.935 ms | 3.7% | 0.730 ms | 6.6% | 1.28x ahead | 3 of 9 | 333036 | 0.048 MB |
+| filter + sum | 0.993 ms | 1.8% | 0.690 ms | 55.5% | 1.44x ahead | 3 of 5 | 166553391274 | 0.050 MB |
+| filter + countByKey | 1.508 ms | 1.5% | 0.990 ms | 5.0% | 1.52x ahead | 3 of 9 | 11147169 | 0.337 MB |
+| filter + reduceByKey | 2.029 ms | 1.1% | 1.759 ms | 2.4% | 1.15x ahead | 3 of 5 | 166564205407 | 0.599 MB |
+| filter + join | 4.145 ms | 1.3% | 1.233 ms | 28.8% | 3.36x ahead | 3 of 5 | 3330360 | 0.643 MB |
+| filter + join sum | 6.050 ms | 1.2% | 4.159 ms | 10.1% | 1.45x ahead | 5 of 5 | 51631715699610 | 19.624 MB |
+| filter + join agg | 5.675 ms | 0.6% | 5.637 ms | 5.0% | 1.01x ahead | 4 of 5 | 836270016740 | 19.790 MB |
+| filter + sort | 70.981 ms | 1.8% | 7.122 ms | 11.7% | 9.97x ahead | 5 of 5 | 5343278082631 | 24.488 MB |
+| filter + distinct | 1.293 ms | 2.2% | 5.396 ms | 8.5% | 4.17x behind | 5 of 5 | 682 | 31.525 MB |
+| filter + topn | 1.602 ms | 0.9% | 4.500 ms | 6.0% | 2.81x behind | 5 of 5 | 1460799775 | 16.315 MB |
+| filter + twogroup | 1.763 ms | 1.8% | 4.732 ms | 11.1% | 2.68x behind | 2 of 9 | 166898953513 | 17.855 MB |
+| filter + keymod | 1.748 ms | 1.0% | 2.317 ms | 1.2% | 1.33x behind | 4 of 5 | 486486 | 0.956 MB |
+
+Count, sum, countByKey, reduceByKey, and join are rounds 100. The rest are rounds 30. Sum's
+three kept windows are 0.655, 0.690, and 1.038 ms. Join's are 1.171, 1.233, and 1.527 ms.
+`twogroup`'s two kept windows are 4.236 and 4.732 ms. The seven dropped windows sit at
+5.066–5.776 ms, so that row is faster than the old 8.928 ms on either cluster.
+
+### 1e7 rows
+
+| query | DuckDB | span | Scarlet | span | ratio | kept | checksum | alloc |
+| --- | ---: | ---: | ---: | ---: | --- | --- | ---: | ---: |
+| filter + count | 7.007 ms | 2.7% | 6.219 ms | 3.2% | 1.13x ahead | 5 of 5 | 3328139 | 0.477 MB |
+| filter + sum | 7.517 ms | 0.8% | 6.020 ms | 7.4% | 1.25x ahead | 3 of 5 | 1663923758546 | 0.477 MB |
+| filter + countByKey | 10.297 ms | 0.4% | 6.553 ms | 4.0% | 1.57x ahead | 4 of 5 | 14142272 | 0.519 MB |
+| filter + reduceByKey | 11.147 ms | 0.3% | 8.613 ms | 14.8% | 1.29x ahead | 5 of 5 | 1663934572679 | 3.038 MB |
+| filter + join | 35.801 ms | 0.5% | 6.101 ms | 5.9% | 5.87x ahead | 5 of 5 | 33281390 | 0.905 MB |
+| filter + join sum | 55.782 ms | 0.6% | 43.849 ms | 7.2% | 1.27x ahead | 5 of 5 | 515818008297280 | 190.007 MB |
+| filter + join agg | 47.307 ms | 0.5% | 56.283 ms | 5.4% | 1.19x behind | 5 of 5 | 8353037776975 | 190.176 MB |
+| filter + sort | 687.435 ms | 3.1% | 70.678 ms | 4.2% | 9.73x ahead | 5 of 5 | 518322534674927 | 244.546 MB |
+| filter + distinct | 9.731 ms | 1.8% | 62.245 ms | 4.4% | 6.40x behind | 5 of 5 | 682 | 309.630 MB |
+| filter + topn | 9.599 ms | 0.4% | 48.938 ms | 4.1% | 5.10x behind | 5 of 5 | 15750242131 | 162.907 MB |
+| filter + twogroup | 11.303 ms | 1.8% | 45.097 ms | 3.4% | 3.99x behind | 5 of 5 | 1664362168978 | 175.476 MB |
+| filter + keymod | 12.410 ms | 0.8% | 10.818 ms | 8.6% | 1.15x ahead | 5 of 5 | 3481589 | 1.145 MB |
+
+`reduceByKey`'s five kept windows are 8.436, 8.506, 8.613, 8.717, and 9.712 ms. Four of them
+sit on the old 8.476 ms row. The span is the fifth.
+
+### Arms
+
+None of the twelve is `row`.
+
+- count folds `FilterValue(FilterKey(Scan))`. Sum folds `Value` of that same filter. Both publish
+  no batch.
+- countByKey is `CountByKey(Exchange(FilterValue(FilterKey(Scan))))`.
+- reduceByKey is `LongHashAggregate(Exchange(FilterValue(FilterKey(Scan))))`.
+- join counts `HashJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(Scan))` and fuses the
+  count. Join sum is that same arm. The harness recorded 28 batches and `fused` 0 at both sizes.
+  Allocation fell from 593.811 MB to 190.007 MB at 1e7.
+- join agg is `JoinProbeSumLeft` of the two filtered exchanges.
+- sort is `SortByIntKey(FilterValue(FilterKey(Scan)))`. topn records
+  `SortByIntValueDesc(FilterValue(FilterKey(Scan)))`. The timed action is `take(100)`.
+- distinct is `Dedupe(Exchange(Key(FilterValue(FilterKey(Scan)))))`.
+- twogroup is `CountSum(Exchange(FilterValue(FilterKey(Scan))))`.
+- keymod is `CountByKey(Exchange(MapKey(FilterValue(FilterKey(Scan)))))`.
+
+### What moved
+
+Against the #259 six, the `8bfc7ca` shapes, and the `7955dca` join sum. A row not listed stayed
+inside about 5% of its previous Scarlet time.
+
+- filter + countByKey, 1e6: 2.099 ms, 1.38x behind, to 0.990 ms, 1.52x ahead. At 1e7: 9.905 ms,
+  1.03x ahead, to 6.553 ms, 1.57x ahead. Alloc at 1e7 is 0.519 MB, from 3.119 MB. #263 merges a
+  small count table on the caller.
+- filter + join, 1e7: 9.158 ms, 3.91x ahead, to 6.101 ms, 5.87x ahead. #260 counts build keys in
+  a direct window. At 1e6 the median is 1.233 ms against 1.077 ms. That median is slower. The
+  kept windows are 1.171, 1.233, and 1.527 ms, and 1.171 ms still meets the old cluster. The
+  spread is 28.8%, so this is not a settled regression.
+- filter + sort, 1e6: 13.898 ms, 5.09x ahead, to 7.122 ms, 9.97x ahead, span 11.7%. At 1e7:
+  139.173 ms, 4.94x ahead, to 70.678 ms, 9.73x ahead. Alloc 702.038 MB to 244.546 MB. #262 reads
+  the ordered columns in place, so the timer no longer collects. #277 drops the survivor index
+  before the radix scratch.
+- filter + join sum, 1e6: 8.897 ms, 1.49x behind, to 4.159 ms, 1.45x ahead. At 1e7: 110.700 ms,
+  1.99x behind, to 43.849 ms, 1.27x ahead. #282 folds `left * 31 + right` from the probe.
+- filter + twogroup, 1e6: 8.928 ms, 4.80x behind, to 4.732 ms, with the dropped windows above.
+  At 1e7: 89.736 ms, 7.94x behind, to 45.097 ms, 3.99x behind. Alloc 705.531 MB to 175.476 MB.
+  #279 is `countSumByKey` and does not box the grouped values.
+- filter + keymod, 1e6: 66.547 ms, 38.16x behind on the row path, to 2.317 ms, 1.33x behind.
+  At 1e7: 1203.643 ms, 97.17x behind on the row path, to 10.818 ms, 1.15x ahead. Alloc
+  2331.177 MB to 1.145 MB. #271 is `mapIntKey` into `countByKey`. #283 does not change this
+  query. A generic pair `map` is not the scored arm.
+- filter + join agg has no earlier pinned row. #281 sums the left value from the probe.
+  1.01x ahead at 1e6, 1.19x behind at 1e7.
+
+Count, sum, reduceByKey, distinct, and topn did not move. #284 is in this binary. This suite
+has no nulls and no sort-merge, so that merge is not in a ratio.
+
+```shell
+# DuckDB. Five processes at each size. The script runs every query, in definition order.
+# Repeat with --rows 10000000.
+LD_LIBRARY_PATH=$(ls -d /nix/store/*gcc-15.3.0-lib/lib | head -1) \
+  taskset -c 0,2,4,6 ~/ce/bin/python ~/cross_engine_duckdb.py \
+  --rows 1000000 --threads 4 --warmup 5 --rounds 30
+
+# Scarlet. One query per JVM. Rounds 100 for an action whose median is under 2 ms.
+# Count and countByKey at 1e6 used nine JVMs. $CP is the 22e90dc test classpath.
+CROSS_ROWS=1000000 CROSS_FILTERS=2 CROSS_NULLS=false CROSS_THREADS=4 \
+  CROSS_QUERY=filter-count CROSS_WARMUP=80 CROSS_ROUNDS=100 CROSS_TIME_ROW=true \
+  taskset -c 0,2,4,6 java -Xmx10g -cp "$CP" \
+  com.ewoodbury.scarlet.execution.CrossEngineBench
+```
+What the six-row board hid, and the measured pairs from #281–#283, is
+`docs/FOUNDATION.md`.
 
 ## 2026-11-17 — materialising join, pinned
 
