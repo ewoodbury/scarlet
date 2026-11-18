@@ -85,11 +85,14 @@ object ColumnarPlanner:
    * `(K, Iterable[V])` and the logical function runs on those rows. The function is not inspected.
    * `values`, `take`, a second map, and a filter above that map stay on the row path. Int, long,
    * and string `keys` stay a distinct-key scan. [[partitioning]] and [[tryRun]] follow a refusal.
-   * They also drop a lowered tree whose layout is invalid.
+   * They also drop a lowered tree whose layout is invalid. `ScarletConf.traceLowering` prints one
+   * line when this returns `None`. The flag is off by default, and the line is not built then.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
-    if (!ScarletConf.get.columnarExecution) then None
-    else lowerPlan(plan)
+    val conf = ScarletConf.get
+    if (!conf.columnarExecution) then None
+    else if (!conf.traceLowering) then lowerPlan(plan)
+    else LoweringTrace.traced(plan)(lowerPlan)
 
   /**
    * Run `plan` on the columnar path. `None` means the caller should use the row path. The single

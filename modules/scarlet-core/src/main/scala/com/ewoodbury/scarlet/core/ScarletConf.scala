@@ -120,6 +120,13 @@ final case class ScarletConf(
      *      rejected when a partition or a sort spills, because a pass would not shrink the runs.
      */
     spillFanIn: Int = 8,
+    /**
+     * When true, a lowering that returns `None` prints one stderr line naming the plan node, its
+     * kind, and the lowering. Off by default. The process starts with this on only when
+     * `SCARLET_TRACE_LOWERING=1`. `lower` reads the flag once and does not build the line when it
+     * is false.
+     */
+    traceLowering: Boolean = false,
 ):
 
   /** Builds the task retry policy from this configuration. */
@@ -131,7 +138,12 @@ final case class ScarletConf(
 
 @SuppressWarnings(Array("org.wartremover.warts.DefaultArguments", "org.wartremover.warts.Var"))
 object ScarletConf {
-  @volatile private var current: ScarletConf = ScarletConf()
+
+  /** `SCARLET_TRACE_LOWERING=1` is the only value that turns the trace on. */
+  private[core] def traceEnabled(value: Option[String]): Boolean = value.contains("1")
+
+  @volatile private var current: ScarletConf =
+    ScarletConf(traceLowering = traceEnabled(sys.env.get("SCARLET_TRACE_LOWERING")))
 
   /** Returns the active configuration. */
   def get: ScarletConf = current

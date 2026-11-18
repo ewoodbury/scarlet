@@ -39,7 +39,12 @@ private[execution] object SortLowering:
     lowerPlan(source) match
       case Some(child) if acceptsScanOrFilters(child, PhysicalOp.Kind.Pairs) =>
         Some(PhysicalOp.SortByIntKey(child))
-      case _ => None
+      case Some(child) =>
+        LoweringTrace.note("SortByIntKeyOp", child.kind, "SortLowering")
+        None
+      case None =>
+        LoweringTrace.noteIfEmpty("SortByIntKeyOp", "SortLowering")
+        None
 
   def lowerIntValueDesc(
       source: Plan[(Int, Int)],
@@ -48,7 +53,12 @@ private[execution] object SortLowering:
     lowerPlan(source) match
       case Some(child) if acceptsScanOrFilters(child, PhysicalOp.Kind.Pairs) =>
         Some(PhysicalOp.SortByIntValueDesc(child))
-      case _ => None
+      case Some(child) =>
+        LoweringTrace.note("SortByIntValueDescOp", child.kind, "SortLowering")
+        None
+      case None =>
+        LoweringTrace.noteIfEmpty("SortByIntValueDescOp", "SortLowering")
+        None
 
   def lowerLong(
       source: Plan[(Long, Long)],
@@ -57,7 +67,12 @@ private[execution] object SortLowering:
     lowerPlan(source) match
       case Some(child) if acceptsScanOrFilters(child, PhysicalOp.Kind.LongPairs) =>
         Some(PhysicalOp.SortByLongKey(child))
-      case _ => None
+      case Some(child) =>
+        LoweringTrace.note("SortByLongKeyOp", child.kind, "SortLowering")
+        None
+      case None =>
+        LoweringTrace.noteIfEmpty("SortByLongKeyOp", "SortLowering")
+        None
 
   def lowerString(
       source: Plan[(String, Int)],
@@ -66,7 +81,12 @@ private[execution] object SortLowering:
     lowerPlan(source) match
       case Some(child) if acceptsScanOrFilters(child, PhysicalOp.Kind.StringPairs) =>
         Some(PhysicalOp.SortByStringKey(child))
-      case _ => None
+      case Some(child) =>
+        LoweringTrace.note("SortByStringKeyOp", child.kind, "SortLowering")
+        None
+      case None =>
+        LoweringTrace.noteIfEmpty("SortByStringKeyOp", "SortLowering")
+        None
 
   /**
    * A scan of `kind`, or filters over that scan. A map, aggregate, or join is not a sort child.

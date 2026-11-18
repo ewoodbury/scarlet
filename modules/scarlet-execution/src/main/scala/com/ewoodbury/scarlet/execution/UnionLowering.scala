@@ -24,7 +24,12 @@ private[execution] object UnionLowering:
             leftOp.kind != PhysicalOp.Kind.GroupedStrings &&
             leftOp.kind != PhysicalOp.Kind.GroupedLongs =>
         Some(PhysicalOp.Union(leftOp, rightOp))
-      case _ => None
+      case (Some(leftOp), Some(rightOp)) =>
+        LoweringTrace.note("UnionOp", leftOp.kind, rightOp.kind, "UnionLowering")
+        None
+      case _ =>
+        LoweringTrace.noteIfEmpty("UnionOp", "UnionLowering")
+        None
 
   def info(
       op: PhysicalOp.Union,
