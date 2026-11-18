@@ -9,9 +9,12 @@ import com.ewoodbury.scarlet.core.{Partition, Plan}
  *
  * The logical plan stays `map` then `reduceByKey`. Only [[JoinSumProjection]] and [[LongSum]] name
  * the column and the addition. Any other map or reducer returns `None`, and so does a join that is
- * not an unhinted or shuffle-hash int inner join. Execution reads the projection again and updates
- * [[com.ewoodbury.scarlet.columnar.HashAggregate]] from the probe. The published pairs are the
- * groups, not the match columns.
+ * not an unhinted or shuffle-hash int inner join. A [[PhysicalOp.MapKey]] on either arm is
+ * admitted. Its kind stays [[PhysicalOp.Kind.Pairs]]. The exchange drops a null key, the function
+ * is not called on that key, and the key is not a probe hit. The function is not inspected. A
+ * filter, `keys`, or `values` above the map still declines in those parents. Execution reads the
+ * projection again and updates [[com.ewoodbury.scarlet.columnar.HashAggregate]] from the probe.
+ * The published pairs are the groups, not the match columns.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Throw"))
 private[execution] object JoinProbeAggregate:
@@ -62,8 +65,12 @@ private[execution] object JoinProbeAggregate:
       (keys.values(row), values.values(row))
     }
 
+  /**
+   * Int pairs, including a key map. This sum does not publish a null key, so it does not consult
+   * [[MapIntKey.inTree]]. A parent that would publish that key still declines.
+   */
   private def accepts(op: PhysicalOp): Boolean = op.kind match
-    case PhysicalOp.Kind.Pairs => !MapIntKey.inTree(op)
+    case PhysicalOp.Kind.Pairs => true
     case _ => false
 
   private def measureOf(column: JoinSumColumn): PhysicalOp.ProbeMeasure = column match

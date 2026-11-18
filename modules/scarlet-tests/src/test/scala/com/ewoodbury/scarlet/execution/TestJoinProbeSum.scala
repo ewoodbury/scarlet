@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -148,11 +150,83 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.lower(broadcast.plan).isEmpty shouldBe true
     sorted.collect().toMap shouldBe rowMap(sorted)
     broadcast.collect().toMap shouldBe rowMap(broadcast)
+  }
 
+  it should "sum a remapped key from the probe without writing matches" in {
     val mapped = pairs(Array(11, 21), Array(4, 5)).mapIntKey(key => key % 10)
-    val remapped = mapped.join(pairs(Array(1, 1), Array(3, 4))).sumJoinLeft
-    ColumnarPlanner.lower(remapped.plan).isEmpty shouldBe true
+    val right = pairs(Array(1, 1), Array(3, 4))
+    val remapped = mapped.join(right).sumJoinLeft
+    ColumnarPlanner.lower(remapped.plan).map(_.shape) shouldBe Some(
+      "JoinProbeSumLeft(Exchange(MapKey(Scan)), Exchange(Scan))",
+    )
+    ColumnarPlanner.tryRun(remapped.plan).isDefined shouldBe true
+    remapped.collect().toMap shouldBe Map(1 -> 18L)
     remapped.collect().toMap shouldBe rowMap(remapped)
+
+    val remappedRight = mapped.join(right).sumJoinRight
+    ColumnarPlanner.lower(remappedRight.plan).map(_.shape) shouldBe Some(
+      "JoinProbeSumRight(Exchange(MapKey(Scan)), Exchange(Scan))",
+    )
+    ColumnarPlanner.tryRun(remappedRight.plan).isDefined shouldBe true
+    remappedRight.collect().toMap shouldBe Map(1 -> 14L)
+    remappedRight.collect().toMap shouldBe rowMap(remappedRight)
+
+    val probeMapped = pairs(Array(1, 2), Array(10, 20))
+      .join(pairs(Array(11, 22), Array(3, 4)).mapIntKey(key => key % 10))
+      .sumJoinLeft
+    ColumnarPlanner.lower(probeMapped.plan).map(_.shape) shouldBe Some(
+      "JoinProbeSumLeft(Exchange(Scan), Exchange(MapKey(Scan)))",
+    )
+    probeMapped.collect().toMap shouldBe Map(1 -> 10L, 2 -> 20L)
+    probeMapped.collect().toMap shouldBe rowMap(probeMapped)
+
+    val above = pairs(Array(1, 2), Array(3, 4)).mapIntKey(key => key + 1)
+    val blocked = above.filterKeys((key: Int) => key > 0).join(right).sumJoinLeft
+    ColumnarPlanner.lower(blocked.plan).isEmpty shouldBe true
+
+    // Filters stay under the map. Skipping the map would leave keys 11 and 13, which miss.
+    val filtered = pairs(Array(11, 12, 13), Array(10, -1, 7))
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+      .mapIntKey(key => key % 10)
+      .join(pairs(Array(1, 2), Array(3, 4)))
+      .sumJoinLeft
+    ColumnarPlanner.lower(filtered.plan).map(_.shape) shouldBe Some(
+      "JoinProbeSumLeft(Exchange(MapKey(FilterValue(FilterKey(Scan)))), Exchange(Scan))",
+    )
+    filtered.collect().toMap shouldBe Map(1 -> 10L)
+    filtered.collect().toMap shouldBe rowMap(filtered)
+
+    val twice = pairs(Array(11, 21), Array(4, 5)).mapIntKey(_ + 1).mapIntKey(_ % 10)
+    val nested = twice.join(pairs(Array(2, 2), Array(3, 4))).sumJoinLeft
+    ColumnarPlanner.lower(nested.plan).map(_.shape) shouldBe Some(
+      "JoinProbeSumLeft(Exchange(MapKey(MapKey(Scan))), Exchange(Scan))",
+    )
+    nested.collect().toMap shouldBe Map(2 -> 18L)
+    nested.collect().toMap shouldBe rowMap(nested)
+  }
+
+  it should "drop a null key from mapIntKey and not call the function on it" in {
+    val calls = new AtomicInteger
+    val summed = boxedPairs(Seq(cell(1, 4), cell(null, 9), cell(2, 5)))
+      .mapIntKey { key =>
+        calls.incrementAndGet()
+        key + 1
+      }
+      .join(boxedPairs(Seq(cell(2, 7), cell(null, 8), cell(3, 1))))
+      .sumJoinLeft
+    calls.set(0)
+    val columnar = summed.collect().toMap
+    calls.get() shouldBe 2
+    calls.set(0)
+    val rows = rowMap(summed)
+    calls.get() shouldBe 2
+    columnar shouldBe rows
+    columnar shouldBe Map(2 -> 4L, 3 -> 5L)
+    ColumnarPlanner.lower(summed.plan).map(_.shape) shouldBe Some(
+      "JoinProbeSumLeft(Exchange(MapKey(Scan)), Exchange(Scan))",
+    )
+    ColumnarPlanner.tryRun(summed.plan).isDefined shouldBe true
   }
 
   "decodeSums" should "reject a hole and a short column" in {
@@ -192,6 +266,16 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
 
   private def pairs(keys: Array[Int], values: Array[Int]): DistCollection[(Int, Int)] =
     DistCollection.ofIntPairs(keys, values, partitions)
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def boxedPairs(rows: Seq[(Any, Any)]): DistCollection[(Int, Int)] =
+    DistCollection(Plan.Source(Seq(Partition(rows))).asInstanceOf[Plan[(Int, Int)]])
 
   private def rowMap(data: DistCollection[(Int, Long)]): Map[Int, Long] =
     row(data.collect().toMap)
