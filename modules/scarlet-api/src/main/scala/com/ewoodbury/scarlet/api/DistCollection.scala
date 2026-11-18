@@ -424,6 +424,31 @@ final case class DistCollection[A](plan: Plan[A]):
     )
 
   /**
+   * Sums the left value of an int inner join once per match, grouped by the join key.
+   *
+   * The row path maps each match to `(key, left.toLong)` and adds with [[LongSum]]. A null key was
+   * already dropped by the join. A null left value unboxes to zero. An unhinted or shuffle-hash
+   * join can update that sum from the probe. Broadcast, sort-merge, outer joins, and any other
+   * reducer stay on this same row path.
+   */
+  def sumJoinLeft(using ev: A =:= (Int, (Int, Int))): DistCollection[(Int, Long)] =
+    sumJoinColumn(JoinSumColumn.Left)
+
+  /** Sums the right value of an int inner join once per match, grouped by the join key. */
+  def sumJoinRight(using ev: A =:= (Int, (Int, Int))): DistCollection[(Int, Long)] =
+    sumJoinColumn(JoinSumColumn.Right)
+
+  private def sumJoinColumn(column: JoinSumColumn)(using
+      ev: A =:= (Int, (Int, Int)),
+  ): DistCollection[(Int, Long)] =
+    DistCollection(
+      Plan.ReduceByKeyOp(
+        Plan.MapOp(plan, new JoinSumProjection[A](column, ev)),
+        LongSum,
+      ),
+    )
+
+  /**
    * Transformation: Co-groups this collection with another collection by key, requiring a shuffle
    * operation. A null key is dropped on either side and does not form a group. Returns a new
    * DistCollection representing the co-grouped data. Does not trigger computation.

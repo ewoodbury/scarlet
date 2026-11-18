@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{ColumnBatch, ColumnPipeline, Selected}
+import com.ewoodbury.scarlet.columnar.{ColumnBatch, ColumnPipeline, JoinProbeSum, Selected}
 import com.ewoodbury.scarlet.core.Plan
 
 import ColumnPipeline.JoinInput
@@ -70,6 +70,27 @@ private[execution] object JoinArms:
         if (build.slice && probe.slice) then
           ColumnPipeline.countInner(build.batches, probe.batches, width, workers, batchSize)
         else ColumnPipeline.countInner(build.input, probe.input, width, workers)
+
+  /**
+   * Grouped sum of one join column. The exchange matches [[inner]]. Match columns are not written.
+   * An over-budget build bucket declines inside [[ColumnPipeline.sumInner]].
+   */
+  def sum(
+      left: Plan[_],
+      right: Plan[_],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      measure: JoinProbeSum.Measure,
+      ordinals: Set[Int],
+  ): Vector[ColumnBatch] =
+    val width = ColumnarPlanner.shuffleWidth
+    val workers = ColumnarPlanner.parallelism
+    val batchSize = ColumnarPlanner.batchSize
+    val build = arm(left, leftOp, None, false, ordinals)
+    val probe = arm(right, rightOp, None, false, ordinals)
+    if (build.slice && probe.slice) then
+      ColumnPipeline.sumInner(build.batches, probe.batches, width, workers, batchSize, measure)
+    else ColumnPipeline.sumInner(build.input, probe.input, width, workers, measure)
 
   private final case class Armed(
       input: JoinInput,

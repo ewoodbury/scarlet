@@ -118,8 +118,11 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
           .filterValues((value: Int) => value < 50),
       )
 
-    ColumnarPlanner.lower(aggregated.plan).isEmpty shouldBe true
-    ColumnarPlanner.partitioning(aggregated.plan).isEmpty shouldBe true
+    ColumnarPlanner.lower(aggregated.plan).map(_.shape) shouldBe Some(
+      "JoinProbeSumLeft(Exchange(FilterValue(FilterKey(Scan))), Exchange(FilterValue(FilterKey(Scan))))",
+    )
+    ColumnarPlanner.partitioning(aggregated.plan).isDefined shouldBe true
+    ColumnarPlanner.tryRun(aggregated.plan).isDefined shouldBe true
     ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
       "HashJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(FilterValue(FilterKey(Scan))))",
     )
@@ -130,6 +133,9 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
         ")",
     )
     ColumnarPlanner.tryRun(projected.plan).isEmpty shouldBe true
+    val generic = projected.reduceByKey((left: Long, right: Long) => left + right)
+    ColumnarPlanner.lower(generic.plan).isEmpty shouldBe true
+    generic.collect().toMap shouldBe Map(1 -> 20L, 2 -> 20L)
     aggregated.collect().toMap shouldBe Map(1 -> 20L, 2 -> 20L)
     CrossEngineShapes.sumChecksum(aggregated.collect()) shouldBe 133L
   }

@@ -116,6 +116,7 @@ object ColumnarPlanner:
     try
       val decoded = op match
         case PhysicalOp.GroupedDecode(child) => GroupedDecode.partitions(plan, child)
+        case sum: PhysicalOp.JoinProbeSum => JoinProbeAggregate.partitions(plan, sum)
         case _ => decodeAccepted(plan, op)
       Some(decoded.asInstanceOf[Seq[Partition[A]]])
     // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
@@ -320,6 +321,8 @@ object ColumnarPlanner:
     op match
       case PhysicalOp.GroupedDecode(child) =>
         Some(GroupedDecode.count(plan, child))
+      case sum: PhysicalOp.JoinProbeSum =>
+        Some(JoinProbeAggregate.count(plan, sum))
       case _: PhysicalOp.GroupByKey =>
         Some(ColumnarInterpreter.groupCount(ColumnarInterpreter.interpret(plan, op)))
       case _ =>
@@ -815,8 +818,10 @@ object ColumnarPlanner:
           case PhysicalOp.Kind.Pairs => Some(PhysicalOp.MapKey(child))
           case _ => None
       }
-    case Plan.ReduceByKeyOp(source, _) =>
-      lowerChild(source).flatMap(ReduceByKeyLowering.apply)
+    case Plan.ReduceByKeyOp(source, reduce) =>
+      JoinProbeAggregate
+        .lower(source, reduce, lowerChild)
+        .orElse(lowerChild(source).flatMap(ReduceByKeyLowering.apply))
     case Plan.GroupByKeyOp(source) =>
       lowerChild(source).flatMap(GroupByKeyLowering.apply)
     case Plan.CountByKeyOp(source) =>
@@ -876,7 +881,7 @@ object ColumnarPlanner:
     case PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
         PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
         PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter |
-        PhysicalOp.Kind.CountSums =>
+        PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums =>
       None
 
   /** A whole-row string filter. A project still refuses the chain. */
@@ -1050,6 +1055,8 @@ object ColumnarPlanner:
       hashed(count.kind)
     case _: PhysicalOp.CountSum =>
       hashed(PhysicalOp.Kind.CountSums)
+    case _: PhysicalOp.JoinProbeSum =>
+      hashed(PhysicalOp.Kind.IntLongSums)
     case PhysicalOp.Exchange(_) =>
       throw new IllegalStateException("exchange is only a child of aggregate or join")
     case PhysicalOp.Scan(kind, partitions) =>
@@ -1090,7 +1097,7 @@ object ColumnarPlanner:
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Bools | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
-        PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.CountSums =>
+        PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums =>
       Layout.Columnar(ScarletConf.get.columnarBatchSize)
 
   private[execution] def batchSize: Int =

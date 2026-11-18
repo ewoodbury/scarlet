@@ -46,12 +46,9 @@ object CrossEngineShapes:
    * `value >= 0` and the right value keeps `value < 50`. Keys are `row % 1024`, so the group has
    * 682 keys. Each matching right row adds the left value once. `filters` is 1 or 2.
    *
-   * The group key is the join key. A map that replaced it with the right value would keep the
-   * join's hash partitioner, `reduceByKey` would skip the shuffle, and the sums would not be a
-   * global group-by. `reduceByKey` lowers only for a pair child. This child is a map over the
-   * join, and a join is a triple, so the aggregate does not lower. The map itself lowers as
-   * `Project` and then declines at `tryRun`, because the function does not stay
-   * `(Int, (Int, Int))`.
+   * The group key is the join key. [[DistCollection.sumJoinLeft]] is the witness: the probe adds
+   * the left value and does not write the match columns. A generic `map` and `_ + _` of the same
+   * arithmetic stays on the row path, because that map does not stay `(Int, (Int, Int))`.
    */
   def joinAgg(
       left: DistCollection[(Int, Int)],
@@ -60,10 +57,7 @@ object CrossEngineShapes:
   ): DistCollection[(Int, Long)] =
     val filteredLeft = applyFilters(left, filters, (value: Int) => value >= 0)
     val filteredRight = applyFilters(right, filters, (value: Int) => value < 50)
-    filteredLeft
-      .join(filteredRight)
-      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
-      .reduceByKey(_ + _)
+    filteredLeft.join(filteredRight).sumJoinLeft
 
   def pairChecksum(rows: Iterable[(Int, Int)]): Long =
     rows.iterator.foldLeft(0L)((total, row) => total + row._1.toLong * 31L + row._2.toLong)
