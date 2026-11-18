@@ -6,7 +6,7 @@ import cats.effect.unsafe.implicits.global
 import com.sun.management.ThreadMXBean
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
+import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, HashReduce, IntPairProject}
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
@@ -16,9 +16,10 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  *
  * The generator is the one [[PairMapBench]] uses: keys are `row % 1024`, values are the
  * cross-engine LCG, two source partitions, then `key % 3 != 0` and `value >= 0`. The action is
- * `data.map { case (k, v) => (k % 100, v) }.reduceByKey(_ + _)`. [[PairMapBench]] stays
- * `countByKey` and is not this action. At 1e7 rows and two filters the checksum is
- * 23246404924.
+ * `data.map { case (k, v) => (k % 100, v) }.filterKeys(_ < 50).reduceByKey(_ + _)`.
+ * [[PairMapBench]] stays `countByKey` and is not this action. The checksum is
+ * [[CrossEngineShapes.pairChecksum]] of that reduce. The bare project reduce, without the slot
+ * above the map, stays at 23246404924 and is not this action.
  *
  * Spill is on for this process only. Warmup 80, rounds 30, and four threads are the defaults.
  * Allocation is the middle of five process-wide thread byte deltas, in decimal megabytes, after
@@ -38,7 +39,9 @@ object PairProjectReduceBench:
   private val batchSize = 8192
   private val sourcePartitions = 2
   private val allocRounds = 5
-  private val expectedAt1e7 = 23246404924L
+
+  /** [[CrossEngineShapes.pairChecksum]] of this reduce at 1e7 rows and two source filters. */
+  private val checksumAt10M = -3535359603L
 
   private final case class Arm(
       name: String,
@@ -76,31 +79,47 @@ object PairProjectReduceBench:
         .getOrElse(refuse("pair project reduce did not lower"))
       println(s"arm $shape")
       val row = time("row", reduced.plan, warmup, rounds, columnar = false)
+      println(render(row))
+      Console.out.flush()
+      HashReduce.resetByKeyForTest()
+      IntPairProject.resetPublishedForTest()
       val columnar = time("columnar", reduced.plan, warmup, rounds, columnar = true)
+      val byKeyCalls = HashReduce.byKeyCallsForTest
+      val published = IntPairProject.publishedForTest
+      println(render(columnar))
+      println(s"columnar byKeyCalls=$byKeyCalls projectPublished=$published")
+      val ratio = if (columnar.p50Ms == 0.0) then 0.0 else row.p50Ms / columnar.p50Ms
+      println(s"ratio row/columnar=$ratio")
+      Console.out.flush()
       if (row.checksum != columnar.checksum) then
         refuse(s"checksums differ row=${row.checksum} columnar=${columnar.checksum}")
-      if (rows == 10000000 && filters == 2 && columnar.checksum != expectedAt1e7) then
-        refuse(s"checksum ${columnar.checksum} != $expectedAt1e7")
+      if (rows == 10000000 && filters == 2 && row.checksum != checksumAt10M) then
+        refuse(s"row checksum ${row.checksum} is not $checksumAt10M")
       if (row.batches != 0L || row.fused != 0L) then
         refuse(s"row published batches=${row.batches} fused=${row.fused}")
-      if (columnar.batches == 0L && columnar.fused == 0L) then
-        refuse("columnar published no column batch and folded nothing")
-      println(render(row))
-      println(render(columnar))
+      if (columnar.fused == 0L) then refuse("columnar folded nothing")
+      if (byKeyCalls != 0) then refuse(s"HashReduce.byKey ran $byKeyCalls times")
+      if (published != 0) then refuse(s"IntPairProject published $published batches")
     finally
       try scheduler.shutdown().unsafeRunSync()
       finally
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)
 
-  /** Filtered int pairs, then `(k % 100, v)`, then `reduceByKey(_ + _)`. */
+  /**
+   * Filtered int pairs, then `(k % 100, v)`, then `filterKeys(_ < 50)`, then `reduceByKey`.
+   * The slot sits above the project.
+   */
   private def query(rows: Int, filters: Int): DistCollection[(Int, Int)] =
     val keys = Array.tabulate(rows)(row => row % groups)
     val values = lcgValues(rows)
     val data = DistCollection.ofIntPairs(keys, values, sourcePartitions)
     val keyed = data.filterKeys((key: Int) => key % 3 != 0)
     val filtered = if (filters == 1) then keyed else keyed.filterValues((value: Int) => value >= 0)
-    filtered.map { case (key, value) => (key % 100, value) }.reduceByKey[Int, Int](_ + _)
+    filtered
+      .map { case (key, value) => (key % 100, value) }
+      .filterKeys((key: Int) => key < 50)
+      .reduceByKey[Int, Int](_ + _)
 
   private def time(
       name: String,
