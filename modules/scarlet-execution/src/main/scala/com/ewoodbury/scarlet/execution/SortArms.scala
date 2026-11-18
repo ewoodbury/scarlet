@@ -6,9 +6,11 @@ import com.ewoodbury.scarlet.core.Plan
 /**
  * Int-pair sort by value descending then key ascending.
  *
- * [[sort]] is the full order for collect. [[take]] is a bounded heap of `n` rows when `n` is below
- * the live row count, and that same full sort when `n` covers every live row. A null value or key
- * orders as zero and stays null. Ties keep input order.
+ * [[sort]] is the full order for collect. [[take]] is a bounded heap of `n` rows. An owned
+ * int-pair scan, with or without an int-slot filter stack, walks those arrays in
+ * [[OwnedValueTake]] and does not encode them. Any other child selects, then heaps, and uses the
+ * full sort when `n` covers every live row. A null value or key orders as zero and stays null on
+ * that selected path. Ties keep input order.
  */
 private[execution] object SortArms:
 
@@ -25,7 +27,9 @@ private[execution] object SortArms:
       ordinals: Set[Int],
       n: Int,
   ): Vector[ColumnBatch] =
-    Vector(prefix(source, child, ordinals, n))
+    OwnedValueTake.take(source, child, ordinals, n) match
+      case Some(batch) => Vector(batch)
+      case None => Vector(prefix(source, child, ordinals, n))
 
   private def sorted(
       source: Plan[_],

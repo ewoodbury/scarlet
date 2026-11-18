@@ -192,6 +192,40 @@ class TestTopN extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     sorted.take(7) shouldBe expected.take(7)
     CrossEngineShapes.pairChecksum(sorted.take(7)) shouldBe
       CrossEngineShapes.pairChecksum(expected.take(7))
+    val saved = ScarletConf.get
+    ScarletConf.set(saved.copy(columnarBatchSize = 1))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      sorted.take(7) shouldBe expected.take(7)
+      sorted.take(7) shouldBe rowTake(sorted, 7)
+      collect(sorted).take(7) shouldBe expected.take(7)
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
+  }
+
+  it should "heap a filtered owned scan in the same order as the row path" in {
+    val keys = Array(5, 1, 3, 1, 4, 2, 8, 0, 6, 2)
+    val values = Array(9, 9, 9, 8, 9, 9, -1, 4, 9, 4)
+    val source = DistCollection.ofIntPairs(keys, values, 2)
+    val sorted = source
+      .filterKeys((key: Int) => key % 3 > 0)
+      .filterValues((value: Int) => value >= 0)
+      .sortByIntValueDesc
+    val full = rowCollect(sorted)
+    sorted.take(4) shouldBe full.take(4).toList
+    sorted.take(4) shouldBe rowTake(sorted, 4)
+    sorted.take(full.length) shouldBe full.toList
+    sorted.take(full.length + 2) shouldBe full.toList
+    collect(sorted) shouldBe full
+    val saved = ScarletConf.get
+    ScarletConf.set(saved.copy(columnarBatchSize = 1))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      sorted.take(4) shouldBe full.take(4).toList
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
   }
 
   private def localOrder(keys: Array[Int], values: Array[Int]): List[(Int, Int)] =

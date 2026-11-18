@@ -5,7 +5,13 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.{ColumnarFallback, DistinctKernel, LogicalType}
+import com.ewoodbury.scarlet.columnar.{
+  ColumnMetrics,
+  ColumnarFallback,
+  CountingSink,
+  DistinctKernel,
+  LogicalType,
+}
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -153,9 +159,21 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     )
     // The winning rows sit past index 2 in their source partition. A limit applied before
     // the sort would drop them.
-    sorted.collect().take(3) shouldBe List(1 -> 100, 2 -> 99, 4 -> 10)
+    val winners = List(1 -> 100, 2 -> 99, 4 -> 10)
+    sorted.collect().take(3) shouldBe winners
     CrossEngineShapes.pairChecksum(sorted.collect().take(3)) shouldBe 426L
-    sorted.take(3) shouldBe List(1 -> 100, 2 -> 99, 4 -> 10)
+    val sink = new CountingSink
+    val taken = ColumnMetrics.withSink(sink)(sorted.take(3))
+    taken shouldBe winners
+    CrossEngineShapes.pairChecksum(taken) shouldBe 426L
+    sink.primitiveEncodeCount shouldBe 0L
+    sink.fusedCount should be > 0L
+    val saved = ScarletConf.get
+    ScarletConf.set(saved.copy(columnarBatchSize = 1))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      sorted.take(3) shouldBe winners
+    finally ScarletConf.set(saved)
   }
 
   "filter-joinagg" should "sum the left value once per filtered match" in {
