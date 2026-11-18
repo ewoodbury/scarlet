@@ -6,7 +6,7 @@ import cats.effect.unsafe.implicits.global
 import com.sun.management.ThreadMXBean
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
+import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, JoinWriteRuns}
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
@@ -86,6 +86,7 @@ object GenericJoinSumBench:
             case other => other.contains("SortMergeJoin")
           if (declined) then println("columnar declined")
           else
+            JoinWriteRuns.resetRunsForTest()
             val columnar = time("columnar", summed.plan, warmup, rounds, columnar = true)
             if (row.checksum != columnar.checksum) then
               refuse(s"checksums differ row=${row.checksum} columnar=${columnar.checksum}")
@@ -94,7 +95,9 @@ object GenericJoinSumBench:
             val ratio = row.p50Ms / columnar.p50Ms
             println(render(columnar))
             println(f"ratio_row_over_columnar $ratio%.3f")
-            val matches = if (shape.contains("JoinProbeSum")) "not_written" else "written"
+            val wrote = JoinWriteRuns.runsForTest != 0L
+            val matches =
+              if (shape.contains("JoinProbeSum") || !wrote) "not_written" else "written"
             println(s"match_columns $matches")
         case _ => ()
     finally

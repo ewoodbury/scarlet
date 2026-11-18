@@ -13,14 +13,19 @@ import ColumnarInterpreter.{Columns, interpretAt}
 /**
  * `reduceByKey` of a triple project whose schema is `[Int32, Int64]`.
  *
- * The child is exchanged even when it is a join: the map may replace the join key. Each morsel is
- * summed with [[com.ewoodbury.scarlet.columnar.HashAggregate.sumInt64]] and the morsels of a batch
- * are folded with [[com.ewoodbury.scarlet.columnar.HashAggregate.mergeSumPartials]]. The reducer
- * has to be addition. Any other `(Long, Long) => Long` declines before a sum is published. A map
- * result that is not `(Int, Long)` declines first, with that name. The join under the project is
- * what runs, so the match columns are still written.
- * [[com.ewoodbury.scarlet.execution.JoinProbeAggregate]] is a different plan and is not built
- * here.
+ * An int inner hash join under that project sums each probe hit under the projected key.
+ * [[com.ewoodbury.scarlet.columnar.JoinWrite]] is not called. Partials are finished by
+ * [[com.ewoodbury.scarlet.columnar.TripleIntLongSum.exchange]], the same exchange
+ * [[com.ewoodbury.scarlet.columnar.TripleIntLongSum.reduce]] uses, which calls
+ * [[com.ewoodbury.scarlet.columnar.HashAggregate.sumInt64]]. The map may replace the join key, so
+ * that second exchange stays. Any other project still interprets the child, and a join there still
+ * writes its match columns. Each of those morsels is summed with `sumInt64` and folded with
+ * [[com.ewoodbury.scarlet.columnar.HashAggregate.mergeSumPartials]].
+ *
+ * The reducer has to be addition. Any other `(Long, Long) => Long` declines before a sum is
+ * published, after the map has run. A map result that is not `(Int, Long)` declines first, with
+ * that name. [[com.ewoodbury.scarlet.execution.JoinProbeAggregate]] is a different plan and is not
+ * built here.
  */
 private[execution] object IntLongReduce:
 
@@ -36,30 +41,62 @@ private[execution] object IntLongReduce:
     (source, child) match
       case (Plan.MapOp(input, mapper), PhysicalOp.Project(inputOp)) =>
         val absence = preserveAbsence || child.requestsTripleAbsence
-        val triples = tripleBatches(
-          interpretAt(input, inputOp, selectedPartition, absence, ordinals),
-        )
         val adapted = TripleToIntLong.adapt(mapper)
-        if (addsLongs(reduceFunc)) then
-          Columns.Pairs(
-            TripleIntLongSum.reduce(
-              triples,
-              ColumnarPlanner.shuffleWidth,
+        probedJoin(input, inputOp) match
+          case Some((left, right, leftOp, rightOp)) if addsLongs(reduceFunc) =>
+            Columns.Pairs(
+              JoinArms.projectSum(left, right, leftOp, rightOp, absence, ordinals, adapted),
+            )
+          case Some((left, right, leftOp, rightOp)) =>
+            JoinArms.projectVisit(left, right, leftOp, rightOp, absence, ordinals, adapted)
+            throw new ColumnarFallback("int-long reduceByKey is the sum")
+          case None if addsLongs(reduceFunc) =>
+            Columns.Pairs(
+              TripleIntLongSum.reduce(
+                triplesOf(input, inputOp, selectedPartition, absence, ordinals),
+                ColumnarPlanner.shuffleWidth,
+                ColumnarPlanner.parallelism,
+                ColumnarPlanner.batchSize,
+                adapted,
+              ),
+            )
+          case None =>
+            TripleIntLongSum.projectAll(
+              triplesOf(input, inputOp, selectedPartition, absence, ordinals),
               ColumnarPlanner.parallelism,
               ColumnarPlanner.batchSize,
               adapted,
-            ),
-          )
-        else
-          TripleIntLongSum.projectAll(
-            triples,
-            ColumnarPlanner.parallelism,
-            ColumnarPlanner.batchSize,
-            adapted,
-          )
-          throw new ColumnarFallback("int-long reduceByKey is the sum")
+            )
+            throw new ColumnarFallback("int-long reduceByKey is the sum")
       case _ =>
         throw new ColumnarFallback("int-long reduceByKey expected a triple project")
+
+  /** Int inner hash join of two exchanges. Sort-merge and broadcast are already rewritten. */
+  private def probedJoin(
+      input: Plan[_],
+      inputOp: PhysicalOp,
+  ): Option[(Plan[_], Plan[_], PhysicalOp, PhysicalOp)] =
+    input match
+      case Plan.JoinOp(left, right, strategy)
+          if JoinLowering.acceptsShuffleHash(strategy) ||
+            JoinLowering.hintedInnerHashed(strategy) =>
+        inputOp match
+          case PhysicalOp.HashJoin(
+                PhysicalOp.Exchange(leftOp),
+                PhysicalOp.Exchange(rightOp),
+              ) =>
+            Some((left, right, leftOp, rightOp))
+          case _ => None
+      case _ => None
+
+  private def triplesOf(
+      input: Plan[_],
+      inputOp: PhysicalOp,
+      selectedPartition: Option[Int],
+      absence: Boolean,
+      ordinals: Set[Int],
+  ): Vector[ColumnBatch] =
+    tripleBatches(interpretAt(input, inputOp, selectedPartition, absence, ordinals))
 
   private def tripleBatches(columns: Columns): Vector[ColumnBatch] =
     columns match

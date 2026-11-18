@@ -30,8 +30,24 @@ object TripleIntLongSum:
         HashAggregate.sumInt64(projected, keyOrdinal = 0, valueOrdinal = 1)
       }
       val combined = mergeGroups(groups.map(_.length), partials, parallelism)
+      exchange(combined, numPartitions, parallelism)
+
+  /**
+   * Exchange summed partials on the projected key and sum each bucket.
+   *
+   * A probe that already summed its own matches uses this same finish. An empty vector is
+   * `numPartitions` empty sum batches. A non-empty vector is [[HashExchange.partitionAll]] then
+   * [[HashAggregate.sumInt64]], including a vector of empty partials.
+   */
+  private[scarlet] def exchange(
+      partials: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+  ): Vector[ColumnBatch] =
+    if (partials.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyIntLongSum)
+    else
       val buckets =
-        HashExchange.partitionAll(combined, keyOrdinal = 0, numPartitions, parallelism)
+        HashExchange.partitionAll(partials, keyOrdinal = 0, numPartitions, parallelism)
       MorselScheduler.map(buckets, parallelism) { (_, bucket) =>
         HashAggregate.sumInt64(bucket, keyOrdinal = 0, valueOrdinal = 1)
       }
