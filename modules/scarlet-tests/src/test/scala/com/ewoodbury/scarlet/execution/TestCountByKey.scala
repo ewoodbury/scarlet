@@ -305,19 +305,30 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     countsOf(nullable.collect()) shouldBe countsOf(row(nullable.collect()))
   }
 
-  it should "keep a key-changing map on the row path" in {
+  it should "lower a key-changing int pair map into countByKey" in {
     val source = DistCollection.ofIntPairs(Array(1, 2, 1, 3), Array(10, 20, 30, 40), 4)
     val changed = source.map((pair: (Int, Int)) => (pair._1 + 1, pair._2)).countByKey
-    ColumnarPlanner.partitioning(changed.plan) shouldBe None
+    ColumnarPlanner.lower(changed.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(Project(Scan)))",
+    )
     countsOf(changed.collect()) shouldBe Map(2 -> 2, 3 -> 1, 4 -> 1)
     countsOf(changed.collect()) shouldBe countsOf(row(changed.collect()))
 
     // The plan node is MapOp. A function that happens to keep the key is still not folded.
     val sameKey = source.map((pair: (Int, Int)) => (pair._1, pair._2 + 1)).countByKey
-    ColumnarPlanner.partitioning(sameKey.plan) shouldBe None
+    ColumnarPlanner.lower(sameKey.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(Project(Scan)))",
+    )
     foldsOf(sameKey.plan) shouldBe false
     countsOf(sameKey.collect()) shouldBe Map(1 -> 2, 2 -> 1, 3 -> 1)
     countsOf(sameKey.collect()) shouldBe countsOf(row(sameKey.collect()))
+
+    val longPairs = DistCollection.ofLongPairs(Array(1L, 2L), Array(10L, 20L), 1)
+    ColumnarPlanner.lower(longPairs.map((pair: (Long, Long)) => (pair._1, pair._2)).plan) shouldBe
+      None
+    val strings = DistCollection(Seq("a" -> 1, "b" -> 2), 1)
+    ColumnarPlanner.lower(strings.map((pair: (String, Int)) => (pair._1, pair._2)).plan) shouldBe
+      None
   }
 
   it should "pin the filter-countbykey checksum" in {

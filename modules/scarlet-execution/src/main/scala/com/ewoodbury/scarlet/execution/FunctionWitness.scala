@@ -5,10 +5,12 @@ package com.ewoodbury.scarlet.execution
  *
  * [[ColumnarPlanner]] uses [[declaredElement]] when a project or `mapValues` must declare the
  * column's signature. `Int => Int` is `apply$mcII$sp`, `Long => Long` is `apply$mcJJ$sp`,
- * `Double => Double` is `apply$mcDD$sp`, and `String => String` is `apply`. The check reads method
- * descriptors and does not call the function. A primitive specialized apply is not a bridge.
- * `Boolean` has no specialized apply, so [[declaredElement]] is false for that kind and does not
- * inspect the function.
+ * `Double => Double` is `apply$mcDD$sp`, `String => String` is `apply`, and `(Int, Int) => (Int,
+ * Int)` is `apply(Tuple2): Tuple2`. Erasure gives that same `apply` to a long or string pair
+ * function. The pair kernel declines a cell that is not an int. The check reads method descriptors
+ * and does not call the function. A primitive specialized apply is not a bridge. `Boolean` has no
+ * specialized apply, so [[declaredElement]] is false for that kind and does not inspect the
+ * function.
  */
 private[execution] object FunctionWitness:
 
@@ -34,9 +36,17 @@ private[execution] object FunctionWitness:
       )
     case PhysicalOp.Kind.Strings =>
       declaredSignature(function, "apply", classOf[String], classOf[String], allowBridge = true)
-    case PhysicalOp.Kind.Bools | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
-        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
-        PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
+    case PhysicalOp.Kind.Pairs =>
+      declaredSignature(
+        function,
+        "apply",
+        classOf[scala.Tuple2[Any, Any]],
+        classOf[scala.Tuple2[Any, Any]],
+        allowBridge = true,
+      )
+    case PhysicalOp.Kind.Bools | PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongPairs |
+        PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs |
+        PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums =>
       false

@@ -666,10 +666,12 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
     arm()
     val source = DistCollection(Seq(1 -> 4, 2 -> 5), 1)
     val stayed = source.map { case (key, value) => (key + 1, value) }
-    ColumnarPlanner.lower(stayed.plan) shouldBe Option.empty[PhysicalOp]
+    ColumnarPlanner.lower(stayed.plan).map(_.shape) shouldBe Some("Project(Scan)")
     ColumnarPlanner.tryGroupedSum(stayed.plan) shouldBe Some(9L)
 
     val widened = source.map { case (key, value) => (key.toLong, value) }
+    ColumnarPlanner.lower(widened.plan).map(_.shape) shouldBe Some("Project(Scan)")
+    ColumnarPlanner.tryRun(widened.plan) shouldBe None
     ColumnarPlanner.tryGroupedSum(widened.plan) shouldBe None
     val batch = BatchCodec.intPairs(Seq((1, 4), (2, 5)))
     val (_, steps) = ColumnarPlanner.peelPairOps(widened.plan)

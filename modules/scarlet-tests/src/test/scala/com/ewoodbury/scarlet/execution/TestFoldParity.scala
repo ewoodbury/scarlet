@@ -114,8 +114,9 @@ class TestFoldParity extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     agreeGrouped("filterValues", source.filterValues[Int, Int](_ > 4))
 
     val mapped = source.map { case (key, value) => (key + 1, value + key) }
-    ColumnarPlanner.lower(mapped.plan) shouldBe Option.empty[PhysicalOp]
-    ColumnarPlanner.tryRun(mapped.plan) shouldBe None
+    ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some("Project(Scan)")
+    val ran = ColumnarPlanner.tryRun(mapped.plan).getOrElse(fail("pair map did not run"))
+    ran.flatMap(_.data).toList shouldBe row(mapped.collect()).toList
     agreeGrouped("pair map", mapped)
 
     val projected = DistCollection.ofIntPairs(Array(1, 2, 3, 4), Array(10, 5, 30, 40), 2)

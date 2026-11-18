@@ -238,12 +238,13 @@ private[execution] object ColumnarInterpreter:
   /**
    * Int-pair decoder for `op`. [[PhysicalOp.SortByLongKey]] and [[PhysicalOp.SortByStringKey]] are
    * their own arms. Those decoders do not call the returned function, and these arms must not fall
-   * through to [[BatchCodec.decodeIntPairs]], which rejects a clear bit. [[PhysicalOp.MapKey]]
-   * keeps a null key or value, so it uses the absence-preserving decoder.
+   * through to [[BatchCodec.decodeIntPairs]], which rejects a clear bit. [[PhysicalOp.MapKey]] and
+   * an int-pair [[PhysicalOp.Project]] keep a null key or value, so they use the
+   * absence-preserving decoder.
    */
   private def intPairDecoder(op: PhysicalOp): (ColumnBatch, Int) => Seq[(Int, Int)] =
     op match
-      case _: PhysicalOp.MapKey =>
+      case _: PhysicalOp.MapKey | _: PhysicalOp.Project =>
         (batch, rows) => BatchCodec.decodeIntPairsPreservingAbsence(batch, rows)
       case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByIntValueDesc =>
         (batch, rows) =>
@@ -981,10 +982,18 @@ private[execution] object ColumnarInterpreter:
       Columns.Triples(onEachMorsel(parts) { morsel =>
         PairKernel.mapTriple(morsel.batch, morsel.start, morsel.length, adapted)
       })
-    case Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.LongCounts(_) |
-        Columns.CountSums(_) | Columns.LongTriples(_) | Columns.StringPairs(_) |
-        Columns.StringTriples(_) | Columns.Outer(_, _) | Columns.GroupedInts(_) |
-        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
+    case Columns.Pairs(parts) =>
+      // Named erasure boundary. The adapter returns Any. A cell that is not an int throws
+      // ColumnarFallback inside the kernel, before the output batch is published. The declared
+      // `apply(Tuple2)` check does not call the function and does not separate `(Long, Int)`.
+      val adapted = IntPairProject.adapt(mapper)
+      Columns.Pairs(onEachMorsel(parts) { morsel =>
+        IntPairProject.project(morsel.batch, morsel.start, morsel.length, adapted)
+      })
+    case Columns.Bools(_) | Columns.LongPairs(_) | Columns.LongCounts(_) | Columns.CountSums(_) |
+        Columns.LongTriples(_) | Columns.StringPairs(_) | Columns.StringTriples(_) |
+        Columns.Outer(_, _) | Columns.GroupedInts(_) | Columns.GroupedStrings(_) |
+        Columns.GroupedLongs(_) =>
       throw new IllegalStateException(
         s"columnar map expects ${elementColumnList(includeBooleans = false)}",
       )

@@ -130,15 +130,15 @@ trait ColumnarContractFixture extends Matchers:
     )
 
   /**
-   * `lower` and the action gates share one decision. A refused plan, including a double sort-merge
-   * and a type-changing pair map, makes every gate return `None`. An accepted plan runs `tryRun`
-   * and `tryCount`. `tryTake` runs when the physical tree keeps input partitions, and for an
-   * int-key, long-key, or string-key sort, which runs the whole sort and then decodes the prefix.
-   * `trySumInt`, `trySumLong`, and `trySumDouble` run only for that numeric kind. `tryGroupedSum`
-   * equals `groupedSum` for an accepted grouped pair source and for an accepted row, key, or value
-   * filter of one, and is `None` for every other accepted plan. The peel label follows
-   * [[expectedGroupedPeel]]. A pair map that stays `(Int, Int)` is outside these lists:
-   * [[ColumnarPlanner.lower]] refuses it and [[ColumnarPlanner.tryGroupedSum]] still succeeds.
+   * `lower` and the action gates share one decision. A refused plan, including a double sort-merge,
+   * makes every gate return `None`. An accepted plan runs `tryRun` and `tryCount`. `tryTake` runs
+   * when the physical tree keeps input partitions, and for an int-key, long-key, or string-key
+   * sort, which runs the whole sort and then decodes the prefix. `trySumInt`, `trySumLong`, and
+   * `trySumDouble` run only for that numeric kind. `tryGroupedSum` equals `groupedSum` for an
+   * accepted grouped pair source, an accepted `(Int, Int)` pair map, and an accepted row, key, or
+   * value filter of one. It is `None` for every other accepted plan. The peel label follows
+   * [[expectedGroupedPeel]]. A pair map whose result is not `(Int, Int)` still lowers, and
+   * [[ColumnarPlanner.tryRun]] returns `None`.
    */
   protected def assertGatesAgree(
       plan: Plan[_],
@@ -388,6 +388,7 @@ trait ColumnarContractFixture extends Matchers:
       case Plan.FilterOp(source, _) => body(source).map(inner => s"FilterRow($inner)")
       case Plan.FilterKeysOp(source, _) => body(source).map(inner => s"FilterKey($inner)")
       case Plan.FilterValuesOp(source, _) => body(source).map(inner => s"FilterValue($inner)")
+      case Plan.MapOp(source, _) => body(source).map(inner => s"MapPair($inner)")
       case source: Plan.Source[_] if ColumnarPlanner.groupedPairSource(source) => Some("Scan")
       case _ => None
 

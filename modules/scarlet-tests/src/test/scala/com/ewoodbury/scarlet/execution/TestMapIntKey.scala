@@ -15,9 +15,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * `mapIntKey` is the typed witness for an int key change.
  *
  * A null key stays null and the function is not called. `countByKey` then drops that key. A
- * generic pair `map` still declines. A filter, `keys`, or `values` above the map declines too: the
- * row path unboxes the null key. `partitionBy` then this map drops the hash, so `countByKey` is
- * one global row per new key.
+ * generic `(Int, Int)` pair `map` lowers as `Project`. A filter, `keys`, or `values` above this
+ * key map declines: the row path unboxes the null key. `partitionBy` then this map drops the
+ * hash, so `countByKey` is one global row per new key.
  */
 class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -34,7 +34,7 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     ScarletConf.set(original)
     ()
 
-  "mapIntKey" should "lower a key change and leave a generic pair map on the row path" in {
+  "mapIntKey" should "lower a key change, and a generic pair map should lower beside it" in {
     val mapped = present.mapIntKey(key => key % 100)
     ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some("MapKey(Scan)")
     val counted = mapped.countByKey
@@ -42,7 +42,36 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       "CountByKey(Exchange(MapKey(Scan)))",
     )
     val opaque = present.map { case (key, value) => (key % 100, value) }.countByKey
-    ColumnarPlanner.lower(opaque.plan) shouldBe None
+    ColumnarPlanner.lower(opaque.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(Project(Scan)))",
+    )
+    counts(run(columnar = true)(opaque.collect())) shouldBe counts(
+      run(columnar = false)(opaque.collect()),
+    )
+  }
+
+  it should "skip a null key in a generic pair map and still count a null value" in {
+    val calls = new AtomicInteger
+    val mapped = nullable.map(shiftKey(calls))
+    calls.set(0)
+    val columnar = fingerprint(run(columnar = true)(mapped.collect()))
+    calls.get() shouldBe 4
+    calls.set(0)
+    val rows = fingerprint(run(columnar = false)(mapped.collect()))
+    calls.get() shouldBe 6
+    columnar shouldBe rows
+    columnar shouldBe Seq("2:4", "2:5", "3:-1", "3:6", "null:8", "null:9")
+
+    val valueCalls = new AtomicInteger
+    val counted = nullThenValue.map(shiftKey(valueCalls)).countByKey
+    valueCalls.set(0)
+    val columnarCounts = counts(run(columnar = true)(counted.collect()))
+    valueCalls.get() shouldBe 2
+    valueCalls.set(0)
+    val rowCounts = counts(run(columnar = false)(counted.collect()))
+    valueCalls.get() shouldBe 2
+    columnarCounts shouldBe rowCounts
+    columnarCounts shouldBe Map(2 -> 1, 5 -> 1)
   }
 
   it should "keep a null key, skip the function, and match the row path" in {
@@ -191,6 +220,34 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
         Seq(Partition(Seq(cell(1, null), cell(4, 4)))),
       ),
     )
+
+  /** A present pair witnesses the scan, then a null value. The key stays present. */
+  private def nullThenValue: DistCollection[(Int, Int)] =
+    DistCollection(
+      Plan.Source(
+        Seq(Partition(Seq(cell(4, 4), cell(1, null)))),
+      ),
+    )
+
+  /**
+   * A null key is returned unchanged. A present key is incremented. `productElement` keeps a null
+   * value, so the row path and the pair project both count it.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def shiftKey(calls: AtomicInteger): ((Int, Int)) => (Int, Int) = pair => {
+    calls.incrementAndGet()
+    val product = pair.asInstanceOf[Product]
+    product.productElement(0) match
+      case null => pair
+      case present: Int =>
+        Tuple2(Int.box(present + 1), product.productElement(1)).asInstanceOf[(Int, Int)]
+  }
 
   @SuppressWarnings(
     Array(

@@ -8,7 +8,8 @@ import com.ewoodbury.scarlet.api.DistCollection
  * `filter-distinct` is `keys.distinct.count`. `filter-twogroup` is `countSumByKey`, the count and
  * the sum. `filter-topn` is `sortByIntValueDesc` on `(v desc, sk asc)` plus
  * `take`. `filter-keymod` maps the key with `mapIntKey` to `k % 100` and then `countByKey`. That
- * typed key map lowers. A generic pair `map` of the same arithmetic stays on the row path.
+ * typed key map lowers. A generic `(Int, Int)` pair `map` of the same arithmetic lowers as
+ * `Project` and then `countByKey`. `keyMod` stays `mapIntKey`.
  * `filter-joinagg` filters both int tables, joins on the key, groups by that key, and sums the
  * left value.
  *

@@ -25,11 +25,12 @@ class TestColumnarContract
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    accepted.size shouldBe 221
+    accepted.size shouldBe 223
     // A null key refuses the shape rather than excluding it. Outer joins are covered by execution
     // tests, not contract fixtures, because the contract does not track the int refusals either.
-    excluded.size shouldBe 35
-    (accepted.size + excluded.size) shouldBe 256
+    // A type-changing pair map lowers and declines at tryRun, so it is in neither list.
+    excluded.size shouldBe 34
+    (accepted.size + excluded.size) shouldBe 257
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -94,6 +95,7 @@ class TestColumnarContract
     val values = Plan.ValuesOp(pairSource)
     val mapValues = Plan.MapValuesOp(pairSource, (value: Int) => value + 1)
     val mapIntKey = Plan.MapIntKeyOp(pairSource, (key: Int) => key % 100)
+    val pairMap = Plan.MapOp(pairSource, (pair: (Int, Int)) => (pair._1 + 1, pair._2 + pair._1))
     val mappedKeys = Plan.MapOp(keys, (key: Int) => key + 1)
     val mappedValues = Plan.MapOp(values, (value: Int) => value + 1)
     val filteredMapValues = Plan.FilterValuesOp(mapValues, (value: Int) => value > 0)
@@ -391,6 +393,19 @@ class TestColumnarContract
         Plan.CountByKeyOp(mapIntKey),
         hashedInfo(layout),
         Some("CountByKey(Exchange(MapKey(Scan)))"),
+      ),
+      AcceptedCase(
+        "int pair map",
+        pairMap,
+        narrowInfo(2, layout),
+        Some("Project(Scan)"),
+        Some(66L),
+      ),
+      AcceptedCase(
+        "countByKey of int pair map",
+        Plan.CountByKeyOp(pairMap),
+        hashedInfo(layout),
+        Some("CountByKey(Exchange(Project(Scan)))"),
       ),
       AcceptedCase(
         "countByKey long",
@@ -753,10 +768,6 @@ class TestColumnarContract
       ExcludedCase("long map to int", Plan.MapOp(longSource, (value: Long) => value.toInt)),
       ExcludedCase("long map to string", Plan.MapOp(longSource, (value: Long) => value.toString)),
       ExcludedCase("int map to pair", Plan.MapOp(intSource, (value: Int) => (value, value))),
-      ExcludedCase(
-        "type-changing pair map",
-        Plan.MapOp(pairSource, (pair: (Int, Int)) => (pair._1.toLong, pair._2)),
-      ),
       ExcludedCase(
         "int filter then map to string",
         Plan.MapOp(

@@ -324,13 +324,13 @@ class TestPhysicalPlan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     joined.collect().toMap shouldBe Map(1 -> ((3, 10)))
   }
 
-  it should "leave a pair map on the row path" in {
+  it should "lower a pair map and reduce the projected pairs" in {
     val mapped = DistCollection(Seq(1 -> 1, 1 -> 2), 1).map { (key, value) =>
       (key, value + 1)
     }
-    ColumnarPlanner.lower(mapped.plan) shouldBe rowPath
+    shape(mapped) shouldBe "Project(Scan)"
     val reduced = mapped.reduceByKey[Int, Int](_ + _)
-    ColumnarPlanner.lower(reduced.plan) shouldBe rowPath
+    shape(reduced) shouldBe "HashAggregate(Exchange(Project(Scan)))"
     reduced.collect().toMap shouldBe Map(1 -> 5)
   }
 
