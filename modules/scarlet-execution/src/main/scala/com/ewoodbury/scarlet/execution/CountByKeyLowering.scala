@@ -27,4 +27,5 @@ private[execution] object CountByKeyLowering:
         PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
         PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter |
         PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums =>
+      LoweringTrace.note("CountByKeyOp", child.kind, "CountByKeyLowering")
       None

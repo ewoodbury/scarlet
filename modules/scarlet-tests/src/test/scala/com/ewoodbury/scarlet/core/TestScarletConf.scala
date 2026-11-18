@@ -28,6 +28,14 @@ class TestScarletConf extends AnyFlatSpec with Matchers with BeforeAndAfterEach 
     conf.spillFanIn shouldBe 8
   }
 
+  it should "keep the lowering trace off unless the value is 1" in {
+    ScarletConf().traceLowering shouldBe false
+    ScarletConf.traceEnabled(None) shouldBe false
+    ScarletConf.traceEnabled(Some("1")) shouldBe true
+    ScarletConf.traceEnabled(Some("true")) shouldBe false
+    ScarletConf.traceEnabled(Some("0")) shouldBe false
+  }
+
   it should "allow overriding fault tolerance configuration" in {
     val customConf = ScarletConf().copy(
       maxTaskRetries = 5,

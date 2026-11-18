@@ -29,7 +29,7 @@ private[execution] object JoinLowering:
       lowerChild: Plan[_] => Option[PhysicalOp],
   ): Option[PhysicalOp] = plan match
     case Plan.JoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)) =>
-      sortMergeJoinOf(left, right, PhysicalOp.SortMergeJoin.apply, lowerChild)
+      sortMergeJoinOf(plan, left, right, PhysicalOp.SortMergeJoin.apply, lowerChild)
     case Plan.JoinOp(left, right, strategy) if acceptsHashJoin(strategy) =>
       (lowerChild(left), lowerChild(right)) match
         case (Some(leftOp), Some(rightOp)) =>
@@ -74,8 +74,8 @@ private[execution] object JoinLowering:
                   )
                 case Some(Plan.JoinStrategy.SortMerge) =>
                   throw new IllegalStateException("sort-merge is lowered by sortMergeJoinOf")
-            case _ => None
-        case _ => None
+            case (leftKind, rightKind) => refuseKinds(plan, leftKind, rightKind)
+        case _ => refuseChild(plan)
 
     case Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)) =>
       (lowerChild(left), lowerChild(right)) match
@@ -87,8 +87,8 @@ private[execution] object JoinLowering:
               Some(PhysicalOp.LongBroadcastLeftOuter(left = leftOp, right = rightOp))
             case (PhysicalOp.Kind.StringPairs, PhysicalOp.Kind.StringPairs) =>
               Some(PhysicalOp.StringBroadcastLeftOuter(left = leftOp, right = rightOp))
-            case _ => None
-        case _ => None
+            case (leftKind, rightKind) => refuseKinds(plan, leftKind, rightKind)
+        case _ => refuseChild(plan)
     // An absent hint is shuffle-hash, the same rule as an inner join. The row executor
     // shuffle-hashes an unhinted outer join, so that plan is this op.
     case Plan.LeftOuterJoinOp(left, right, strategy) if acceptsShuffleHash(strategy) =>
@@ -116,8 +116,8 @@ private[execution] object JoinLowering:
                   PhysicalOp.Exchange(rightOp),
                 ),
               )
-            case _ => None
-        case _ => None
+            case (leftKind, rightKind) => refuseKinds(plan, leftKind, rightKind)
+        case _ => refuseChild(plan)
     case Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)) =>
       (lowerChild(left), lowerChild(right)) match
         case (Some(leftOp), Some(rightOp)) =>
@@ -128,8 +128,8 @@ private[execution] object JoinLowering:
               Some(PhysicalOp.LongBroadcastRightOuter(left = leftOp, right = rightOp))
             case (PhysicalOp.Kind.StringPairs, PhysicalOp.Kind.StringPairs) =>
               Some(PhysicalOp.StringBroadcastRightOuter(left = leftOp, right = rightOp))
-            case _ => None
-        case _ => None
+            case (leftKind, rightKind) => refuseKinds(plan, leftKind, rightKind)
+        case _ => refuseChild(plan)
     // An absent hint is shuffle-hash, the same rule as an inner join and a left outer join.
     // The row executor shuffle-hashes an unhinted outer join, so that plan is this op.
     case Plan.RightOuterJoinOp(left, right, strategy) if acceptsShuffleHash(strategy) =>
@@ -157,8 +157,8 @@ private[execution] object JoinLowering:
                   PhysicalOp.Exchange(rightOp),
                 ),
               )
-            case _ => None
-        case _ => None
+            case (leftKind, rightKind) => refuseKinds(plan, leftKind, rightKind)
+        case _ => refuseChild(plan)
     case Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)) =>
       (lowerChild(left), lowerChild(right)) match
         case (Some(leftOp), Some(rightOp)) =>
@@ -169,8 +169,8 @@ private[execution] object JoinLowering:
               Some(PhysicalOp.LongBroadcastFullOuter(left = leftOp, right = rightOp))
             case (PhysicalOp.Kind.StringPairs, PhysicalOp.Kind.StringPairs) =>
               Some(PhysicalOp.StringBroadcastFullOuter(left = leftOp, right = rightOp))
-            case _ => None
-        case _ => None
+            case (leftKind, rightKind) => refuseKinds(plan, leftKind, rightKind)
+        case _ => refuseChild(plan)
     // An absent hint is shuffle-hash, the same rule as an inner join and the other outer joins.
     // The row executor shuffle-hashes an unhinted outer join, so that plan is this op.
     case Plan.FullOuterJoinOp(left, right, strategy) if acceptsShuffleHash(strategy) =>
@@ -198,10 +198,11 @@ private[execution] object JoinLowering:
                   PhysicalOp.Exchange(rightOp),
                 ),
               )
-            case _ => None
-        case _ => None
+            case (leftKind, rightKind) => refuseKinds(plan, leftKind, rightKind)
+        case _ => refuseChild(plan)
     case Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)) =>
       outerSortMerge(
+        plan,
         left,
         right,
         PhysicalOp.SortMergeLeftOuter.apply,
@@ -209,6 +210,7 @@ private[execution] object JoinLowering:
         lowerChild,
       ).orElse(
         stringOuterSortMerge(
+          plan,
           left,
           right,
           PhysicalOp.StringSortMergeLeftOuter.apply,
@@ -217,6 +219,7 @@ private[execution] object JoinLowering:
       )
     case Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)) =>
       outerSortMerge(
+        plan,
         left,
         right,
         PhysicalOp.SortMergeRightOuter.apply,
@@ -224,6 +227,7 @@ private[execution] object JoinLowering:
         lowerChild,
       ).orElse(
         stringOuterSortMerge(
+          plan,
           left,
           right,
           PhysicalOp.StringSortMergeRightOuter.apply,
@@ -232,6 +236,7 @@ private[execution] object JoinLowering:
       )
     case Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)) =>
       outerSortMerge(
+        plan,
         left,
         right,
         PhysicalOp.SortMergeFullOuter.apply,
@@ -239,6 +244,7 @@ private[execution] object JoinLowering:
         lowerChild,
       ).orElse(
         stringOuterSortMerge(
+          plan,
           left,
           right,
           PhysicalOp.StringSortMergeFullOuter.apply,
@@ -248,8 +254,27 @@ private[execution] object JoinLowering:
     // A strategy the cases above do not accept stays on the row path.
     case _: Plan.LeftOuterJoinOp[_, _, _] | _: Plan.RightOuterJoinOp[_, _, _] |
         _: Plan.FullOuterJoinOp[_, _, _] =>
-      None
-    case _ => None
+      refusePlan(plan)
+    case _ => refusePlan(plan)
+
+  /** Kind mismatch. Both children lowered. */
+  private def refuseKinds(
+      plan: Plan[_],
+      left: PhysicalOp.Kind,
+      right: PhysicalOp.Kind,
+  ): Option[PhysicalOp] =
+    LoweringTrace.note(plan, left, right, "JoinLowering")
+    None
+
+  /** A child did not lower. Keeps that child's note when it recorded one. */
+  private def refuseChild(plan: Plan[_]): Option[PhysicalOp] =
+    LoweringTrace.noteIfEmpty(plan, "JoinLowering")
+    None
+
+  /** This join shape has no columnar kernel. */
+  private def refusePlan(plan: Plan[_]): Option[PhysicalOp] =
+    LoweringTrace.note(plan, "JoinLowering")
+    None
 
   /**
    * Columnar hash joins. No hint, shuffle-hash, and broadcast all qualify. Sort-merge is
@@ -294,6 +319,7 @@ private[execution] object JoinLowering:
    * on [[sortMergeJoinOf]] and accepts int pairs, long pairs, and string pairs.
    */
   private def outerSortMerge(
+      plan: Plan[_],
       left: Plan[_],
       right: Plan[_],
       intNode: (PhysicalOp, PhysicalOp) => PhysicalOp,
@@ -307,8 +333,8 @@ private[execution] object JoinLowering:
             Some(intNode(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)))
           case (PhysicalOp.Kind.LongPairs, PhysicalOp.Kind.LongPairs) =>
             Some(longNode(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)))
-          case _ => None
-      case _ => None
+          case (leftKind, rightKind) => refuseKinds(plan, leftKind, rightKind)
+      case _ => refuseChild(plan)
 
   /**
    * Sort-merge of two string-pair sides. Both children are exchanged. Any other kind stays on the
@@ -316,6 +342,7 @@ private[execution] object JoinLowering:
    * [[sortMergeJoinOf]] and accepts int pairs, long pairs, and string pairs.
    */
   private def stringOuterSortMerge(
+      plan: Plan[_],
       left: Plan[_],
       right: Plan[_],
       node: (PhysicalOp, PhysicalOp) => PhysicalOp,
@@ -326,8 +353,8 @@ private[execution] object JoinLowering:
         (leftOp.kind, rightOp.kind) match
           case (PhysicalOp.Kind.StringPairs, PhysicalOp.Kind.StringPairs) =>
             Some(node(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)))
-          case _ => None
-      case _ => None
+          case (leftKind, rightKind) => refuseKinds(plan, leftKind, rightKind)
+      case _ => refuseChild(plan)
 
   /**
    * Sort-merge of two inner-join sides. Int pairs use [[PhysicalOp.SortMergeJoin]]. Long pairs use
@@ -336,6 +363,7 @@ private[execution] object JoinLowering:
    * [[outerSortMerge]].
    */
   private def sortMergeJoinOf(
+      plan: Plan[_],
       left: Plan[_],
       right: Plan[_],
       node: (PhysicalOp, PhysicalOp) => PhysicalOp,
@@ -360,8 +388,8 @@ private[execution] object JoinLowering:
                 PhysicalOp.Exchange(rightOp),
               ),
             )
-          case _ => None
-      case _ => None
+          case (leftKind, rightKind) => refuseKinds(plan, leftKind, rightKind)
+      case _ => refuseChild(plan)
 
   /**
    * Layout of a join. Aggregates, scans, and exchanges stay in [[ColumnarPlanner.infoOf]]. A

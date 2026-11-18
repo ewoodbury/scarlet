@@ -21,6 +21,8 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * `arm` say `row`, and one execution supplies the checksum. That run is not a speed.
  * `CROSS_TIME_ROW=true` times that decline with the same warmup, rounds, and steady window. The
  * arm stays `row`. A published batch on a declined plan still fails the process.
+ * `CROSS_TRACE_LOWERING=1` prints one lowering-refusal line on stderr before the timed samples
+ * when the plan stays on the row path. The timed section leaves `traceLowering` off.
  *
  * Owned int arrays use [[BatchCodec.intPairs]]. Owned long arrays use
  * [[BatchCodec.copiedLongPairs]], the scan's array encode. A null long value is timed with
@@ -81,6 +83,7 @@ object CrossEngineBench:
       warmup: Int,
       rounds: Int,
       timeRow: Boolean,
+      traceLowering: Boolean,
   )
 
   private final case class Built(action: () => Any, encodeMs: Double, plan: Plan[_])
@@ -122,6 +125,7 @@ object CrossEngineBench:
           columnarBatchSize = batchSize,
           defaultShufflePartitions = 4,
           spillEnabled = true,
+          traceLowering = false,
         ),
       )
       ScarletRuntime.set(savedRuntime.copy(scheduler = scheduler))
@@ -146,7 +150,8 @@ object CrossEngineBench:
     val uptime = java.lang.management.ManagementFactory.getRuntimeMXBean.getUptime
     System.err.println(s"QUERY_BEGIN $name ${System.currentTimeMillis()} uptime=$uptime")
     val built = build(name, settings)
-    val sample = measure(name, built, settings.warmup, settings.rounds, settings.timeRow)
+    val sample =
+      measure(name, built, settings.warmup, settings.rounds, settings.timeRow, settings.traceLowering)
     val endUptime = java.lang.management.ManagementFactory.getRuntimeMXBean.getUptime
     System.err.println(
       s"QUERY_END $name ${System.currentTimeMillis()} uptime=$endUptime p50=${sample.p50Ms} checksum=${sample.checksum}",
@@ -388,11 +393,25 @@ object CrossEngineBench:
       warmup: Int,
       rounds: Int,
       timeRow: Boolean,
+      traceLowering: Boolean,
   ): Sample =
+    if (traceLowering) then traceRefusal(built.plan)
     armOf(built.plan) match
       case None if timeRow => timedSample(name, built, "row", warmup, rounds, columnar = false)
       case None => rowSample(name, built)
       case Some(shape) => timedSample(name, built, shape, warmup, rounds, columnar = true)
+
+  /**
+   * One refusal line, outside the timer. [[ColumnarPlanner.lower]] prints it when the flag is on
+   * and the plan stays empty. A plan that lowers prints nothing. The flag is off again before
+   * warmup.
+   */
+  private def traceRefusal(plan: Plan[_]): Unit =
+    val saved = ScarletConf.get
+    ScarletConf.set(saved.copy(traceLowering = true))
+    try
+      val _ = ColumnarPlanner.lower(plan)
+    finally ScarletConf.set(saved)
 
   /**
    * Physical shape when [[ColumnarPlanner]] accepts `plan`. `None` is the row path, including a
@@ -692,6 +711,7 @@ $body
       warmup = readInt("CROSS_WARMUP", 80),
       rounds = readInt("CROSS_ROUNDS", 30),
       timeRow = readFlag("CROSS_TIME_ROW", false),
+      traceLowering = readOne("CROSS_TRACE_LOWERING"),
     )
 
   private def readInt(name: String, default: Int): Int =
@@ -706,6 +726,13 @@ $body
     val value = readInt(name, default)
     if (allowed.contains(value)) then value
     else envError(s"$name must be ${allowed.mkString(" or ")}, found $value")
+
+  /** `1` turns the flag on. Unset leaves it off. Any other value stops the process. */
+  private def readOne(name: String): Boolean =
+    sys.env.get(name) match
+      case None => false
+      case Some("1") => true
+      case Some(other) => envError(s"$name must be 1, found $other")
 
   private def readFlag(name: String, default: Boolean): Boolean =
     sys.env.get(name) match

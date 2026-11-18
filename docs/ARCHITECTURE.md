@@ -409,6 +409,16 @@ removed: it could not safely reconstruct arbitrary user functions. Retry is hone
 
 ### Columnar fallback
 
+`SCARLET_TRACE_LOWERING=1` sets `ScarletConf.traceLowering`. The flag is off by default. A plan
+`ColumnarPlanner.lower` refuses then prints one stderr line,
+`lowering refused node=<plan> kind=<kind> lowering=<object>`. The line names the plan node, the
+physical kind when a lowering has one, and the lowering that returned `None`. A sort of an int
+`reduceByKey` prints `lowering refused node=SortByIntKeyOp kind=Pairs lowering=SortLowering`. A
+plan that lowers prints nothing. With the flag off, `lower` reads the boolean once and does not
+build the line. `CROSS_TRACE_LOWERING=1` prints that same line once from `CrossEngineBench`,
+before the timed samples, when the query stays on the row path. The timed section leaves the flag
+off.
+
 `ColumnarFallback` is a deliberate decline: the planner or interpreter chose not to run a kernel,
 and the row path runs instead. A `ClassCastException` from a filter, or from a string map that
 declares `String` and returns another value, is also a fallback, and that function may already

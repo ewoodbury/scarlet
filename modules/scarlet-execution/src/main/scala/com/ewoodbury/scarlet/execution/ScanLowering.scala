@@ -25,7 +25,9 @@ private[execution] object ScanLowering:
               if describedKind.contains(kind) && dataMatchesDescriptor(source, descriptor) =>
             Some(kind)
           case None if source.partitions.forall(_.data.isEmpty) => describedKind
-          case _ => None
+          case _ =>
+            LoweringTrace.note(source, "ScanLowering")
+            None
 
   private def kindOf(descriptor: Plan.SourceDescriptor): Option[PhysicalOp.Kind] = descriptor match
     // Boundary guard: classify returns on Unknown before this match.
