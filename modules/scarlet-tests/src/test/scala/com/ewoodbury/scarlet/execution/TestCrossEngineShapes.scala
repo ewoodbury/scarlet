@@ -211,6 +211,103 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     CrossEngineShapes.sumChecksum(aggregated.collect()) shouldBe 133L
   }
 
+  "a hinted triple project" should "reduce by hashing both sides" in {
+    val left = DistCollection.ofIntPairs(
+      Array(1, 2, 3, 4, 5),
+      Array(10, 20, 5, -1, 7),
+      partitions,
+    )
+    val right = DistCollection.ofIntPairs(
+      Array(1, 1, 2, 3, 4, 5),
+      Array(10, 20, 10, 5, 0, 60),
+      partitions,
+    )
+    val filteredLeft = left
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+    val filteredRight = right
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value < 50)
+    val sortJoined = filteredLeft.sortMergeJoin(filteredRight)
+    ColumnarPlanner.lower(sortJoined.plan).map(_.shape).get should include("SortMergeJoin")
+    val sortSum = sortJoined
+      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+      .reduceByKey((left: Long, right: Long) => left + right)
+    val sortOp = ColumnarPlanner.lower(sortSum.plan).get
+    sortOp.shape should startWith("HashAggregate(Exchange(Project(")
+    sortOp.shape should include("HashJoin")
+    sortOp.shape should not include "SortMergeJoin"
+    ColumnarPlanner.tryRun(sortSum.plan).isDefined shouldBe true
+    Task.resetSortMergeJoinRunsForTest()
+    val summed = sortSum.collect().toMap
+    Task.sortMergeJoinRunsForTest shouldBe 0
+    summed shouldBe Map(1 -> 20L, 2 -> 20L)
+    CrossEngineShapes.sumChecksum(summed) shouldBe 133L
+    val savedBatch = ScarletConf.get
+    ScarletConf.set(savedBatch.copy(columnarBatchSize = 1))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      sortSum.collect().toMap shouldBe summed
+    finally ScarletConf.set(savedBatch)
+    val savedRow = ScarletConf.get
+    ScarletConf.set(savedRow.copy(columnarExecution = false))
+    val rowSum = sortSum.collect().toMap
+    ScarletConf.set(savedRow)
+    summed shouldBe rowSum
+    val changed = sortJoined
+      .map { case (key, (leftValue, _)) => (leftValue, key.toLong) }
+      .reduceByKey((left: Long, right: Long) => left + right)
+    ColumnarPlanner.lower(changed.plan).map(_.shape).get should include(
+      "HashAggregate(Exchange(Project(",
+    )
+    changed.collect().toMap shouldBe Map(10 -> 2L, 20 -> 2L)
+    val broadcastJoined = filteredLeft.broadcastJoin(filteredRight)
+    ColumnarPlanner.lower(broadcastJoined.plan).map(_.shape).get should include("BroadcastJoin")
+    val broadcastSum = broadcastJoined
+      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+      .reduceByKey((left: Long, right: Long) => left + right)
+    val broadcastShape = ColumnarPlanner.lower(broadcastSum.plan).map(_.shape).get
+    broadcastShape should startWith("HashAggregate(Exchange(Project(")
+    broadcastShape should not include "BroadcastJoin"
+    broadcastSum.collect().toMap shouldBe summed
+    val maximized = sortJoined
+      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+      .reduceByKey((left: Long, right: Long) => math.max(left, right))
+    ColumnarPlanner.tryRun(maximized.plan).isEmpty shouldBe true
+    val nested = sortJoined
+      .map { case (key, pair) => (key, pair) }
+      .reduceByKey((left: (Int, Int), right: (Int, Int)) =>
+        (left._1 + right._1, left._2 + right._2),
+      )
+    ColumnarPlanner.tryRun(nested.plan).isEmpty shouldBe true
+    ColumnarPlanner.lower(nested.plan).foreach { op =>
+      val declined = intercept[ColumnarFallback] {
+        ColumnarInterpreter.interpret(nested.plan, op)
+      }
+      declined.getMessage should include("(Int, Long)")
+    }
+    val savedNested = ScarletConf.get
+    ScarletConf.set(savedNested.copy(columnarExecution = false))
+    val rowPairs = nested.collect().toMap
+    ScarletConf.set(savedNested)
+    nested.collect().toMap shouldBe rowPairs
+    rowPairs shouldBe Map(1 -> (20, 30), 2 -> (20, 10))
+    val scan = PhysicalOp.Scan(PhysicalOp.Kind.Pairs, Seq.empty)
+    val bare = PhysicalOp.Project(PhysicalOp.SortMergeJoin(scan, scan))
+    ReduceByKeyLowering.apply(bare).isEmpty shouldBe true
+    val oneSide = PhysicalOp.Project(
+      PhysicalOp.SortMergeJoin(PhysicalOp.Exchange(scan), scan),
+    )
+    ReduceByKeyLowering.apply(oneSide).isEmpty shouldBe true
+    val between = PhysicalOp.Project(
+      PhysicalOp.Filter(
+        PhysicalOp.SortMergeJoin(PhysicalOp.Exchange(scan), PhysicalOp.Exchange(scan)),
+        PhysicalOp.Slot.TripleRow,
+      ),
+    )
+    ReduceByKeyLowering.apply(between).isEmpty shouldBe true
+  }
+
   "a generic value sort" should "decline tryRun and stay off the columnar arm" in {
     val data = filtered(topKeys, topValues)
     val plan = data

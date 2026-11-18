@@ -572,19 +572,12 @@ private[execution] object ColumnarInterpreter:
           Plan.JoinOp(left, right, strategy),
           PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
         ) if JoinLowering.acceptsShuffleHash(strategy) =>
-      // Boundary guard: take refuses a join, so a selector never reaches this arm.
-      require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-      Columns.Triples(
-        JoinArms.inner(
-          left,
-          right,
-          leftOp,
-          rightOp,
-          selectedPartition,
-          preserveAbsence,
-          ordinals,
-        ),
-      )
+      hashJoinTriples(left, right, leftOp, rightOp, selectedPartition, preserveAbsence, ordinals)
+    case (
+          Plan.JoinOp(left, right, strategy),
+          PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
+        ) if JoinLowering.hintedInnerHashed(strategy) =>
+      hashJoinTriples(left, right, leftOp, rightOp, selectedPartition, preserveAbsence, ordinals)
     case (
           Plan.JoinOp(left, right, strategy),
           PhysicalOp.LongHashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
@@ -930,6 +923,29 @@ private[execution] object ColumnarInterpreter:
       throw new IllegalStateException(
         s"physical tree does not match ${plan.getClass.getSimpleName}",
       )
+
+  /** Hash join of two exchanges. A selector never reaches this arm: take refuses a join. */
+  private def hashJoinTriples(
+      left: Plan[_],
+      right: Plan[_],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): Columns =
+    require(selectedPartition.isEmpty, "a partition selector cannot run a join")
+    Columns.Triples(
+      JoinArms.inner(
+        left,
+        right,
+        leftOp,
+        rightOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
+      ),
+    )
 
   private def interpretPipeline(
       plan: Plan[_],
