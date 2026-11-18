@@ -9,14 +9,17 @@ import com.ewoodbury.scarlet.core.Plan
  * to [[PhysicalOp.SortByIntKey]]. [[Plan.SortByIntValueDescOp]] lowers for the same child shape to
  * [[PhysicalOp.SortByIntValueDesc]]. [[Plan.SortByLongKeyOp]] and [[Plan.SortByStringKeyOp]] lower
  * for the same shape on long pairs and string pairs, to [[PhysicalOp.SortByLongKey]] and
- * [[PhysicalOp.SortByStringKey]]. A map, aggregate, or join under any of these sorts stays on the
- * row path. A filter whose child is not that scan does not lower. [[acceptsAsChild]] refuses every
- * sort, so a join, aggregate, or projection above a sort stays on the row path. One row filter
- * above an int, long, or string key sort is admitted only for a fully present key column. A slot
- * filter, including a long-pair row filter and a whole-row string filter, sorts the survivor
- * index. Over the budget, with spill on, that index is spilled. A long sort spills through the
- * same budget as an int sort. The physical op stays [[PhysicalOp.SortByLongKey]]. A string sort
- * spills through that same budget. The physical op stays [[PhysicalOp.SortByStringKey]].
+ * [[PhysicalOp.SortByStringKey]]. An int pair project under `sortByIntKey` lowers when its kind
+ * stays pairs, so column 0 is still the int key. A map, aggregate, or join under the long sort,
+ * the string sort, or `sortByIntValueDesc` stays on the row path. A map above `sortByIntKey` stays
+ * on the row path. A filter whose child is not that scan does not lower. [[acceptsAsChild]]
+ * refuses every sort, so a join, aggregate, or projection above a sort stays on the row path. One
+ * row filter above an int, long, or string key sort is admitted only for a fully present key
+ * column. A slot filter, including a long-pair row filter and a whole-row string filter, sorts the
+ * survivor index. Over the budget, with spill on, that index is spilled. A long sort spills
+ * through the same budget as an int sort. The physical op stays [[PhysicalOp.SortByLongKey]]. A
+ * string sort spills through that same budget. The physical op stays
+ * [[PhysicalOp.SortByStringKey]].
  *
  * The sorts share one ordering tag: range distribution on the row key, ascending by effective key.
  * A null int or long key orders as zero and stays null. A null string key orders as `""` and stays
@@ -37,7 +40,7 @@ private[execution] object SortLowering:
       lowerPlan: Plan[_] => Option[PhysicalOp],
   ): Option[PhysicalOp] =
     lowerPlan(source) match
-      case Some(child) if acceptsScanOrFilters(child, PhysicalOp.Kind.Pairs) =>
+      case Some(child) if intKeySortChild(child) =>
         Some(PhysicalOp.SortByIntKey(child))
       case Some(child) =>
         LoweringTrace.note("SortByIntKeyOp", child.kind, "SortLowering")
@@ -87,6 +90,19 @@ private[execution] object SortLowering:
       case None =>
         LoweringTrace.noteIfEmpty("SortByStringKeyOp", "SortLowering")
         None
+
+  /**
+   * A scan of int pairs, filters over that scan, or an int-pair project whose child is one of
+   * those. Column 0 stays the int key after the project. A value-desc sort does not use this.
+   */
+  private def intKeySortChild(op: PhysicalOp): Boolean = op match
+    case PhysicalOp.Scan(PhysicalOp.Kind.Pairs, _) => true
+    case PhysicalOp.Filter(child, _) => intKeySortChild(child)
+    case PhysicalOp.Project(child) =>
+      child.kind match
+        case PhysicalOp.Kind.Pairs => intKeySortChild(child)
+        case _ => false
+    case _ => false
 
   /**
    * A scan of `kind`, or filters over that scan. A map, aggregate, or join is not a sort child.

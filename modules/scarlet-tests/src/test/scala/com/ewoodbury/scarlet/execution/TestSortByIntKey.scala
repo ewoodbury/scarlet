@@ -243,7 +243,8 @@ class TestSortByIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       .filter((pair: (Int, Int)) => pair._2 != 20)
       .filter((pair: (Int, Int)) => pair._1 > 0)
 
-    ColumnarPlanner.partitioning(mapped.plan) shouldBe Option.empty[PartitioningInfo]
+    ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some("SortByIntKey(Project(Scan))")
+    collect(mapped) shouldBe rowCollect(mapped)
     ColumnarPlanner.partitioning(rewritten.plan) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.partitioning(sorted.keys.plan) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.partitioning(sorted.values.plan) shouldBe Option.empty[PartitioningInfo]

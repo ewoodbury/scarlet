@@ -5,12 +5,13 @@ package com.ewoodbury.scarlet.execution
  *
  * [[ColumnarPlanner]] uses [[declaredElement]] when a project or `mapValues` must declare the
  * column's signature. `Int => Int` is `apply$mcII$sp`, `Long => Long` is `apply$mcJJ$sp`,
- * `Double => Double` is `apply$mcDD$sp`, `String => String` is `apply`, and `(Int, Int) => (Int,
- * Int)` is `apply(Tuple2): Tuple2`. Erasure gives that same `apply` to a long or string pair
- * function. The pair kernel declines a cell that is not an int. The check reads method descriptors
- * and does not call the function. A primitive specialized apply is not a bridge. `Boolean` has no
- * specialized apply, so [[declaredElement]] is false for that kind and does not inspect the
- * function.
+ * `Double => Double` is `apply$mcDD$sp`, `String => String` is `apply`, and a pair function is
+ * `apply(Tuple2): Tuple2`. Erasure gives that same `apply` to `(Int, Int)`, `(Long, Long)`, and
+ * `(String, Int)`. The child kind selects the kernel. Each kernel declines a cell of the wrong
+ * type, and the string kernel also declines a key the input dictionary does not hold. The check
+ * reads method descriptors and does not call the function. A primitive specialized apply is not a
+ * bridge. `Boolean` has no specialized apply, so [[declaredElement]] is false for that kind and
+ * does not inspect the function.
  */
 private[execution] object FunctionWitness:
 
@@ -36,7 +37,7 @@ private[execution] object FunctionWitness:
       )
     case PhysicalOp.Kind.Strings =>
       declaredSignature(function, "apply", classOf[String], classOf[String], allowBridge = true)
-    case PhysicalOp.Kind.Pairs =>
+    case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs =>
       declaredSignature(
         function,
         "apply",
@@ -44,9 +45,8 @@ private[execution] object FunctionWitness:
         classOf[scala.Tuple2[Any, Any]],
         allowBridge = true,
       )
-    case PhysicalOp.Kind.Bools | PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongPairs |
-        PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs |
-        PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
+    case PhysicalOp.Kind.Bools | PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongCounts |
+        PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums =>
       false

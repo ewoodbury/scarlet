@@ -1007,10 +1007,21 @@ private[execution] object ColumnarInterpreter:
       Columns.Pairs(onEachMorsel(parts) { morsel =>
         IntPairProject.project(morsel.batch, morsel.start, morsel.length, adapted)
       })
-    case Columns.Bools(_) | Columns.LongPairs(_) | Columns.LongCounts(_) | Columns.CountSums(_) |
-        Columns.LongTriples(_) | Columns.StringPairs(_) | Columns.StringTriples(_) |
-        Columns.Outer(_, _) | Columns.GroupedInts(_) | Columns.GroupedStrings(_) |
-        Columns.GroupedLongs(_) =>
+    case Columns.LongPairs(parts) =>
+      // Same witness as the int pair. A cell that is not a long throws before publish.
+      val adapted = LongPairProject.adapt(mapper)
+      Columns.LongPairs(onEachMorsel(parts) { morsel =>
+        LongPairProject.project(morsel.batch, morsel.start, morsel.length, adapted)
+      })
+    case Columns.StringPairs(parts) =>
+      // Shares the input dictionary. A key that dictionary does not hold throws before publish.
+      val adapted = StringPairProject.adapt(mapper)
+      Columns.StringPairs(onEachMorsel(parts) { morsel =>
+        StringPairProject.project(morsel.batch, morsel.start, morsel.length, adapted)
+      })
+    case Columns.Bools(_) | Columns.LongCounts(_) | Columns.CountSums(_) | Columns.LongTriples(_) |
+        Columns.StringTriples(_) | Columns.Outer(_, _) | Columns.GroupedInts(_) |
+        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
       throw new IllegalStateException(
         s"columnar map expects ${elementColumnList(includeBooleans = false)}",
       )

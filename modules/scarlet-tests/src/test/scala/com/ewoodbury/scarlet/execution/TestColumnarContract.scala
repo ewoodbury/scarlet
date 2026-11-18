@@ -25,12 +25,13 @@ class TestColumnarContract
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    accepted.size shouldBe 223
+    accepted.size shouldBe 228
     // A null key refuses the shape rather than excluding it. Outer joins are covered by execution
     // tests, not contract fixtures, because the contract does not track the int refusals either.
-    // A type-changing pair map lowers and declines at tryRun, so it is in neither list.
-    excluded.size shouldBe 34
-    (accepted.size + excluded.size) shouldBe 257
+    // A type-changing pair map lowers and declines at tryRun, so it is in neither list. A string
+    // pair map whose key is not in the input dictionary lowers and declines the same way.
+    excluded.size shouldBe 40
+    (accepted.size + excluded.size) shouldBe 268
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -96,6 +97,10 @@ class TestColumnarContract
     val mapValues = Plan.MapValuesOp(pairSource, (value: Int) => value + 1)
     val mapIntKey = Plan.MapIntKeyOp(pairSource, (key: Int) => key % 100)
     val pairMap = Plan.MapOp(pairSource, (pair: (Int, Int)) => (pair._1 + 1, pair._2 + pair._1))
+    val longPairMap =
+      Plan.MapOp(longPairSource, (pair: (Long, Long)) => (pair._1 + 1L, pair._2))
+    val stringPairMap =
+      Plan.MapOp(stringKeySource, (pair: (String, Int)) => (pair._1, pair._2 + 1))
     val mappedKeys = Plan.MapOp(keys, (key: Int) => key + 1)
     val mappedValues = Plan.MapOp(values, (value: Int) => value + 1)
     val filteredMapValues = Plan.FilterValuesOp(mapValues, (value: Int) => value > 0)
@@ -406,6 +411,36 @@ class TestColumnarContract
         Plan.CountByKeyOp(pairMap),
         hashedInfo(layout),
         Some("CountByKey(Exchange(Project(Scan)))"),
+      ),
+      AcceptedCase(
+        "long pair map",
+        longPairMap,
+        narrowInfo(2, layout),
+        Some("Project(Scan)"),
+      ),
+      AcceptedCase(
+        "countByKey of long pair map",
+        Plan.CountByKeyOp(longPairMap),
+        hashedInfo(layout),
+        Some("CountByKey(Exchange(Project(Scan)))"),
+      ),
+      AcceptedCase(
+        "string pair map",
+        stringPairMap,
+        narrowInfo(1, stringPairLayout),
+        Some("Project(Scan)"),
+      ),
+      AcceptedCase(
+        "countByKey of string pair map",
+        Plan.CountByKeyOp(stringPairMap),
+        hashedInfo(stringPairLayout),
+        Some("CountByKey(Exchange(Project(Scan)))"),
+      ),
+      AcceptedCase(
+        "sortByIntKey of int pair map",
+        Plan.SortByIntKeyOp(pairMap),
+        rangeSortedInfo(layout),
+        Some("SortByIntKey(Project(Scan))"),
       ),
       AcceptedCase(
         "countByKey long",
@@ -789,6 +824,50 @@ class TestColumnarContract
             (value: Int) => value.toString,
           ),
           (value: String) => value.nonEmpty,
+        ),
+      ),
+      // The function can replace column 0, so a project would inherit a false Sorted tag.
+      ExcludedCase(
+        "map above sortByIntKey replaces the key",
+        Plan.MapOp(
+          Plan.SortByIntKeyOp(pairSource),
+          (pair: (Int, Int)) => (pair._1, pair._2),
+        ),
+      ),
+      // This admission is the int pair key only. Column 0 of a long project is not that sort.
+      ExcludedCase(
+        "long pair map under sortByLongKey",
+        Plan.SortByLongKeyOp(
+          Plan.MapOp(longPairSource, (pair: (Long, Long)) => (pair._1, pair._2)),
+        ),
+      ),
+      // Int pair key only. A changed string key may also be unable to share the dictionary.
+      ExcludedCase(
+        "string pair map under sortByStringKey",
+        Plan.SortByStringKeyOp(
+          Plan.MapOp(stringKeySource, (pair: (String, Int)) => (pair._1, pair._2 + 1)),
+        ),
+      ),
+      // MapValue is not the pair project this sort admits.
+      ExcludedCase(
+        "mapValues under sortByIntKey",
+        Plan.SortByIntKeyOp(Plan.MapValuesOp(pairSource, (value: Int) => value + 1)),
+      ),
+      // Value-desc order is columns 1 then 0. This admission resolves column 0 only.
+      ExcludedCase(
+        "int pair map under sortByIntValueDesc",
+        Plan.SortByIntValueDescOp(
+          Plan.MapOp(pairSource, (pair: (Int, Int)) => (pair._2, pair._1)),
+        ),
+      ),
+      // The map can introduce a null key. The row filter keeps it; the pair-row kernel drops it.
+      ExcludedCase(
+        "filter over sort of an int pair map",
+        Plan.FilterOp(
+          Plan.SortByIntKeyOp(
+            Plan.MapOp(pairSource, (pair: (Int, Int)) => (pair._1, pair._2)),
+          ),
+          (pair: (Int, Int)) => pair._2 > 0,
         ),
       ),
     )

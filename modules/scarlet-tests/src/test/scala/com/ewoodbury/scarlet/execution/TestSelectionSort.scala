@@ -280,7 +280,7 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     assertFewerBatches(sorted, filtered, source)
   }
 
-  "a scan" should "take the dense path, and a map under the sort should stay on the row path" in {
+  "a scan" should "take the dense path, and an int pair map under the sort should lower" in {
     val source = pairs
     val sorted = source.sortByIntKey
     val mapped = source.map((pair: (Int, Int)) => (pair._1, pair._2)).sortByIntKey
@@ -298,7 +298,8 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       )
     }
     published(sorted.collect()) shouldBe direct
-    ColumnarPlanner.lower(mapped.plan) shouldBe Option.empty[PhysicalOp]
+    ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some("SortByIntKey(Project(Scan))")
+    collect(mapped) shouldBe row(mapped.collect().toSeq)
   }
 
   "sortAndSplitSelected" should "match sortAndSplit of the materialised prefix" in {

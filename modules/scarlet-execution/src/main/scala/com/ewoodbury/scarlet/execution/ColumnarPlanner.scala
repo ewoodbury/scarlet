@@ -26,10 +26,11 @@ object ColumnarPlanner:
    * physical tree and that tree's layout is valid. `None` means the plan is not accepted, which is
    * the row path. There is no second layout source. A string filter or map reports
    * [[Layout.Utf8Dict]]. An int, long, boolean, double, or int-pair plan reports
-   * [[Layout.Columnar]]. A long-pair plan reports that layout too. An `(Int, Int)` pair map whose
-   * function declares `apply(Tuple2): Tuple2` is accepted and stays [[PhysicalOp.Kind.Pairs]]. A
-   * long-pair or string-pair map is `None`. Erasure also accepts `(Long, Int)`; the kernel
-   * declines that cell.
+   * [[Layout.Columnar]]. A long-pair plan reports that layout too. An `(Int, Int)`,
+   * `(Long, Long)`, or `(String, Int)` pair map whose function declares `apply(Tuple2): Tuple2` is
+   * accepted and stays that kind. Erasure does not separate those three. The child kind selects
+   * the kernel. Each kernel declines a cell of the wrong type. A string map that needs a new
+   * dictionary key declines instead of interning.
    */
   def partitioning[A](plan: Plan[A]): Option[PartitioningInfo] =
     accepted(plan).map(infoOf)
@@ -68,9 +69,12 @@ object ColumnarPlanner:
    * or right outer join, or an int sort-merge left outer join, stays a clear validity bit and
    * [[tryRun]] keeps the row. A null value on a full outer join, a sort-merge right outer join, or
    * a sort-merge full outer join makes [[tryRun]] return `None`. [[SortLowering]] accepts an int,
-   * long, or string key sort of a scan, or of filters over that scan. A map, aggregate, or join
-   * under the sort stays on the row path. One filter above an int, long, or string key sort lowers
-   * to [[PhysicalOp.Filter]] on [[PhysicalOp.Slot.Row]] around that sort, and only for a fully
+   * long, or string key sort of a scan, or of filters over that scan. An int pair project under
+   * `sortByIntKey` lowers when the kind stays [[PhysicalOp.Kind.Pairs]], so column 0 is still the
+   * key. A map above that sort stays on the row path: the project would inherit a sorted tag for a
+   * key the function can replace. A long map, a string map, `mapValues`, and a value-desc sort of
+   * a map stay on the row path. One filter above an int, long, or string key sort lowers to
+   * [[PhysicalOp.Filter]] on [[PhysicalOp.Slot.Row]] around that sort, and only for a fully
    * present key column. The pair-row filter drops a null key while the row path keeps it. The sort
    * is [[SortLowering.lowerInt]], [[SortLowering.lowerLong]], or [[SortLowering.lowerString]], not
    * [[lowerChild]]. [[SortLowering.acceptsAsChild]] stays false, so a null key, a second filter, a
@@ -889,10 +893,12 @@ object ColumnarPlanner:
         PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums =>
       None
 
-  /** A whole-row string filter. A project still refuses the chain. */
+  /** A whole-row string filter, or a string pair project that declares `Tuple2 => Tuple2`. */
   private def lowerStringRow(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
     step match
       case ElementStep.Filter(_) => Some(PhysicalOp.Filter(child, PhysicalOp.Slot.Row))
+      case ElementStep.Project(mapper) if returnsStringPair(mapper) =>
+        Some(PhysicalOp.Project(child))
       case ElementStep.Project(_) => None
 
   private def lowerElementStep(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
@@ -916,6 +922,8 @@ object ColumnarPlanner:
             case PhysicalOp.Kind.Triples if child.isInnerTriple =>
               Some(PhysicalOp.Project(child))
             case PhysicalOp.Kind.Pairs if returnsIntPair(mapper) =>
+              Some(PhysicalOp.Project(child))
+            case PhysicalOp.Kind.LongPairs if returnsLongPair(mapper) =>
               Some(PhysicalOp.Project(child))
             case _ => None
 
@@ -1011,12 +1019,18 @@ object ColumnarPlanner:
     FunctionWitness.declaredElement(PhysicalOp.Kind.Ints, function)
 
   /**
-   * `Tuple2 => Tuple2` via [[FunctionWitness]], the same witness shape as [[returnsUnboxedInt]].
-   * Erasure does not separate `(Int, Int)` from `(Long, Int)`. The pair kernel declines a cell
-   * that is not an int. This does not call `function` and does not read its body.
+   * `Tuple2 => Tuple2` via [[FunctionWitness]]. Erasure does not separate `(Int, Int)`,
+   * `(Long, Long)`, and `(String, Int)`. The child kind selects the kernel. Each kernel declines a
+   * wrong cell. This does not call `function` and does not read its body.
    */
   private def returnsIntPair(function: Any): Boolean =
     FunctionWitness.declaredElement(PhysicalOp.Kind.Pairs, function)
+
+  private def returnsLongPair(function: Any): Boolean =
+    FunctionWitness.declaredElement(PhysicalOp.Kind.LongPairs, function)
+
+  private def returnsStringPair(function: Any): Boolean =
+    FunctionWitness.declaredElement(PhysicalOp.Kind.StringPairs, function)
 
   /** Unboxed `Long => Long` via [[FunctionWitness]], same as a long element project. */
   private def returnsUnboxedLong(function: Any): Boolean =

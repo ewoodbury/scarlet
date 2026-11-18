@@ -324,12 +324,20 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     countsOf(sameKey.collect()) shouldBe Map(1 -> 2, 2 -> 1, 3 -> 1)
     countsOf(sameKey.collect()) shouldBe countsOf(row(sameKey.collect()))
 
-    val longPairs = DistCollection.ofLongPairs(Array(1L, 2L), Array(10L, 20L), 1)
-    ColumnarPlanner.lower(longPairs.map((pair: (Long, Long)) => (pair._1, pair._2)).plan) shouldBe
-      None
-    val strings = DistCollection(Seq("a" -> 1, "b" -> 2), 1)
-    ColumnarPlanner.lower(strings.map((pair: (String, Int)) => (pair._1, pair._2)).plan) shouldBe
-      None
+    val longPairs = DistCollection.ofLongPairs(Array(1L, 2L, 1L), Array(10L, 20L, 30L), 1)
+    val longChanged = longPairs.map((pair: (Long, Long)) => (pair._1 % 100L, pair._2)).countByKey
+    ColumnarPlanner.lower(longChanged.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(Project(Scan)))",
+    )
+    foldsOf(longChanged.plan) shouldBe false
+    countsOf(longChanged.collect()) shouldBe countsOf(row(longChanged.collect()))
+    val strings = DistCollection(Seq("a" -> 1, "b" -> 2, "a" -> 3), 1)
+    val stringChanged = strings.map((pair: (String, Int)) => (pair._1, pair._2 + 1)).countByKey
+    ColumnarPlanner.lower(stringChanged.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(Project(Scan)))",
+    )
+    foldsOf(stringChanged.plan) shouldBe false
+    countsOf(stringChanged.collect()) shouldBe countsOf(row(stringChanged.collect()))
   }
 
   it should "pin the filter-countbykey checksum" in {
