@@ -550,6 +550,17 @@ private[execution] object ColumnarInterpreter:
     case (
           Plan.CountByKeyOp(source),
           PhysicalOp.CountByKey(PhysicalOp.Exchange(child)),
+        ) if PhysicalSchema.isIntLong(child.schema) =>
+      IntLongCount.columns(
+        source,
+        child,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
+      )
+    case (
+          Plan.CountByKeyOp(source),
+          PhysicalOp.CountByKey(PhysicalOp.Exchange(child)),
         ) =>
       CountByKeyArms.columns(source, child, selectedPartition, preserveAbsence, ordinals)
     case (

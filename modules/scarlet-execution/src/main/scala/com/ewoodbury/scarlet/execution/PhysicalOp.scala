@@ -433,12 +433,14 @@ enum PhysicalOp:
    * `countByKey`. The child is an [[PhysicalOp.Exchange]]. The kernel shuffles. A null key is
    * dropped. The value column is not read, so a null value still counts. One `(key, count)` row is
    * published per distinct key, including an empty bucket. Output kind is
-   * [[PhysicalOp.Kind.Pairs]] for a [[PhysicalOp.Kind.Pairs]] child,
-   * [[PhysicalOp.Kind.LongCounts]] for a [[PhysicalOp.Kind.LongPairs]] child, and
-   * [[PhysicalOp.Kind.StringPairs]] for a [[PhysicalOp.Kind.StringPairs]] child. Any other child
-   * is a planner bug. The count is an `Int` and wraps. A long count is `[Int64, Int32]`. The long
-   * estimate charges 8-byte keys. The string estimate charges dictionary bytes. With spill off, an
-   * input that does not fit the budget throws
+   * [[PhysicalOp.Kind.Pairs]] for a [[PhysicalOp.Kind.Pairs]] child and for a triple
+   * [[PhysicalOp.Project]] whose schema is `[Int32, Int64]`. That project keeps kind
+   * [[PhysicalOp.Kind.Triples]]; the count still publishes int pairs and reads only the projected
+   * key. A [[PhysicalOp.Kind.LongPairs]] child publishes [[PhysicalOp.Kind.LongCounts]], and a
+   * [[PhysicalOp.Kind.StringPairs]] child publishes [[PhysicalOp.Kind.StringPairs]]. Any other
+   * child is a planner bug. The count is an `Int` and wraps. A long count is `[Int64, Int32]`. The
+   * long estimate charges 8-byte keys. The string estimate charges dictionary bytes. With spill
+   * off, an input that does not fit the budget throws
    * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] before the table is allocated, and the
    * action fails instead of rerunning on rows. With spill on, an over-budget post-exchange bucket
    * spills. A count table that still does not fit throws
@@ -561,14 +563,16 @@ enum PhysicalOp:
           )
     case GroupedDecode(child) => child.kind
     case CountByKey(child) =>
-      child.kind match
-        case PhysicalOp.Kind.Pairs => PhysicalOp.Kind.Pairs
-        case PhysicalOp.Kind.LongPairs => PhysicalOp.Kind.LongCounts
-        case PhysicalOp.Kind.StringPairs => PhysicalOp.Kind.StringPairs
-        case other =>
-          throw new IllegalStateException(
-            s"countByKey column is $other, expected int, long, or string pairs",
-          )
+      if (PhysicalSchema.isIntLong(child.schema)) then PhysicalOp.Kind.Pairs
+      else
+        child.kind match
+          case PhysicalOp.Kind.Pairs => PhysicalOp.Kind.Pairs
+          case PhysicalOp.Kind.LongPairs => PhysicalOp.Kind.LongCounts
+          case PhysicalOp.Kind.StringPairs => PhysicalOp.Kind.StringPairs
+          case other =>
+            throw new IllegalStateException(
+              s"countByKey column is $other, expected int, long, or string pairs",
+            )
     case CountSum(_) => PhysicalOp.Kind.CountSums
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
     case JoinProbeSum(_, _, _) => PhysicalOp.Kind.IntLongSums
