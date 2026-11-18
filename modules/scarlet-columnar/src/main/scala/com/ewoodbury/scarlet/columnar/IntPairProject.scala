@@ -45,6 +45,13 @@ object IntPairProject:
     def applyNulls(): Any
 
   /**
+   * One present projected pair. A null key or a null value is not passed. The caller owns the
+   * group.
+   */
+  private[scarlet] trait IntPairSink:
+    def add(key: Int, value: Int): Unit
+
+  /**
    * Adapts a `Tuple2 => Tuple2`. The cast is not a call. A hidden lambda and an anonymous
    * `Function1` both land here after the declared `apply` check. Each absent apply builds the pair
    * the row path would pass, so a null stays null instead of unboxing to `0`.
@@ -220,6 +227,101 @@ object IntPairProject:
       offer(projected, add)
       row += 1
     }
+
+  /**
+   * Runs `mapper` on `[start, start + length)` and passes each present projected pair to `sink`.
+   *
+   * The calls match [[project]]: a null key and a null value are passed in, and an empty range
+   * does not call `mapper`. A null projected key is dropped. A null projected value is dropped and
+   * does not create a group. A result that is not a pair of ints throws [[ColumnarFallback]] and
+   * publishes nothing. This does not allocate an output column. [[visitKeys]] stays count-only.
+   */
+  private[scarlet] def visitPairs(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      mapper: IntPairMap,
+      sink: IntPairSink,
+  ): Unit =
+    require(
+      batch.columns.length == 2,
+      s"pair project expected 2 columns, got ${batch.columns.length}",
+    )
+    val keys = int32At(batch, 0)
+    val values = int32At(batch, 1)
+    require(keys.length == values.length, "key and value columns differ in length")
+    Ranges.check(start, length, keys.length)
+    if (length == 0) then ()
+    else if (
+        Validity.rangePresent(keys.validity, start, length) &&
+        Validity.rangePresent(values.validity, start, length)
+      )
+    then visitPairsDense(keys, values, start, length, mapper, sink)
+    else visitPairsSparse(keys, values, start, length, mapper, sink)
+
+  private def visitPairsDense(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      mapper: IntPairMap,
+      sink: IntPairSink,
+  ): Unit =
+    val keyArr = keys.values
+    val valueArr = values.values
+    val end = start + length
+    var row = start
+    while (row < end) {
+      offerPair(mapper(keyArr(row), valueArr(row)), sink)
+      row += 1
+    }
+
+  private def visitPairsSparse(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      mapper: IntPairMap,
+      sink: IntPairSink,
+  ): Unit =
+    val keyArr = keys.values
+    val valueArr = values.values
+    val keyIn = keys.validity.words
+    val valueIn = values.validity.words
+    val end = start + length
+    var row = start
+    while (row < end) {
+      val keyOn = Validity.isSet(keyIn, row)
+      val valueOn = Validity.isSet(valueIn, row)
+      val projected =
+        if (keyOn && valueOn) then mapper(keyArr(row), valueArr(row))
+        else if (keyOn) then mapper.applyNullValue(keyArr(row))
+        else if (valueOn) then mapper.applyNullKey(valueArr(row))
+        else mapper.applyNulls()
+      offerPair(projected, sink)
+      row += 1
+    }
+
+  /**
+   * Keeps a present key and a present value. A null key is dropped. A null value is dropped and
+   * does not create a group. A cell that is not an int declines, and the value is checked first.
+   */
+  private def offerPair(projected: Any, sink: IntPairSink): Unit =
+    projected match
+      case null => decline("null")
+      case row: Product if row.productArity == 2 =>
+        val valueCell = row.productElement(1)
+        valueCell match
+          case null | _: Int => ()
+          case other => decline(foundName(other))
+        row.productElement(0) match
+          case null => ()
+          case key: Int =>
+            valueCell match
+              case value: Int => sink.add(key, value)
+              case _ => ()
+          case other => decline(foundName(other))
+      case other => decline(foundName(other))
 
   /** Keeps a present key. A null key is dropped. The value is only a type check. */
   private def offer(projected: Any, add: Int => Unit): Unit =

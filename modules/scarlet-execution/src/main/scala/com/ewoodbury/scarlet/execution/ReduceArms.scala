@@ -12,9 +12,13 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * one. A long key, value, or row stack folds those predicates into the partial table and does not
  * build the index. An owned long-pair source is read in place. A boxed source is still encoded,
  * which is what keeps a null key. An int-pair row filter and a whole-row string filter still use
- * the index. The exchange sees dense partials. A map, a scan, and a non-pair child stay on the
- * dense reduce. The `None` path is the only one that interprets a child the fold did not already
- * scan.
+ * the index. The exchange sees dense partials. An int-pair [[PhysicalOp.Project]] is reduced from
+ * that project's input morsels. The interpreter's adapter runs on every row, and a present
+ * projected key and value are inserted into the [[HashReduce]] table. The pair batch is not
+ * published, and [[HashReduce.byKey]] is not called. The function is not inspected. A null
+ * projected key is dropped. A null projected value is dropped and does not create a group. A long
+ * or string project stays on its own arm. A scan and a non-pair child stay on the dense reduce.
+ * The `None` path is the only one that interprets a child the fold did not already scan.
  */
 private[execution] object ReduceArms:
 
@@ -31,30 +35,84 @@ private[execution] object ReduceArms:
     // Named erasure boundary. Grouped pair reduction declares `(Int, Int) => Int`.
     @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
     val op = reduceFunc.asInstanceOf[(Int, Int) => Int]
-    // A slot-filter stack scans survivor ids, including one filter. An int-pair row filter does
-    // the same. The `None` path is the only one that interprets that child.
+    // A slot-filter stack scans survivor ids, including one filter. An int-pair project reduces
+    // from the input morsels and does not publish. The `None` path interprets any other child.
     val binOp: HashReduce.IntBinOp = (left: Int, right: Int) => op(left, right)
     val width = ColumnarPlanner.shuffleWidth
     val workers = ColumnarPlanner.parallelism
     val batchSize = ColumnarPlanner.batchSize
-    val reduced = FilterChain.selected(
+    val reduced = reduceProjected(
       source,
       child,
+      binOp,
       selectedPartition,
       preserveAbsence,
       ordinals,
-    ) match
-      case Some(parts) =>
-        HashReduce.byKeySelected(parts, width, workers, batchSize, binOp)
-      case None =>
-        HashReduce.byKey(
-          pairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)),
-          width,
-          workers,
-          batchSize,
-          binOp,
-        )
+      width,
+      workers,
+      batchSize,
+    ).getOrElse {
+      FilterChain.selected(
+        source,
+        child,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
+      ) match
+        case Some(parts) =>
+          HashReduce.byKeySelected(parts, width, workers, batchSize, binOp)
+        case None =>
+          HashReduce.byKey(
+            pairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)),
+            width,
+            workers,
+            batchSize,
+            binOp,
+          )
+    }
     Columns.Pairs(reduced)
+
+  /**
+   * One pair [[Plan.MapOp]]. The input of the project is interpreted, then each morsel is reduced
+   * through [[IntPairProject.visitPairs]]. `None` when this child is not that project. A null key
+   * and a null value are passed to the adapter. A null projected key is dropped. A null projected
+   * value is dropped and does not create a group. [[HashReduce.byKey]] is not called.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def reduceProjected(
+      source: Plan[_],
+      child: PhysicalOp,
+      binOp: HashReduce.IntBinOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    (source, child) match
+      case (Plan.MapOp(inner, fn), PhysicalOp.Project(under)) if intPairs(child) =>
+        val adapted = IntPairProject.adapt(fn)
+        val columns =
+          try interpretAt(inner, under, selectedPartition, preserveAbsence, ordinals)
+          catch
+            case _: NullPointerException =>
+              throw new ColumnarFallback("reduceByKey source has a null pair component")
+        columns match
+          case Columns.Pairs(batches) if batches.nonEmpty =>
+            Some(
+              ProjectedPairReduce.reduce(batches, adapted, width, workers, batchSize, binOp),
+            )
+          case Columns.Pairs(_) =>
+            throw new IllegalStateException("columnar pairs have no partitions")
+          case _ =>
+            throw new IllegalStateException("pair project reduce expected int pairs")
+      case _ => None
+
+  /** An int-pair project. A long or string project stays on its own arm. */
+  private def intPairs(op: PhysicalOp): Boolean = op.kind match
+    case PhysicalOp.Kind.Pairs => true
+    case _ => false
 
   def longByKey[V](
       source: Plan[_],

@@ -8,8 +8,8 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.{BatchCodec, HashJoin}
-import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
+import com.ewoodbury.scarlet.columnar.{BatchCodec, HashJoin, HashReduce, IntPairProject}
+import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /** The columnar path lowers physical trees and fuses short element filter/project runs. */
@@ -334,6 +334,67 @@ class TestPhysicalPlan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     reduced.collect().toMap shouldBe Map(1 -> 5)
   }
 
+  it should "reduce an int pair map without publishing the pair batch" in {
+    val source = DistCollection.ofIntPairs(Array(1, 2, 1, 3), Array(10, 20, 30, 40), 1)
+    val mapped = source.map((pair: (Int, Int)) => (pair._1 + 1, pair._2))
+    val changed = mapped.reduceByKey[Int, Int](_ + _)
+    shape(changed) shouldBe "HashAggregate(Exchange(Project(Scan)))"
+    val expected = Map(2 -> 40, 3 -> 20, 4 -> 40)
+    val atBatch = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      IntPairProject.resetPublishedForTest()
+      HashReduce.resetByKeyForTest()
+      val found = changed.collect().toMap
+      IntPairProject.publishedForTest shouldBe 0
+      HashReduce.byKeyCallsForTest shouldBe 0
+      found
+    }
+    atBatch(8192) shouldBe expected
+    atBatch(1) shouldBe expected
+    atBatch(8192) shouldBe row(changed.collect().toMap)
+
+    IntPairProject.resetPublishedForTest()
+    val projected = mapped.collect()
+    IntPairProject.publishedForTest should be > 0
+    projected.toList.sorted shouldBe List((2, 10), (2, 30), (3, 20), (4, 40))
+
+    val calls = new AtomicInteger
+    val nullable = nullIntKeySource().map(shiftNullKey(calls, nullKey = 7)).reduceByKey[Int, Int](
+      _ + _,
+    )
+    val nullAt = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      calls.set(0)
+      val found = nullable.collect().toMap
+      (found, calls.get)
+    }
+    val (nullSums, nullCalls) = nullAt(8192)
+    nullSums shouldBe Map(2 -> 9, 3 -> 5, 7 -> 17)
+    nullAt(1) shouldBe (nullSums, nullCalls)
+    calls.set(0)
+    row(nullable.collect().toMap) shouldBe nullSums
+    calls.get shouldBe nullCalls
+
+    val valueCalls = new AtomicInteger
+    val values =
+      nullIntValueSource().map(shiftNullKey(valueCalls, nullKey = 7)).reduceByKey[Int, Int](_ + _)
+    val valueAt = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      valueCalls.set(0)
+      val found = values.collect().toMap
+      (found, valueCalls.get)
+    }
+    val (valueSums, valueCount) = valueAt(8192)
+    valueSums shouldBe Map(5 -> 4)
+    valueAt(1) shouldBe (valueSums, valueCount)
+    valueCalls.set(0)
+    val _ = row(values.collect())
+    valueCalls.get shouldBe valueCount
+  }
+
   it should "leave a map into a pair on the row path" in {
     val counted = DistCollection(Seq(1, 1, 2), 1)
       .map(value => (value, 1))
@@ -458,3 +519,73 @@ class TestPhysicalPlan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val columnar = pipelines.map((_, plan) => plan.collect())
     ScarletConf.set(ScarletConf.get.copy(columnarExecution = false))
     columnar shouldBe pipelines.map((_, plan) => plan.collect())
+
+  /**
+   * A null key becomes `nullKey`. A present key is incremented. `productElement` keeps a null
+   * value, so both paths see it. The row path and the pair project call this once per row.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+      "org.wartremover.warts.Throw",
+    ),
+  )
+  private def shiftNullKey(calls: AtomicInteger, nullKey: Int): ((Int, Int)) => (Int, Int) =
+    pair => {
+      val _ = calls.incrementAndGet()
+      val product = pair.asInstanceOf[Product]
+      val value = product.productElement(1)
+      val key = product.productElement(0) match
+        case null => nullKey
+        case present: Int => present + 1
+        case other => throw new IllegalArgumentException(s"pair map saw $other")
+      Tuple2(Int.box(key), value).asInstanceOf[(Int, Int)]
+    }
+
+  /** A present pair witnesses the scan, then a null value. The key stays present. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def nullIntValueSource(): DistCollection[(Int, Int)] =
+    def cell(key: Int, value: Any): (Int, Int) =
+      Tuple2(Int.box(key), value).asInstanceOf[(Int, Int)]
+    DistCollection(Plan.Source(Seq(Partition(Seq(cell(4, 4), cell(1, null))))))
+
+  /**
+   * A present pair witnesses the column. A later null key stays absent. The value is a present
+   * int.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def nullIntKeySource(): DistCollection[(Int, Int)] =
+    def cell(key: Any, value: Int): (Int, Int) =
+      Tuple2(key, Int.box(value)).asInstanceOf[(Int, Int)]
+    DistCollection(
+      Plan.Source(
+        Seq(
+          Partition(Seq(cell(1, 4), cell(null, 9), cell(1, 5), cell(2, -1))),
+          Partition(Seq(cell(2, 6), cell(null, 8))),
+        ),
+      ),
+    )
+
+  private def row[A](body: => A): A =
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(saved.copy(columnarExecution = false))
+      ScarletRuntime.get.shuffle.clear()
+      body
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
