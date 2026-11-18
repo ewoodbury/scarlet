@@ -37,6 +37,9 @@ import com.ewoodbury.scarlet.core.ScarletConf
  *
  * Both paths read the key at ordinal 0 and the value at ordinal 1, and the exchange partitions on
  * that layout. A change to the pair layout has to change both together.
+ *
+ * [[partialPairs]] inserts pairs a caller already projected. It does not read a pair column and is
+ * not [[byKey]]. A null value uses the missing-group rule above.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object LongHashReduce:
@@ -165,6 +168,7 @@ object LongHashReduce:
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    val _ = byKeyCalls.incrementAndGet()
     if (batches.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyLongPairs)
     else
       try
@@ -207,6 +211,33 @@ object LongHashReduce:
         )
         reduceExchanged(combined, numPartitions, parallelism, batchSize, op)
       finally releaseOversized()
+
+  /**
+   * Reduce pairs a caller supplies. No pair column is read.
+   *
+   * `rows` sizes the table the way [[int64]] sizes one morsel. A zero estimate publishes an empty
+   * long-pair batch and does not call `supply`. `supply` receives `add` for a present pair and
+   * `addMissing` for a present key whose value is null. A null key is the caller's to skip. This
+   * is not [[byKey]]: nothing here is a published pair project, and [[byKeyCallsForTest]] does not
+   * move.
+   */
+  private[scarlet] def partialPairs(
+      rows: Int,
+      op: LongBinOp,
+  )(supply: LongPairProject.LongPairSink => Unit): ColumnBatch =
+    require(rows >= 0, s"row estimate must be >= 0, got $rows")
+    if (rows == 0) then ColumnBatches.emptyLongPairs
+    else
+      val table = borrow(rows, op)
+      table.supplyPairs(supply)
+      table.compact()
+
+  /** [[byKey]] entries since the last [[resetByKeyForTest]]. */
+  private[scarlet] def byKeyCallsForTest: Int = byKeyCalls.get
+
+  /** Clears [[byKeyCallsForTest]]. */
+  private[scarlet] def resetByKeyForTest(): Unit =
+    byKeyCalls.set(0)
 
   /**
    * Exchange combined partials and reduce each bucket. Called by the folded long reduce; [[byKey]]
@@ -257,6 +288,7 @@ object LongHashReduce:
   private val allocatedTables = new AtomicLong
   private val reusedTables = new AtomicLong
   private val peakSlots = new AtomicInteger
+  private val byKeyCalls = new AtomicInteger
 
   private val locals: ThreadLocal[Table | Null] = new ThreadLocal[Table | Null]()
 
@@ -581,6 +613,13 @@ object LongHashReduce:
         index += 1
       }
       keep
+
+    /** Hands `add` and `addMissing` to `supply`. The lambda stays inside [[Table]]. */
+    def supplyPairs(supply: LongPairProject.LongPairSink => Unit): Unit =
+      val sink = new LongPairProject.LongPairSink:
+        def add(key: Long, value: Long): Unit = addPresent(key, value)
+        def addMissing(key: Long): Unit = Table.this.addMissing(key)
+      supply(sink)
 
     private def addPresent(key: Long, value: Long): Unit =
       val slot = locateForInsert(key)

@@ -2,6 +2,8 @@ package com.ewoodbury.scarlet.columnar
 
 import java.util.concurrent.atomic.AtomicInteger
 
+import scala.collection.mutable.ListBuffer
+
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -81,6 +83,77 @@ class TestLongPairProject extends AnyFlatSpec with Matchers:
     held.words.toSeq shouldBe before.toSeq
     cells(out) shouldBe Seq("1:10", "null:20", "3:30")
   }
+
+  it should "reduce present pairs and a null value without publishing a column" in {
+    val batch = nullableLongPairs(
+      Seq(
+        (Some(1L), Some(10L)),
+        (None, Some(20L)),
+        (Some(3L), None),
+        (None, None),
+      ),
+    )
+    val calls = new AtomicInteger
+    val sink = new RecordingSink
+    LongPairProject.resetPublishedForTest()
+    LongPairProject.visitPairs(batch, 0, 4, adaptCounted(calls, projectNulls), sink)
+    calls.get() shouldBe 4
+    sink.present.toSeq shouldBe Seq((2L, 10L))
+    sink.missing.toSeq shouldBe Seq(4L)
+    LongPairProject.publishedForTest shouldBe 0
+
+    val dense = BatchCodec.longPairs(Seq((1L, 10L), (2L, 20L)))
+    val denseSink = new RecordingSink
+    val denseCalls = new AtomicInteger
+    LongPairProject.visitPairs(dense, 0, 2, counting(denseCalls, shift), denseSink)
+    denseCalls.get() shouldBe 2
+    denseSink.present.toSeq shouldBe Seq((2L, 11L), (3L, 21L))
+    denseSink.missing shouldBe empty
+    LongPairProject.visitPairs(dense, 2, 0, counting(denseCalls, shift), denseSink)
+    denseCalls.get() shouldBe 2
+    LongPairProject.publishedForTest shouldBe 0
+
+    val dropped = new RecordingSink
+    LongPairProject.visitPairs(
+      BatchCodec.longPairs(Seq((1L, 10L), (2L, 20L))),
+      0,
+      2,
+      dropKey(2L),
+      dropped,
+    )
+    dropped.present.toSeq shouldBe Seq((1L, 10L))
+    dropped.missing shouldBe empty
+
+    val thrown = intercept[ColumnarFallback] {
+      LongPairProject.visitPairs(dense, 0, 1, constant(nullResult), new RecordingSink)
+    }
+    thrown.getMessage should startWith("pair map did not stay (Long, Long)")
+  }
+
+  /** A present key is incremented. A null key stays null. A null value stays null. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+      "org.wartremover.warts.Throw",
+    ),
+  )
+  private def projectNulls(pair: (Long, Long)): (Long, Long) =
+    val product = pair.asInstanceOf[Product]
+    val value = product.productElement(1)
+    product.productElement(0) match
+      case null => erased(null, value)
+      case present: Long => erased(present + 1L, value)
+      case other => throw new IllegalArgumentException(s"pair map saw $other")
+
+  private final class RecordingSink extends LongPairProject.LongPairSink:
+    val present: ListBuffer[(Long, Long)] = ListBuffer.empty
+    val missing: ListBuffer[Long] = ListBuffer.empty
+    def add(key: Long, value: Long): Unit =
+      val _ = present.addOne((key, value))
+    def addMissing(key: Long): Unit =
+      val _ = missing.addOne(key)
 
   private def keep(key: Long, value: Long): (Long, Long) = (key, value)
 
