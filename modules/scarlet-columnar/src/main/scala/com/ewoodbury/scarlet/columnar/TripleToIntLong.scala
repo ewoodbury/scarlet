@@ -26,6 +26,10 @@ object TripleToIntLong:
   trait TripleMap:
     def apply(key: Int, left: Int, right: Int): Any
 
+  /** One present `(Int, Long)`. The caller owns the group. A null cell is not passed. */
+  private[scarlet] trait LongSink:
+    def add(key: Int, value: Long): Unit
+
   def adapt(mapper: Any): TripleMap =
     val fn = mapper.asInstanceOf[((Int, (Int, Int))) => Any]
     new TripleMap:
@@ -66,6 +70,21 @@ object TripleToIntLong:
     }
     publish(outKeys, outValues, length)
 
+  /**
+   * One projected pair, not stored. A null, or a cell that is not `(Int, Long)`, declines with the
+   * same name [[project]] uses. The caller has already rejected a null input component.
+   */
+  private[scarlet] def offer(projected: Any, sink: LongSink): Unit =
+    projected match
+      case null => decline("null")
+      case row: Product if row.productArity == 2 =>
+        sink.add(readKey(row.productElement(0)), readValue(row.productElement(1)))
+      case other => decline(foundName(other))
+
+  /** A matched null component. [[project]] declines the same way before it calls the function. */
+  private[scarlet] def rejectNull(): Nothing =
+    decline("null component")
+
   private def write(projected: Any, keys: Array[Int], values: Array[Long], out: Int): Unit =
     projected match
       case null => decline("null")
@@ -73,6 +92,14 @@ object TripleToIntLong:
         writeKey(row.productElement(0), keys, out)
         writeValue(row.productElement(1), values, out)
       case other => decline(foundName(other))
+
+  private def readKey(cell: Any): Int = cell match
+    case present: Int => present
+    case other => decline(foundName(other))
+
+  private def readValue(cell: Any): Long = cell match
+    case present: Long => present
+    case other => decline(foundName(other))
 
   private def writeKey(cell: Any, into: Array[Int], out: Int): Unit = cell match
     case present: Int => into(out) = present

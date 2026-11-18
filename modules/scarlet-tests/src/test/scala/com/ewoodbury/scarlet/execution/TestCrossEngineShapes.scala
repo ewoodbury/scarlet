@@ -5,13 +5,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.{
-  ColumnMetrics,
-  ColumnarFallback,
-  CountingSink,
-  DistinctKernel,
-  LogicalType,
-}
+import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -207,6 +201,9 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
       "HashJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(FilterValue(FilterKey(Scan))))",
     )
+    JoinWriteRuns.resetRunsForTest()
+    joined.collect().iterator.hasNext shouldBe true
+    JoinWriteRuns.runsForTest should be > 0L
     val projected = joined.map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
     val projectedOp = ColumnarPlanner.lower(projected.plan).get
     projectedOp.shape shouldBe (
@@ -223,13 +220,17 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     genericOp.shape should not include "SortMergeJoin"
     genericOp.schema shouldBe Vector(LogicalType.Int32, LogicalType.Int64)
     ColumnarPlanner.tryRun(generic.plan).isDefined shouldBe true
+    JoinWriteRuns.resetRunsForTest()
     val summed = generic.collect().toMap
+    JoinWriteRuns.runsForTest shouldBe 0L
     summed shouldBe Map(1 -> 20L, 2 -> 20L)
     CrossEngineShapes.sumChecksum(summed) shouldBe 133L
     ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 1))
     try
       ScarletRuntime.get.shuffle.clear()
+      JoinWriteRuns.resetRunsForTest()
       generic.collect().toMap shouldBe summed
+      JoinWriteRuns.runsForTest shouldBe 0L
     finally ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 8192))
     val counted = projected.countByKey
     val countedOp = ColumnarPlanner.lower(counted.plan).get
@@ -262,7 +263,9 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
       .reduceByKey((left: Long, right: Long) => left + right)
     val changedShape = ColumnarPlanner.lower(changed.plan).map(_.shape).get
     changedShape should include("HashAggregate(Exchange(Project(")
+    JoinWriteRuns.resetRunsForTest()
     changed.collect().toMap shouldBe Map(10 -> 2L, 20 -> 2L)
+    JoinWriteRuns.runsForTest shouldBe 0L
     val nested = joined
       .map { case (key, pair) => (key, pair) }
       .reduceByKey((left: (Int, Int), right: (Int, Int)) =>
@@ -319,15 +322,19 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     sortOp.shape should not include "SortMergeJoin"
     ColumnarPlanner.tryRun(sortSum.plan).isDefined shouldBe true
     Task.resetSortMergeJoinRunsForTest()
+    JoinWriteRuns.resetRunsForTest()
     val summed = sortSum.collect().toMap
     Task.sortMergeJoinRunsForTest shouldBe 0
+    JoinWriteRuns.runsForTest shouldBe 0L
     summed shouldBe Map(1 -> 20L, 2 -> 20L)
     CrossEngineShapes.sumChecksum(summed) shouldBe 133L
     val savedBatch = ScarletConf.get
     ScarletConf.set(savedBatch.copy(columnarBatchSize = 1))
     try
       ScarletRuntime.get.shuffle.clear()
+      JoinWriteRuns.resetRunsForTest()
       sortSum.collect().toMap shouldBe summed
+      JoinWriteRuns.runsForTest shouldBe 0L
     finally ScarletConf.set(savedBatch)
     val savedRow = ScarletConf.get
     ScarletConf.set(savedRow.copy(columnarExecution = false))
@@ -340,7 +347,9 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     ColumnarPlanner.lower(changed.plan).map(_.shape).get should include(
       "HashAggregate(Exchange(Project(",
     )
+    JoinWriteRuns.resetRunsForTest()
     changed.collect().toMap shouldBe Map(10 -> 2L, 20 -> 2L)
+    JoinWriteRuns.runsForTest shouldBe 0L
     val broadcastJoined = filteredLeft.broadcastJoin(filteredRight)
     ColumnarPlanner.lower(broadcastJoined.plan).map(_.shape).get should include("BroadcastJoin")
     val broadcastSum = broadcastJoined
@@ -349,7 +358,9 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     val broadcastShape = ColumnarPlanner.lower(broadcastSum.plan).map(_.shape).get
     broadcastShape should startWith("HashAggregate(Exchange(Project(")
     broadcastShape should not include "BroadcastJoin"
+    JoinWriteRuns.resetRunsForTest()
     broadcastSum.collect().toMap shouldBe summed
+    JoinWriteRuns.runsForTest shouldBe 0L
     val maximized = sortJoined
       .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
       .reduceByKey((left: Long, right: Long) => math.max(left, right))

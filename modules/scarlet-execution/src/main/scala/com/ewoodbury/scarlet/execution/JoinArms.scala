@@ -1,12 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{
-  ColumnBatch,
-  ColumnPipeline,
-  JoinProbeSum,
-  Selected,
-  Selection,
-}
+import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 
 import ColumnPipeline.JoinInput
@@ -26,8 +20,9 @@ import ColumnPipeline.JoinInput
  * caller's flag and slice. An owned filter copy is already dense and is not sliced. [[count]] of
  * two owned int-pair sides multiplies per-key counts and does not copy values. Any other count
  * uses that same exchange and sums chain lengths. [[sumValuePair]] uses that same exchange and
- * adds `build * 31 + probe` per present match. It does not write the match columns. [[inner]]
- * still does.
+ * adds `build * 31 + probe` per present match. It does not write the match columns. [[projectSum]]
+ * uses that same exchange, projects each hit, and sums under the projected key. [[inner]] still
+ * writes the match columns.
  */
 private[execution] object JoinArms:
 
@@ -103,6 +98,51 @@ private[execution] object JoinArms:
     else ColumnPipeline.sumValuePair(build.input, probe.input, width, workers)
 
   /**
+   * Grouped sum of a triple project over the exchange [[inner]] uses. Match columns are not
+   * written. An over-budget build bucket declines inside [[ProjectedJoinSum.reduce]].
+   */
+  def projectSum(
+      left: Plan[_],
+      right: Plan[_],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      mapper: TripleToIntLong.TripleMap,
+  ): Vector[ColumnBatch] =
+    val (build, probe, slice) = sides(left, right, leftOp, rightOp, preserveAbsence, ordinals)
+    ProjectedJoinSum.reduce(
+      build,
+      probe,
+      ColumnarPlanner.shuffleWidth,
+      ColumnarPlanner.parallelism,
+      ColumnarPlanner.batchSize,
+      slice,
+      mapper,
+    )
+
+  /** Hits [[projectSum]] would add. Nothing is published. */
+  def projectVisit(
+      left: Plan[_],
+      right: Plan[_],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      mapper: TripleToIntLong.TripleMap,
+  ): Unit =
+    val (build, probe, slice) = sides(left, right, leftOp, rightOp, preserveAbsence, ordinals)
+    ProjectedJoinSum.visit(
+      build,
+      probe,
+      ColumnarPlanner.shuffleWidth,
+      ColumnarPlanner.parallelism,
+      ColumnarPlanner.batchSize,
+      slice,
+      mapper,
+    )
+
+  /**
    * Grouped sum of one join column. The exchange matches [[inner]]. Match columns are not written.
    * An over-budget build bucket declines inside [[ColumnPipeline.sumInner]].
    */
@@ -148,6 +188,18 @@ private[execution] object JoinArms:
         measure,
       ),
     )
+
+  private def sides(
+      left: Plan[_],
+      right: Plan[_],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): (JoinInput, JoinInput, Boolean) =
+    val build = arm(left, leftOp, None, preserveAbsence, ordinals)
+    val probe = arm(right, rightOp, None, preserveAbsence, ordinals)
+    (build.input, probe.input, build.slice && probe.slice)
 
   private def dense(armed: Armed): Vector[ColumnBatch] = armed.input match
     case JoinInput.Dense(batches) => batches

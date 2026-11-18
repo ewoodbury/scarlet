@@ -1,6 +1,26 @@
 package com.ewoodbury.scarlet.columnar
 
 import java.util.Arrays
+import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * Entries to [[JoinWrite.writeGrouped]] and [[JoinWrite.writeDense]].
+ *
+ * The per-row writer in [[HashJoin]] does not come through those two methods, so it does not
+ * count. Tests and [[com.ewoodbury.scarlet.execution.GenericJoinSumBench]] read this because
+ * [[JoinWrite]] itself stays package-private.
+ */
+private[scarlet] object JoinWriteRuns:
+
+  private val runs = new AtomicLong
+
+  def runsForTest: Long = runs.get
+
+  def resetRunsForTest(): Unit =
+    runs.set(0L)
+
+  private[columnar] def note(): Unit =
+    val _ = runs.incrementAndGet()
 
 /**
  * Dense inner write for [[HashJoin]].
@@ -22,6 +42,9 @@ private[columnar] object JoinWrite:
   /** Larger probes stay on the per-row writer. */
   val MaxProbeRows: Int = 65536
 
+  private def noteRun(): Unit =
+    JoinWriteRuns.note()
+
   /** True when every live probe key, probe value, and build value is present. */
   def dense(probeKeys: Int32Column, probeValues: Int32Column, buildValues: Int32Column): Boolean =
     Validity.livePresent(probeKeys.validity, probeKeys.length) &&
@@ -39,6 +62,7 @@ private[columnar] object JoinWrite:
       probeValues: Int32Column,
       reserved: Int,
   ): ColumnBatch =
+    noteRun()
     val probeKeyValues = probeKeys.values
     val probeValueValues = probeValues.values
     val probeRows = probeKeys.length
@@ -139,6 +163,7 @@ private[columnar] object JoinWrite:
       reserved: Int,
       probeBeforeBuild: Boolean,
   ): ColumnBatch =
+    noteRun()
     if (slots.maxChain <= 1) then
       writeUnique(
         slots,
