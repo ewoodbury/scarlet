@@ -15,15 +15,17 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * unchanged, so the scan reads the source key column and does not run the value function.
  * [[Plan.MapIntKeyOp]] changes the key. Int-slot filters under that one map are counted from the
  * source: the function runs once on each present survivor and is not inspected. A null key is
- * dropped and is not passed in. Any other key map is interpreted, then counted. A filter above the
- * value map must be an int key slot. A value or row filter above that map, a second map, a
- * [[Plan.MapOp]], a flatMap, and a mapPartitions stay on the old path. The plan node decides that.
- * The function is not inspected. No filters and no such map, a whole-row or string step, a non-int
- * slot, and a null component the encoder throws on stay on the old path. That path partial-counts
- * survivor ids, including one row, key, or value filter. A scan and a non-pair child stay on the
- * dense count. The value column is not read, so a null value still counts. A long count publishes
- * [[Columns.LongCounts]]. A string count publishes [[Columns.StringPairs]]. The stored count is an
- * `Int`. A null string key is dropped and `""` is kept.
+ * dropped and is not passed in. A [[Plan.MapOp]] that is a pair [[PhysicalOp.Project]] is counted
+ * from that project's input morsels. The interpreter's adapter runs on every row, including a null
+ * key, and only the projected key is stored. The pair batch is not published. The function is not
+ * inspected. A filter above that project, a flatMap, and a mapPartitions stay on the interpreted
+ * path. Long-pair and string-pair maps do not lower. No filters and no such map, a whole-row or
+ * string step, a non-int slot, and a null component the encoder throws on stay on the old path.
+ * That path partial-counts survivor ids, including one row, key, or value filter. A scan and a
+ * non-pair child stay on the dense count. The value column is not read on that path, so a null
+ * value still counts. A long count publishes [[Columns.LongCounts]]. A string count publishes
+ * [[Columns.StringPairs]]. The stored count is an `Int`. A null string key is dropped and `""` is
+ * kept.
  */
 private[execution] object CountByKeyArms:
 
@@ -53,34 +55,28 @@ private[execution] object CountByKeyArms:
         ) match
           case Some(folded) => folded
           case None =>
-            // A boxed pair source whose first row witnesses `Kind.Pairs` can still hold a null
-            // component later. The scan keeps that null absent, and this count does not read the
-            // value column, so a null value still counts. The catch stays for a null the selection
-            // itself throws.
-            val selectedParts =
-              try
-                FilterChain.selected(
+            countProjected(
+              source,
+              child,
+              selectedPartition,
+              preserveAbsence,
+              ordinals,
+              width,
+              workers,
+              batchSize,
+            ) match
+              case Some(projected) => projected
+              case None =>
+                countedFromBatches(
                   source,
                   child,
                   selectedPartition,
                   preserveAbsence,
                   ordinals,
+                  width,
+                  workers,
+                  batchSize,
                 )
-              catch
-                case _: NullPointerException =>
-                  throw new ColumnarFallback("countByKey source has a null pair component")
-            selectedParts match
-              case Some(parts) => HashCount.byKeySelected(parts, width, workers, batchSize)
-              case None =>
-                val batches =
-                  try
-                    pairsOf(
-                      interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),
-                    )
-                  catch
-                    case _: NullPointerException =>
-                      throw new ColumnarFallback("countByKey source has a null pair component")
-                HashCount.byKey(batches, width, workers, batchSize)
         Columns.Pairs(counted)
       case PhysicalOp.Kind.LongPairs =>
         val counted = FilterChain.selected(
@@ -119,14 +115,19 @@ private[execution] object CountByKeyArms:
         )
 
   /**
-   * True when [[tryFold]] has a source scan. That is a non-empty int slot stack whose child is not
-   * a map, one [[Plan.MapValuesOp]] whose child is not a map, or one [[Plan.MapIntKeyOp]] whose
-   * filters are int slots and whose child is not a map. A value or row filter above the value map,
-   * a second map, and a dense scan with no map are false. Budget, a null sort key, and a null the
-   * encoder throws are decided in [[columns]], which returns to the index path.
+   * True when [[tryFold]] has a source scan, or a pair project is counted without its batch. That
+   * is a non-empty int slot stack whose child is not a map, one [[Plan.MapValuesOp]] whose child
+   * is not a map, one [[Plan.MapIntKeyOp]] whose filters are int slots and whose child is not a
+   * map, or one pair [[Plan.MapOp]]. A value or row filter above the value map, a second map under
+   * [[Plan.MapIntKeyOp]], and a dense scan with no map are false. Budget, a null sort key, and a
+   * null the encoder throws are decided in [[columns]], which returns to the index path.
    */
   private[execution] def folds(source: Plan[_], child: PhysicalOp, ordinals: Set[Int]): Boolean =
-    foldTarget(source, child, ordinals).nonEmpty || mappedKey(source, child, ordinals).nonEmpty
+    foldTarget(source, child, ordinals).nonEmpty || mappedKey(
+      source,
+      child,
+      ordinals,
+    ).nonEmpty || pairProject(source, child).nonEmpty
 
   private def tryFold(
       source: Plan[_],
@@ -178,6 +179,84 @@ private[execution] object CountByKeyArms:
         if (pastMap(underPlan)) then None
         else admitted(inner, mapped, ordinals).map(steps => (underPlan, underOp, steps, fn))
       case _ => None
+
+  /**
+   * One pair [[Plan.MapOp]]. The input of the project is interpreted, then each morsel is counted
+   * through [[IntPairProject.visitKeys]]. `None` when this child is not that project. A null key
+   * is passed to the adapter. The value cell is not stored.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def countProjected(
+      source: Plan[_],
+      child: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    pairProject(source, child).map { (inner, under, fn) =>
+      val adapted = IntPairProject.adapt(fn)
+      val columns =
+        try interpretAt(inner, under, selectedPartition, preserveAbsence, ordinals)
+        catch
+          case _: NullPointerException =>
+            throw new ColumnarFallback("countByKey source has a null pair component")
+      columns match
+        case Columns.Pairs(batches) =>
+          ProjectedPairCount.count(batches, adapted, width, workers, batchSize)
+        case _ =>
+          throw new IllegalStateException("pair project count expected int pairs")
+    }
+
+  /** The plan under a pair project and the function the interpreter would adapt. */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def pairProject(
+      source: Plan[_],
+      child: PhysicalOp,
+  ): Option[(Plan[_], PhysicalOp, Any)] =
+    (source, child) match
+      case (Plan.MapOp(inner, fn), PhysicalOp.Project(under)) => Some((inner, under, fn))
+      case _ => None
+
+  /**
+   * Index path, then a full interpret. A boxed pair source whose first row witnesses `Kind.Pairs`
+   * can still hold a null component later. The scan keeps that null absent, and this count does
+   * not read the value column, so a null value still counts. The catch stays for a null the
+   * selection itself throws.
+   */
+  private def countedFromBatches(
+      source: Plan[_],
+      child: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    val selectedParts =
+      try
+        FilterChain.selected(
+          source,
+          child,
+          selectedPartition,
+          preserveAbsence,
+          ordinals,
+        )
+      catch
+        case _: NullPointerException =>
+          throw new ColumnarFallback("countByKey source has a null pair component")
+    selectedParts match
+      case Some(parts) => HashCount.byKeySelected(parts, width, workers, batchSize)
+      case None =>
+        val batches =
+          try pairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals))
+          catch
+            case _: NullPointerException =>
+              throw new ColumnarFallback("countByKey source has a null pair component")
+        HashCount.byKey(batches, width, workers, batchSize)
 
   /** Fully present int pairs. Anything else, including one boxed partition, stays on encode. */
   private def ownedPairs(

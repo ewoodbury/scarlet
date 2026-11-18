@@ -81,6 +81,7 @@ object HashCount:
       batchSize: Int,
   ): Vector[ColumnBatch] =
     requirePositive(numPartitions, parallelism, batchSize)
+    val _ = byKeyCalls.incrementAndGet()
     if (batches.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs)
     else
       try
@@ -120,6 +121,30 @@ object HashCount:
         )
         finish(combined, numPartitions, parallelism, batchSize)
       finally releaseWorkers()
+
+  /**
+   * Count keys a caller supplies. No key column is read and no value is stored.
+   *
+   * `rows` is the estimate [[int32]] charges for one morsel. A non-positive estimate publishes an
+   * empty pair batch and does not call `supply`. `supply` receives `add` and calls it once per
+   * present key. A null key is the caller's to skip. This is not [[byKey]]: nothing here is a
+   * published pair project.
+   */
+  private[scarlet] def partialKeys(rows: Int)(supply: (Int => Unit) => Unit): ColumnBatch =
+    require(rows >= 0, s"row estimate must be >= 0, got $rows")
+    if (rows == 0) then ColumnBatches.emptyIntPairs
+    else
+      refuse(rows.toLong)
+      val table = borrow(rows)
+      table.supplyKeys(supply)
+      table.compact()
+
+  /** [[byKey]] entries since the last [[resetByKeyForTest]]. */
+  private[scarlet] def byKeyCallsForTest: Int = byKeyCalls.get
+
+  /** Clears [[byKeyCallsForTest]]. */
+  private[scarlet] def resetByKeyForTest(): Unit =
+    byKeyCalls.set(0)
 
   /**
    * Estimated bytes of a count table for `rows` input keys.
@@ -179,7 +204,7 @@ object HashCount:
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
 
-  private def requireKey(batch: ColumnBatch): Unit =
+  private[scarlet] def requireKey(batch: ColumnBatch): Unit =
     val keyType = batch.schema.headOption.getOrElse {
       throw new ColumnarFallback("countByKey expects an Int32 key column")
     }
@@ -199,7 +224,7 @@ object HashCount:
    * budget that can hold one row skips this check. Morsels still refuse themselves, and an
    * over-budget bucket spills after the exchange.
    */
-  private def refuseBeforeCombine: Boolean =
+  private[scarlet] def refuseBeforeCombine: Boolean =
     val conf = ScarletConf.get
     !conf.spillEnabled || inputRowBytes(1L) > conf.spillBudgetBytes
 
@@ -209,7 +234,7 @@ object HashCount:
    * whole-input call when spill is on and a one-row table fits. A morsel, a partial combine, and a
    * spill fold still call this.
    */
-  private def refuse(rows: Long): Unit =
+  private[scarlet] def refuse(rows: Long): Unit =
     val budget = ScarletConf.get.spillBudgetBytes
     val bytes = inputRowBytes(rows)
     if (bytes > budget) then throw new ClosedKernelRefusal(rows, bytes, budget)
@@ -219,6 +244,7 @@ object HashCount:
    * new array. [[MorselScheduler]] drops the holder when a pool task returns. [[byKey]] and
    * [[byKeySelected]] drop the caller's holder, and [[FoldedCount]] drops it after the merge.
    */
+  private val byKeyCalls = new AtomicInteger
   private val locals: ThreadLocal[Table | Null] = new ThreadLocal[Table | Null]()
   private val allocatedTables = new AtomicLong
   private val reusedTables = new AtomicLong
@@ -379,6 +405,10 @@ object HashCount:
         Vector(Int32Column.of(outKeys, present, rows), Int32Column.of(outCounts, present, rows)),
         rows,
       )
+
+    /** Hands `add` to `supply`. The lambda stays inside [[Table]] so `add` stays private. */
+    def supplyKeys(supply: (Int => Unit) => Unit): Unit =
+      supply(key => add(key, 1))
 
     private def add(key: Int, weight: Int): Unit =
       val slot = locate(key)

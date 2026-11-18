@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -305,24 +307,81 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     countsOf(nullable.collect()) shouldBe countsOf(row(nullable.collect()))
   }
 
-  it should "lower a key-changing int pair map into countByKey" in {
+  it should "count an int pair map without publishing the pair batch" in {
     val source = DistCollection.ofIntPairs(Array(1, 2, 1, 3), Array(10, 20, 30, 40), 4)
     val changed = source.map((pair: (Int, Int)) => (pair._1 + 1, pair._2)).countByKey
     ColumnarPlanner.lower(changed.plan).map(_.shape) shouldBe Some(
       "CountByKey(Exchange(Project(Scan)))",
     )
-    foldsOf(changed.plan) shouldBe false
-    countsOf(changed.collect()) shouldBe Map(2 -> 2, 3 -> 1, 4 -> 1)
-    countsOf(changed.collect()) shouldBe countsOf(row(changed.collect()))
+    foldsOf(changed.plan) shouldBe true
+    val atBatch = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      IntPairProject.resetPublishedForTest()
+      HashCount.resetByKeyForTest()
+      val found = countsOf(changed.collect())
+      IntPairProject.publishedForTest shouldBe 0
+      HashCount.byKeyCallsForTest shouldBe 0
+      found
+    }
+    val counted = atBatch(8192)
+    counted shouldBe Map(2 -> 2, 3 -> 1, 4 -> 1)
+    atBatch(1) shouldBe counted
+    counted shouldBe countsOf(row(changed.collect()))
 
-    // The plan node is MapOp. A function that happens to keep the key is still not folded.
+    IntPairProject.resetPublishedForTest()
+    val projected = source.map((pair: (Int, Int)) => (pair._1 + 1, pair._2)).collect()
+    IntPairProject.publishedForTest should be > 0
+    projected.toList.sorted shouldBe List((2, 10), (2, 30), (3, 20), (4, 40))
+
+    // The plan node is MapOp. A function that keeps the key is still counted here.
     val sameKey = source.map((pair: (Int, Int)) => (pair._1, pair._2 + 1)).countByKey
     ColumnarPlanner.lower(sameKey.plan).map(_.shape) shouldBe Some(
       "CountByKey(Exchange(Project(Scan)))",
     )
-    foldsOf(sameKey.plan) shouldBe false
+    foldsOf(sameKey.plan) shouldBe true
+    IntPairProject.resetPublishedForTest()
     countsOf(sameKey.collect()) shouldBe Map(1 -> 2, 2 -> 1, 3 -> 1)
+    IntPairProject.publishedForTest shouldBe 0
     countsOf(sameKey.collect()) shouldBe countsOf(row(sameKey.collect()))
+
+    val calls = new AtomicInteger
+    val nullable = nullIntKeySource().map(shiftNullKey(calls, nullKey = 7)).countByKey
+    val nullAt = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      calls.set(0)
+      val found = countsOf(nullable.collect())
+      (found, calls.get)
+    }
+    val (nullCounts, nullCalls) = nullAt(8192)
+    nullCounts shouldBe Map(2 -> 2, 3 -> 2, 7 -> 2)
+    nullAt(1) shouldBe (nullCounts, nullCalls)
+    calls.set(0)
+    countsOf(row(nullable.collect())) shouldBe nullCounts
+    calls.get shouldBe nullCalls
+
+    val valueCalls = new AtomicInteger
+    val values = nullIntValueSource().map(shiftNullKey(valueCalls, nullKey = 7)).countByKey
+    valueCalls.set(0)
+    countsOf(values.collect()) shouldBe Map(2 -> 1, 5 -> 1)
+    valueCalls.get shouldBe 2
+    valueCalls.set(0)
+    countsOf(row(values.collect())) shouldBe Map(2 -> 1, 5 -> 1)
+    valueCalls.get shouldBe 2
+
+    val keyed = source.mapIntKey((key: Int) => key % 100).countByKey
+    ColumnarPlanner.lower(keyed.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(MapKey(Scan)))",
+    )
+    val filteredKey = source
+      .filterKeys((key: Int) => key > 0)
+      .mapIntKey((key: Int) => key + 1)
+      .countByKey
+    ColumnarPlanner.lower(filteredKey.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(MapKey(FilterKey(Scan))))",
+    )
+    foldsOf(filteredKey.plan) shouldBe true
 
     val longPairs = DistCollection.ofLongPairs(Array(1L, 2L), Array(10L, 20L), 1)
     ColumnarPlanner.lower(longPairs.map((pair: (Long, Long)) => (pair._1, pair._2)).plan) shouldBe
@@ -935,6 +994,43 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def nullValue(key: Int): (Int, String) = key -> (null: String)
+
+  /**
+   * A null key becomes `nullKey`. A present key is incremented. `productElement` keeps a null
+   * value, so both paths count it. The row path and the pair project call this once per row.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+      "org.wartremover.warts.Throw",
+    ),
+  )
+  private def shiftNullKey(calls: AtomicInteger, nullKey: Int): ((Int, Int)) => (Int, Int) =
+    pair => {
+      val _ = calls.incrementAndGet()
+      val product = pair.asInstanceOf[Product]
+      val value = product.productElement(1)
+      val key = product.productElement(0) match
+        case null => nullKey
+        case present: Int => present + 1
+        case other => throw new IllegalArgumentException(s"pair map saw $other")
+      Tuple2(Int.box(key), value).asInstanceOf[(Int, Int)]
+    }
+
+  /** A present pair witnesses the scan, then a null value. The key stays present. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def nullIntValueSource(): DistCollection[(Int, Int)] =
+    def cell(key: Int, value: Any): (Int, Int) =
+      Tuple2(Int.box(key), value).asInstanceOf[(Int, Int)]
+    DistCollection(Plan.Source(Seq(Partition(Seq(cell(4, 4), cell(1, null))))))
 
   /**
    * A present pair witnesses the column. A later null key stays absent and `countByKey` drops it.
