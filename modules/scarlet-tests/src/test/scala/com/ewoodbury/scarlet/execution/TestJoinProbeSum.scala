@@ -331,9 +331,17 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     probeMapped.collect().toMap shouldBe Map(1 -> 10L, 2 -> 20L)
     probeMapped.collect().toMap shouldBe rowMap(probeMapped)
 
-    val above = pairs(Array(1, 2), Array(3, 4)).mapIntKey(key => key + 1)
-    val blocked = above.filterKeys((key: Int) => key > 0).join(right).sumJoinLeft
-    ColumnarPlanner.lower(blocked.plan).isEmpty shouldBe true
+    // The slot sees the mapped key. Filtering the source would drop both rows.
+    val shifted = pairs(Array(1, 3), Array(10, 20)).mapIntKey(key => key + 10)
+    val filteredJoin = shifted
+      .filterKeys((key: Int) => key > 12)
+      .join(pairs(Array(11, 13), Array(1, 2)))
+      .sumJoinLeft
+    ColumnarPlanner.lower(filteredJoin.plan).map(_.shape) shouldBe Some(
+      "JoinProbeSumLeft(Exchange(FilterKey(MapKey(Scan))), Exchange(Scan))",
+    )
+    filteredJoin.collect().toMap shouldBe Map(13 -> 20L)
+    filteredJoin.collect().toMap shouldBe rowMap(filteredJoin)
 
     // Filters stay under the map. Skipping the map would leave keys 11 and 13, which miss.
     val filtered = pairs(Array(11, 12, 13), Array(10, -1, 7))

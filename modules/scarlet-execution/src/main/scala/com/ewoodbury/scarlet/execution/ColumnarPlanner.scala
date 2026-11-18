@@ -825,9 +825,13 @@ object ColumnarPlanner:
       else None
     case Plan.MapIntKeyOp(source, _) =>
       lowerChild(source).flatMap { child =>
-        child.kind match
-          case PhysicalOp.Kind.Pairs => Some(PhysicalOp.MapKey(child))
-          case _ => None
+        // A second key map above a slot filter would publish the filtered key. Two maps with
+        // no filter between them still lower.
+        if (MapIntKey.filtered(child)) then None
+        else
+          child.kind match
+            case PhysicalOp.Kind.Pairs => Some(PhysicalOp.MapKey(child))
+            case _ => None
       }
     case Plan.ReduceByKeyOp(source, reduce) =>
       JoinProbeAggregate
@@ -909,7 +913,7 @@ object ColumnarPlanner:
       case ElementStep.Project(_) => None
 
   private def lowerElementStep(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
-    // A filter or project above a key map sees a null key the row path unboxes. Decline.
+    // A whole-row filter or a project above a key map sees a null key the row path unboxes.
     if (MapIntKey.inTree(child)) then None
     else
       step match
@@ -1053,10 +1057,12 @@ object ColumnarPlanner:
 
   private def columnFilter(source: Plan[_], slot: PhysicalOp.Slot): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
-      // A key or value filter above a key map drops or keeps a null the row path unboxes.
-      // The same filter above a long-pair or string-pair project stays empty: the row path sees
-      // the new key.
-      if (MapIntKey.inTree(child) || longPairProject(child) || stringPairProject(child)) then None
+      // One key or value slot above one int key map. The key predicate sees the mapped key and
+      // is not called on a null. A value predicate sees the original value. A second slot, and
+      // the same filter above a long-pair or string-pair project, stays empty.
+      if (MapIntKey.slotAbove(child, slot)) then Some(PhysicalOp.Filter(child, slot))
+      else if (MapIntKey.inTree(child) || longPairProject(child) || stringPairProject(child)) then
+        None
       else
         child.kind match
           case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.LongPairs =>

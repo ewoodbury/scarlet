@@ -249,14 +249,14 @@ private[execution] object ColumnarInterpreter:
   /**
    * Int-pair decoder for `op`. [[PhysicalOp.SortByLongKey]] and [[PhysicalOp.SortByStringKey]] are
    * their own arms. Those decoders do not call the returned function, and these arms must not fall
-   * through to [[BatchCodec.decodeIntPairs]], which rejects a clear bit. [[PhysicalOp.MapKey]] and
-   * an int-pair [[PhysicalOp.Project]] keep a null key or value, so they use the
+   * through to [[BatchCodec.decodeIntPairs]], which rejects a clear bit. [[MapIntKey.keepsNull]]
+   * and an int-pair [[PhysicalOp.Project]] keep a null key or value, so they use the
    * absence-preserving decoder. A triple [[PhysicalOp.Project]] does not: its kind is not
    * [[PhysicalOp.Kind.Pairs]], and [[tripleDecoder]] is the arm that runs.
    */
   private def intPairDecoder(op: PhysicalOp): (ColumnBatch, Int) => Seq[(Int, Int)] =
     op match
-      case _: PhysicalOp.MapKey =>
+      case kept if MapIntKey.keepsNull(kept) =>
         (batch, rows) => BatchCodec.decodeIntPairsPreservingAbsence(batch, rows)
       case project: PhysicalOp.Project if intPairProject(project) =>
         (batch, rows) => BatchCodec.decodeIntPairsPreservingAbsence(batch, rows)

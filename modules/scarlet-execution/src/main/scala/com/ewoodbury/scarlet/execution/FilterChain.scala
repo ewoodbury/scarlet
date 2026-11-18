@@ -86,6 +86,18 @@ private[execution] object FilterChain:
       preserveAbsence: Boolean,
       ordinals: Set[Int],
   ): Option[Vector[Selected]] =
+    // A slot filter above a key map keeps a null the index decoder rejects. Collect interprets
+    // the map, writes both columns, and decodes with [[MapIntKey.keepsNull]].
+    if (MapIntKey.inTree(op)) then None
+    else selectIndexed(plan, op, selectedPartition, preserveAbsence, ordinals)
+
+  private def selectIndexed(
+      plan: Plan[_],
+      op: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): Option[Vector[Selected]] =
     op.kind match
       case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.Triples |
           PhysicalOp.Kind.StringPairs =>

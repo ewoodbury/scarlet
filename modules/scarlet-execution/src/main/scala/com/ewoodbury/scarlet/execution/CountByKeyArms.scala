@@ -15,20 +15,23 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * unchanged, so the scan reads the source key column and does not run the value function.
  * [[Plan.MapIntKeyOp]] changes the key. Int-slot filters under that one map are counted from the
  * source: the function runs once on each present survivor and is not inspected. A null key is
- * dropped and is not passed in. A [[Plan.MapOp]] that is a pair [[PhysicalOp.Project]] is counted
- * from that project's input morsels. The interpreter's adapter runs on every row, including a null
- * key, and only the projected key is stored. The pair batch is not published. The function is not
- * inspected. A filter above that project, a flatMap, and a mapPartitions stay on the interpreted
- * path. A long-pair [[PhysicalOp.Project]] uses [[LongPairProject]] the same way and does not
- * publish the pair batch. [[LongHashCount.byKey]] counts a long scan or filter and does not see
- * that project. A string-pair [[PhysicalOp.Project]] is interpreted into a dictionary column and
- * an int column, then [[StringHashCount.byKey]] hashes that dictionary. The pairs are not decoded.
- * A filter above that project does not lower. No filters, a whole-row or string step, a non-int
- * slot, and a null component the encoder throws on stay on the old path. That path partial-counts
- * survivor ids, including one row, key, or value filter. A scan and a non-pair child stay on the
- * dense count. The value column is not read on that path, so a null value still counts. A long
- * count publishes [[Columns.LongCounts]]. A string count publishes [[Columns.StringPairs]]. The
- * stored count is an `Int`. A null string key is dropped and `""` is kept.
+ * dropped and is not passed in. One key or value slot above that map is applied after the
+ * function. A key slot sees the mapped key and is not called on a null. A value slot sees the
+ * original value. The mapped pair batch is not published. A [[Plan.MapOp]] that is a pair
+ * [[PhysicalOp.Project]] is counted from that project's input morsels. The interpreter's adapter
+ * runs on every row, including a null key, and only the projected key is stored. The pair batch is
+ * not published. The function is not inspected. A filter above that project, a flatMap, and a
+ * mapPartitions stay on the interpreted path. A long-pair [[PhysicalOp.Project]] uses
+ * [[LongPairProject]] the same way and does not publish the pair batch. [[LongHashCount.byKey]]
+ * counts a long scan or filter and does not see that project. A string-pair [[PhysicalOp.Project]]
+ * is interpreted into a dictionary column and an int column, then [[StringHashCount.byKey]] hashes
+ * that dictionary. The pairs are not decoded. A filter above that project does not lower. No
+ * filters, a whole-row or string step, a non-int slot, and a null component the encoder throws on
+ * stay on the old path. That path partial-counts survivor ids, including one row, key, or value
+ * filter. A scan and a non-pair child stay on the dense count. The value column is not read on
+ * that path, so a null value still counts. A long count publishes [[Columns.LongCounts]]. A string
+ * count publishes [[Columns.StringPairs]]. The stored count is an `Int`. A null string key is
+ * dropped and `""` is kept.
  */
 private[execution] object CountByKeyArms:
 
@@ -159,7 +162,10 @@ private[execution] object CountByKeyArms:
       source,
       child,
       ordinals,
-    ).nonEmpty || pairProject(source, child).nonEmpty
+    ).nonEmpty || mappedAbove(source, child, ordinals).nonEmpty || pairProject(
+      source,
+      child,
+    ).nonEmpty
 
   private def tryFold(
       source: Plan[_],
@@ -171,29 +177,44 @@ private[execution] object CountByKeyArms:
       workers: Int,
       batchSize: Int,
   ): Option[Vector[ColumnBatch]] =
-    val mapped = mappedKey(source, child, ordinals).flatMap { (plan, op, steps, fn) =>
+    val above = mappedAbove(source, child, ordinals).flatMap { (plan, op, steps, fn, slot) =>
       ownedPairs(plan, op) match
         case Some(parts) =>
-          FoldedCount.countOwnedMapped(parts, steps, fn, width, workers, batchSize)
+          MappedAboveCount.countOwned(parts, steps, slot, fn, width, workers, batchSize)
         case None =>
           scanned(plan, op, selectedPartition, preserveAbsence, ordinals).flatMap {
             (under, batches) =>
               if (sortDropsNullKey(under, batches)) then None
-              else FoldedCount.countMapped(batches, steps, fn, width, workers, batchSize)
+              else MappedAboveCount.count(batches, steps, slot, fn, width, workers, batchSize)
           }
     }
-    mapped.orElse {
-      foldTarget(source, child, ordinals).flatMap { (plan, op, steps) =>
-        ownedPairs(plan, op) match
-          case Some(parts) => countOwned(parts, steps, width, workers, batchSize)
-          case None =>
-            scanned(plan, op, selectedPartition, preserveAbsence, ordinals).flatMap {
-              (under, batches) =>
-                if (sortDropsNullKey(under, batches)) then None
-                else countEncoded(batches, steps, width, workers, batchSize)
-            }
+    above
+      .orElse {
+        val mapped = mappedKey(source, child, ordinals).flatMap { (plan, op, steps, fn) =>
+          ownedPairs(plan, op) match
+            case Some(parts) =>
+              FoldedCount.countOwnedMapped(parts, steps, fn, width, workers, batchSize)
+            case None =>
+              scanned(plan, op, selectedPartition, preserveAbsence, ordinals).flatMap {
+                (under, batches) =>
+                  if (sortDropsNullKey(under, batches)) then None
+                  else FoldedCount.countMapped(batches, steps, fn, width, workers, batchSize)
+              }
+        }
+        mapped
       }
-    }
+      .orElse {
+        foldTarget(source, child, ordinals).flatMap { (plan, op, steps) =>
+          ownedPairs(plan, op) match
+            case Some(parts) => countOwned(parts, steps, width, workers, batchSize)
+            case None =>
+              scanned(plan, op, selectedPartition, preserveAbsence, ordinals).flatMap {
+                (under, batches) =>
+                  if (sortDropsNullKey(under, batches)) then None
+                  else countEncoded(batches, steps, width, workers, batchSize)
+              }
+        }
+      }
 
   /**
    * One [[Plan.MapIntKeyOp]] over an int-slot filter stack. The filters stay on the source. The
@@ -211,6 +232,70 @@ private[execution] object CountByKeyArms:
         if (pastMap(underPlan)) then None
         else admitted(inner, mapped, ordinals).map(steps => (underPlan, underOp, steps, fn))
       case _ => None
+
+  /**
+   * One key or value slot above one [[Plan.MapIntKeyOp]]. Steps under the map stay on the source
+   * and may be empty. The slot above the map is applied after the key function. `None` when a
+   * second map sits under the filters, or when a step is not an int slot. Neither function is
+   * read.
+   */
+  private def mappedAbove(
+      source: Plan[_],
+      child: PhysicalOp,
+      ordinals: Set[Int],
+  ): Option[(Plan[_], PhysicalOp, List[Selection.Step], Int => Int, Selection.Step)] =
+    (source, child) match
+      case (
+            Plan.FilterKeysOp(Plan.MapIntKeyOp(inner, fn), _),
+            PhysicalOp.Filter(PhysicalOp.MapKey(mapped), PhysicalOp.Slot.Key),
+          ) =>
+        aboveOf(inner, mapped, fn, source, child, ordinals)
+      case (
+            Plan.FilterValuesOp(Plan.MapIntKeyOp(inner, fn), _),
+            PhysicalOp.Filter(PhysicalOp.MapKey(mapped), PhysicalOp.Slot.Value),
+          ) =>
+        aboveOf(inner, mapped, fn, source, child, ordinals)
+      case _ => None
+
+  private def aboveOf(
+      inner: Plan[_],
+      mapped: PhysicalOp,
+      fn: Int => Int,
+      source: Plan[_],
+      child: PhysicalOp,
+      ordinals: Set[Int],
+  ): Option[(Plan[_], PhysicalOp, List[Selection.Step], Int => Int, Selection.Step)] =
+    val (underPlan, underOp) = PredicatePlan.childOf(inner, mapped)
+    if (pastMap(underPlan)) then None
+    else
+      underSlots(inner, mapped, ordinals).flatMap { steps =>
+        oneSlot(source, child, ordinals).map { slot =>
+          (underPlan, underOp, steps, fn, slot)
+        }
+      }
+
+  /** Steps under the map. `Some(Nil)` when the child is not a filter. */
+  private def underSlots(
+      plan: Plan[_],
+      op: PhysicalOp,
+      ordinals: Set[Int],
+  ): Option[List[Selection.Step]] =
+    PredicatePlan.compile(plan, op) match
+      case None => Some(Nil)
+      case Some(compiled) =>
+        slotList(compiled, ordinals).filter(steps => FoldedCount.admitsUnmapped(steps))
+
+  /** The one slot above the map. */
+  private def oneSlot(
+      source: Plan[_],
+      child: PhysicalOp,
+      ordinals: Set[Int],
+  ): Option[Selection.Step] =
+    PredicatePlan.compile(source, child).flatMap { compiled =>
+      slotList(compiled, ordinals) match
+        case Some(step :: Nil) => Some(step)
+        case _ => None
+    }
 
   /**
    * One pair [[Plan.MapOp]]. The input of the project is interpreted, then each morsel is counted
