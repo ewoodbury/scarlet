@@ -12,9 +12,10 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * one. A long key, value, or row stack folds those predicates into the partial table and does not
  * build the index. An owned long-pair source is read in place. A boxed source is still encoded,
  * which is what keeps a null key. An int-pair row filter and a whole-row string filter still use
- * the index. The exchange sees dense partials. A map, a scan, and a non-pair child stay on the
- * dense reduce. The `None` path is the only one that interprets a child the fold did not already
- * scan.
+ * the index. The exchange sees dense partials. A long-pair map is reduced from the project's input
+ * morsels: the projected key and value go into the long hash table, and the pair batch is not
+ * published. An int map, a scan, and a non-pair child stay on the dense reduce. The `None` path is
+ * the only one that interprets a child the project fold and the filter fold did not already scan.
  */
 private[execution] object ReduceArms:
 
@@ -69,15 +70,16 @@ private[execution] object ReduceArms:
     // Named erasure boundary. Grouped long-pair reduction declares `(Long, Long) => Long`.
     @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
     val op = reduceFunc.asInstanceOf[(Long, Long) => Long]
-    // A long key, value, or row stack folds the predicates into the partial table. The index path
-    // remains for a stack the fold does not admit. The `None` path is the only one that
-    // interprets a child the fold did not already scan. The same plan function keeps one adapter,
-    // so a retained partial table accepts the next collect.
+    // A long-pair project inserts each projected key and value into the partial table and does not
+    // publish the pair batch. A long key, value, or row stack folds the predicates into that
+    // table. The index path remains for a stack the fold does not admit. The `None` path is the
+    // only one that interprets a child those folds did not already scan. The same plan function
+    // keeps one adapter, so a retained partial table accepts the next collect.
     val binOp = longBinOp(op)
     val width = ColumnarPlanner.shuffleWidth
     val workers = ColumnarPlanner.parallelism
     val batchSize = ColumnarPlanner.batchSize
-    val reduced = foldLong(
+    val reduced = reduceProjected(
       source,
       child,
       binOp,
@@ -87,7 +89,19 @@ private[execution] object ReduceArms:
       width,
       workers,
       batchSize,
-    ).getOrElse {
+    ).orElse {
+      foldLong(
+        source,
+        child,
+        binOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
+        width,
+        workers,
+        batchSize,
+      )
+    }.getOrElse {
       FilterChain.selected(
         source,
         child,
@@ -107,6 +121,49 @@ private[execution] object ReduceArms:
           )
     }
     Columns.LongPairs(reduced)
+
+  /**
+   * One long-pair [[Plan.MapOp]]. The input of the project is interpreted, then each morsel is
+   * inserted through [[LongPairProject]] into [[LongHashReduce]]. A null projected key is dropped.
+   * A null projected value stays missing until another value arrives. The pair batch is not
+   * published and [[LongHashReduce.byKey]] is not called. The function body is not read. `None`
+   * when this child is not that project.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def reduceProjected(
+      source: Plan[_],
+      child: PhysicalOp,
+      binOp: LongHashReduce.LongBinOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    longPairProject(source, child).map { (inner, under, fn) =>
+      val adapted = LongPairProject.adapt(fn)
+      val columns =
+        try interpretAt(inner, under, selectedPartition, preserveAbsence, ordinals)
+        catch
+          case _: NullPointerException =>
+            throw new ColumnarFallback("reduceByKey source has a null pair component")
+      columns match
+        case Columns.LongPairs(batches) =>
+          ProjectedLongPairReduce.reduce(batches, adapted, width, workers, batchSize, binOp)
+        case _ =>
+          throw new IllegalStateException("pair project reduce expected long pairs")
+    }
+
+  /** The plan under a long-pair project and the function the interpreter would adapt. */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def longPairProject(
+      source: Plan[_],
+      child: PhysicalOp,
+  ): Option[(Plan[_], PhysicalOp, Any)] =
+    (source, child) match
+      case (Plan.MapOp(inner, fn), PhysicalOp.Project(under)) => Some((inner, under, fn))
+      case _ => None
 
   /**
    * Scan the child under the filter stack once and fold `steps` into the partial table. `None`

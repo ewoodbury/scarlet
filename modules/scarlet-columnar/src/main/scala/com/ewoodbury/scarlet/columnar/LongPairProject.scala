@@ -45,6 +45,27 @@ object LongPairProject:
     def applyNullKey(value: Long): Any
     def applyNulls(): Any
 
+  /** [[decode]] dropped the row. The projected key was null. */
+  private[scarlet] val ProjectedDrop: Int = 0
+
+  /** [[decode]] saw a present key and a null value. */
+  private[scarlet] val ProjectedMissing: Int = 1
+
+  /** [[decode]] saw a present key and a present value. */
+  private[scarlet] val ProjectedPresent: Int = 2
+
+  /**
+   * One projected pair, written by [[decode]].
+   *
+   * `mark` is [[ProjectedDrop]], [[ProjectedMissing]], or [[ProjectedPresent]]. `key` and `value`
+   * are meaningful only for a present key. A missing value leaves `value` unread.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private[scarlet] final class DecodedPair:
+    var key: Long = 0L
+    var value: Long = 0L
+    var mark: Int = ProjectedDrop
+
   /**
    * Adapts a `Tuple2 => Tuple2`. The cast is not a call. A hidden lambda and an anonymous
    * `Function1` both land here after the declared `apply` check. Each absent apply builds the pair
@@ -221,6 +242,43 @@ object LongPairProject:
       offer(projected, add)
       row += 1
     }
+
+  /**
+   * The cells [[project]] would write, without an output column.
+   *
+   * A null key sets [[ProjectedDrop]] after the value cell is checked, and does not store it. A
+   * null value on a present key sets [[ProjectedMissing]]. A present pair sets
+   * [[ProjectedPresent]]. A result that is not a pair of longs throws [[ColumnarFallback]]. This
+   * does not publish a batch.
+   */
+  private[scarlet] def decode(projected: Any, into: DecodedPair): Unit =
+    projected match
+      case null => decline("null")
+      case row: Product if row.productArity == 2 =>
+        val keyCell = row.productElement(0)
+        val valueCell = row.productElement(1)
+        keyCell match
+          case null =>
+            acceptLong(valueCell)
+            into.mark = ProjectedDrop
+          case key: Long =>
+            valueCell match
+              case null =>
+                into.key = key
+                into.mark = ProjectedMissing
+              case value: Long =>
+                into.key = key
+                into.value = value
+                into.mark = ProjectedPresent
+              case other => decline(foundName(other))
+          case other => decline(foundName(other))
+      case other => decline(foundName(other))
+
+  /** A null or a long. Any other cell declines, including when the key itself is dropped. */
+  private def acceptLong(cell: Any): Unit =
+    cell match
+      case null | _: Long => ()
+      case other => decline(foundName(other))
 
   /** Keeps a present key. A null key is dropped. The value is only a type check. */
   private def offer(projected: Any, add: Long => Unit): Unit =

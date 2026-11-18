@@ -154,6 +154,9 @@ object LongHashReduce:
    * is deleted before the next bucket opens a store. A run whose buckets all fit stays on
    * [[MorselScheduler]], including when spill is enabled and none of them exceed the budget. Spill
    * off is the in-memory [[int64]] result. A spilled bucket may change first-seen output order.
+   *
+   * A long-pair project does not call this. [[partialProjected]] inserts the projected cells, and
+   * [[exchangeReduced]] shuffles those partials. This counter stays at zero on that path.
    */
   def byKey(
       batches: Vector[ColumnBatch],
@@ -162,6 +165,7 @@ object LongHashReduce:
       batchSize: Int,
       op: LongBinOp,
   ): Vector[ColumnBatch] =
+    val _ = byKeyCalls.incrementAndGet()
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
@@ -177,6 +181,48 @@ object LongHashReduce:
         )
         reduceExchanged(combined, numPartitions, parallelism, batchSize, op)
       finally releaseOversized()
+
+  /**
+   * Reduce every window of one source batch through `mapper`, then compact once.
+   *
+   * The table starts at the longest window. A later window updates a key already inserted and
+   * grows only when a new key does not fit. An empty window is skipped and does not call `mapper`.
+   * All-empty input publishes an empty long-pair batch. This is not [[byKey]].
+   */
+  private[scarlet] def partialProjectedRanges(
+      batch: ColumnBatch,
+      starts: Array[Int],
+      lengths: Array[Int],
+      mapper: LongPairProject.LongPairMap,
+      op: LongBinOp,
+  ): ColumnBatch =
+    require(starts.length == lengths.length, "projected ranges disagree")
+    var cursor = 0
+    var maxLength = 0
+    var any = false
+    val count = lengths.length
+    while (cursor < count) do
+      val length = lengths(cursor)
+      require(length >= 0, s"row estimate must be >= 0, got $length")
+      if (length > maxLength) then maxLength = length
+      if (length > 0) then any = true
+      cursor += 1
+    if (!any) then ColumnBatches.emptyLongPairs
+    else
+      val table = borrow(maxLength, op)
+      cursor = 0
+      while (cursor < count) do
+        val length = lengths(cursor)
+        if (length > 0) then table.scanProjected(batch, starts(cursor), length, mapper)
+        cursor += 1
+      table.compact()
+
+  /** [[byKey]] entries since the last [[resetByKeyForTest]]. */
+  private[scarlet] def byKeyCallsForTest: Int = byKeyCalls.get
+
+  /** Clears [[byKeyCallsForTest]]. */
+  private[scarlet] def resetByKeyForTest(): Unit =
+    byKeyCalls.set(0)
 
   /**
    * [[byKey]] for a selection. Each live prefix is partial-reduced, the dense partials are
@@ -257,6 +303,7 @@ object LongHashReduce:
   private val allocatedTables = new AtomicLong
   private val reusedTables = new AtomicLong
   private val peakSlots = new AtomicInteger
+  private val byKeyCalls = new AtomicInteger
 
   private val locals: ThreadLocal[Table | Null] = new ThreadLocal[Table | Null]()
 
@@ -450,6 +497,112 @@ object LongHashReduce:
         then
           if (Validity.isSet(valueWords, row)) then addPresent(keyValues(row), valueValues(row))
           else addMissing(keyValues(row))
+        row += 1
+      }
+
+    /**
+     * Insert `[start, start + length)` through `mapper`. Both columns present in the window skip
+     * the bit test. A null projected key is dropped. A null projected value is [[addMissing]]. The
+     * present-value update is inlined: [[addPresent]] does not inline, and after the first keys of
+     * a window almost every row is an update. A new key, and a missing value, still go through
+     * those methods, which may grow the table. The arrays are read again after that call.
+     */
+    def scanProjected(
+        batch: ColumnBatch,
+        start: Int,
+        length: Int,
+        mapper: LongPairProject.LongPairMap,
+    ): Unit =
+      require(
+        batch.columns.length == 2,
+        s"pair project expected 2 columns, got ${batch.columns.length}",
+      )
+      val keys = ColumnHash.int64At(batch, 0)
+      val values = ColumnHash.int64At(batch, 1)
+      require(keys.length == values.length, "key and value columns differ in length")
+      Ranges.check(start, length, keys.length)
+      val cell = new LongPairProject.DecodedPair
+      val end = start + length
+      if (
+          Validity.rangePresent(keys.validity, start, length) &&
+          Validity.rangePresent(values.validity, start, length)
+        )
+      then scanDenseProjected(keys.values, values.values, start, end, mapper, cell)
+      else
+        scanSparseProjected(
+          keys.values,
+          values.values,
+          keys.validity.words,
+          values.validity.words,
+          start,
+          end,
+          mapper,
+          cell,
+        )
+
+    private def scanDenseProjected(
+        keyValues: Array[Long],
+        valueValues: Array[Long],
+        start: Int,
+        end: Int,
+        mapper: LongPairProject.LongPairMap,
+        cell: LongPairProject.DecodedPair,
+    ): Unit =
+      var row = start
+      var capMask = mask
+      var st = state
+      var ks = keys
+      var vs = values
+      while (row < end) {
+        LongPairProject.decode(mapper(keyValues(row), valueValues(row)), cell)
+        val mark = cell.mark
+        if (mark == LongPairProject.ProjectedPresent) then
+          val key = cell.key
+          val value = cell.value
+          var slot = ColumnHash.mix(java.lang.Long.hashCode(key)) & capMask
+          while (st(slot) != empty && ks(slot) != key) {
+            slot = (slot + 1) & capMask
+          }
+          if (st(slot) == present) then vs(slot) = op(vs(slot), value)
+          else
+            addPresent(key, value)
+            capMask = mask
+            st = state
+            ks = keys
+            vs = values
+        else if (mark == LongPairProject.ProjectedMissing) then
+          addMissing(cell.key)
+          capMask = mask
+          st = state
+          ks = keys
+          vs = values
+        row += 1
+      }
+
+    @SuppressWarnings(Array("org.wartremover.warts.Any"))
+    private def scanSparseProjected(
+        keyValues: Array[Long],
+        valueValues: Array[Long],
+        keyWords: Array[Long],
+        valueWords: Array[Long],
+        start: Int,
+        end: Int,
+        mapper: LongPairProject.LongPairMap,
+        cell: LongPairProject.DecodedPair,
+    ): Unit =
+      var row = start
+      while (row < end) {
+        val keyOn = Validity.isSet(keyWords, row)
+        val valueOn = Validity.isSet(valueWords, row)
+        val projected: Any =
+          if (keyOn && valueOn) then mapper(keyValues(row), valueValues(row))
+          else if (keyOn) then mapper.applyNullValue(keyValues(row))
+          else if (valueOn) then mapper.applyNullKey(valueValues(row))
+          else mapper.applyNulls()
+        LongPairProject.decode(projected, cell)
+        val mark = cell.mark
+        if (mark == LongPairProject.ProjectedPresent) then addPresent(cell.key, cell.value)
+        else if (mark == LongPairProject.ProjectedMissing) then addMissing(cell.key)
         row += 1
       }
 

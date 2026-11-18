@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -488,6 +490,134 @@ class TestLongPairReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     filtered.collect().toList shouldBe row(filtered.collect().toList)
   }
 
+  it should "reduce a long pair map without publishing the pair batch" in {
+    val source = DistCollection.ofLongPairs(Array(1L, 2L, 1L, 3L), Array(10L, 20L, 30L, 40L), 1)
+    val mapped = source.map((pair: (Long, Long)) => (pair._1 + 1L, pair._2))
+    val changed = mapped.reduceByKey[Long, Long](_ + _)
+    ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some("Project(Scan)")
+    ColumnarPlanner.lower(changed.plan).map(_.shape) shouldBe Some(
+      "LongHashAggregate(Exchange(Project(Scan)))",
+    )
+    val atBatch = (size: Int) => {
+      ScarletConf.set(originalConf.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      LongPairProject.resetPublishedForTest()
+      LongHashReduce.resetByKeyForTest()
+      val sink = new CountingSink
+      val previous = ColumnMetrics.install(sink)
+      val found =
+        try changed.collect().toMap
+        finally ColumnMetrics.restore(previous)
+      LongPairProject.publishedForTest shouldBe 0
+      LongHashReduce.byKeyCallsForTest shouldBe 0
+      sink.fusedCount should be > 0L
+      found
+    }
+    val reduced = atBatch(8192)
+    reduced shouldBe Map(2L -> 40L, 3L -> 20L, 4L -> 40L)
+    atBatch(1) shouldBe reduced
+    reduced shouldBe row(changed.collect().toMap)
+
+    LongPairProject.resetPublishedForTest()
+    val projected = mapped.collect().toList.sorted
+    LongPairProject.publishedForTest should be > 0
+    projected shouldBe List((2L, 10L), (2L, 30L), (3L, 20L), (4L, 40L))
+
+    val empty = DistCollection
+      .ofLongPairs(Array.empty[Long], Array.empty[Long], 4)
+      .map((pair: (Long, Long)) => (pair._1 + 1L, pair._2))
+      .reduceByKey[Long, Long](_ + _)
+    empty.collect() shouldBe Seq.empty[(Long, Long)]
+    val parts = longPairBatches(empty.plan)
+    parts.length shouldBe 4
+    parts.foreach { batch =>
+      batch.length shouldBe 0
+      batch.schema shouldBe Vector(LogicalType.Int64, LogicalType.Int64)
+    }
+  }
+
+  it should "keep null groups when a long pair map projects them" in {
+    val input = Seq(
+      pair(longRef(1L), longRef(10L)),
+      pair(longRef(1L), absent),
+      pair(absent, longRef(7L)),
+      pair(longRef(2L), absent),
+      pair(longRef(3L), longRef(4L)),
+      pair(longRef(3L), longRef(5L)),
+      pair(longRef(4L), absent),
+      pair(longRef(4L), absent),
+    )
+    val calls = new AtomicInteger
+    val rows = DistCollection(input, 1).map(shiftNullLongKey(calls))
+    val reduced = rows.reduceByKey[Long, Long](_ + _)
+    val expected = Seq(
+      pair(longRef(2L), longRef(10L)),
+      pair(longRef(3L), absent),
+      pair(longRef(4L), longRef(9L)),
+      pair(longRef(5L), longRef(0L)),
+    )
+    val atBatch = (size: Int) => {
+      ScarletConf.set(
+        originalConf.copy(columnarExecution = true, columnarBatchSize = size, threadPoolSize = 2),
+      )
+      ScarletRuntime.get.shuffle.clear()
+      LongPairProject.resetPublishedForTest()
+      LongHashReduce.resetByKeyForTest()
+      calls.set(0)
+      val found = reduced.collect().toList
+      val seen = calls.get
+      LongPairProject.publishedForTest shouldBe 0
+      LongHashReduce.byKeyCallsForTest shouldBe 0
+      (found, seen)
+    }
+    val (columnar, seen) = atBatch(8192)
+    columnar should contain theSameElementsAs expected
+    atBatch(1) shouldBe (columnar, seen)
+    calls.set(0)
+    columnar should contain theSameElementsAs row(reduced.collect().toList)
+    calls.get shouldBe seen
+    longPairBatches(reduced.plan).foreach(assertValidity)
+
+    // Dense source. The map is what makes the value null, so the insert loop is the present one.
+    val dense = DistCollection.ofLongPairs(Array(3L, 1L, 2L, 1L), Array(4L, -1L, -2L, 5L), 1)
+    val nulled = dense.map((pair: (Long, Long)) => nullNegativeValue(pair))
+    val combine = (left: Long, right: Long) => left + right + 1L
+    val folded = nulled.reduceByKey[Long, Long](combine)
+    val literal = Seq(
+      pair(longRef(1L), longRef(6L)),
+      pair(longRef(2L), absent),
+      pair(longRef(3L), longRef(4L)),
+    )
+    val denseAt = (size: Int) => {
+      ScarletConf.set(
+        originalConf.copy(columnarExecution = true, columnarBatchSize = size, threadPoolSize = 2),
+      )
+      ScarletRuntime.get.shuffle.clear()
+      folded.collect().toList
+    }
+    val denseRows = denseAt(1)
+    denseRows should contain theSameElementsAs literal
+    denseAt(8192) should contain theSameElementsAs denseRows
+    denseRows should contain theSameElementsAs row(folded.collect().toList)
+    longPairBatches(folded.plan).foreach(assertValidity)
+
+    val twice = DistCollection
+      .ofLongPairs(Array(3L, 1L, 2L, 1L), Array(4L, -1L, -2L, -3L), 1)
+      .map((pair: (Long, Long)) => nullNegativeValue(pair))
+      .reduceByKey[Long, Long](combine)
+    ScarletConf.set(
+      originalConf.copy(columnarExecution = true, columnarBatchSize = 1, threadPoolSize = 2),
+    )
+    val twoNulls = twice.collect().toList
+    val twoLiteral = Seq(
+      pair(longRef(1L), longRef(1L)),
+      pair(longRef(2L), absent),
+      pair(longRef(3L), longRef(4L)),
+    )
+    twoNulls should contain theSameElementsAs twoLiteral
+    twoNulls should contain theSameElementsAs row(twice.collect().toList)
+  }
+
   /** Output columns are copies. The fold may read the source arrays and must not publish them. */
   private def outputArrays(source: Plan[_], reduced: Plan[_]): Unit =
     val owned = source match
@@ -549,6 +679,46 @@ class TestLongPairReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEa
   )
   private def valueMissing(row: (Long, Long)): Boolean =
     row.productElement(1).asInstanceOf[AnyRef] eq null
+
+  /**
+   * A null key stays null. A present key is incremented. `productElement` keeps a null value.
+   * The row path and the long-pair project call this once per row.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+      "org.wartremover.warts.Throw",
+    ),
+  )
+  private def shiftNullLongKey(calls: AtomicInteger): ((Long, Long)) => (Long, Long) =
+    pair => {
+      val _ = calls.incrementAndGet()
+      val product = pair.asInstanceOf[Product]
+      val value = product.productElement(1).asInstanceOf[java.lang.Long]
+      val key: java.lang.Long = product.productElement(0) match
+        case null => null
+        case present: Long => Long.box(present + 1L)
+        case other => throw new IllegalArgumentException(s"pair map saw $other")
+      Tuple2(key, value).asInstanceOf[(Long, Long)]
+    }
+
+  /** A negative value becomes null. The key stays. The source itself has no nulls. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def nullNegativeValue(pair: (Long, Long)): (Long, Long) =
+    val product = pair.asInstanceOf[Product]
+    val key = product.productElement(0).asInstanceOf[java.lang.Long]
+    val value: java.lang.Long = product.productElement(1) match
+      case present: Long if present < 0L => null
+      case _ => product.productElement(1).asInstanceOf[java.lang.Long]
+    Tuple2(key, value).asInstanceOf[(Long, Long)]
 
   private def keepKeys(rows: DistCollection[(Long, Long)]): DistCollection[(Long, Long)] =
     rows
