@@ -603,36 +603,30 @@ class TestRightOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
       .map(_.shape) shouldBe Some("SortMergeFullOuter(Exchange(Scan), Exchange(Scan))")
   }
 
-  "full outer, sort-merge left, and sort-merge right" should
-    "decline a null value and match the row path" in {
-      val left = source(Seq(Seq(1 -> 10, pair(Some(2), None))))
-      val right = source(Seq(Seq(1 -> 100)))
-      val plans = Seq(
-        (
-          "full outer",
-          Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.ShuffleHash)),
-          "HashFullOuter(Exchange(Scan), Exchange(Scan))",
-        ),
-        (
-          "sort-merge left",
-          Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
-          "SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))",
-        ),
-        (
-          "sort-merge right",
-          Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
-          "SortMergeRightOuter(Exchange(Scan), Exchange(Scan))",
-        ),
-      )
-      plans.foreach { case (label, plan, shape) =>
-        withClue(s"$label: ") {
-          ScarletConf.set(shuffledConf)
-          ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(shape)
-          ColumnarPlanner.tryRun(plan) shouldBe None
-          agree(collect(plan, columnar = true), collect(plan, columnar = false))
-        }
+  "full outer and sort-merge right" should "decline a null value and match the row path" in {
+    val left = source(Seq(Seq(1 -> 10, pair(Some(2), None))))
+    val right = source(Seq(Seq(1 -> 100)))
+    val plans = Seq(
+      (
+        "full outer",
+        Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.ShuffleHash)),
+        "HashFullOuter(Exchange(Scan), Exchange(Scan))",
+      ),
+      (
+        "sort-merge right",
+        Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
+        "SortMergeRightOuter(Exchange(Scan), Exchange(Scan))",
+      ),
+    )
+    plans.foreach { case (label, plan, shape) =>
+      withClue(s"$label: ") {
+        ScarletConf.set(shuffledConf)
+        ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(shape)
+        ColumnarPlanner.tryRun(plan) shouldBe None
+        agree(collect(plan, columnar = true), collect(plan, columnar = false))
       }
     }
+  }
 
   "sort-merge right outer join" should "match the row path in memory and over spilled runs" in {
     val plan = Plan.RightOuterJoinOp(

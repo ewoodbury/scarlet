@@ -64,15 +64,15 @@ object ColumnarPlanner:
    * matching node. Any other sort-merge returns `None`. A left, right, or full outer join on int
    * pairs lowers for a broadcast, shuffle-hash, absent, or sort-merge hint. An absent hint uses
    * the shuffle-hash op. On a right outer join the left input is the build and the right input is
-   * the probe. A null value on an int shuffle-hash left or right outer join, or an int broadcast
-   * right outer join, stays a clear validity bit and [[tryRun]] keeps the row. A null value on a
-   * full outer join, a broadcast left outer join, or a sort-merge outer join makes [[tryRun]]
-   * return `None`. [[SortLowering]] accepts an int, long, or string key sort of a scan, or of
-   * filters over that scan. A map, aggregate, or join under the sort stays on the row path. One
-   * filter above an int, long, or string key sort lowers to [[PhysicalOp.Filter]] on
-   * [[PhysicalOp.Slot.Row]] around that sort, and only for a fully present key column. The
-   * pair-row filter drops a null key while the row path keeps it. The sort is
-   * [[SortLowering.lowerInt]], [[SortLowering.lowerLong]], or [[SortLowering.lowerString]], not
+   * the probe. A null value on an int shuffle-hash left or right outer join, an int broadcast left
+   * or right outer join, or an int sort-merge left outer join, stays a clear validity bit and
+   * [[tryRun]] keeps the row. A null value on a full outer join, a sort-merge right outer join, or
+   * a sort-merge full outer join makes [[tryRun]] return `None`. [[SortLowering]] accepts an int,
+   * long, or string key sort of a scan, or of filters over that scan. A map, aggregate, or join
+   * under the sort stays on the row path. One filter above an int, long, or string key sort lowers
+   * to [[PhysicalOp.Filter]] on [[PhysicalOp.Slot.Row]] around that sort, and only for a fully
+   * present key column. The pair-row filter drops a null key while the row path keeps it. The sort
+   * is [[SortLowering.lowerInt]], [[SortLowering.lowerLong]], or [[SortLowering.lowerString]], not
    * [[lowerChild]]. [[SortLowering.acceptsAsChild]] stays false, so a null key, a second filter, a
    * key or value filter above the sort, and every other parent stay on the row path. A slot filter
    * sorts the survivor index. Over the budget, with spill on, that index is spilled. A long-pair

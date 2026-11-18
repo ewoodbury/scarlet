@@ -37,12 +37,13 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * keeps a clear bit. A shuffle-hash right outer reuses that kernel, so the bit survives the swap.
  * [[broadcastOuterKeepNull]] keeps the same bit for a broadcast left or right outer join. A
  * broadcast right outer join swaps the value columns. A broadcast left outer join does not: the
- * probe is already the left input. Sort-merge and full outer still require every value to be
- * present. Match order is a kernel detail. The published multiset is multiplicity, values, and
- * null semantics. A full outer join probes the left input and also emits build rows no probe
- * matched. Broadcast gives each probe thread its own bitmap and ORs them after the probes join.
- * Shuffle keeps one bitmap per partition and finishes that partition immediately. Null build keys
- * are carried outside the table and emitted once. Those bitmaps are not part of the build budget.
+ * probe is already the left input. [[sortMergeLeftOuterJoin]] keeps that same bit and does not
+ * swap. Sort-merge right, sort-merge full, and full outer still require every value to be present.
+ * Match order is a kernel detail. The published multiset is multiplicity, values, and null
+ * semantics. A full outer join probes the left input and also emits build rows no probe matched.
+ * Broadcast gives each probe thread its own bitmap and ORs them after the probes join. Shuffle
+ * keeps one bitmap per partition and finishes that partition immediately. Null build keys are
+ * carried outside the table and emitted once. Those bitmaps are not part of the build budget.
  */
 object ColumnPipeline:
 
@@ -457,7 +458,8 @@ object ColumnPipeline:
    * a null key. [[SortMerge.leftOuter]] merges bucket `i` with bucket `i`. A null key does not
    * match. A left row with no right partner is kept, including a null key, and the right value's
    * absence bit is set. A preserved null key publishes a clear bit on the key column. A null value
-   * is not absence. Call this only when both value columns are fully valid.
+   * is a clear validity bit and is copied. It is not an absence bit. A stored `0` stays a present
+   * zero. The inputs are not swapped.
    *
    * Spill follows [[sortMergeJoin]]. Preserved null keys are removed before any run is written and
    * emitted once after the two reduced runs are joined. With spill off, or under the budget, this
@@ -470,10 +472,6 @@ object ColumnPipeline:
       parallelism: Int,
       batchSize: Int,
   ): Vector[ColumnBatch] =
-    require(
-      valuesFullyPresent(left) && valuesFullyPresent(right),
-      "a left outer join needs fully present value columns",
-    )
     sortMergeOuter(
       left,
       right,

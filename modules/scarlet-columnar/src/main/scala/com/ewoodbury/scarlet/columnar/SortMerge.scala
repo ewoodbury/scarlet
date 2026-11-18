@@ -20,11 +20,12 @@ package com.ewoodbury.scarlet.columnar
  *
  * Outer joins use a separate walk. A null key is not sorted, so it cannot match key `0`. A
  * preserved null key is emitted with a clear bit on the key column. The other value's absence bit
- * is set, and its validity bit stays clear. A null value is not absence, so both value columns
- * must be fully present. [[leftOuter]], [[rightOuter]], and [[fullOuter]] fail when a value is
- * null, rather than publishing that null as absence. [[rightOuter]] is [[leftOuter]] on swapped
- * inputs, with the value columns swapped back. [[fullOuter]] emits a group that exists on only one
- * side, and emits both sides when one of them is empty.
+ * is set, and its validity bit stays clear. A null value is a clear validity bit and is copied
+ * with the row. It is not an absence bit. A stored `0` stays present. [[leftOuter]] keeps that
+ * bit. [[rightOuter]] and [[fullOuter]] still fail when a value is null, rather than publishing
+ * that null as absence. [[rightOuter]] is [[leftOuter]] on swapped inputs, with the value columns
+ * swapped back, and it checks both value columns before that swap. [[fullOuter]] emits a group
+ * that exists on only one side, and emits both sides when one of them is empty.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object SortMerge:
@@ -58,24 +59,35 @@ object SortMerge:
    * Left outer join of one co-located partition. A null key does not match. Each left row whose
    * key is missing on the right is emitted once, including a null key, and the right value's
    * absence bit is set. A right null key is dropped. A clear key bit is a null key. The payload is
-   * not read.
+   * not read. A clear value bit is a null value and is copied. It is not an absence bit. A stored
+   * `0` stays present. The inputs are not swapped.
    */
   def leftOuter(left: ColumnBatch, right: ColumnBatch): ColumnBatch =
     outer(left, right, preserveRight = false)
 
   /**
    * Right outer join. Runs [[leftOuter]] with the inputs swapped, then swaps the value columns
-   * back to `(key, left, right)`. Absence moves with the left value.
+   * back to `(key, left, right)`. Absence moves with the left value. A null value is refused
+   * before that swap.
    */
   def rightOuter(left: ColumnBatch, right: ColumnBatch): ColumnBatch =
+    require(
+      valuesPresent(left) && valuesPresent(right),
+      "an outer join needs fully present value columns",
+    )
     swapValues(leftOuter(right, left))
 
   /**
    * Full outer join of one co-located partition. Equal keys emit the cartesian product. A group on
    * only one side emits that side, with the other value absent. A null key on either side is
-   * emitted once. An empty side emits every row of the other side.
+   * emitted once. An empty side emits every row of the other side. A null value is refused before
+   * the walk.
    */
   def fullOuter(left: ColumnBatch, right: ColumnBatch): ColumnBatch =
+    require(
+      valuesPresent(left) && valuesPresent(right),
+      "an outer join needs fully present value columns",
+    )
     outer(left, right, preserveRight = true)
 
   /**
@@ -270,11 +282,8 @@ object SortMerge:
       right: ColumnBatch,
       preserveRight: Boolean,
   ): ColumnBatch =
-    // Absence is a missing partner, not a null value. A null value must not reach this walk.
-    require(
-      valuesPresent(left) && valuesPresent(right),
-      "an outer join needs fully present value columns",
-    )
+    // Absence is a missing partner, not a null value. A clear validity bit is copied. Right and
+    // full outer refuse a null value before this walk. Left outer does not.
     val leftSide = sortedSide(left)
     val rightSide = sortedSide(right)
     val leftNulls = nullKeys(left)

@@ -554,29 +554,16 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     )
   }
 
-  "full outer and sort-merge left" should "decline a null value and match the row path" in {
+  "hash full outer" should "decline a null value and match the row path" in {
     val left = source(Seq(Seq(1 -> 10, pair(Some(2), None))))
     val right = source(Seq(Seq(1 -> 100)))
-    val plans = Seq(
-      (
-        "full outer",
-        Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.ShuffleHash)),
-        "HashFullOuter(Exchange(Scan), Exchange(Scan))",
-      ),
-      (
-        "sort-merge left",
-        Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge)),
-        "SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))",
-      ),
+    val plan = Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.ShuffleHash))
+    ScarletConf.set(shuffledConf)
+    ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
+      "HashFullOuter(Exchange(Scan), Exchange(Scan))",
     )
-    plans.foreach { case (label, plan, shape) =>
-      withClue(s"$label: ") {
-        ScarletConf.set(shuffledConf)
-        ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(shape)
-        ColumnarPlanner.tryRun(plan) shouldBe None
-        agree(collect(plan, columnar = true), collect(plan, columnar = false))
-      }
-    }
+    ColumnarPlanner.tryRun(plan) shouldBe None
+    agree(collect(plan, columnar = true), collect(plan, columnar = false))
   }
 
   it should "bound each partition build table by the broadcast budget" in {
@@ -719,33 +706,159 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     spilledBoth.isEmpty shouldBe true
   }
 
-  it should "keep a null value on the row path" in {
-    val left = source(Seq(Seq(1 -> 10, pair(Some(2), None))))
-    val right = source(Seq(Seq(1 -> 100)))
-    val plan = Plan.LeftOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge))
-    ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
-      "SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))",
+  it should "keep a null value columnar and match the row path" in {
+    val noRows = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 4).plan
+    // A present pair comes first, so the source still witnesses int pairs. The null value is later.
+    val nullProbe = source(
+      Seq(Seq(pair(Some(2), Some(0)), pair(Some(1), None), pair(None, Some(7)))),
     )
-    ColumnarPlanner.tryRun(plan) shouldBe None
-    canonical(collect(plan, columnar = true)) should contain theSameElementsAs canonical(
-      collect(plan, columnar = false),
+    val nullBuild = source(Seq(Seq(pair(Some(0), Some(0)), pair(Some(1), None))))
+    val cases = Seq(
+      "null probe value" -> (
+        Seq(Seq(pair(Some(2), Some(20)), pair(Some(1), None))),
+        Seq(Seq(1 -> 100, 2 -> 200)),
+      ),
+      "null build value" -> (
+        Seq(Seq(1 -> 10, 2 -> 20)),
+        Seq(Seq(pair(Some(2), Some(200)), pair(Some(1), None))),
+      ),
+      "missing partner" -> (
+        Seq(Seq(1 -> 10, 2 -> 20)),
+        Seq(Seq(1 -> 100)),
+      ),
+      "null key on the preserved side" -> (
+        Seq(Seq(pair(Some(1), Some(10)), pair(None, Some(7)), 0 -> 5)),
+        Seq(Seq(1 -> 100, 0 -> 50)),
+      ),
+      "null key on the build" -> (
+        Seq(Seq(1 -> 10, 0 -> 5)),
+        Seq(Seq(pair(Some(1), Some(100)), pair(None, Some(99)), 0 -> 50)),
+      ),
+      "real zero" -> (
+        Seq(Seq(pair(Some(1), Some(0)), pair(Some(3), Some(0)))),
+        Seq(Seq(pair(Some(1), Some(0)))),
+      ),
     )
-    val probe = BatchCodec.nullableIntPairs(Seq((Some(1), Some(10)), (Some(2), None)))
-    val build = BatchCodec.nullableIntPairs(Seq((Some(1), Some(100))))
-    val refused = intercept[IllegalArgumentException] {
-      ColumnPipeline.sortMergeLeftOuterJoin(
-        Vector(probe),
-        Vector(build),
-        numPartitions = 1,
-        parallelism = 1,
-        batchSize = 8,
+    cases.foreach { case (label, (leftParts, rightParts)) =>
+      withClue(s"$label: ") {
+        ScarletConf.set(shuffledConf)
+        val plan = Plan.LeftOuterJoinOp(
+          source(leftParts),
+          source(rightParts),
+          Some(Plan.JoinStrategy.SortMerge),
+        )
+        ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
+          "SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))",
+        )
+        ColumnarPlanner.tryRun(plan).isDefined shouldBe true
+        val columnar = collect(plan, columnar = true)
+        agree(columnar, collect(plan, columnar = false))
+        if (label.contains("on the build")) then containsInt(columnar, 99) shouldBe false
+      }
+    }
+    withClue("empty build keeps a null probe value: ") {
+      ScarletConf.set(shuffledConf)
+      val plan = Plan.LeftOuterJoinOp(nullProbe, noRows, Some(Plan.JoinStrategy.SortMerge))
+      ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
+        "SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))",
       )
+      ColumnarPlanner.tryRun(plan).isDefined shouldBe true
+      agree(collect(plan, columnar = true), collect(plan, columnar = false))
     }
-    refused.getMessage should include("fully present")
-    val kernel = intercept[IllegalArgumentException] {
-      SortMerge.leftOuter(probe, build)
+    withClue("empty probe drops a null build value: ") {
+      ScarletConf.set(shuffledConf)
+      val plan = Plan.LeftOuterJoinOp(noRows, nullBuild, Some(Plan.JoinStrategy.SortMerge))
+      ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
+        "SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))",
+      )
+      ColumnarPlanner.tryRun(plan).isDefined shouldBe true
+      val row = collect(plan, columnar = false)
+      agree(collect(plan, columnar = true), row)
+      JoinDigest.fromOuter(row).total shouldBe 0L
     }
-    kernel.getMessage should include("fully present")
+  }
+
+  it should "publish a null value as a clear bit and a missing partner as absence" in {
+    val probe = BatchCodec.nullableIntPairs(
+      Seq(
+        (Some(1), None),
+        (Some(2), Some(20)),
+        (Some(3), Some(30)),
+        (None, Some(7)),
+        (Some(0), Some(0)),
+        (Some(4), Some(40)),
+        (Some(5), Some(0)),
+      ),
+    )
+    val build = BatchCodec.nullableIntPairs(
+      Seq(
+        (Some(1), Some(100)),
+        (Some(2), None),
+        (None, Some(99)),
+        (Some(0), Some(0)),
+        (Some(4), Some(0)),
+        (Some(8), Some(80)),
+      ),
+    )
+    val parts = sortMergeLeft(Vector(probe), Vector(build))
+    parts.flatMap(bitMarks) should contain theSameElementsAs Seq(
+      "key=1 left=null right=present:100",
+      "key=2 left=present:20 right=null",
+      "key=3 left=present:30 right=absent",
+      "key=null left=present:7 right=absent",
+      "key=0 left=present:0 right=present:0",
+      "key=4 left=present:40 right=present:0",
+      "key=5 left=present:0 right=absent",
+    )
+    agree(decodedRight(parts), expectedNullBits)
+
+    val emptyProbe = sortMergeLeft(Vector(BatchCodec.nullableIntPairs(Seq.empty)), Vector(build))
+    emptyProbe.map(_.length).sum shouldBe 0
+    JoinDigest.fromOuter(decodedRight(emptyProbe)).total shouldBe 0L
+
+    val emptyBuild = sortMergeLeft(
+      Vector(
+        BatchCodec.nullableIntPairs(
+          Seq((Some(1), None), (Some(2), Some(0)), (None, Some(7))),
+        ),
+      ),
+      Vector(BatchCodec.nullableIntPairs(Seq.empty)),
+    )
+    emptyBuild.flatMap(bitMarks) should contain theSameElementsAs Seq(
+      "key=1 left=null right=absent",
+      "key=2 left=present:0 right=absent",
+      "key=null left=present:7 right=absent",
+    )
+  }
+
+  it should "keep a null value over spilled runs" in {
+    // Same key counts as the present-value spill case. A present pair stays first so the scan
+    // still witnesses int pairs. One later value on each side is null. The side estimate still
+    // exceeds the budget, and each equal-key group stays at the budget.
+    val budget = SortMergeRuns.retainedBytes(2) + SortMergeRuns.retainedBytes(1)
+    val leftRows = sortMergeLeftRows.zipWithIndex.map { (row, index) =>
+      if (index == 1) then pair(Some(0), None) else row
+    }
+    val rightRows = sortMergeRightRows.zipWithIndex.map { (row, index) =>
+      if (index == 1) then pair(Some(4), None) else row
+    }
+    val plan = Plan.LeftOuterJoinOp(
+      source(Seq(leftRows)),
+      source(Seq(rightRows)),
+      Some(Plan.JoinStrategy.SortMerge),
+    )
+    ScarletConf.set(shuffledConf)
+    ColumnarPlanner.tryRun(plan).isDefined shouldBe true
+    val row = collect(plan, columnar = false)
+    val spilled = withSpill(budget) { _ =>
+      val rows = collectCurrent(plan)
+      // One execution. The present-value case writes twice that many files.
+      SortMergeRuns.filesWrittenForTest shouldBe 48L
+      SortMergeRuns.mergePassesForTest shouldBe 16L
+      rows
+    }
+    agree(spilled, row)
+    containsInt(spilled, 9) shouldBe false
   }
 
   private def shuffledConf: ScarletConf =
@@ -789,6 +902,18 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
   private def decodedRight(parts: Vector[ColumnBatch]): Seq[Any] =
     parts.flatMap(batch => BatchCodec.decodeOuter(batch, AbsentSide.Right))
+
+  private def sortMergeLeft(
+      left: Vector[ColumnBatch],
+      right: Vector[ColumnBatch],
+  ): Vector[ColumnBatch] =
+    ColumnPipeline.sortMergeLeftOuterJoin(
+      left,
+      right,
+      numPartitions = 4,
+      parallelism = 1,
+      batchSize = 8,
+    )
 
   private def hashLeft(
       probe: Vector[ColumnBatch],
