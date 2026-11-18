@@ -13,11 +13,15 @@ import ColumnarInterpreter.{Columns, interpretAt, pairsOf}
  * copied, and no survivor index is built. One [[Plan.MapIntKeyOp]] over that source is summed the
  * same way: the function runs once on each present survivor and is not inspected, and the pair
  * batch is not published. A null key is not passed in. Encoded morsels under that one map,
- * including a null value, observe into the same table. A second map, a whole-row step, a non-int
- * slot, a boxed row the encoder throws on, and any other pair child are interpreted, then
- * aggregated. That path partial-aggregates survivor ids, including a stack of one, and
- * [[CountSum.byKey]] sees the published pairs. A null key is dropped. A null value is counted and
- * not added. The exchange sees dense partials of `(key, count, sum)`.
+ * including a null value, observe into the same table. One pair [[Plan.MapOp]] whose filters are
+ * int slots, or absent, is summed from that project's input morsels. The interpreter's adapter
+ * runs on every row, including a null key and a null value, and is not inspected. A null projected
+ * key is dropped. A null projected value is counted and not added. The pair batch is not
+ * published, and [[CountSum.byKey]] is not called. A second map, a whole-row step, a non-int slot,
+ * a boxed row the encoder throws on, and any other pair child are interpreted, then aggregated.
+ * That path partial-aggregates survivor ids, including a stack of one, and [[CountSum.byKey]] sees
+ * the published pairs. A null key is dropped. A null value is counted and not added. The exchange
+ * sees dense partials of `(key, count, sum)`.
  */
 private[execution] object CountSumArms:
 
@@ -34,7 +38,7 @@ private[execution] object CountSumArms:
     val batchSize = ColumnarPlanner.batchSize
     child.kind match
       case PhysicalOp.Kind.Pairs =>
-        val aggregated = foldedMapped(
+        val aggregated = foldedProjected(
           source,
           child,
           selectedPartition,
@@ -43,6 +47,17 @@ private[execution] object CountSumArms:
           width,
           workers,
           batchSize,
+        ).orElse(
+          foldedMapped(
+            source,
+            child,
+            selectedPartition,
+            preserveAbsence,
+            ordinals,
+            width,
+            workers,
+            batchSize,
+          ),
         ).orElse(folded(source, child, ordinals, width, workers, batchSize)) match
           case Some(summed) => summed
           case None =>
@@ -68,6 +83,64 @@ private[execution] object CountSumArms:
         throw new IllegalStateException(
           s"countSumByKey column is $other, expected int pairs",
         )
+
+  /**
+   * One pair [[Plan.MapOp]]. The input of the project is interpreted, then each morsel is summed
+   * through [[IntPairProject.visitCountSums]]. `None` when a second map sits under the filters, or
+   * when a step is not an int slot, including a whole-row predicate. A null key and a null value
+   * are passed to the adapter. A null projected key is dropped. A null projected value is counted
+   * and not added. [[CountSum.byKey]] is not called. The function is not inspected.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def foldedProjected(
+      source: Plan[_],
+      child: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    (source, child) match
+      case (Plan.MapOp(inner, fn), PhysicalOp.Project(under)) =>
+        val (underPlan, _) = PredicatePlan.childOf(inner, under)
+        if (pastMap(underPlan)) then None
+        else
+          slotSteps(inner, under, ordinals) match
+            case None => None
+            case Some(steps) =>
+              val adapted = IntPairProject.adapt(fn)
+              ownedPairs(inner, under) match
+                case Some(parts) =>
+                  Some(
+                    CountSum.byKeyOwnedProjected(
+                      parts,
+                      steps,
+                      adapted,
+                      width,
+                      workers,
+                      batchSize,
+                    ),
+                  )
+                case None =>
+                  val columns =
+                    try interpretAt(inner, under, selectedPartition, preserveAbsence, ordinals)
+                    catch
+                      case _: NullPointerException =>
+                        throw new ColumnarFallback(
+                          "countSumByKey source has a null pair component",
+                        )
+                  columns match
+                    case Columns.Pairs(batches) =>
+                      Some(
+                        ProjectedPairCountSum.sum(batches, adapted, width, workers, batchSize),
+                      )
+                    case _ =>
+                      throw new IllegalStateException(
+                        "pair project count-sum expected int pairs",
+                      )
+      case _ => None
 
   /**
    * One [[Plan.MapIntKeyOp]] over an int-slot stack, or over a scan with no filter. The filters

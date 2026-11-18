@@ -28,7 +28,9 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * [[byKeyOwnedMapped]] is [[byKeyOwned]] after an int key function. [[byKeyMapped]] is the same
  * aggregate over encoded morsels: a null key is not passed to the function, and a null value is
- * counted and not added. Neither calls [[byKey]], so a published pair batch is not the input.
+ * counted and not added. [[suppliedPartial]] is that aggregate for pairs a caller projects. A null
+ * projected key is the caller's to drop. A null projected value is counted and not added. None of
+ * these call [[byKey]], so a published pair batch is not the input.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object CountSum:
@@ -149,6 +151,27 @@ object CountSum:
     else finish(partials, numPartitions, parallelism)
 
   /**
+   * [[byKeyOwned]] after an int-pair project. Filters see the source pair. `mapper` runs once on
+   * each survivor and is not inspected. A null projected key is dropped. A null projected value is
+   * counted and not added. This does not call [[byKey]] and does not publish the pair batch.
+   */
+  private[scarlet] def byKeyOwnedProjected(
+      parts: Vector[(Array[Int], Array[Int])],
+      steps: List[Selection.Step],
+      mapper: IntPairProject.IntPairMap,
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    val partials =
+      OwnedProjectedCountSum.fold(parts, steps, mapper, parallelism, () => open(), publish)
+    if (partials.isEmpty) then Vector.fill(numPartitions)(emptyBatch())
+    else finish(partials, numPartitions, parallelism)
+
+  /**
    * [[byKey]] for encoded morsels under an int key function. `steps` may be empty. A null key is
    * dropped and `mapKey` is not called. A null value is counted and not added. This does not call
    * [[byKey]]: the morsel is the source, not a published map.
@@ -175,6 +198,48 @@ object CountSum:
         merge,
       )
       finish(combined, numPartitions, parallelism)
+
+  /**
+   * One partial from rows the caller supplies. No pair column is read.
+   *
+   * `rows` of zero publishes an empty count-sum batch and does not call `supply`. `supply`
+   * receives a sink and calls [[IntPairProject.IntPairCountSink.observe]] or
+   * [[IntPairProject.IntPairCountSink.countNull]] once per projected pair. A null key is the
+   * caller's to skip. This is not [[byKey]]: nothing here is a published pair project.
+   */
+  private[scarlet] def suppliedPartial(
+      rows: Int,
+  )(supply: IntPairProject.IntPairCountSink => Unit): ColumnBatch =
+    require(rows >= 0, s"row estimate must be >= 0, got $rows")
+    if (rows == 0) then emptyBatch()
+    else
+      val table = open()
+      val sink = new IntPairProject.IntPairCountSink:
+        def observe(key: Int, value: Int): Unit =
+          table.observe(table.ensure(key), value)
+        def countNull(key: Int): Unit =
+          table.countNull(table.ensure(key))
+      supply(sink)
+      publish(table)
+
+  /** [[merge]] for a projected count-sum. [[byKey]] is not called. */
+  private[scarlet] def mergeCountSums(batch: ColumnBatch): ColumnBatch = merge(batch)
+
+  /** [[finish]] for a projected count-sum. [[byKey]] is not called. */
+  private[scarlet] def exchangeCountSums(
+      combined: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+  ): Vector[ColumnBatch] =
+    require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    if (combined.isEmpty) then Vector.fill(numPartitions)(emptyBatch())
+    else finish(combined, numPartitions, parallelism)
+
+  /** `numPartitions` empty count-sum batches. [[byKey]] is not called. */
+  private[scarlet] def emptyCountSums(numPartitions: Int): Vector[ColumnBatch] =
+    require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+    Vector.fill(numPartitions)(emptyBatch())
 
   /** [[byKey]] entries since the last [[resetByKeyForTest]]. */
   private[scarlet] def byKeyCallsForTest: Int = byKeyCalls.get
