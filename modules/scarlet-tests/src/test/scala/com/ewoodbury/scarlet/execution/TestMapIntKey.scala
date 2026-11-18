@@ -15,9 +15,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * `mapIntKey` is the typed witness for an int key change.
  *
  * A null key stays null and the function is not called. `countByKey` then drops that key. A
- * generic pair `map` still declines. A filter, `keys`, or `values` above the map declines too: the
- * row path unboxes the null key. `partitionBy` then this map drops the hash, so `countByKey` is
- * one global row per new key.
+ * generic `(Int, Int)` pair `map` lowers as `Project` and calls the function on a null key. A
+ * filter, `keys`, or `values` above this key map declines: the row path unboxes the null key.
+ * `partitionBy` then this map drops the hash, so `countByKey` is one global row per new key.
  */
 class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -34,7 +34,7 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     ScarletConf.set(original)
     ()
 
-  "mapIntKey" should "lower a key change and leave a generic pair map on the row path" in {
+  "mapIntKey" should "lower a key change, and a generic pair map should lower beside it" in {
     val mapped = present.mapIntKey(key => key % 100)
     ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some("MapKey(Scan)")
     val counted = mapped.countByKey
@@ -42,7 +42,46 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       "CountByKey(Exchange(MapKey(Scan)))",
     )
     val opaque = present.map { case (key, value) => (key % 100, value) }.countByKey
-    ColumnarPlanner.lower(opaque.plan) shouldBe None
+    ColumnarPlanner.lower(opaque.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(Project(Scan)))",
+    )
+    counts(run(columnar = true)(opaque.collect())) shouldBe counts(
+      run(columnar = false)(opaque.collect()),
+    )
+  }
+
+  it should "call a generic pair map on a null key and still count a null value" in {
+    val calls = new AtomicInteger
+    val mapped = nullable.map(rewriteNullKey(calls, nullKey = 7))
+    calls.set(0)
+    val columnar = fingerprint(run(columnar = true)(mapped.collect()))
+    calls.get() shouldBe 6
+    calls.set(0)
+    val rows = fingerprint(run(columnar = false)(mapped.collect()))
+    calls.get() shouldBe 6
+    columnar shouldBe rows
+    columnar shouldBe Seq("2:4", "2:5", "3:-1", "3:6", "7:8", "7:9")
+
+    val counted = nullable.map(rewriteNullKey(calls, nullKey = 7)).countByKey
+    calls.set(0)
+    val columnarCounts = counts(run(columnar = true)(counted.collect()))
+    calls.get() shouldBe 6
+    calls.set(0)
+    val rowCounts = counts(run(columnar = false)(counted.collect()))
+    calls.get() shouldBe 6
+    columnarCounts shouldBe rowCounts
+    columnarCounts shouldBe Map(2 -> 2, 3 -> 2, 7 -> 2)
+
+    val valueCalls = new AtomicInteger
+    val values = nullThenValue.map(rewriteNullKey(valueCalls, nullKey = 7)).countByKey
+    valueCalls.set(0)
+    val columnarValues = counts(run(columnar = true)(values.collect()))
+    valueCalls.get() shouldBe 2
+    valueCalls.set(0)
+    val rowValues = counts(run(columnar = false)(values.collect()))
+    valueCalls.get() shouldBe 2
+    columnarValues shouldBe rowValues
+    columnarValues shouldBe Map(2 -> 1, 5 -> 1)
   }
 
   it should "keep a null key, skip the function, and match the row path" in {
@@ -183,6 +222,38 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
         ),
       ),
     )
+
+  /** A present pair witnesses the scan, then a null value. The key stays present. */
+  private def nullThenValue: DistCollection[(Int, Int)] =
+    DistCollection(
+      Plan.Source(
+        Seq(Partition(Seq(cell(4, 4), cell(1, null)))),
+      ),
+    )
+
+  /**
+   * A null key becomes `nullKey`. A present key is incremented. `productElement` keeps a null
+   * value, so both paths count it. The row path and the pair project call this once per row.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+      "org.wartremover.warts.Throw",
+    ),
+  )
+  private def rewriteNullKey(calls: AtomicInteger, nullKey: Int): ((Int, Int)) => (Int, Int) =
+    pair => {
+      calls.incrementAndGet()
+      val product = pair.asInstanceOf[Product]
+      val value = product.productElement(1)
+      product.productElement(0) match
+        case null => Tuple2(Int.box(nullKey), value).asInstanceOf[(Int, Int)]
+        case present: Int => Tuple2(Int.box(present + 1), value).asInstanceOf[(Int, Int)]
+        case other =>
+          throw new IllegalArgumentException(s"pair map saw $other")
+    }
 
   /** One null value. The key function still runs. */
   private def nullValue: DistCollection[(Int, Int)] =

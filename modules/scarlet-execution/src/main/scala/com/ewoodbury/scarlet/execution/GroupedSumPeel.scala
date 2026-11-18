@@ -11,9 +11,8 @@ import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
  * grouped int-pair source, in source order. A typed int-pair source is `GroupedSum(Scan)`. Those
  * steps wrap the scan as `FilterRow`, `FilterKey`, `FilterValue`, or `MapPair`. The label does not
  * mean [[ColumnarPlanner.tryGroupedSum]] runs. A map that changes `(Int, Int)` to another pair
- * type still peels as `GroupedSum(MapPair(Scan))`, and the fused action returns `None`.
- * [[ColumnarPlanner.lower]] refuses every pair map, so [[ColumnarPlanner.partitioning]] reports no
- * layout for it.
+ * type still peels as `GroupedSum(MapPair(Scan))`, and the fused action returns `None`. An
+ * `(Int, Int)` pair map also lowers. This label is not that physical shape.
  */
 private[execution] object GroupedSumPeel:
 

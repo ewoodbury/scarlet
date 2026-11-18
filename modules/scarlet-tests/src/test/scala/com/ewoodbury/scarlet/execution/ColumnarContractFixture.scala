@@ -130,15 +130,15 @@ trait ColumnarContractFixture extends Matchers:
     )
 
   /**
-   * `lower` and the action gates share one decision. A refused plan, including a double sort-merge
-   * and a type-changing pair map, makes every gate return `None`. An accepted plan runs `tryRun`
-   * and `tryCount`. `tryTake` runs when the physical tree keeps input partitions, and for an
-   * int-key, long-key, or string-key sort, which runs the whole sort and then decodes the prefix.
-   * `trySumInt`, `trySumLong`, and `trySumDouble` run only for that numeric kind. `tryGroupedSum`
-   * equals `groupedSum` for an accepted grouped pair source and for an accepted row, key, or value
-   * filter of one, and is `None` for every other accepted plan. The peel label follows
-   * [[expectedGroupedPeel]]. A pair map that stays `(Int, Int)` is outside these lists:
-   * [[ColumnarPlanner.lower]] refuses it and [[ColumnarPlanner.tryGroupedSum]] still succeeds.
+   * `lower` and the action gates share one decision. A refused plan, including a double
+   * sort-merge, makes every gate return `None`. An accepted plan runs `tryRun` and `tryCount`.
+   * `tryTake` runs when the physical tree keeps input partitions, and for an int-key, long-key, or
+   * string-key sort, which runs the whole sort and then decodes the prefix. `trySumInt`,
+   * `trySumLong`, and `trySumDouble` run only for that numeric kind. `tryGroupedSum` equals
+   * `groupedSum` for an accepted grouped pair source, an accepted `(Int, Int)` pair map, and an
+   * accepted row, key, or value filter of one. It is `None` for every other accepted plan. The
+   * peel label follows [[expectedGroupedPeel]]. A pair map whose result is not `(Int, Int)` still
+   * lowers, and [[ColumnarPlanner.tryRun]] returns `None`.
    */
   protected def assertGatesAgree(
       plan: Plan[_],
@@ -383,15 +383,17 @@ trait ColumnarContractFixture extends Matchers:
 
   /**
    * Structural peel label of an accepted grouped sum. A grouped int-pair source, including an
-   * empty typed source, is `GroupedSum(Scan)`. A row, key, or value filter wraps that scan. Any
-   * other accepted plan is `None`. Eligibility is [[ColumnarPlanner.groupedPairSource]], so any
-   * grouped int-pair source is included, not one particular source value.
+   * empty typed source, is `GroupedSum(Scan)`. A row, key, or value filter wraps that scan. A
+   * pair map wraps that peel as `MapPair` only when the child peels. Any other accepted plan is
+   * `None`. Eligibility is [[ColumnarPlanner.groupedPairSource]], so any grouped int-pair source
+   * is included, not one particular source value.
    */
   protected def expectedGroupedPeel(plan: Plan[_]): Option[String] =
     def body(current: Plan[_]): Option[String] = current match
       case Plan.FilterOp(source, _) => body(source).map(inner => s"FilterRow($inner)")
       case Plan.FilterKeysOp(source, _) => body(source).map(inner => s"FilterKey($inner)")
       case Plan.FilterValuesOp(source, _) => body(source).map(inner => s"FilterValue($inner)")
+      case Plan.MapOp(source, _) => body(source).map(inner => s"MapPair($inner)")
       case source: Plan.Source[_] if ColumnarPlanner.groupedPairSource(source) => Some("Scan")
       case _ => None
 

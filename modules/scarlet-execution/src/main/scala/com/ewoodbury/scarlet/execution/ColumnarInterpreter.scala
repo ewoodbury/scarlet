@@ -191,24 +191,26 @@ private[execution] object ColumnarInterpreter:
 
   /**
    * Decode `columns`. Int pairs use [[BatchCodec.decodeIntPairsPreservingAbsence]] for
-   * [[PhysicalOp.SortByIntKey]], [[PhysicalOp.SortByIntValueDesc]], and [[PhysicalOp.MapKey]]. A
-   * key map keeps a null key. Every other int-pair op uses [[BatchCodec.decodeIntPairs]], which
-   * rejects a clear bit. Long pairs use [[BatchCodec.decodeLongPairs]], which already keeps a
-   * clear bit. [[PhysicalOp.SortByLongKey]] returns long pairs, so collect and take use that
-   * decoder and do not call the int-pair function. A long column projected from a long pair keeps
-   * a clear bit via [[BatchCodec.decodeLongsPreservingAbsence]]. An element long scan still uses
+   * [[PhysicalOp.SortByIntKey]], [[PhysicalOp.SortByIntValueDesc]], [[PhysicalOp.MapKey]], and an
+   * int-pair [[PhysicalOp.Project]]. A key map and that project keep a null key. Every other
+   * int-pair op uses [[BatchCodec.decodeIntPairs]], which rejects a clear bit. Long pairs use
+   * [[BatchCodec.decodeLongPairs]], which already keeps a clear bit. [[PhysicalOp.SortByLongKey]]
+   * returns long pairs, so collect and take use that decoder and do not call the int-pair
+   * function. A long column projected from a long pair keeps a clear bit via
+   * [[BatchCodec.decodeLongsPreservingAbsence]]. An element long scan still uses
    * [[BatchCodec.decodeLongs]], which rejects a clear bit. Int triples use
-   * [[BatchCodec.decodeIntTriplesPreservingAbsence]] for a [[PhysicalOp.Project]] and for an int
-   * inner join: [[PhysicalOp.HashJoin]], [[PhysicalOp.BroadcastJoin]], or
-   * [[PhysicalOp.SortMergeJoin]]. A map or that join may keep a null component. A filter or other
-   * triple op uses [[BatchCodec.decodeIntTriples]], which rejects a clear bit. A whole-row filter
-   * drops those rows before decode. Outer joins are [[Columns.Outer]] and do not use this decoder.
-   * Long triples are a long inner hash, broadcast, or sort-merge join and use
-   * [[BatchCodec.decodeLongTriplesPreservingAbsence]]. A clear validity bit is a null value, not
-   * an absence bit. A fully present batch still decodes to the same longs. String triples are a
-   * string inner hash or broadcast join and use [[BatchCodec.decodeStringJoinKeepingNulls]]. A
-   * clear value bit is a null int, not an absence bit. A clear key bit is still an error. A fully
-   * present batch still decodes to the same strings and ints.
+   * [[BatchCodec.decodeIntTriplesPreservingAbsence]] for a triple [[PhysicalOp.Project]] and for
+   * an int inner join: [[PhysicalOp.HashJoin]], [[PhysicalOp.BroadcastJoin]], or
+   * [[PhysicalOp.SortMergeJoin]]. A map or that join may keep a null component. An int-pair
+   * project is not that decoder. A filter or other triple op uses [[BatchCodec.decodeIntTriples]],
+   * which rejects a clear bit. A whole-row filter drops those rows before decode. Outer joins are
+   * [[Columns.Outer]] and do not use this decoder. Long triples are a long inner hash, broadcast,
+   * or sort-merge join and use [[BatchCodec.decodeLongTriplesPreservingAbsence]]. A clear validity
+   * bit is a null value, not an absence bit. A fully present batch still decodes to the same
+   * longs. String triples are a string inner hash or broadcast join and use
+   * [[BatchCodec.decodeStringJoinKeepingNulls]]. A clear value bit is a null int, not an absence
+   * bit. A clear key bit is still an error. A fully present batch still decodes to the same
+   * strings and ints.
    */
   private[execution] def decodeFor(columns: Columns, op: PhysicalOp): Seq[Partition[_]] =
     decodeWith(columns, intPairDecoder(op), longDecoder(op), tripleDecoder(op))
@@ -238,12 +240,16 @@ private[execution] object ColumnarInterpreter:
   /**
    * Int-pair decoder for `op`. [[PhysicalOp.SortByLongKey]] and [[PhysicalOp.SortByStringKey]] are
    * their own arms. Those decoders do not call the returned function, and these arms must not fall
-   * through to [[BatchCodec.decodeIntPairs]], which rejects a clear bit. [[PhysicalOp.MapKey]]
-   * keeps a null key or value, so it uses the absence-preserving decoder.
+   * through to [[BatchCodec.decodeIntPairs]], which rejects a clear bit. [[PhysicalOp.MapKey]] and
+   * an int-pair [[PhysicalOp.Project]] keep a null key or value, so they use the
+   * absence-preserving decoder. A triple [[PhysicalOp.Project]] does not: its kind is not
+   * [[PhysicalOp.Kind.Pairs]], and [[tripleDecoder]] is the arm that runs.
    */
   private def intPairDecoder(op: PhysicalOp): (ColumnBatch, Int) => Seq[(Int, Int)] =
     op match
       case _: PhysicalOp.MapKey =>
+        (batch, rows) => BatchCodec.decodeIntPairsPreservingAbsence(batch, rows)
+      case project: PhysicalOp.Project if intPairProject(project) =>
         (batch, rows) => BatchCodec.decodeIntPairsPreservingAbsence(batch, rows)
       case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByIntValueDesc =>
         (batch, rows) =>
@@ -262,6 +268,17 @@ private[execution] object ColumnarInterpreter:
             "SortByStringKey is decoded as string pairs, not int pairs",
           )
       case _ => (batch, rows) => BatchCodec.decodeIntPairs(batch, rows)
+
+  /** An int-pair project. A triple project stays on [[tripleDecoder]]. */
+  private def intPairProject(op: PhysicalOp.Project): Boolean = op.kind match
+    case PhysicalOp.Kind.Pairs => true
+    case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
+        PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools |
+        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
+        PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
+        PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
+        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums =>
+      false
 
   /**
    * An int inner join or a triple map may keep a null component. A filter or other triple op
@@ -982,10 +999,18 @@ private[execution] object ColumnarInterpreter:
       Columns.Triples(onEachMorsel(parts) { morsel =>
         PairKernel.mapTriple(morsel.batch, morsel.start, morsel.length, adapted)
       })
-    case Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.LongCounts(_) |
-        Columns.CountSums(_) | Columns.LongTriples(_) | Columns.StringPairs(_) |
-        Columns.StringTriples(_) | Columns.Outer(_, _) | Columns.GroupedInts(_) |
-        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
+    case Columns.Pairs(parts) =>
+      // The adapter returns Any. A cell that is not an int throws ColumnarFallback inside the
+      // kernel, before the output batch is published. The declared apply(Tuple2) check does not
+      // call the function. Long counts stay on the refusal below.
+      val adapted = IntPairProject.adapt(mapper)
+      Columns.Pairs(onEachMorsel(parts) { morsel =>
+        IntPairProject.project(morsel.batch, morsel.start, morsel.length, adapted)
+      })
+    case Columns.Bools(_) | Columns.LongPairs(_) | Columns.LongCounts(_) | Columns.CountSums(_) |
+        Columns.LongTriples(_) | Columns.StringPairs(_) | Columns.StringTriples(_) |
+        Columns.Outer(_, _) | Columns.GroupedInts(_) | Columns.GroupedStrings(_) |
+        Columns.GroupedLongs(_) =>
       throw new IllegalStateException(
         s"columnar map expects ${elementColumnList(includeBooleans = false)}",
       )
