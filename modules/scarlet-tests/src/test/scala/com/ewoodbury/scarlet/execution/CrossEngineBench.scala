@@ -17,12 +17,14 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * Each query builds its own input and drops it before the next query starts. `encode_ms` times one
  * encode of that input before warmup and is not subtracted from the action. The action timer still
  * includes the scan encode. A columnar action that publishes no column batch and folds nothing
- * fails the process. A plan [[ColumnarPlanner]] declines is not timed: `batches`, `fused`, and
- * `arm` say `row`, and one execution supplies the checksum. That run is not a speed.
- * `CROSS_TIME_ROW=true` times that decline with the same warmup, rounds, and steady window. The
- * arm stays `row`. A published batch on a declined plan still fails the process.
- * `CROSS_TRACE_LOWERING=1` prints one lowering-refusal line on stderr before the timed samples
- * when the plan stays on the row path. The timed section leaves `traceLowering` off.
+ * fails the process. When [[ColumnarPlanner]] declines a plan, the arm is `row`. That is not a
+ * measurement. The run fails unless the shape is listed in [[rowArms]] with a reason. An
+ * allowlisted decline is not timed: `batches` and `fused` say `row`, and one execution supplies
+ * the checksum. `CROSS_TIME_ROW=true` times that listed decline with the same warmup, rounds, and
+ * steady window. The arm stays `row`. A published batch on a declined plan still fails the
+ * process. `CROSS_TRACE_LOWERING=1` prints one lowering-refusal line on stderr before the timed
+ * samples when the plan stays on the row path. The timed section leaves `traceLowering` off.
+ * Stderr then prints a summary table. Its arm column is the JSON `arm`.
  *
  * Owned int arrays use [[BatchCodec.intPairs]]. Owned long arrays use
  * [[BatchCodec.copiedLongPairs]], the scan's array encode. A null long value is timed with
@@ -59,7 +61,12 @@ object CrossEngineBench:
   private val batchSize = 8192
   private val sourcePartitions = 2
   private val nullStride = 4096
-  private val queryNames = Vector(
+
+  /** True when the null generators plant a null value at `index`. Row 0 stays present. */
+  private[execution] def nullValueAt(index: Int): Boolean =
+    index % nullStride == 1
+
+  private[execution] val queryNames = Vector(
     "filter-count",
     "filter-sum",
     "filter-groupbykey",
@@ -74,6 +81,26 @@ object CrossEngineBench:
     "filter-keymod",
     "filter-joinagg",
   )
+
+  /**
+   * Scored shapes that still report `row`.
+   *
+   * An entry is debt. `reason` says why [[ColumnarPlanner]] declines that shape, and it is not
+   * optional. [[TestCrossEngineRowDebt]] fails once any harness cell of the shape lowers, so the
+   * entry has to come off. A shape that reports `row` and is absent here fails the run. One name
+   * covers every `(filters, nulls)` cell the harness builds. A name that is `row` for one cell and
+   * columnar for another cannot stay listed: the lowered cell forces the entry off, and the
+   * remaining `row` cell then fails the run.
+   *
+   * Empty. All thirteen names in [[queryNames]] lower for one filter and for two, with nulls and
+   * without. `filter-joinagg` with nulls is refused before a plan exists, so it has no arm.
+   * `filter-keymod` lowers through `MapKey` into `CountByKey`. `filter-joinagg` lowers to
+   * `JoinProbeSumLeft`.
+   */
+  private[execution] final case class RowArm(shape: String, reason: String):
+    require(reason.trim.nonEmpty, s"$shape is on the row-arm allowlist without a reason")
+
+  private[execution] val rowArms: Vector[RowArm] = Vector.empty
 
   private final case class Settings(
       rows: Int,
@@ -129,7 +156,9 @@ object CrossEngineBench:
         ),
       )
       ScarletRuntime.set(savedRuntime.copy(scheduler = scheduler))
-      println(render(settings, run(settings)))
+      val results = run(settings)
+      System.err.println(humanSummary(results))
+      println(render(settings, results))
     catch case _: HarnessRefusal => status = 1
     finally
       try scheduler.shutdown().unsafeRunSync()
@@ -151,10 +180,18 @@ object CrossEngineBench:
     System.err.println(s"QUERY_BEGIN $name ${System.currentTimeMillis()} uptime=$uptime")
     val built = build(name, settings)
     val sample =
-      measure(name, built, settings.warmup, settings.rounds, settings.timeRow, settings.traceLowering)
+      measure(
+        name,
+        built,
+        settings.warmup,
+        settings.rounds,
+        settings.timeRow,
+        settings.traceLowering,
+      )
     val endUptime = java.lang.management.ManagementFactory.getRuntimeMXBean.getUptime
     System.err.println(
-      s"QUERY_END $name ${System.currentTimeMillis()} uptime=$endUptime p50=${sample.p50Ms} checksum=${sample.checksum}",
+      s"QUERY_END $name ${System.currentTimeMillis()} uptime=$endUptime " +
+        s"p50=${sample.p50Ms} checksum=${sample.checksum} arm=${sample.arm}",
     )
     sample
 
@@ -275,8 +312,8 @@ object CrossEngineBench:
     joinBuilt(rows, filters, nulls)(joined => () => joined.count())
 
   /**
-   * Same inputs as [[joinQuery]]. The action sums `left * 31 + right` from the hash probe and
-   * does not write the match columns. The count action does not write them either.
+   * Same inputs as [[joinQuery]]. The action sums `left * 31 + right` from the hash probe and does
+   * not write the match columns. The count action does not write them either.
    */
   private def joinSumQuery(rows: Int, filters: Int, nulls: Boolean): Built =
     joinBuilt(rows, filters, nulls)(joined => () => JoinValueSum.of(joined))
@@ -396,10 +433,52 @@ object CrossEngineBench:
       traceLowering: Boolean,
   ): Sample =
     if (traceLowering) then traceRefusal(built.plan)
-    armOf(built.plan) match
+    val arm = armOf(built.plan)
+    // Outside the timed loop. A columnar arm does not read the allowlist.
+    rowArmRefusal(name, arm).foreach(refuse)
+    arm match
       case None if timeRow => timedSample(name, built, "row", warmup, rounds, columnar = false)
       case None => rowSample(name, built)
       case Some(shape) => timedSample(name, built, shape, warmup, rounds, columnar = true)
+
+  /**
+   * `Some` when a scored shape reports `row` and [[rowArms]] does not list it. A columnar arm
+   * returns `None` without reading the list.
+   */
+  private[execution] def rowArmRefusal(name: String, arm: Option[String]): Option[String] =
+    arm match
+      case Some(_) => None
+      case None => unlistedRow(name, rowArms.map(_.shape))
+
+  /** `Some` when `name` reports `row` and `listed` does not contain it. */
+  private[execution] def unlistedRow(name: String, listed: Seq[String]): Option[String] =
+    if (listed.contains(name)) then None
+    else
+      Some(
+        s"$name reports arm=row and is not on the row-arm allowlist. " +
+          "A row fallback is not a scored measurement.",
+      )
+
+  /**
+   * Plan [[build]] would time for `name`, without running it. `filter-joinagg` with nulls refuses
+   * before a plan exists.
+   */
+  private[execution] def scoredPlan(
+      name: String,
+      rows: Int,
+      filters: Int,
+      nulls: Boolean,
+  ): Plan[_] =
+    build(name, Settings(rows, filters, nulls, None, 0, 0, false, false)).plan
+
+  /** [[armOf]] of [[scoredPlan]]. `None` is `row`. */
+  private[execution] def scoredArm(
+      name: String,
+      rows: Int,
+      filters: Int,
+      nulls: Boolean,
+  ): Option[String] =
+    armOf(scoredPlan(name, rows, filters, nulls))
 
   /**
    * One refusal line, outside the timer. [[ColumnarPlanner.lower]] prints it when the flag is on
@@ -417,7 +496,7 @@ object CrossEngineBench:
    * Physical shape when [[ColumnarPlanner]] accepts `plan`. `None` is the row path, including a
    * lowered tree whose layout is invalid. This does not run the plan.
    */
-  private def armOf(plan: Plan[_]): Option[String] =
+  private[execution] def armOf(plan: Plan[_]): Option[String] =
     ColumnarPlanner.partitioning(plan) match
       case None => None
       case Some(_) => ColumnarPlanner.lower(plan).map(_.shape)
@@ -430,7 +509,7 @@ object CrossEngineBench:
     val observed = observe(built.action)
     if (observed.batches != 0L || observed.fused != 0L) then
       refuse(s"$name declined but published batches=${observed.batches} fused=${observed.fused}")
-    System.err.println(s"ROW $name checksum=${checksumOf(observed.value)}")
+    System.err.println(s"ROW $name arm=row checksum=${checksumOf(observed.value)}")
     Sample(
       Double.NaN,
       checksumOf(observed.value),
@@ -601,7 +680,7 @@ object CrossEngineBench:
   private def nullableInts(rows: Int, keys: Array[Int]): IndexedSeq[(Int, Int)] =
     val values = lcgValues(rows)
     IndexedSeq.tabulate(rows) { index =>
-      if (index % nullStride == 1) then intPair(boxedInt(keys(index)), absentInt)
+      if (nullValueAt(index)) then intPair(boxedInt(keys(index)), absentInt)
       else keys(index) -> values(index)
     }
 
@@ -609,7 +688,7 @@ object CrossEngineBench:
     val keys = longKeys(rows)
     val values = lcgLongs(rows)
     IndexedSeq.tabulate(rows) { index =>
-      if (index % nullStride == 1) then longPair(boxedLong(keys(index)), absentLong)
+      if (nullValueAt(index)) then longPair(boxedLong(keys(index)), absentLong)
       else keys(index) -> values(index)
     }
 
@@ -632,6 +711,30 @@ object CrossEngineBench:
   private def boxedInt(value: Int): java.lang.Integer = java.lang.Integer.valueOf(value)
 
   private def boxedLong(value: Long): java.lang.Long = java.lang.Long.valueOf(value)
+
+  /**
+   * One row per shape. The arm column is [[Sample.arm]], the same value as the JSON `arm`,
+   * including `row`.
+   */
+  private def humanSummary(results: Vector[(String, Sample)]): String =
+    summaryTable(
+      results.map { case (name, sample) =>
+        (name, sample.arm, jsonDouble(sample.p50Ms), sample.checksum, sample.verdict)
+      },
+    )
+
+  /** Header plus one body row. `arm` is the second column. */
+  private[execution] def summaryTable(
+      rows: Seq[(String, String, String, Long, String)],
+  ): String =
+    val header = Vector(
+      "| shape | arm | p50_ms | checksum | steady |",
+      "| --- | --- | ---: | ---: | --- |",
+    )
+    val body = rows.map { case (name, arm, p50, checksum, verdict) =>
+      s"| $name | $arm | $p50 | $checksum | $verdict |"
+    }
+    (header ++ body).mkString("\n")
 
   private def render(settings: Settings, results: Vector[(String, Sample)]): String =
     val body = results.map { case (name, sample) => queryJson(name, sample) }.mkString(",\n")
