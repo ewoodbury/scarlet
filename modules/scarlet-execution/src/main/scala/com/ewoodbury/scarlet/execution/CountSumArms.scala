@@ -12,11 +12,14 @@ import ColumnarInterpreter.{Columns, interpretAt, pairsOf}
  * is summed from those arrays. The predicates run inside the scan. The arrays are aliased and not
  * copied, and no survivor index is built. One [[Plan.MapIntKeyOp]] over that source is summed the
  * same way: the function runs once on each present survivor and is not inspected, and the pair
- * batch is not published. A null key is not passed in. Encoded morsels under that one map,
- * including a null value, observe into the same table. One pair [[Plan.MapOp]] whose filters are
- * int slots, or absent, is summed from that project's input morsels. The interpreter's adapter
- * runs on every row, including a null key and a null value, and is not inspected. A null projected
- * key is dropped. A null projected value is counted and not added. The pair batch is not
+ * batch is not published. A null key is not passed in. One key or value slot directly above that
+ * map is summed from the same morsels. The slot runs after the function. A key slot sees the
+ * mapped key and is not called on a null. A value slot sees the original value, including a row
+ * whose key is null. A null value the slot keeps is counted and not added. Encoded morsels under
+ * that one map, including a null value, observe into the same table. One pair [[Plan.MapOp]] whose
+ * filters are int slots, or absent, is summed from that project's input morsels. The interpreter's
+ * adapter runs on every row, including a null key and a null value, and is not inspected. A null
+ * projected key is dropped. A null projected value is counted and not added. The pair batch is not
  * published, and [[CountSum.byKey]] is not called. A second map, a whole-row step, a non-int slot,
  * a boxed row the encoder throws on, and any other pair child are interpreted, then aggregated.
  * That path partial-aggregates survivor ids, including a stack of one, and [[CountSum.byKey]] sees
@@ -47,6 +50,17 @@ private[execution] object CountSumArms:
           width,
           workers,
           batchSize,
+        ).orElse(
+          foldedAbove(
+            source,
+            child,
+            selectedPartition,
+            preserveAbsence,
+            ordinals,
+            width,
+            workers,
+            batchSize,
+          ),
         ).orElse(
           foldedMapped(
             source,
@@ -140,6 +154,83 @@ private[execution] object CountSumArms:
                       throw new IllegalStateException(
                         "pair project count-sum expected int pairs",
                       )
+      case _ => None
+
+  /**
+   * One key or value slot above one [[Plan.MapIntKeyOp]]. Steps under the map stay on the source
+   * and may be empty. The slot runs after the key function. `None` when a second map sits under
+   * the filters, when a step is not an int slot, or when a second slot sits above the map.
+   * [[CountSum.byKey]] is not called. Neither function is read.
+   */
+  private def foldedAbove(
+      source: Plan[_],
+      child: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    aboveTarget(source, child, ordinals).flatMap { (plan, op, steps, fn, slot) =>
+      ownedPairs(plan, op) match
+        case Some(parts) =>
+          Some(
+            CountSum.byKeyOwnedMappedAbove(parts, steps, slot, fn, width, workers, batchSize),
+          )
+        case None =>
+          encoded(plan, op, selectedPartition, preserveAbsence, ordinals).map { batches =>
+            CountSum.byKeyMappedAbove(batches, steps, slot, fn, width, workers, batchSize)
+          }
+    }
+
+  /**
+   * One [[Plan.FilterKeysOp]] or [[Plan.FilterValuesOp]] whose child is one [[Plan.MapIntKeyOp]].
+   * The returned plan is the source under that map. The step list is the filters under the map.
+   */
+  private def aboveTarget(
+      source: Plan[_],
+      child: PhysicalOp,
+      ordinals: Set[Int],
+  ): Option[(Plan[_], PhysicalOp, List[Selection.Step], Int => Int, Selection.Step)] =
+    (source, child) match
+      case (
+            Plan.FilterKeysOp(Plan.MapIntKeyOp(inner, fn), _),
+            PhysicalOp.Filter(PhysicalOp.MapKey(mapped), PhysicalOp.Slot.Key),
+          ) =>
+        aboveOf(inner, mapped, fn, source, child, ordinals)
+      case (
+            Plan.FilterValuesOp(Plan.MapIntKeyOp(inner, fn), _),
+            PhysicalOp.Filter(PhysicalOp.MapKey(mapped), PhysicalOp.Slot.Value),
+          ) =>
+        aboveOf(inner, mapped, fn, source, child, ordinals)
+      case _ => None
+
+  private def aboveOf(
+      inner: Plan[_],
+      mapped: PhysicalOp,
+      fn: Int => Int,
+      source: Plan[_],
+      child: PhysicalOp,
+      ordinals: Set[Int],
+  ): Option[(Plan[_], PhysicalOp, List[Selection.Step], Int => Int, Selection.Step)] =
+    val (underPlan, underOp) = PredicatePlan.childOf(inner, mapped)
+    if (pastMap(underPlan)) then None
+    else
+      slotSteps(inner, mapped, ordinals).flatMap { steps =>
+        oneSlot(source, child, ordinals).map { slot =>
+          (underPlan, underOp, steps, fn, slot)
+        }
+      }
+
+  /** The one slot above the map. */
+  private def oneSlot(
+      source: Plan[_],
+      child: PhysicalOp,
+      ordinals: Set[Int],
+  ): Option[Selection.Step] =
+    slotSteps(source, child, ordinals) match
+      case Some(step :: Nil) => Some(step)
       case _ => None
 
   /**
