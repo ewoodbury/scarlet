@@ -1,5 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
+import com.ewoodbury.scarlet.columnar.LogicalType
 import com.ewoodbury.scarlet.core.Partition
 
 /**
@@ -596,6 +597,12 @@ enum PhysicalOp:
         StringBroadcastFullOuter(_, _) | StringSortMergeLeftOuter(_, _) |
         StringSortMergeRightOuter(_, _) | StringSortMergeFullOuter(_, _) =>
       PhysicalOp.Kind.StringOuter
+
+  /**
+   * Output columns. [[kind]] stays the admission enum. A [[Project]] whose child kind is
+   * [[PhysicalOp.Kind.Triples]] reports `[Int32, Int64]`.
+   */
+  def schema: IndexedSeq[LogicalType] = PhysicalSchema.of(this)
 
   /**
    * An int inner join, or a filter or project stacked on one. An outer join is a triple batch with

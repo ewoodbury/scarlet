@@ -210,10 +210,19 @@ private[execution] object ColumnarInterpreter:
    * longs. String triples are a string inner hash or broadcast join and use
    * [[BatchCodec.decodeStringJoinKeepingNulls]]. A clear value bit is a null int, not an absence
    * bit. A clear key bit is still an error. A fully present batch still decodes to the same
-   * strings and ints.
+   * strings and ints. An `[Int32, Int64]` hash aggregate uses [[JoinProbeAggregate.decodeSums]]:
+   * both columns are present, and the sum is a long.
    */
   private[execution] def decodeFor(columns: Columns, op: PhysicalOp): Seq[Partition[_]] =
-    decodeWith(columns, intPairDecoder(op), longDecoder(op), tripleDecoder(op))
+    if (PhysicalSchema.isIntLongAggregate(op)) then intLongSums(columns)
+    else decodeWith(columns, intPairDecoder(op), longDecoder(op), tripleDecoder(op))
+
+  /** Groups of an int-long reduce. A non-pair batch is a bug in the arm, not a row fallback. */
+  private def intLongSums(columns: Columns): Seq[Partition[_]] = columns match
+    case Columns.Pairs(parts) =>
+      parts.map(batch => Partition(JoinProbeAggregate.decodeSums(batch)))
+    case _ =>
+      throw new IllegalStateException("int-long reduceByKey expected pair batches")
 
   /**
    * Prefix of [[decodeFor]]. The same op chooses the int-pair decoder and the long decoder.
@@ -482,6 +491,18 @@ private[execution] object ColumnarInterpreter:
       MapIntKey.columns(
         interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),
         mapper,
+      )
+    case (
+          Plan.ReduceByKeyOp(source, reduceFunc),
+          aggregate @ PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)),
+        ) if PhysicalSchema.isIntLongAggregate(aggregate) =>
+      IntLongReduce.columns(
+        source,
+        child,
+        reduceFunc,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
       )
     case (
           Plan.ReduceByKeyOp(source, reduceFunc),

@@ -31,7 +31,8 @@ private[scarlet] final class JoinSumProjection[A](
  * Addition of two `Long` sums.
  *
  * This is a singleton so a plan can name addition without inspecting a lambda. Any other reducer,
- * including `_ + _`, stays on the row path.
+ * including `_ + _`, is not this witness. A generic `(Int, Long)` sum is a separate hash
+ * aggregate.
  */
 private[scarlet] object LongSum extends ((Long, Long) => Long):
   def apply(left: Long, right: Long): Long = left + right
