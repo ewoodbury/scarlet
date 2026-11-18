@@ -7,7 +7,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.FoldedCount
+import com.ewoodbury.scarlet.columnar.{FoldedCount, HashReduce}
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -150,6 +150,9 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val mapped = nullable.mapIntKey(key => key + 1)
     ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).plan) shouldBe None
     ColumnarPlanner.lower(mapped.filterValues((value: Int) => value >= 0).plan) shouldBe None
+    ColumnarPlanner.lower(
+      mapped.filterKeys((key: Int) => key > 0).reduceByKey[Int, Int](_ + _).plan,
+    ) shouldBe None
     ColumnarPlanner.lower(mapped.keys.plan) shouldBe None
     ColumnarPlanner.lower(mapped.values.plan) shouldBe None
     ColumnarPlanner.tryRun(mapped.filterKeys((key: Int) => key > 0).plan) shouldBe None
@@ -200,10 +203,95 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   }
 
   it should "drop a null key in reduceByKey and match the row path" in {
-    val reduced = nullable.mapIntKey(key => key + 1).reduceByKey[Int, Int](_ + _)
-    counts(run(columnar = true)(reduced.collect())) shouldBe counts(
-      run(columnar = false)(reduced.collect()),
+    val calls = new AtomicInteger
+    val reduced = nullable.mapIntKey { key =>
+      calls.incrementAndGet()
+      key + 1
+    }.reduceByKey[Int, Int](_ + _)
+    val at = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      calls.set(0)
+      val found = counts(reduced.collect())
+      (found, calls.get())
+    }
+    val (columnar, columnarCalls) = at(8192)
+    columnarCalls shouldBe 4
+    columnar shouldBe Map(2 -> 9, 3 -> 5)
+    at(1) shouldBe (columnar, columnarCalls)
+    calls.set(0)
+    counts(run(columnar = false)(reduced.collect())) shouldBe columnar
+    calls.get() shouldBe columnarCalls
+  }
+
+  it should "reduce a key map without publishing the pair batch" in {
+    val source = DistCollection.ofIntPairs(Array(1, 2, 1, 3), Array(10, 20, 30, 40), 1)
+    val mapped = source.mapIntKey(_ + 1)
+    val changed = mapped.reduceByKey[Int, Int](_ + _)
+    ColumnarPlanner.lower(changed.plan).map(_.shape) shouldBe Some(
+      "HashAggregate(Exchange(MapKey(Scan)))",
     )
+    val expected = Map(2 -> 40, 3 -> 20, 4 -> 40)
+    val atBatch = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      MapIntKey.resetPublishedForTest()
+      HashReduce.resetByKeyForTest()
+      val found = counts(changed.collect())
+      MapIntKey.publishedForTest shouldBe 0
+      HashReduce.byKeyCallsForTest shouldBe 0
+      found
+    }
+    atBatch(8192) shouldBe expected
+    atBatch(1) shouldBe expected
+    atBatch(8192) shouldBe counts(run(columnar = false)(changed.collect()))
+
+    MapIntKey.resetPublishedForTest()
+    val projected = mapped.collect()
+    MapIntKey.publishedForTest should be > 0
+    fingerprint(projected) shouldBe Seq("2:10", "2:30", "3:20", "4:40")
+
+    val filtered = source
+      .filterKeys((key: Int) => key > 1)
+      .mapIntKey(_ + 1)
+      .reduceByKey[Int, Int](_ + _)
+    ColumnarPlanner.lower(filtered.plan).map(_.shape) shouldBe Some(
+      "HashAggregate(Exchange(MapKey(FilterKey(Scan))))",
+    )
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = 1))
+    ScarletRuntime.get.shuffle.clear()
+    MapIntKey.resetPublishedForTest()
+    HashReduce.resetByKeyForTest()
+    counts(filtered.collect()) shouldBe Map(3 -> 20, 4 -> 40)
+    MapIntKey.publishedForTest shouldBe 0
+    HashReduce.byKeyCallsForTest shouldBe 0
+    counts(run(columnar = false)(filtered.collect())) shouldBe Map(3 -> 20, 4 -> 40)
+  }
+
+  it should "drop a null value from a key map reduce and still call the function" in {
+    val calls = new AtomicInteger
+    val reduced = nullThenValue.mapIntKey { key =>
+      calls.incrementAndGet()
+      key * 2
+    }.reduceByKey[Int, Int](_ + _)
+    ColumnarPlanner.lower(reduced.plan).map(_.shape) shouldBe Some(
+      "HashAggregate(Exchange(MapKey(Scan)))",
+    )
+    val at = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      calls.set(0)
+      MapIntKey.resetPublishedForTest()
+      HashReduce.resetByKeyForTest()
+      val found = counts(reduced.collect())
+      (found, calls.get(), MapIntKey.publishedForTest, HashReduce.byKeyCallsForTest)
+    }
+    val once = at(8192)
+    once shouldBe (Map(8 -> 4), 2, 0, 0)
+    at(1) shouldBe once
+    calls.set(0)
+    val _ = run(columnar = false)(reduced.collect())
+    calls.get() shouldBe 2
   }
 
   private val present: DistCollection[(Int, Int)] =
