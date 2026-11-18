@@ -311,6 +311,90 @@ object IntPairProject:
     }
 
   /**
+   * [[visitPairs]] for one int slot above the project.
+   *
+   * The adapter calls match [[project]], including a null key and a null value. A null projected
+   * key is dropped, and a key predicate is not called. A null projected value is dropped and does
+   * not create a group, and a value predicate is not called. The other column is still tested when
+   * it is present: a key predicate runs on a null value, and a value predicate runs on a null key.
+   * A row the slot keeps is passed to `sink` only when both projected cells are present. A result
+   * that is not a pair of ints throws [[ColumnarFallback]] and publishes nothing. This does not
+   * allocate an output column. `column` is `0` for the key and `1` for the value.
+   */
+  private[scarlet] def visitFiltered(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      mapper: IntPairMap,
+      column: Int,
+      keep: Int => Boolean,
+      sink: IntPairSink,
+  ): Unit =
+    require(column == 0 || column == 1, s"pair slot must be a key or a value, got $column")
+    require(
+      batch.columns.length == 2,
+      s"pair project expected 2 columns, got ${batch.columns.length}",
+    )
+    val keys = int32At(batch, 0)
+    val values = int32At(batch, 1)
+    require(keys.length == values.length, "key and value columns differ in length")
+    Ranges.check(start, length, keys.length)
+    if (length == 0) then ()
+    else if (
+        Validity.rangePresent(keys.validity, start, length) &&
+        Validity.rangePresent(values.validity, start, length)
+      )
+    then visitFilteredDense(keys, values, start, length, mapper, column, keep, sink)
+    else visitFilteredSparse(keys, values, start, length, mapper, column, keep, sink)
+
+  private def visitFilteredDense(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      mapper: IntPairMap,
+      column: Int,
+      keep: Int => Boolean,
+      sink: IntPairSink,
+  ): Unit =
+    val keyArr = keys.values
+    val valueArr = values.values
+    val end = start + length
+    var row = start
+    while (row < end) {
+      offerFiltered(mapper(keyArr(row), valueArr(row)), column, keep, sink)
+      row += 1
+    }
+
+  private def visitFilteredSparse(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      mapper: IntPairMap,
+      column: Int,
+      keep: Int => Boolean,
+      sink: IntPairSink,
+  ): Unit =
+    val keyArr = keys.values
+    val valueArr = values.values
+    val keyIn = keys.validity.words
+    val valueIn = values.validity.words
+    val end = start + length
+    var row = start
+    while (row < end) {
+      val keyOn = Validity.isSet(keyIn, row)
+      val valueOn = Validity.isSet(valueIn, row)
+      val projected =
+        if (keyOn && valueOn) then mapper(keyArr(row), valueArr(row))
+        else if (keyOn) then mapper.applyNullValue(keyArr(row))
+        else if (valueOn) then mapper.applyNullKey(valueArr(row))
+        else mapper.applyNulls()
+      offerFiltered(projected, column, keep, sink)
+      row += 1
+    }
+
+  /**
    * Runs `mapper` on `[start, start + length)` and passes each projected pair to `sink`.
    *
    * The calls match [[project]]: a null key and a null value are passed in, and an empty range
@@ -405,6 +489,58 @@ object IntPairProject:
               case _ => ()
           case other => decline(foundName(other))
       case other => decline(foundName(other))
+
+  /**
+   * [[offerPair]] plus one int slot. The value cell is checked first, matching [[offerPair]]. A
+   * null slot cell is dropped and `keep` is not called. `keep` sees a present partner even when
+   * the other cell is null. Both cells have to be present before `sink` is called.
+   */
+  private def offerFiltered(
+      projected: Any,
+      column: Int,
+      keep: Int => Boolean,
+      sink: IntPairSink,
+  ): Unit =
+    projected match
+      case null => decline("null")
+      case row: Product if row.productArity == 2 =>
+        val valueCell = row.productElement(1)
+        valueCell match
+          case null | _: Int => ()
+          case other => decline(foundName(other))
+        val keyCell = row.productElement(0)
+        keyCell match
+          case null | _: Int => ()
+          case other => decline(foundName(other))
+        if (column == 0) then keepKey(keyCell, valueCell, keep, sink)
+        else keepValue(keyCell, valueCell, keep, sink)
+      case other => decline(foundName(other))
+
+  private def keepKey(
+      keyCell: Any,
+      valueCell: Any,
+      keep: Int => Boolean,
+      sink: IntPairSink,
+  ): Unit =
+    keyCell match
+      case key: Int if keep(key) =>
+        valueCell match
+          case value: Int => sink.add(key, value)
+          case _ => ()
+      case _ => ()
+
+  private def keepValue(
+      keyCell: Any,
+      valueCell: Any,
+      keep: Int => Boolean,
+      sink: IntPairSink,
+  ): Unit =
+    valueCell match
+      case value: Int if keep(value) =>
+        keyCell match
+          case key: Int => sink.add(key, value)
+          case _ => ()
+      case _ => ()
 
   /**
    * [[offerCountSum]] for a caller that already ran [[adapt]]. Does not publish a column. A null

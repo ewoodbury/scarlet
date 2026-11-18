@@ -16,18 +16,23 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * that project's input morsels. The interpreter's adapter runs on every row, and a present
  * projected key and value are inserted into the [[HashReduce]] table. The pair batch is not
  * published, and [[HashReduce.byKey]] is not called. The function is not inspected. A null
- * projected key is dropped. A null projected value is dropped and does not create a group. An int
- * [[PhysicalOp.MapKey]] is reduced from that map's source morsels. Each present key is passed to
- * the `Int => Int` witness. A null key is not passed and is not inserted. A null value is dropped
- * and does not create a group. That pair batch is not published, and [[HashReduce.byKey]] is not
- * called. A long-pair [[PhysicalOp.Project]] is reduced from that project's input morsels. The
- * interpreter's adapter runs on every row, and a present projected key and value are inserted into
- * the [[LongHashReduce]] table. A null projected key is dropped. A null projected value stays a
- * null group until another value arrives, and a later combine unboxes that null to `0`. The pair
- * batch is not published, and [[LongHashReduce.byKey]] is not called. The function is not
- * inspected. A filter above that project is not this arm. A string project stays on its own arm. A
- * scan and a non-pair child stay on the dense reduce. The `None` path is the only one that
- * interprets a child the fold did not already scan.
+ * projected key is dropped. A null projected value is dropped and does not create a group. One
+ * [[Plan.FilterKeysOp]] or [[Plan.FilterValuesOp]] directly above that project applies the slot to
+ * the projected pair and still does not publish. A key predicate is not called on a null projected
+ * key. A value predicate is not called on a null projected value. A present partner on the other
+ * column is still tested, and a null partner does not create a group. A second slot, a whole-row
+ * filter, and a second map stay on the published selection path. Long and string slot-above are
+ * not this arm. An int [[PhysicalOp.MapKey]] is reduced from that map's source morsels. Each
+ * present key is passed to the `Int => Int` witness. A null key is not passed and is not inserted.
+ * A null value is dropped and does not create a group. That pair batch is not published, and
+ * [[HashReduce.byKey]] is not called. A long-pair [[PhysicalOp.Project]] is reduced from that
+ * project's input morsels. The interpreter's adapter runs on every row, and a present projected
+ * key and value are inserted into the [[LongHashReduce]] table. A null projected key is dropped. A
+ * null projected value stays a null group until another value arrives, and a later combine unboxes
+ * that null to `0`. The pair batch is not published, and [[LongHashReduce.byKey]] is not called.
+ * The function is not inspected. A filter above that project is not this arm. A string project
+ * stays on its own arm. A scan and a non-pair child stay on the dense reduce. The `None` path is
+ * the only one that interprets a child the fold did not already scan.
  */
 private[execution] object ReduceArms:
 
@@ -44,9 +49,9 @@ private[execution] object ReduceArms:
     // Named erasure boundary. Grouped pair reduction declares `(Int, Int) => Int`.
     @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
     val op = reduceFunc.asInstanceOf[(Int, Int) => Int]
-    // A slot-filter stack scans survivor ids, including one filter. An int key map and an
-    // int-pair project each reduce from the input morsels and do not publish. The `None` path
-    // interprets any other child.
+    // A slot-filter stack scans survivor ids, including one filter. An int key map, an int-pair
+    // project, and one int slot above that project each reduce from the input morsels and do not
+    // publish. The `None` path interprets any other child.
     val binOp: HashReduce.IntBinOp = (left: Int, right: Int) => op(left, right)
     val width = ColumnarPlanner.shuffleWidth
     val workers = ColumnarPlanner.parallelism
@@ -63,6 +68,18 @@ private[execution] object ReduceArms:
       batchSize,
     ).orElse(
       reduceProjected(
+        source,
+        child,
+        binOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
+        width,
+        workers,
+        batchSize,
+      ),
+    ).orElse(
+      reduceAboveProject(
         source,
         child,
         binOp,
@@ -163,6 +180,90 @@ private[execution] object ReduceArms:
           case _ =>
             throw new IllegalStateException("pair project reduce expected int pairs")
       case _ => None
+
+  /**
+   * One key or value slot directly above one int-pair project. The project's input is interpreted,
+   * then each morsel is reduced through [[IntPairProject.visitFiltered]]. `None` when a second map
+   * sits under the project, or when the step is not one int key or value. A null key and a null
+   * value are passed to the adapter. A null projected key is dropped and the key predicate is not
+   * called. A null projected value is dropped and does not create a group, and the value predicate
+   * is not called. [[HashReduce.byKey]] is not called.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def reduceAboveProject(
+      source: Plan[_],
+      child: PhysicalOp,
+      binOp: HashReduce.IntBinOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    val matched = (source, child) match
+      case (
+            Plan.FilterKeysOp(Plan.MapOp(inner, fn), _),
+            PhysicalOp.Filter(PhysicalOp.Project(under), PhysicalOp.Slot.Key),
+          ) if intPairs(child) =>
+        Some((inner, under, fn))
+      case (
+            Plan.FilterValuesOp(Plan.MapOp(inner, fn), _),
+            PhysicalOp.Filter(PhysicalOp.Project(under), PhysicalOp.Slot.Value),
+          ) if intPairs(child) =>
+        Some((inner, under, fn))
+      case _ => None
+    matched.flatMap { (inner, under, fn) =>
+      if (deeperMap(inner, under)) then None
+      else
+        oneIntSlot(source, child).map { step =>
+          val adapted = IntPairProject.adapt(fn)
+          val columns =
+            try interpretAt(inner, under, selectedPartition, preserveAbsence, ordinals)
+            catch
+              case _: NullPointerException =>
+                throw new ColumnarFallback("reduceByKey source has a null pair component")
+          columns match
+            case Columns.Pairs(batches) if batches.nonEmpty =>
+              ProjectedAboveReduce.reduce(
+                batches,
+                adapted,
+                step,
+                width,
+                workers,
+                batchSize,
+                binOp,
+              )
+            case Columns.Pairs(_) =>
+              throw new IllegalStateException("columnar pairs have no partitions")
+            case _ =>
+              throw new IllegalStateException("pair project reduce expected int pairs")
+        }
+    }
+
+  /** One int key or value on the projected pair. A row step and a second slot are `None`. */
+  private def oneIntSlot(source: Plan[_], child: PhysicalOp): Option[Selection.Step] =
+    PredicatePlan.compile(source, child).flatMap { compiled =>
+      PredicatePlan.selectionSteps(compiled) match
+        case Some(Vector(step @ Selection.Step.Int32(column, _))) if column == 0 || column == 1 =>
+          Some(step)
+        case _ => None
+    }
+
+  /** A second map under the project. Filters between the maps are peeled first. */
+  private def deeperMap(plan: Plan[_], op: PhysicalOp): Boolean =
+    val (underPlan, underOp) = PredicatePlan.childOf(plan, op)
+    val planned = underPlan match
+      case Plan.MapOp(_, _) | Plan.MapValuesOp(_, _) | Plan.MapIntKeyOp(_, _) |
+          Plan.FlatMapOp(_, _) | Plan.FlatMapValuesOp(_, _) | Plan.MapPartitionsOp(_, _) =>
+        true
+      case _ => false
+    val physical = underOp match
+      case PhysicalOp.Project(_) | PhysicalOp.MapKey(_) | PhysicalOp.MapValue(_) |
+          PhysicalOp.Pipeline(_, _) =>
+        true
+      case _ => false
+    planned || physical
 
   /**
    * An int-pair project. A long project has its own arm. A string project stays on the row arm.
