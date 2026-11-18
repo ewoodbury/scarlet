@@ -280,7 +280,7 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     assertFewerBatches(sorted, filtered, source)
   }
 
-  "a scan" should "take the dense path, and a map under the sort should stay on the row path" in {
+  "a scan" should "take the dense path, and one pair project should sort through rank split" in {
     val source = pairs
     val sorted = source.sortByIntKey
     val mapped = source.map((pair: (Int, Int)) => (pair._1, pair._2)).sortByIntKey
@@ -298,7 +298,90 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       )
     }
     published(sorted.collect()) shouldBe direct
-    ColumnarPlanner.lower(mapped.plan) shouldBe Option.empty[PhysicalOp]
+
+    shape(mapped) shouldBe "SortByIntKey(Project(Scan))"
+    collect(mapped) shouldBe collect(sorted)
+    collect(mapped) shouldBe row(mapped.collect().toSeq)
+    val shifted = DistCollection
+      .ofIntPairs(Array(3, 1, 2), Array(30, 10, 20), 2)
+      .map((pair: (Int, Int)) => (pair._1 + 1, pair._2))
+      .sortByIntKey
+    shape(shifted) shouldBe "SortByIntKey(Project(Scan))"
+    collect(shifted) shouldBe Seq(2 -> 10, 3 -> 20, 4 -> 30)
+    collect(shifted) shouldBe row(shifted.collect().toSeq)
+    collectAt(shifted, 1) shouldBe collectAt(shifted, 8192)
+
+    val under = source
+      .filterKeys((key: Int) => key > 0)
+      .map((pair: (Int, Int)) => (pair._1 + 1, pair._2))
+      .sortByIntKey
+    shape(under) shouldBe "SortByIntKey(Project(FilterKey(Scan)))"
+    collect(under) shouldBe row(under.collect().toSeq)
+
+    RankSplit.resetForTest()
+    IntPairProject.resetPublishedForTest()
+    val found = collect(mapped)
+    found shouldBe collect(sorted)
+    IntPairProject.publishedForTest should be > 0
+    RankSplit.mergePassesForTest should be > 0
+  }
+
+  it should "order a null key from a pair project as zero and keep the null" in {
+    val rows = Seq(
+      intPair(boxedInt(1), boxedInt(10)),
+      intPair(noInt, boxedInt(99)),
+      intPair(boxedInt(-5), boxedInt(3)),
+      intPair(boxedInt(0), boxedInt(7)),
+      intPair(noInt, noInt),
+    )
+    val source = DistCollection(rows, 2)
+    val mapped = source.map((pair: (Int, Int)) => copyPair(pair)).sortByIntKey
+    val plain = source.sortByIntKey
+
+    shape(mapped) shouldBe "SortByIntKey(Project(Scan))"
+    val found = collect(mapped)
+    shown(found) shouldBe shown(collect(plain))
+    shown(found) shouldBe shown(row(mapped.collect().toSeq))
+    shown(collectAt(mapped, 1)) shouldBe shown(collectAt(mapped, 8192))
+    effectiveKeys(found) shouldBe effectiveKeys(found).sorted
+    found.exists(pair => !present(pair, 0)) shouldBe true
+    found.exists(pair => !present(pair, 1)) shouldBe true
+  }
+
+  "other maps" should "stay off sortByIntKey" in {
+    val source = pairs
+    val values = source.mapValues((value: Int) => value + 1).sortByIntKey
+    val twice = source
+      .map((pair: (Int, Int)) => (pair._1 + 1, pair._2))
+      .map((pair: (Int, Int)) => (pair._1, pair._2 + 1))
+    val above = source
+      .map((pair: (Int, Int)) => (pair._1 + 1, pair._2))
+      .filter((pair: (Int, Int)) => pair._2 > 0)
+      .sortByIntKey
+    val byValue = source.map((pair: (Int, Int)) => (pair._1, pair._2)).sortByIntValueDesc
+    val longs = DistCollection
+      .ofLongPairs(Array(3L, 1L), Array(30L, 10L), 1)
+      .map((pair: (Long, Long)) => (pair._1.toInt, pair._2.toInt))
+    val strings = DistCollection(Seq("b" -> 2, "a" -> 1), 1).map((pair: (String, Int)) =>
+      (pair._2, pair._2),
+    )
+    val bad = source.map((pair: (Int, Int)) => stringKey(pair)).sortByIntKey
+
+    ColumnarPlanner.lower(values.plan) shouldBe None
+    ColumnarPlanner.lower(twice.plan).map(_.shape) shouldBe Some("Project(Project(Scan))")
+    ColumnarPlanner.lower(twice.sortByIntKey.plan) shouldBe None
+    ColumnarPlanner.lower(above.plan) shouldBe None
+    ColumnarPlanner.lower(byValue.plan) shouldBe None
+    ColumnarPlanner.lower(longs.plan).map(_.shape) shouldBe Some("Project(Scan)")
+    ColumnarPlanner.lower(longs.sortByIntKey.plan) shouldBe None
+    ColumnarPlanner.lower(strings.plan).map(_.shape) shouldBe Some("Project(Scan)")
+    ColumnarPlanner.lower(strings.sortByIntKey.plan) shouldBe None
+    shape(bad) shouldBe "SortByIntKey(Project(Scan))"
+    val lowered = ColumnarPlanner.lower(bad.plan).getOrElse(fail("expected a project sort"))
+    a[ColumnarFallback] should be thrownBy {
+      val _ = ColumnarInterpreter.interpret(bad.plan, lowered)
+    }
+    ColumnarPlanner.tryRun(bad.plan) shouldBe None
   }
 
   "sortAndSplitSelected" should "match sortAndSplit of the materialised prefix" in {
@@ -596,6 +679,15 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ScarletRuntime.get.shuffle.clear()
     data.collect().toSeq
 
+  private def collectAt(data: DistCollection[(Int, Int)], batch: Int): Seq[(Int, Int)] =
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(saved.copy(columnarBatchSize = batch))
+      collect(data)
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
+
   private def row[A](body: => A): A =
     val saved = ScarletConf.get
     try
@@ -630,6 +722,43 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
   @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
   private def intPair(key: java.lang.Integer, value: java.lang.Integer): (Int, Int) =
     Tuple2(key, value).asInstanceOf[(Int, Int)]
+
+  /** Copies both cells, including a null. `productElement` does not unbox. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def copyPair(pair: (Int, Int)): (Int, Int) =
+    val product = pair.asInstanceOf[Product]
+    Tuple2(product.productElement(0), product.productElement(1)).asInstanceOf[(Int, Int)]
+
+  /** A string key in an int-pair slot. The pair project declines the cell. */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+  private def stringKey(pair: (Int, Int)): (Int, Int) =
+    Tuple2(pair._1.toString, java.lang.Integer.valueOf(pair._2)).asInstanceOf[(Int, Int)]
+
+  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.AsInstanceOf"))
+  private def shown(rows: Seq[(Int, Int)]): Seq[String] =
+    rows.map { row =>
+      val product = row.asInstanceOf[Product]
+      String.valueOf(product.productElement(0)) + ":" + String.valueOf(product.productElement(1))
+    }
+
+  private def effectiveKeys(rows: Seq[(Int, Int)]): Seq[Int] =
+    rows.map(pair => if (present(pair, 0)) storedInt(pair, 0) else 0)
+
+  private def present(pair: (Int, Int), ordinal: Int): Boolean =
+    pair.productElement(ordinal) match
+      case _: java.lang.Integer => true
+      case _ => false
+
+  private def storedInt(pair: (Int, Int), ordinal: Int): Int =
+    pair.productElement(ordinal) match
+      case key: java.lang.Integer => key.intValue()
+      case other => fail(s"expected an int component, found $other")
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def noInt: java.lang.Integer = null
