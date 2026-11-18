@@ -7,16 +7,22 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountSum, CountingSink, GroupByKey}
+import com.ewoodbury.scarlet.columnar.{
+  ColumnMetrics,
+  CountSum,
+  CountingSink,
+  GroupByKey,
+  IntPairProject,
+}
 import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
  * `countSumByKey` against the row path.
  *
- * Non-null rows match `groupByKey.map` with the count-and-sum fold. A null key is dropped. A
- * null value is counted and not added. Generic `groupByKey.map` stays `GroupedDecode` and still
- * builds value lists. This operator does not.
+ * Non-null rows match `groupByKey.map` with the count-and-sum fold. A null key is dropped. A null
+ * value is counted and not added. Generic `groupByKey.map` stays `GroupedDecode` and still builds
+ * value lists. This operator does not.
  */
 class TestCountSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -55,12 +61,14 @@ class TestCountSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     GroupByKey.valueListsBuilt shouldBe 0L
     val folded = row {
       pairs {
-        data.groupByKey.map { case (key, grouped) =>
-          val (count, sum) = grouped.iterator.foldLeft((0, 0L)) { case ((count, sum), value) =>
-            (count + 1, sum + value.toLong)
+        data.groupByKey
+          .map { case (key, grouped) =>
+            val (count, sum) = grouped.iterator.foldLeft((0, 0L)) { case ((count, sum), value) =>
+              (count + 1, sum + value.toLong)
+            }
+            (key, count, sum)
           }
-          (key, count, sum)
-        }.collect()
+          .collect()
       }
     }
     columnar shouldBe folded
@@ -175,6 +183,143 @@ class TestCountSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     projected shouldBe List((2, 10), (2, 30), (3, 20), (4, 40))
   }
 
+  it should "fold a pair project without publishing the pair batch" in {
+    val data = DistCollection.ofIntPairs(Array(1, 2, 1, 3), Array(10, 20, 30, 40), partitions)
+    val counted = data.map { case (key, value) => (key + 1, value) }.countSumByKey
+    ColumnarPlanner.lower(counted.plan).map(_.shape) shouldBe Some(
+      "CountSum(Exchange(Project(Scan)))",
+    )
+    val atBatch = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      IntPairProject.resetPublishedForTest()
+      CountSum.resetByKeyForTest()
+      val found = ColumnMetrics.withSink(new CountingSink) {
+        val rows = pairs(counted.collect())
+        ColumnMetrics.primitiveEncodeCount shouldBe 0L
+        rows
+      }
+      IntPairProject.publishedForTest shouldBe 0
+      CountSum.byKeyCallsForTest shouldBe 0
+      found
+    }
+    val summed = atBatch(8192)
+    summed shouldBe Map(2 -> (2, 40L), 3 -> (1, 20L), 4 -> (1, 40L))
+    atBatch(1) shouldBe summed
+    summed shouldBe row(pairs(counted.collect()))
+
+    IntPairProject.resetPublishedForTest()
+    val projected = data.map { case (key, value) => (key + 1, value) }.collect().toList.sorted
+    IntPairProject.publishedForTest should be > 0
+    projected shouldBe List((2, 10), (2, 30), (3, 20), (4, 40))
+  }
+
+  it should "fold a filtered pair project from the source morsels" in {
+    val data = DistCollection.ofIntPairs(Array(1, 2, 1, 3), Array(10, 20, 30, 40), partitions)
+    val counted = data
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+      .map { case (key, value) => (key % 100, value) }
+      .countSumByKey
+    ColumnarPlanner.lower(counted.plan).map(_.shape) shouldBe Some(
+      "CountSum(Exchange(Project(FilterValue(FilterKey(Scan)))))",
+    )
+    val atBatch = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      IntPairProject.resetPublishedForTest()
+      CountSum.resetByKeyForTest()
+      val found = ColumnMetrics.withSink(new CountingSink) {
+        val rows = pairs(counted.collect())
+        ColumnMetrics.primitiveEncodeCount shouldBe 0L
+        rows
+      }
+      IntPairProject.publishedForTest shouldBe 0
+      CountSum.byKeyCallsForTest shouldBe 0
+      found
+    }
+    val summed = atBatch(8192)
+    summed shouldBe Map(1 -> (2, 40L), 2 -> (1, 20L))
+    atBatch(1) shouldBe summed
+    summed shouldBe row(pairs(counted.collect()))
+  }
+
+  it should "keep a second pair map and a whole-row filter on the interpreted path" in {
+    val data = DistCollection.ofIntPairs(Array(1, 2, 1, 3), Array(10, 20, 30, 40), partitions)
+    val twice = data
+      .map { case (key, value) => (key + 1, value) }
+      .map { case (key, value) => (key * 2, value) }
+      .countSumByKey
+    ColumnarPlanner.lower(twice.plan).map(_.shape) shouldBe Some(
+      "CountSum(Exchange(Project(Project(Scan))))",
+    )
+    IntPairProject.resetPublishedForTest()
+    CountSum.resetByKeyForTest()
+    val doubled = pairs(twice.collect())
+    IntPairProject.publishedForTest should be > 0
+    CountSum.byKeyCallsForTest should be > 0
+    doubled shouldBe Map(4 -> (2, 40L), 6 -> (1, 20L), 8 -> (1, 40L))
+    doubled shouldBe row(pairs(twice.collect()))
+
+    val whole = data
+      .filter((pair: (Int, Int)) => pair._1 % 2 != 0 && pair._2 > 0)
+      .map { case (key, value) => (key + 1, value) }
+      .countSumByKey
+    ColumnarPlanner.lower(whole.plan).map(_.shape) shouldBe Some(
+      "CountSum(Exchange(Project(FilterRow(Scan))))",
+    )
+    IntPairProject.resetPublishedForTest()
+    CountSum.resetByKeyForTest()
+    val filtered = pairs(whole.collect())
+    IntPairProject.publishedForTest should be > 0
+    CountSum.byKeyCallsForTest should be > 0
+    filtered shouldBe Map(2 -> (2, 40L), 4 -> (1, 40L))
+    filtered shouldBe row(pairs(whole.collect()))
+  }
+
+  it should "drop a null projected key and count a null projected value" in {
+    val calls = new AtomicInteger
+    val counted = nullPairs().map(shiftNullPair(calls)).countSumByKey
+    val expected = Map(
+      2 -> (2, 9L),
+      6 -> (2, 4L),
+      3 -> (1, 0L),
+      8 -> (2, 4L),
+    )
+    val atBatch = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      calls.set(0)
+      IntPairProject.resetPublishedForTest()
+      CountSum.resetByKeyForTest()
+      val found = pairs(counted.collect())
+      IntPairProject.publishedForTest shouldBe 0
+      CountSum.byKeyCallsForTest shouldBe 0
+      (found, calls.get())
+    }
+    val (summed, invoked) = atBatch(8192)
+    summed shouldBe expected
+    invoked shouldBe 9
+    atBatch(1) shouldBe (summed, invoked)
+    calls.set(0)
+    row(pairs(counted.collect())) shouldBe expected
+    calls.get() shouldBe invoked
+
+    val valueCalls = new AtomicInteger
+    val values = nullValue().map(shiftNullPair(valueCalls, _ * 2)).countSumByKey
+    valueCalls.set(0)
+    IntPairProject.resetPublishedForTest()
+    CountSum.resetByKeyForTest()
+    val columnarValues = pairs(values.collect())
+    valueCalls.get() shouldBe 2
+    IntPairProject.publishedForTest shouldBe 0
+    CountSum.byKeyCallsForTest shouldBe 0
+    columnarValues shouldBe Map(2 -> (1, 0L), 8 -> (1, 4L))
+    valueCalls.set(0)
+    row(pairs(values.collect())) shouldBe columnarValues
+    valueCalls.get() shouldBe 2
+  }
+
   it should "fold a filtered mapIntKey from the source columns" in {
     val calls = new AtomicInteger
     val data = DistCollection.ofIntPairs(Array(1, 2, 3, 4, 6), Array(10, -1, 20, 0, 5), partitions)
@@ -262,7 +407,8 @@ class TestCountSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   it should "keep a second map and a whole-row filter on the interpreted path" in {
     val data = DistCollection.ofIntPairs(Array(1, 2, 1, 3), Array(10, 20, 30, 40), partitions)
-    val twice = data.mapIntKey((key: Int) => key + 1).mapIntKey((key: Int) => key * 2).countSumByKey
+    val twice =
+      data.mapIntKey((key: Int) => key + 1).mapIntKey((key: Int) => key * 2).countSumByKey
     ColumnarPlanner.lower(twice.plan).map(_.shape) shouldBe Some(
       "CountSum(Exchange(MapKey(MapKey(Scan))))",
     )
@@ -348,6 +494,33 @@ class TestCountSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       ),
     )
     DistCollection(source.asInstanceOf[Plan[(Int, Int)]])
+
+  /**
+   * A null key stays null, so count-sum drops it. A present key is `bump`. `productElement` keeps
+   * a null value, so both paths count it and do not add it. The row path and the pair project call
+   * this once per row, including a null key.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+      "org.wartremover.warts.Throw",
+    ),
+  )
+  private def shiftNullPair(
+      calls: AtomicInteger,
+      bump: Int => Int = _ + 1,
+  ): ((Int, Int)) => (Int, Int) =
+    pair => {
+      val _ = calls.incrementAndGet()
+      val product = pair.asInstanceOf[Product]
+      val key = product.productElement(0) match
+        case null => null
+        case present: Int => Int.box(bump(present))
+        case other => throw new IllegalArgumentException(s"pair map saw $other")
+      Tuple2(key, product.productElement(1)).asInstanceOf[(Int, Int)]
+    }
 
   /** One null value. The key stays present, so the key function still runs. */
   @SuppressWarnings(

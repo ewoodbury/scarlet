@@ -52,6 +52,14 @@ object IntPairProject:
     def add(key: Int, value: Int): Unit
 
   /**
+   * One present projected key for count and sum. A null value is counted and not added. A null key
+   * is not passed. The caller owns the group. [[IntPairSink]] stays reduce-only.
+   */
+  private[scarlet] trait IntPairCountSink:
+    def observe(key: Int, value: Int): Unit
+    def countNull(key: Int): Unit
+
+  /**
    * Adapts a `Tuple2 => Tuple2`. The cast is not a call. A hidden lambda and an anonymous
    * `Function1` both land here after the declared `apply` check. Each absent apply builds the pair
    * the row path would pass, so a null stays null instead of unboxing to `0`.
@@ -303,6 +311,81 @@ object IntPairProject:
     }
 
   /**
+   * Runs `mapper` on `[start, start + length)` and passes each projected pair to `sink`.
+   *
+   * The calls match [[project]]: a null key and a null value are passed in, and an empty range
+   * does not call `mapper`. A null projected key is not passed to `sink`. A null projected value
+   * is [[IntPairCountSink.countNull]], counted and not added. A result that is not a pair of ints
+   * throws [[ColumnarFallback]] and publishes nothing. This does not allocate an output column.
+   * [[visitPairs]] stays reduce-only: a null projected value there does not create a group.
+   */
+  private[scarlet] def visitCountSums(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      mapper: IntPairMap,
+      sink: IntPairCountSink,
+  ): Unit =
+    require(
+      batch.columns.length == 2,
+      s"pair project expected 2 columns, got ${batch.columns.length}",
+    )
+    val keys = int32At(batch, 0)
+    val values = int32At(batch, 1)
+    require(keys.length == values.length, "key and value columns differ in length")
+    Ranges.check(start, length, keys.length)
+    if (length == 0) then ()
+    else if (
+        Validity.rangePresent(keys.validity, start, length) &&
+        Validity.rangePresent(values.validity, start, length)
+      )
+    then visitCountSumsDense(keys, values, start, length, mapper, sink)
+    else visitCountSumsSparse(keys, values, start, length, mapper, sink)
+
+  private def visitCountSumsDense(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      mapper: IntPairMap,
+      sink: IntPairCountSink,
+  ): Unit =
+    val keyArr = keys.values
+    val valueArr = values.values
+    val end = start + length
+    var row = start
+    while (row < end) {
+      offerCountSum(mapper(keyArr(row), valueArr(row)), sink)
+      row += 1
+    }
+
+  private def visitCountSumsSparse(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      mapper: IntPairMap,
+      sink: IntPairCountSink,
+  ): Unit =
+    val keyArr = keys.values
+    val valueArr = values.values
+    val keyIn = keys.validity.words
+    val valueIn = values.validity.words
+    val end = start + length
+    var row = start
+    while (row < end) {
+      val keyOn = Validity.isSet(keyIn, row)
+      val valueOn = Validity.isSet(valueIn, row)
+      val projected =
+        if (keyOn && valueOn) then mapper(keyArr(row), valueArr(row))
+        else if (keyOn) then mapper.applyNullValue(keyArr(row))
+        else if (valueOn) then mapper.applyNullKey(valueArr(row))
+        else mapper.applyNulls()
+      offerCountSum(projected, sink)
+      row += 1
+    }
+
+  /**
    * Keeps a present key and a present value. A null key is dropped. A null value is dropped and
    * does not create a group. A cell that is not an int declines, and the value is checked first.
    */
@@ -320,6 +403,34 @@ object IntPairProject:
             valueCell match
               case value: Int => sink.add(key, value)
               case _ => ()
+          case other => decline(foundName(other))
+      case other => decline(foundName(other))
+
+  /**
+   * [[offerCountSum]] for a caller that already ran [[adapt]]. Does not publish a column. A null
+   * projected key is dropped. A null projected value is counted and not added.
+   */
+  private[scarlet] def acceptCountSum(projected: Any, sink: IntPairCountSink): Unit =
+    offerCountSum(projected, sink)
+
+  /**
+   * Keeps a present key. A null key is dropped. A null value is counted and not added. A cell that
+   * is not an int declines, and the value is checked first.
+   */
+  private def offerCountSum(projected: Any, sink: IntPairCountSink): Unit =
+    projected match
+      case null => decline("null")
+      case row: Product if row.productArity == 2 =>
+        val valueCell = row.productElement(1)
+        valueCell match
+          case null | _: Int => ()
+          case other => decline(foundName(other))
+        row.productElement(0) match
+          case null => ()
+          case key: Int =>
+            valueCell match
+              case value: Int => sink.observe(key, value)
+              case _ => sink.countNull(key)
           case other => decline(foundName(other))
       case other => decline(foundName(other))
 
