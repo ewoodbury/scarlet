@@ -45,6 +45,8 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     source.count() shouldBe 9L
     grouped.count() shouldBe 5L
     grouped.count() shouldBe row(grouped.count())
+    ColumnarPlanner.tryCount(grouped.plan) shouldBe Some(5L)
+    assertCountBuildsNoLists(grouped)
     found shouldBe valuesByKey(row(grouped.collect()))
     found shouldBe Map(
       1 -> Seq(10, 11, 12),
@@ -55,6 +57,21 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     )
     ExecutionService.get.executePartitions(grouped.plan).size shouldBe
       ScarletConf.get.defaultShufflePartitions
+  }
+
+  it should "count the same groups at batch size 1 and 8192" in {
+    countedAt(1) shouldBe countedAt(8192)
+    countedAt(1) shouldBe 5L
+    filteredCount(1) shouldBe filteredCount(8192)
+    filteredCount(1) shouldBe 2L
+    longCountedAt(1) shouldBe longCountedAt(8192)
+    longCountedAt(1) shouldBe 5L
+    stringCountedAt(1) shouldBe stringCountedAt(8192)
+    stringCountedAt(1) shouldBe 5L
+  }
+
+  it should "drop a null key, keep a null value's key, and build no value lists" in {
+    assertNullKeyCount()
   }
 
   it should "keep duplicate values and several input partitions" in {
@@ -188,6 +205,7 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     grouped.count() shouldBe 5L
     grouped.count() shouldBe row(grouped.count())
     ColumnarPlanner.tryCount(grouped.plan) shouldBe Some(5L)
+    assertCountBuildsNoLists(grouped)
     found shouldBe stringValues(row(grouped.collect()))
     found shouldBe Map(
       "" -> Seq(1, 8),
@@ -199,6 +217,28 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     accent should not be decomposed
     ExecutionService.get.executePartitions(grouped.plan).size shouldBe
       ScarletConf.get.defaultShufflePartitions
+  }
+
+  it should "drop a null key on count and keep a null value's key" in {
+    val source = DistCollection(
+      Seq(
+        "a" -> 1,
+        erasedString(None, Some(9)),
+        "b" -> 2,
+        erasedString(Some("c"), None),
+        "" -> 4,
+        "a" -> 5,
+      ),
+      2,
+    )
+    val grouped = source.groupByKey
+
+    ColumnarPlanner.lower(grouped.plan).map(_.shape) shouldBe Some("GroupByKey(Exchange(Scan))")
+    GroupByKey.resetValueListsBuilt()
+    grouped.count() shouldBe 4L
+    ColumnarPlanner.tryCount(grouped.plan) shouldBe Some(4L)
+    GroupByKey.valueListsBuilt shouldBe 0L
+    grouped.count() shouldBe row(grouped.count())
   }
 
   it should "keep duplicate values and several input partitions" in {
@@ -285,6 +325,8 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     source.count() shouldBe 9L
     grouped.count() shouldBe 5L
     grouped.count() shouldBe row(grouped.count())
+    ColumnarPlanner.tryCount(grouped.plan) shouldBe Some(5L)
+    assertCountBuildsNoLists(grouped)
     found shouldBe longByKey(row(grouped.collect()))
     found shouldBe Map(
       1L -> Seq(10L, 11L, 12L),
@@ -295,6 +337,46 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     )
     ExecutionService.get.executePartitions(grouped.plan).size shouldBe
       ScarletConf.get.defaultShufflePartitions
+  }
+
+  it should "count hash-colliding longs as distinct groups" in {
+    val collided = 1L << 32
+    val grouped = DistCollection
+      .ofLongPairs(
+        Array(1L, collided, Long.MinValue, 1L, collided),
+        Array(1L, 2L, 3L, 4L, 5L),
+        4,
+      )
+      .groupByKey
+
+    GroupByKey.resetValueListsBuilt()
+    grouped.count() shouldBe 3L
+    ColumnarPlanner.tryCount(grouped.plan) shouldBe Some(3L)
+    GroupByKey.valueListsBuilt shouldBe 0L
+    grouped.count() shouldBe row(grouped.count())
+  }
+
+  it should "drop a null key on count and keep a null value's key" in {
+    val source = DistCollection(
+      Seq(
+        (1L, 4L),
+        erasedLong(None, Some(9L)),
+        (5L, 1L),
+        (1L, 5L),
+        (5L, 3L),
+        erasedLong(Some(2L), None),
+        erasedLong(None, Some(8L)),
+      ),
+      2,
+    )
+    val grouped = source.groupByKey
+
+    ColumnarPlanner.lower(grouped.plan).map(_.shape) shouldBe Some("GroupByKey(Exchange(Scan))")
+    GroupByKey.resetValueListsBuilt()
+    grouped.count() shouldBe 3L
+    ColumnarPlanner.tryCount(grouped.plan) shouldBe Some(3L)
+    GroupByKey.valueListsBuilt shouldBe 0L
+    grouped.count() shouldBe row(grouped.count())
   }
 
   it should "drop a null key and keep the other values in order" in {
@@ -474,6 +556,103 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
 
   private def valuesByKey(rows: Iterable[(Int, Iterable[Int])]): Map[Int, Seq[Int]] =
     rows.map { case (key, values) => key -> values.toSeq }.toMap
+
+  /** Columnar `count` reads occupancy only. `collect` still builds one list per group. */
+  private def assertCountBuildsNoLists[K, V](grouped: DistCollection[(K, Iterable[V])]): Unit =
+    GroupByKey.resetValueListsBuilt()
+    val counted = grouped.count()
+    ColumnarPlanner.tryCount(grouped.plan) shouldBe Some(counted)
+    GroupByKey.valueListsBuilt shouldBe 0L
+    GroupByKey.resetValueListsBuilt()
+    val _ = grouped.collect()
+    GroupByKey.valueListsBuilt should be > 0L
+
+  private def countedAt(size: Int): Long =
+    ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size))
+    val grouped = DistCollection.ofIntPairs(keys, values, 4).groupByKey
+    ColumnarPlanner.tryCount(grouped.plan).getOrElse(fail(s"batch $size did not count"))
+
+  private def longCountedAt(size: Int): Long =
+    ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size))
+    val grouped = DistCollection.ofLongPairs(longKeys, longPayloads, 4).groupByKey
+    ColumnarPlanner.tryCount(grouped.plan).getOrElse(fail(s"long batch $size did not count"))
+
+  private def stringCountedAt(size: Int): Long =
+    ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size))
+    val grouped = stringSource.groupByKey
+    ColumnarPlanner.tryCount(grouped.plan).getOrElse(fail(s"string batch $size did not count"))
+
+  private def filteredCount(size: Int): Long =
+    ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size))
+    DistCollection
+      .ofIntPairs(keys, values, 4)
+      .filterKeys((key: Int) => key > 0)
+      .filterValues((value: Int) => value > 20)
+      .groupByKey
+      .count()
+
+  /**
+   * Named erasure boundary. The source is boxed so a null key and a null value can sit beside
+   * present ints. The null key is not a group. Key 2 has a null value and still counts.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def assertNullKeyCount(): Unit =
+    def cell(key: Any, value: Any): (Any, Any) = (key, value)
+    val source = DistCollection(
+      Plan.Source(
+        Seq(
+          Partition(Seq(cell(1, 4), cell(null, 9), cell(5, 1), cell(1, 5))),
+          Partition(Seq(cell(5, 3), cell(2, null), cell(null, 8))),
+        ),
+      ),
+    )
+    val grouped = source.groupByKey
+
+    ColumnarPlanner.lower(grouped.plan).map(_.shape) shouldBe Some("GroupByKey(Exchange(Scan))")
+    GroupByKey.resetValueListsBuilt()
+    grouped.count() shouldBe 3L
+    ColumnarPlanner.tryCount(grouped.plan) shouldBe Some(3L)
+    GroupByKey.valueListsBuilt shouldBe 0L
+    grouped.count() shouldBe row(grouped.count())
+
+  /** Named erasure boundary. `Tuple2` keeps a null `Long`. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def erasedLong(key: Option[Long], value: Option[Long]): (Long, Long) =
+    val left: AnyRef = key match
+      case Some(present) => Long.box(present)
+      case None => null
+    val right: AnyRef = value match
+      case Some(present) => Long.box(present)
+      case None => null
+    Tuple2(left, right).asInstanceOf[(Long, Long)]
+
+  /** Named erasure boundary. `Tuple2` keeps a null `String` or `Integer`. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def erasedString(key: Option[String], value: Option[Int]): (String, Int) =
+    val left: AnyRef = key match
+      case Some(present) => present
+      case None => null
+    val right: AnyRef = value match
+      case Some(present) => Int.box(present)
+      case None => null
+    Tuple2(left, right).asInstanceOf[(String, Int)]
 
   /** Per-partition sequence, then the concatenation. Columnar `keys` builds no value lists. */
   private def assertKeysMatch[A](keys: DistCollection[A]): Unit =
