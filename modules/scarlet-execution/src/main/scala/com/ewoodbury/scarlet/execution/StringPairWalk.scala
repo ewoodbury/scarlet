@@ -11,8 +11,10 @@ import ColumnarInterpreter.Columns
  * A batch is a UTF-8 dictionary key and an int value. A null key is a clear bit on the key and
  * stays in the batch. A null int is a clear value bit and is not stored as zero. `mapValues`
  * rewrites column 1 and copies both bits, so a null int stays null and the new value does not
- * inherit a clear key bit. A value projection of a kept null int declines. A value filter drops a
- * clear bit first, so that projection stays columnar when every survivor is present.
+ * inherit a clear key bit. A `(String, Int)` map writes a new dictionary and an int column, and
+ * each output batch owns that dictionary. A value projection of a kept null int declines. A value
+ * filter drops a clear bit first, so that projection stays columnar when every survivor is
+ * present.
  *
  * [[encoded]] may publish a one-column batch when demand narrowed the read to the key or the
  * value. A [[PhysicalOp.Column]] or the filter path consumes that shape; a column wraps the batch
@@ -62,6 +64,18 @@ private[execution] object StringPairWalk:
         Columns.Ints(columns)
       case _ =>
         throw new IllegalStateException("columnar projection expected a pair")
+
+  /**
+   * One `(String, Int)` project. The child kind selected this cell. Each batch owns its
+   * dictionary.
+   */
+  def project(parts: Vector[ColumnBatch], mapper: Any): Columns =
+    val adapted = StringPairProject.adapt(mapper)
+    Columns.StringPairs(
+      ColumnarInterpreter.onEachMorsel(parts) { morsel =>
+        StringPairProject.project(morsel.batch, morsel.start, morsel.length, adapted)
+      },
+    )
 
   def mapValues(columns: Columns, mapper: Any): Columns =
     val fn = intMapper(mapper)
