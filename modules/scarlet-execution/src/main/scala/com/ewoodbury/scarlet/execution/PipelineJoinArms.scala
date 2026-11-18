@@ -417,12 +417,9 @@ private[execution] object PipelineJoinArms:
     val build = pairsOf(
       interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals),
     )
-    val valuesPresent =
-      ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
-    if (!valuesPresent) then
-      throw new ColumnarFallback(
-        "a null value on a left outer join stays on the row path",
-      )
+    // A null value is a clear validity bit. The kernel copies it and writes (key, left, right).
+    // The left input is not swapped. Absence is the right value's absence bit, set only for a
+    // missing partner, and its validity bit stays clear. A stored 0 stays a present zero.
     Columns.Outer(
       ColumnPipeline.sortMergeLeftOuterJoin(
         probe,

@@ -30,12 +30,13 @@ import com.ewoodbury.scarlet.core.Partition
  * child is probed in place. A hash or broadcast left outer join always builds the right input. The
  * left input is the probe side. A hash or broadcast right outer join always builds the left input
  * and probes the right. A probe-side row with no partner sets the build value's absence bit. A
- * null value is not absence. A sort-merge outer join has no build table. Long outer joins are the
- * `LongHash*Outer`, `LongBroadcast*Outer`, and `LongSortMerge*Outer` nodes. Their kind is
- * [[PhysicalOp.Kind.LongOuter]]. String outer joins are the `StringHash*Outer`,
- * `StringBroadcast*Outer`, and `StringSortMerge*Outer` nodes. Their kind is
- * [[PhysicalOp.Kind.StringOuter]]. Hash and broadcast do not spill. Sort-merge runs in memory and
- * throws instead of spilling.
+ * null value is not absence. A sort-merge left outer join copies a clear validity bit and does not
+ * swap. A sort-merge right or full outer join still declines a null value. A sort-merge outer join
+ * has no build table. Long outer joins are the `LongHash*Outer`, `LongBroadcast*Outer`, and
+ * `LongSortMerge*Outer` nodes. Their kind is [[PhysicalOp.Kind.LongOuter]]. String outer joins are
+ * the `StringHash*Outer`, `StringBroadcast*Outer`, and `StringSortMerge*Outer` nodes. Their kind
+ * is [[PhysicalOp.Kind.StringOuter]]. Hash and broadcast do not spill. Sort-merge runs in memory
+ * and throws instead of spilling.
  */
 enum PhysicalOp:
   case Scan(sourceKind: PhysicalOp.Kind, partitions: Seq[Partition[_]])
@@ -190,8 +191,9 @@ enum PhysicalOp:
    * a null key. Each partition is sorted by present key and merged. A null key does not match. A
    * left row with no right partner is kept, including a null key, and the right value's absence
    * bit is set. Its validity bit stays clear. A preserved null key publishes a clear bit on the
-   * key column. A null value is not absence and stays on the row path. Output columns are
-   * `(key, left, right)`. One batch per partition.
+   * key column. A null value is a clear validity bit and is copied. It is not an absence bit. A
+   * stored `0` stays a present zero. Output columns are `(key, left, right)`. One batch per
+   * partition. The inputs are not swapped.
    */
   case SortMergeLeftOuter(left: PhysicalOp, right: PhysicalOp)
 
