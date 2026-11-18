@@ -1048,17 +1048,20 @@ private[execution] object ColumnarInterpreter:
         PairKernel.mapTriple(morsel.batch, morsel.start, morsel.length, adapted)
       })
     case Columns.Pairs(parts) =>
-      // The adapter returns Any. A cell that is not an int throws ColumnarFallback inside the
-      // kernel, before the output batch is published. The declared apply(Tuple2) check does not
-      // call the function. Long counts stay on the refusal below.
+      // A non-int cell throws ColumnarFallback before publish. The Tuple2 witness is not a call.
       val adapted = IntPairProject.adapt(mapper)
       Columns.Pairs(onEachMorsel(parts) { morsel =>
         IntPairProject.project(morsel.batch, morsel.start, morsel.length, adapted)
       })
-    case Columns.Bools(_) | Columns.LongPairs(_) | Columns.LongCounts(_) | Columns.CountSums(_) |
-        Columns.LongTriples(_) | Columns.StringPairs(_) | Columns.StringTriples(_) |
-        Columns.Outer(_, _) | Columns.GroupedInts(_) | Columns.GroupedStrings(_) |
-        Columns.GroupedLongs(_) =>
+    case Columns.LongPairs(parts) =>
+      // Child kind selected longs. A non-long cell throws ColumnarFallback before publish.
+      val adapted = LongPairProject.adapt(mapper)
+      Columns.LongPairs(onEachMorsel(parts) { morsel =>
+        LongPairProject.project(morsel.batch, morsel.start, morsel.length, adapted)
+      })
+    case Columns.Bools(_) | Columns.LongCounts(_) | Columns.CountSums(_) | Columns.LongTriples(_) |
+        Columns.StringPairs(_) | Columns.StringTriples(_) | Columns.Outer(_, _) |
+        Columns.GroupedInts(_) | Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
       throw new IllegalStateException(
         s"columnar map expects ${elementColumnList(includeBooleans = false)}",
       )

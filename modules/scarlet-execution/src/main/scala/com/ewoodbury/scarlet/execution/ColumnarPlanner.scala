@@ -28,8 +28,10 @@ object ColumnarPlanner:
    * [[Layout.Utf8Dict]]. An int, long, boolean, double, or int-pair plan reports
    * [[Layout.Columnar]]. A long-pair plan reports that layout too. An `(Int, Int)` pair map whose
    * function declares `apply(Tuple2): Tuple2` is accepted and stays [[PhysicalOp.Kind.Pairs]]. A
-   * long-pair or string-pair map is `None`. Erasure also accepts `(Long, Int)`; the kernel
-   * declines that cell.
+   * `(Long, Long)` map with that witness is a project and stays [[PhysicalOp.Kind.LongPairs]]. The
+   * child kind selects the cell. A string-pair map is `None`. Erasure also accepts `(Long, Int)`;
+   * the int-pair kernel declines that cell, and a long-pair project declines a cell that is not a
+   * long.
    */
   def partitioning[A](plan: Plan[A]): Option[PartitioningInfo] =
     accepted(plan).map(infoOf)
@@ -916,6 +918,8 @@ object ColumnarPlanner:
               Some(PhysicalOp.Project(child))
             case PhysicalOp.Kind.Pairs if returnsIntPair(mapper) =>
               Some(PhysicalOp.Project(child))
+            case PhysicalOp.Kind.LongPairs if returnsIntPair(mapper) =>
+              Some(PhysicalOp.Project(child))
             case _ => None
 
   private def tripleFilterSlot(predicate: Any): Option[PhysicalOp.Slot] = predicate match
@@ -1011,8 +1015,10 @@ object ColumnarPlanner:
 
   /**
    * `Tuple2 => Tuple2` via [[FunctionWitness]], the same witness shape as [[returnsUnboxedInt]].
-   * Erasure does not separate `(Int, Int)` from `(Long, Int)`. The pair kernel declines a cell
-   * that is not an int. This does not call `function` and does not read its body.
+   * Erasure does not separate `(Int, Int)` from `(Long, Long)` or `(Long, Int)`. The child kind
+   * selects the cell. The int-pair kernel declines a cell that is not an int. The long-pair kernel
+   * declines a cell that is not a long. This does not call `function` and does not read its body.
+   * [[FunctionWitness.declaredElement]] stays false for [[PhysicalOp.Kind.LongPairs]].
    */
   private def returnsIntPair(function: Any): Boolean =
     FunctionWitness.declaredElement(PhysicalOp.Kind.Pairs, function)
@@ -1034,13 +1040,22 @@ object ColumnarPlanner:
   private def columnFilter(source: Plan[_], slot: PhysicalOp.Slot): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
       // A key or value filter above a key map drops or keeps a null the row path unboxes.
-      if (MapIntKey.inTree(child)) then None
+      // The same filter above a long-pair project stays empty: the row path sees the new key.
+      if (MapIntKey.inTree(child) || longPairProject(child)) then None
       else
         child.kind match
           case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.LongPairs =>
             Some(PhysicalOp.Filter(child, slot))
           case _ => None
     }
+
+  /** A long-pair [[PhysicalOp.Project]]. Slot filters above that project stay on the row path. */
+  private def longPairProject(op: PhysicalOp): Boolean = op match
+    case PhysicalOp.Project(child) =>
+      child.kind match
+        case PhysicalOp.Kind.LongPairs => true
+        case _ => false
+    case _ => false
 
   private[execution] def infoOf(op: PhysicalOp): PartitioningInfo = op match
     case PhysicalOp.Filter(child, _) => infoOf(child)

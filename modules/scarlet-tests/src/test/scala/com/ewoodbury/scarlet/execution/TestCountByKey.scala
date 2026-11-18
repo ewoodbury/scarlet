@@ -384,11 +384,65 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     foldsOf(filteredKey.plan) shouldBe true
 
     val longPairs = DistCollection.ofLongPairs(Array(1L, 2L), Array(10L, 20L), 1)
-    ColumnarPlanner.lower(longPairs.map((pair: (Long, Long)) => (pair._1, pair._2)).plan) shouldBe
-      None
+    ColumnarPlanner
+      .lower(longPairs.map((pair: (Long, Long)) => (pair._1, pair._2)).plan)
+      .map(_.shape) shouldBe Some("Project(Scan)")
     val strings = DistCollection(Seq("a" -> 1, "b" -> 2), 1)
     ColumnarPlanner.lower(strings.map((pair: (String, Int)) => (pair._1, pair._2)).plan) shouldBe
       None
+  }
+
+  it should "count a long pair map from two long columns" in {
+    val source = DistCollection.ofLongPairs(Array(1L, 2L, 1L, 3L), Array(10L, 20L, 30L, 40L), 1)
+    val mapped = source.map((pair: (Long, Long)) => (pair._1 + 1L, pair._2))
+    val changed = mapped.countByKey
+    ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some("Project(Scan)")
+    ColumnarPlanner.lower(changed.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(Project(Scan)))",
+    )
+    val atBatch = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      countsOf(changed.collect())
+    }
+    val counted = atBatch(8192)
+    counted shouldBe Map(2L -> 2, 3L -> 1, 4L -> 1)
+    atBatch(1) shouldBe counted
+    counted shouldBe countsOf(row(changed.collect()))
+
+    LongPairProject.resetPublishedForTest()
+    val projected = mapped.collect().toList.sorted
+    LongPairProject.publishedForTest should be > 0
+    projected shouldBe List((2L, 10L), (2L, 30L), (3L, 20L), (4L, 40L))
+
+    val calls = new AtomicInteger
+    val nullable = nullLongKeySource().map(shiftNullLongKey(calls, nullKey = 7L)).countByKey
+    val nullAt = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      calls.set(0)
+      val found = countsOf(nullable.collect())
+      (found, calls.get)
+    }
+    val (nullCounts, nullCalls) = nullAt(8192)
+    nullCounts shouldBe Map(2L -> 2, 3L -> 2, 7L -> 2)
+    nullAt(1) shouldBe (nullCounts, nullCalls)
+    calls.set(0)
+    countsOf(row(nullable.collect())) shouldBe nullCounts
+    calls.get shouldBe nullCalls
+
+    val valueCalls = new AtomicInteger
+    val values = nullLongValueSource().map(shiftNullLongKey(valueCalls, nullKey = 7L)).countByKey
+    valueCalls.set(0)
+    countsOf(values.collect()) shouldBe Map(2L -> 1, 5L -> 1)
+    valueCalls.get shouldBe 2
+    valueCalls.set(0)
+    countsOf(row(values.collect())) shouldBe Map(2L -> 1, 5L -> 1)
+    valueCalls.get shouldBe 2
+
+    val widened = source.map((pair: (Long, Long)) => (pair._1.toInt, pair._2))
+    ColumnarPlanner.lower(widened.plan).map(_.shape) shouldBe Some("Project(Scan)")
+    ColumnarPlanner.tryRun(widened.plan) shouldBe None
   }
 
   it should "pin the filter-countbykey checksum" in {
@@ -989,6 +1043,61 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   private def absent: java.lang.Long = null
 
   private def longRef(value: Long): java.lang.Long = java.lang.Long.valueOf(value)
+
+  /**
+   * A null key becomes `nullKey`. A present key is incremented. `productElement` keeps a null
+   * value, so both paths count it. The row path and the long-pair project call this once per row.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+      "org.wartremover.warts.Throw",
+    ),
+  )
+  private def shiftNullLongKey(calls: AtomicInteger, nullKey: Long): ((Long, Long)) => (Long, Long) =
+    pair => {
+      val _ = calls.incrementAndGet()
+      val product = pair.asInstanceOf[Product]
+      val value = product.productElement(1)
+      val key = product.productElement(0) match
+        case null => nullKey
+        case present: Long => present + 1L
+        case other => throw new IllegalArgumentException(s"pair map saw $other")
+      Tuple2(Long.box(key), value).asInstanceOf[(Long, Long)]
+    }
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def nullLongKeySource(): DistCollection[(Long, Long)] =
+    def cell(key: Any, value: Long): (Long, Long) =
+      Tuple2(key, Long.box(value)).asInstanceOf[(Long, Long)]
+    DistCollection(
+      Plan.Source(
+        Seq(
+          Partition(Seq(cell(longRef(1L), 4L), cell(null, 9L), cell(longRef(1L), 5L), cell(longRef(2L), -1L))),
+          Partition(Seq(cell(longRef(2L), 6L), cell(null, 8L))),
+        ),
+      ),
+    )
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def nullLongValueSource(): DistCollection[(Long, Long)] =
+    def cell(key: Long, value: Any): (Long, Long) =
+      Tuple2(Long.box(key), value).asInstanceOf[(Long, Long)]
+    DistCollection(Plan.Source(Seq(Partition(Seq(cell(4L, longRef(4L)), cell(1L, null))))))
 
   private def nullKey(value: Int): (String, Int) = (null: String) -> value
 
