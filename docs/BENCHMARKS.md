@@ -4,7 +4,9 @@
 `make test` does not run it, and it does not assert on timing. A premise a command already
 killed is in `docs/NEGATIVE-RESULTS.md`: 1e7 sort `alloc_mb=702.096` at
 `SORT_ROWS=10000000 SORT_WARMUP=80 SORT_ROUNDS=30 SORT_THREADS=4`, and 1e7 `countByKey`
-`steady_ms=12.236` at `CROSS_ROWS=10000000 CROSS_WARMUP=80 CROSS_ROUNDS=30`.
+`steady_ms=12.236` at `CROSS_ROWS=10000000 CROSS_WARMUP=80 CROSS_ROUNDS=30`. The foundation
+arc's record of why composed plans missed the kernels this bench times is
+`docs/FOUNDATION.md`.
 
 ## Run
 

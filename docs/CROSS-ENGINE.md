@@ -8,7 +8,8 @@ run at `b704c3c` (#234) is the previous scoreboard. The 2026-11-15 steady-window
 stops at `2b7b01e`, before #234. The warmup-5 full-window run at `8958ac9` is the one before that. The
 2026-11-14 second run is at `ffca249`. The 2026-11-13 devbox section is the earlier warmup-3,
 rounds-10 protocol. The Apple M1 Pro table is history from 2026-11-07. It is not comparable with
-the container or the devbox.
+the container or the devbox. What the six-row board hid, and the measured pairs from #281–#283,
+is `docs/FOUNDATION.md`.
 
 ## 2026-11-17 — materialising join, pinned
 
