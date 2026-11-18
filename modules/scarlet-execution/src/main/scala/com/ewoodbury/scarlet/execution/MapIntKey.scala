@@ -23,9 +23,11 @@ private[execution] object MapIntKey:
     published.set(0)
 
   /**
-   * True when `op` still carries a key map. A parent that would publish that null key declines.
-   * [[JoinProbeAggregate]] does not: the exchange drops the key and the sum does not publish it.
-   * One key or value filter immediately above the map is [[slotAbove]], not a decline.
+   * True when `op` still carries a key map. A parent that would publish that null key as a pair
+   * declines. `keys` directly above the map projects column 0 and is not this decline.
+   * [[JoinProbeAggregate]] does not decline either: the exchange drops the key and the sum does
+   * not publish it. One key or value filter immediately above the map is [[slotAbove]], not a
+   * decline.
    */
   def inTree(op: PhysicalOp): Boolean = op match
     case _: PhysicalOp.MapKey => true

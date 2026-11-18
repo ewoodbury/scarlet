@@ -283,6 +283,30 @@ object BatchCodec:
       column.values(row)
     }
 
+  /**
+   * Reads one `Int32` column and keeps a clear bit as a null `Int`. A fully present column still
+   * decodes to the stored ints. [[decodeInts]] rejects a clear bit. `keys` of `mapIntKey` is the
+   * caller that keeps those nulls.
+   *
+   * Named erasure boundary. The cells are `java.lang.Integer` references in an `Array[AnyRef]`. A
+   * `scala.Int` cell would unbox a null to `0`.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private[scarlet] def decodeIntsPreservingAbsence(
+      batch: ColumnBatch,
+      maxRows: Int,
+  ): Seq[Int] =
+    val column = int32(batch)
+    val rows = decodedLength(batch, maxRows)
+    ColumnMetrics.decoded(rows)
+    val boxed = Array.tabulate[AnyRef](rows)(row => intRef(column, row))
+    ArraySeq.unsafeWrapArray(boxed).asInstanceOf[Seq[Int]]
+
   def decodeNullableInts(batch: ColumnBatch): Seq[Option[Int]] =
     val column = int32(batch)
     Seq.tabulate(column.length) { row =>
