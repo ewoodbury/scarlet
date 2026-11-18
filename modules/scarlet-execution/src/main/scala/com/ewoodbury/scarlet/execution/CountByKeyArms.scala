@@ -23,15 +23,17 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * not published. The function is not inspected. A filter above that project, a flatMap, and a
  * mapPartitions stay on the interpreted path. A long-pair [[PhysicalOp.Project]] uses
  * [[LongPairProject]] the same way and does not publish the pair batch. [[LongHashCount.byKey]]
- * counts a long scan or filter and does not see that project. A string-pair [[PhysicalOp.Project]]
- * is interpreted into a dictionary column and an int column, then [[StringHashCount.byKey]] hashes
- * that dictionary. The pairs are not decoded. A filter above that project does not lower. No
- * filters, a whole-row or string step, a non-int slot, and a null component the encoder throws on
- * stay on the old path. That path partial-counts survivor ids, including one row, key, or value
- * filter. A scan and a non-pair child stay on the dense count. The value column is not read on
- * that path, so a null value still counts. A long count publishes [[Columns.LongCounts]]. A string
- * count publishes [[Columns.StringPairs]]. The stored count is an `Int`. A null string key is
- * dropped and `""` is kept.
+ * counts a long scan or filter and does not see that project. One key or value slot above that
+ * project, on a scan or a long-pair filter stack, applies the slot after the adapter and still
+ * does not publish the pair batch. [[LongHashCount.byKey]] does not see that filter. A string-pair
+ * [[PhysicalOp.Project]] is interpreted into a dictionary column and an int column, then
+ * [[StringHashCount.byKey]] hashes that dictionary. The pairs are not decoded. A filter above that
+ * project does not lower. No filters, a whole-row or string step, a non-int slot, and a null
+ * component the encoder throws on stay on the old path. That path partial-counts survivor ids,
+ * including one row, key, or value filter. A scan and a non-pair child stay on the dense count.
+ * The value column is not read on that path, so a null value still counts. A long count publishes
+ * [[Columns.LongCounts]]. A string count publishes [[Columns.StringPairs]]. The stored count is an
+ * `Int`. A null string key is dropped and `""` is kept.
  */
 private[execution] object CountByKeyArms:
 
@@ -85,31 +87,44 @@ private[execution] object CountByKeyArms:
                 )
         Columns.Pairs(counted)
       case PhysicalOp.Kind.LongPairs =>
-        val counted = countProjectedLong(
-          source,
-          child,
-          selectedPartition,
-          preserveAbsence,
-          ordinals,
-          width,
-          workers,
-          batchSize,
-        ) match
-          case Some(projected) => projected
-          case None =>
-            FilterChain.selected(
+        val counted = LongSlotCount
+          .columns(
+            source,
+            child,
+            selectedPartition,
+            preserveAbsence,
+            ordinals,
+            width,
+            workers,
+            batchSize,
+          )
+          .getOrElse {
+            countProjectedLong(
               source,
               child,
               selectedPartition,
               preserveAbsence,
               ordinals,
-            ) match
-              case Some(parts) => LongHashCount.byKeySelected(parts, width, workers, batchSize)
-              case None =>
-                val batches = longPairsOf(
-                  interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),
-                )
-                LongHashCount.byKey(batches, width, workers, batchSize)
+              width,
+              workers,
+              batchSize,
+            ).getOrElse {
+              FilterChain.selected(
+                source,
+                child,
+                selectedPartition,
+                preserveAbsence,
+                ordinals,
+              ) match
+                case Some(parts) =>
+                  LongHashCount.byKeySelected(parts, width, workers, batchSize)
+                case None =>
+                  val batches = longPairsOf(
+                    interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),
+                  )
+                  LongHashCount.byKey(batches, width, workers, batchSize)
+            }
+          }
         Columns.LongCounts(counted)
       case PhysicalOp.Kind.StringPairs =>
         // A project child is already dictionary columns. byKey hashes those codes and does not
