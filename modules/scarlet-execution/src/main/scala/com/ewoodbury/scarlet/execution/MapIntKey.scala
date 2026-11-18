@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import com.ewoodbury.scarlet.columnar.ColumnKernel
 
 /**
@@ -10,6 +12,15 @@ import com.ewoodbury.scarlet.columnar.ColumnKernel
  * [[ColumnKernel.projectInt32]] is that rule. The value column is copied through.
  */
 private[execution] object MapIntKey:
+
+  private val published = new AtomicInteger
+
+  /** Successful [[columns]] calls since the last [[resetPublishedForTest]]. */
+  private[execution] def publishedForTest: Int = published.get
+
+  /** Clears [[publishedForTest]]. */
+  private[execution] def resetPublishedForTest(): Unit =
+    published.set(0)
 
   /**
    * True when `op` still carries a key map. A parent that would publish that null key declines.
@@ -22,7 +33,7 @@ private[execution] object MapIntKey:
   @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
   def columns(input: ColumnarInterpreter.Columns, mapper: Any): ColumnarInterpreter.Columns =
     val fn = mapper.asInstanceOf[Int => Int]
-    ColumnarInterpreter.Columns.Pairs(
+    val projected = ColumnarInterpreter.Columns.Pairs(
       ColumnarInterpreter.onEachMorsel(ColumnarInterpreter.pairsOf(input)) { morsel =>
         ColumnKernel.projectInt32(
           morsel.batch,
@@ -33,3 +44,5 @@ private[execution] object MapIntKey:
         )
       },
     )
+    val _ = published.incrementAndGet()
+    projected
