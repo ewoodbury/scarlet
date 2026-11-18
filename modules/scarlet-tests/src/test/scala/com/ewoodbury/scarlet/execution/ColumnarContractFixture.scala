@@ -170,7 +170,8 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
-        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums =>
+        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
+        PhysicalOp.Kind.IntLongSums =>
       false
 
   protected def sumsLongs(op: PhysicalOp): Boolean = op.kind match
@@ -180,7 +181,8 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
-        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums =>
+        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
+        PhysicalOp.Kind.IntLongSums =>
       false
 
   protected def sumsFloats(op: PhysicalOp): Boolean = op.kind match
@@ -190,7 +192,8 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
-        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums =>
+        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
+        PhysicalOp.Kind.IntLongSums =>
       false
 
   protected def preservesPartitions(op: PhysicalOp): Boolean = op match
@@ -204,6 +207,7 @@ trait ColumnarContractFixture extends Matchers:
     case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.LongHashAggregate(_) |
         PhysicalOp.StringHashAggregate(_) | PhysicalOp.GroupByKey(_) |
         PhysicalOp.GroupedDecode(_) | PhysicalOp.CountByKey(_) | PhysicalOp.CountSum(_) |
+        PhysicalOp.JoinProbeSum(_, _, _) |
         PhysicalOp.HashJoin(_, _) |
         PhysicalOp.LongHashJoin(_, _) | PhysicalOp.LongSortMergeJoin(_, _) |
         PhysicalOp.StringHashJoin(_, _) | PhysicalOp.StringSortMergeJoin(_, _) |

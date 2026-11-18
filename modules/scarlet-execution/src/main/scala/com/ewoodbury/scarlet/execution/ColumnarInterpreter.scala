@@ -403,7 +403,8 @@ private[execution] object ColumnarInterpreter:
         case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
             PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
             PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs |
-            PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums =>
+            PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
+            PhysicalOp.Kind.IntLongSums =>
           throw new IllegalStateException(
             s"physical tree does not match ${plan.getClass.getSimpleName}",
           )

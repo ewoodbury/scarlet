@@ -446,6 +446,19 @@ object HashAggregate:
   private[columnar] def sumWorkerCapacity: Int =
     sumWorkers.get().table.currentCapacity
 
+  /**
+   * One group table for `body`. `add` updates the reused per-thread sum under the key it is given.
+   * [[compact]] copies the groups out, then the table is cleared. A failure inside `body` skips
+   * the copy and still clears the table, so the next partition on this thread does not see it.
+   */
+  private[scarlet] def consume(body: ((Int, Long) => Unit) => Unit): ColumnBatch =
+    val table = sumWorkers.get().table
+    table.release()
+    try
+      body((key, value) => table.addSum(key, value))
+      table.compact()
+    finally table.release()
+
   private def withSumTable(body: (GroupTable, PairSlot) => Unit): ColumnBatch =
     val worker = sumWorkers.get()
     val table = worker.table
