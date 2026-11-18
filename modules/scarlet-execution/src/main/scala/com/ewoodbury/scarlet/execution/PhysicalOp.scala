@@ -1,5 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
+import com.ewoodbury.scarlet.columnar.LogicalType
 import com.ewoodbury.scarlet.core.Partition
 
 /**
@@ -40,7 +41,13 @@ import com.ewoodbury.scarlet.core.Partition
 enum PhysicalOp:
   case Scan(sourceKind: PhysicalOp.Kind, partitions: Seq[Partition[_]])
   case Filter(child: PhysicalOp, slot: PhysicalOp.Slot)
-  case Project(child: PhysicalOp)
+
+  /**
+   * A map. Kind stays the child kind. `out` is the columns this map publishes. A map that stays on
+   * that kind stores [[PhysicalOp.schemaOf]] of the kind. A triple map whose result is declared
+   * `(Int, Long)` stores [[PhysicalOp.intLongSchema]].
+   */
+  case Project(child: PhysicalOp, out: IndexedSeq[LogicalType])
 
   /**
    * One column of an int, long, or string pair, or the key of a `countByKey` witness. Kind is
@@ -521,7 +528,7 @@ enum PhysicalOp:
   def kind: PhysicalOp.Kind = this match
     case Scan(sourceKind, _) => sourceKind
     case Filter(child, _) => child.kind
-    case Project(child) => child.kind
+    case Project(child, _) => child.kind
     case Pipeline(child, _) => child.kind
     case Union(left, _) => left.kind
     case Dedupe(child) => child.kind
@@ -595,13 +602,33 @@ enum PhysicalOp:
       PhysicalOp.Kind.StringOuter
 
   /**
+   * Columns this operator publishes. [[Project]] reports its stored schema. Every other operator
+   * reports [[PhysicalOp.schemaOf]] its kind, except a [[HashAggregate]] over an `(Int, Long)`
+   * child, which keeps that pair. Kind is unchanged: a triple project is still
+   * [[PhysicalOp.Kind.Triples]] even when `out` is [[PhysicalOp.intLongSchema]].
+   */
+  def schema: IndexedSeq[LogicalType] = this match
+    case Project(_, out) => out
+    case Scan(kind, _) => PhysicalOp.schemaOf(kind)
+    case Filter(child, _) => child.schema
+    case Pipeline(child, _) => child.schema
+    case Union(left, _) => left.schema
+    case Dedupe(child) => child.schema
+    case Exchange(child) => child.schema
+    case GroupedDecode(child) => child.schema
+    case MapKey(child) => child.schema
+    case HashAggregate(child) if PhysicalOp.isIntLong(child.schema) => PhysicalOp.intLongSchema
+    case other => PhysicalOp.schemaOf(other.kind)
+
+  /**
    * An int inner join, or a filter or project stacked on one. An outer join is a triple batch with
-   * an absent side, so a whole-row filter or a map on it stays on the row path.
+   * an absent side, so a whole-row filter or a map on it stays on the row path. A project that
+   * publishes `(Int, Long)` is no longer a triple.
    */
   def isInnerTriple: Boolean = this match
     case HashJoin(_, _) | SortMergeJoin(_, _) | BroadcastJoin(_, _, _) => true
     case Filter(child, _) => child.isInnerTriple
-    case Project(child) => child.isInnerTriple
+    case Project(child, out) => child.isInnerTriple && !PhysicalOp.isIntLong(out)
     case _ => false
 
   /**
@@ -611,7 +638,7 @@ enum PhysicalOp:
   def keepsTripleAbsence: Boolean = this match
     case HashJoin(_, _) | SortMergeJoin(_, _) | BroadcastJoin(_, _, _) => true
     case Filter(child, PhysicalOp.Slot.TripleRow) => child.keepsTripleAbsence
-    case Project(child) => child.keepsTripleAbsence
+    case Project(child, _) => child.keepsTripleAbsence
     case _ => false
 
   /**
@@ -619,7 +646,7 @@ enum PhysicalOp:
    * null values only for this root. A bare join stays on the unboxing encode.
    */
   def requestsTripleAbsence: Boolean = this match
-    case Project(child) => child.keepsTripleAbsence
+    case Project(child, _) => child.keepsTripleAbsence
     case Filter(child, PhysicalOp.Slot.TripleRow) => child.keepsTripleAbsence
     case _ => false
 
@@ -627,7 +654,7 @@ enum PhysicalOp:
   def shape: String = this match
     case Scan(_, _) => "Scan"
     case Filter(child, slot) => s"${slot.label}(${child.shape})"
-    case Project(child) => s"Project(${child.shape})"
+    case Project(child, _) => s"Project(${child.shape})"
     case Pipeline(child, length) => s"Pipeline$length(${child.shape})"
     case Union(left, right) => s"Union(${left.shape}, ${right.shape})"
     case Dedupe(child) => s"Dedupe(${child.shape})"
@@ -711,6 +738,45 @@ enum PhysicalOp:
       s"StringSortMergeFullOuter(${left.shape}, ${right.shape})"
 
 object PhysicalOp:
+  /**
+   * `(Int32 key, Int64 value)`. The same columns
+   * [[com.ewoodbury.scarlet.columnar.HashAggregate.sumInt64]] writes.
+   */
+  val intLongSchema: IndexedSeq[LogicalType] = Vector(LogicalType.Int32, LogicalType.Int64)
+
+  @SuppressWarnings(Array("org.wartremover.warts.Equals", "org.wartremover.warts.SeqApply"))
+  def isIntLong(schema: IndexedSeq[LogicalType]): Boolean =
+    schema.length == 2 && schema(0) == LogicalType.Int32 && schema(1) == LogicalType.Int64
+
+  /** A project that does not change the child kind. */
+  def projectKeeping(child: PhysicalOp): PhysicalOp =
+    Project(child, schemaOf(child.kind))
+
+  /**
+   * Column types of `kind`. Grouped kinds are not [[com.ewoodbury.scarlet.columnar.ColumnBatch]]
+   * values; the vector names the key and one value element.
+   */
+  def schemaOf(kind: Kind): IndexedSeq[LogicalType] = kind match
+    case Kind.Ints => Vector(LogicalType.Int32)
+    case Kind.Longs => Vector(LogicalType.Int64)
+    case Kind.Floats => Vector(LogicalType.Float64)
+    case Kind.Bools => Vector(LogicalType.Bool)
+    case Kind.Strings => Vector(LogicalType.Utf8Dict)
+    case Kind.Pairs => Vector(LogicalType.Int32, LogicalType.Int32)
+    case Kind.LongPairs => Vector(LogicalType.Int64, LogicalType.Int64)
+    case Kind.LongCounts => Vector(LogicalType.Int64, LogicalType.Int32)
+    case Kind.Triples => Vector(LogicalType.Int32, LogicalType.Int32, LogicalType.Int32)
+    case Kind.LongTriples => Vector(LogicalType.Int64, LogicalType.Int64, LogicalType.Int64)
+    case Kind.StringPairs => Vector(LogicalType.Utf8Dict, LogicalType.Int32)
+    case Kind.StringTriples | Kind.StringOuter =>
+      Vector(LogicalType.Utf8Dict, LogicalType.Int32, LogicalType.Int32)
+    case Kind.LongOuter => Vector(LogicalType.Int64, LogicalType.Int64, LogicalType.Int64)
+    case Kind.CountSums => Vector(LogicalType.Int32, LogicalType.Int64, LogicalType.Int64)
+    case Kind.IntLongSums => intLongSchema
+    case Kind.GroupedInts => Vector(LogicalType.Int32, LogicalType.Int32)
+    case Kind.GroupedStrings => Vector(LogicalType.Utf8Dict, LogicalType.Int32)
+    case Kind.GroupedLongs => Vector(LogicalType.Int64, LogicalType.Int64)
+
   enum Kind:
     case Ints, Longs, Floats, Pairs, Triples, Strings, Bools, LongPairs, LongCounts, LongTriples,
       StringPairs, StringTriples, GroupedInts, GroupedStrings, GroupedLongs, LongOuter,

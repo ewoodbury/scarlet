@@ -173,7 +173,7 @@ class TestSelectionPushdown extends AnyFlatSpec with Matchers with BeforeAndAfte
       .keys
     val scan = pairScan(source)
     val op = PhysicalOp.Column(
-      PhysicalOp.Project(PhysicalOp.Filter(scan, PhysicalOp.Slot.Key)),
+      PhysicalOp.projectKeeping(PhysicalOp.Filter(scan, PhysicalOp.Slot.Key)),
       0,
     )
 
@@ -209,7 +209,7 @@ class TestSelectionPushdown extends AnyFlatSpec with Matchers with BeforeAndAfte
 
   /** A pair `map` does not lower. This is `keys` or `values` above `Project` of the pair scan. */
   private def projectedMap(source: DistCollection[_], ordinal: Int): PhysicalOp =
-    PhysicalOp.Column(PhysicalOp.Project(pairScan(source)), ordinal)
+    PhysicalOp.Column(PhysicalOp.projectKeeping(pairScan(source)), ordinal)
 
   private def pairScan(source: DistCollection[_]): PhysicalOp =
     PhysicalOp.Scan(PhysicalOp.Kind.Pairs, partitionsOf(source))

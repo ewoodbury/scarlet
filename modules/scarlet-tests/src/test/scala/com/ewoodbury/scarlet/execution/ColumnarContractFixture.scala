@@ -199,7 +199,7 @@ trait ColumnarContractFixture extends Matchers:
   protected def preservesPartitions(op: PhysicalOp): Boolean = op match
     case PhysicalOp.Scan(_, _) => true
     case PhysicalOp.Filter(child, _) => preservesPartitions(child)
-    case PhysicalOp.Project(child) => preservesPartitions(child)
+    case PhysicalOp.Project(child, _) => preservesPartitions(child)
     case PhysicalOp.Pipeline(child, _) => preservesPartitions(child)
     case PhysicalOp.Column(child, _) => preservesPartitions(child)
     case PhysicalOp.MapValue(child) => preservesPartitions(child)

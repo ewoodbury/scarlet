@@ -279,7 +279,7 @@ object HashAggregate:
    * The slots of the most recent dense key sequence are reused when the next dense partial repeats
    * that sequence. `grow` and `release` drop the cached sequence.
    */
-  private[columnar] def mergeSumPartials(
+  private[scarlet] def mergeSumPartials(
       partials: Vector[ColumnBatch],
       keyOrdinal: Int,
       valueOrdinal: Int,

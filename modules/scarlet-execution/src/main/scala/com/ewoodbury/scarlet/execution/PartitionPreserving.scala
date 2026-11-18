@@ -12,7 +12,7 @@ private[execution] object PartitionPreserving:
   def of(op: PhysicalOp): Option[Int] = op match
     case PhysicalOp.Scan(_, partitions) => Some(partitions.length)
     case PhysicalOp.Filter(child, _) => of(child)
-    case PhysicalOp.Project(child) => of(child)
+    case PhysicalOp.Project(child, _) => of(child)
     case PhysicalOp.Pipeline(child, _) => of(child)
     case PhysicalOp.Column(child, _) => of(child)
     case PhysicalOp.MapValue(child) => of(child)

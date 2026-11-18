@@ -37,7 +37,7 @@ private[execution] object ColumnUse:
     case (Plan.MapIntKeyOp(source, _), PhysicalOp.MapKey(child)) =>
       // The key is always read. A values-only parent still has to encode column 0.
       walk(source, child, parent union Set(0))
-    case (Plan.MapOp(source, _), PhysicalOp.Project(child)) =>
+    case (Plan.MapOp(source, _), PhysicalOp.Project(child, _)) =>
       // The mapper sees the whole input record. An element project reads no pair ordinal.
       walk(source, child, parent union consumedOrdinals(child.kind))
     case (Plan.UnionOp(left, right), PhysicalOp.Union(leftOp, rightOp)) =>

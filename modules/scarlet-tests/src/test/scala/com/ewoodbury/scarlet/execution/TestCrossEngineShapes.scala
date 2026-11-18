@@ -5,6 +5,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
+import com.ewoodbury.scarlet.columnar.LogicalType
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -127,15 +128,26 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
       "HashJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(FilterValue(FilterKey(Scan))))",
     )
     val projected = joined.map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
-    ColumnarPlanner.lower(projected.plan).map(_.shape) shouldBe Some(
+    val projectedOp = ColumnarPlanner.lower(projected.plan).getOrElse(fail("project was refused"))
+    projectedOp.shape shouldBe
       "Project(" +
         "HashJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(FilterValue(FilterKey(Scan))))" +
-        ")",
-    )
-    ColumnarPlanner.tryRun(projected.plan).isEmpty shouldBe true
+        ")"
+    projectedOp.kind shouldBe PhysicalOp.Kind.Triples
+    projectedOp.schema shouldBe Vector(LogicalType.Int32, LogicalType.Int64)
+    projected.collect().toList.sorted shouldBe List(1 -> 10L, 1 -> 10L, 2 -> 20L)
     val generic = projected.reduceByKey((left: Long, right: Long) => left + right)
-    ColumnarPlanner.lower(generic.plan).isEmpty shouldBe true
+    val genericOp = ColumnarPlanner.lower(generic.plan).getOrElse(fail("reduce was refused"))
+    genericOp.shape shouldBe
+      "HashAggregate(Project(" +
+        "HashJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(FilterValue(FilterKey(Scan))))" +
+        "))"
+    ColumnarPlanner.partitioning(generic.plan).isDefined shouldBe true
+    genericOp.schema shouldBe Vector(LogicalType.Int32, LogicalType.Int64)
     generic.collect().toMap shouldBe Map(1 -> 20L, 2 -> 20L)
+    CrossEngineShapes.sumChecksum(generic.collect()) shouldBe 133L
+    val multiplied = projected.reduceByKey((left: Long, right: Long) => left * right)
+    ColumnarPlanner.lower(multiplied.plan) shouldBe None
     aggregated.collect().toMap shouldBe Map(1 -> 20L, 2 -> 20L)
     CrossEngineShapes.sumChecksum(aggregated.collect()) shouldBe 133L
   }

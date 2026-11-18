@@ -117,6 +117,10 @@ object ColumnarPlanner:
       val decoded = op match
         case PhysicalOp.GroupedDecode(child) => GroupedDecode.partitions(plan, child)
         case sum: PhysicalOp.JoinProbeSum => JoinProbeAggregate.partitions(plan, sum)
+        case project: PhysicalOp.Project if PhysicalOp.isIntLong(project.schema) =>
+          IntLongPairs.partitions(plan, project)
+        case aggregate: PhysicalOp.HashAggregate if PhysicalOp.isIntLong(aggregate.schema) =>
+          IntLongPairs.partitions(plan, aggregate)
         case _ => decodeAccepted(plan, op)
       Some(decoded.asInstanceOf[Seq[Partition[A]]])
     // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
@@ -490,7 +494,7 @@ object ColumnarPlanner:
         batch =>
           Float64Pipeline.sumFiltered(batch, keep)
       }
-    case (Plan.MapOp(source, mapper), PhysicalOp.Project(child)) if isFloat(child) =>
+    case (Plan.MapOp(source, mapper), PhysicalOp.Project(child, _)) if isFloat(child) =>
       val fn = mapper.asInstanceOf[Double => Double]
       foldDouble(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(source, child))) {
         batch =>
@@ -821,7 +825,7 @@ object ColumnarPlanner:
     case Plan.ReduceByKeyOp(source, reduce) =>
       JoinProbeAggregate
         .lower(source, reduce, lowerChild)
-        .orElse(lowerChild(source).flatMap(ReduceByKeyLowering.apply))
+        .orElse(lowerChild(source).flatMap(child => ReduceByKeyLowering(child, reduce)))
     case Plan.GroupByKeyOp(source) =>
       lowerChild(source).flatMap(GroupByKeyLowering.apply)
     case Plan.CountByKeyOp(source) =>
@@ -906,10 +910,13 @@ object ColumnarPlanner:
                   Some(PhysicalOp.Filter(child, PhysicalOp.Slot.TripleRow))
                 case None => None
             case _ => None
-        case ElementStep.Project(_) =>
-          Option.when(child.kind == PhysicalOp.Kind.Triples && child.isInnerTriple)(
-            PhysicalOp.Project(child),
-          )
+        case ElementStep.Project(mapper) =>
+          Option.when(child.kind == PhysicalOp.Kind.Triples && child.isInnerTriple) {
+            val out =
+              if (DeclaredPair.returnsIntLong(mapper)) then PhysicalOp.intLongSchema
+              else PhysicalOp.schemaOf(PhysicalOp.Kind.Triples)
+            PhysicalOp.Project(child, out)
+          }
 
   private def tripleFilterSlot(predicate: Any): Option[PhysicalOp.Slot] = predicate match
     case recognized: IntJoinTriplePredicate[?] =>
@@ -931,7 +938,7 @@ object ColumnarPlanner:
       val chunked = ordinary.grouped(4).foldLeft(current) { (parent, group) =>
         group match
           case List(ElementStep.Filter(_)) => PhysicalOp.Filter(parent, PhysicalOp.Slot.Element)
-          case List(ElementStep.Project(_)) => PhysicalOp.Project(parent)
+          case List(ElementStep.Project(_)) => PhysicalOp.projectKeeping(parent)
           case _ => PhysicalOp.Pipeline(parent, group.length)
       }
       rest match
@@ -1029,7 +1036,7 @@ object ColumnarPlanner:
 
   private[execution] def infoOf(op: PhysicalOp): PartitioningInfo = op match
     case PhysicalOp.Filter(child, _) => infoOf(child)
-    case PhysicalOp.Project(child) => infoOf(child)
+    case PhysicalOp.Project(child, _) => infoOf(child)
     case PhysicalOp.Pipeline(child, _) => infoOf(child)
     case union: PhysicalOp.Union =>
       UnionLowering.info(union, infoOf, layoutOf(op.kind))

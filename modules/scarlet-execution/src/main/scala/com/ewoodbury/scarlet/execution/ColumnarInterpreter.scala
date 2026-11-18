@@ -419,8 +419,10 @@ private[execution] object ColumnarInterpreter:
     case (logical, physical)
         if physical.isInstanceOf[PhysicalOp.Filter] && FilterChain.accepts(logical, physical) =>
       FilterChain.run(logical, physical, selectedPartition, preserveAbsence, ordinals)
-    case (Plan.MapOp(source, mapper), PhysicalOp.Project(child)) =>
-      project(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals), mapper)
+    case (Plan.MapOp(source, mapper), PhysicalOp.Project(child, out)) =>
+      val input = interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)
+      if (PhysicalOp.isIntLong(out)) then Columns.Pairs(IntLongPairs.project(input, mapper))
+      else project(input, mapper)
     case (logical, PhysicalOp.Pipeline(child, length)) =>
       interpretPipeline(logical, child, length, selectedPartition, preserveAbsence, ordinals)
     case (
@@ -466,6 +468,10 @@ private[execution] object ColumnarInterpreter:
         interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),
         mapper,
       )
+    case (Plan.ReduceByKeyOp(source, _), PhysicalOp.HashAggregate(child))
+        if PhysicalOp.isIntLong(child.schema) =>
+      require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
+      Columns.Pairs(IntLongPairs.aggregate(source, child))
     case (
           Plan.ReduceByKeyOp(source, reduceFunc),
           PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)),

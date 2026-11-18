@@ -123,7 +123,8 @@ private[execution] object TrailingProject:
       op: PhysicalOp,
       action: ProjectFold,
   ): Option[Long] = (plan, op) match
-    case (Plan.MapOp(source, mapper), PhysicalOp.Project(child)) if ColumnarPlanner.isInt(child) =>
+    case (Plan.MapOp(source, mapper), PhysicalOp.Project(child, _))
+        if ColumnarPlanner.isInt(child) =>
       val total = ColumnarPlanner.foldInterpreted(source, child) { morsel =>
         action match
           case ProjectFold.Sum => ElementSum.sumMapped(morsel, mapper)
@@ -168,7 +169,7 @@ private[execution] object TrailingProject:
       op: PhysicalOp,
       action: ProjectFold,
   ): Option[Long] = (plan, op) match
-    case (Plan.MapOp(source, mapper), PhysicalOp.Project(child))
+    case (Plan.MapOp(source, mapper), PhysicalOp.Project(child, _))
         if ColumnarPlanner.isLong(child) =>
       val total = ColumnarPlanner.foldInterpreted(source, child) { morsel =>
         val steps = List(ColumnarPlanner.ElementStep.Project(mapper))
@@ -190,7 +191,7 @@ private[execution] object TrailingProject:
   @tailrec
   private def stringColumnBase(op: PhysicalOp): Option[PhysicalOp] = op match
     case scan @ PhysicalOp.Scan(PhysicalOp.Kind.Strings, _) => Some(scan)
-    case PhysicalOp.Project(child) => stringColumnBase(child)
+    case PhysicalOp.Project(child, _) => stringColumnBase(child)
     case PhysicalOp.Pipeline(child, _) => stringColumnBase(child)
     case PhysicalOp.Filter(child, PhysicalOp.Slot.Element) => stringColumnBase(child)
     case _ => None
@@ -198,7 +199,7 @@ private[execution] object TrailingProject:
   @tailrec
   private def longColumnBase(op: PhysicalOp): Option[PhysicalOp] = op match
     case scan @ PhysicalOp.Scan(PhysicalOp.Kind.Longs, _) => Some(scan)
-    case PhysicalOp.Project(child) => longColumnBase(child)
+    case PhysicalOp.Project(child, _) => longColumnBase(child)
     case PhysicalOp.Pipeline(child, _) => longColumnBase(child)
     case PhysicalOp.Filter(child, PhysicalOp.Slot.Element) => longColumnBase(child)
     case _ => None
@@ -210,7 +211,7 @@ private[execution] object TrailingProject:
       column.kind match
         case PhysicalOp.Kind.Ints => Some(column)
         case _ => None
-    case PhysicalOp.Project(child) => intColumnBase(child)
+    case PhysicalOp.Project(child, _) => intColumnBase(child)
     case PhysicalOp.Pipeline(child, _) => intColumnBase(child)
     case PhysicalOp.Filter(child, PhysicalOp.Slot.Element) => intColumnBase(child)
     case _ => None
@@ -220,7 +221,7 @@ private[execution] object TrailingProject:
 
   @tailrec
   private def depthFrom(op: PhysicalOp, seen: Int): Int = op match
-    case PhysicalOp.Project(child) => depthFrom(child, seen + 1)
+    case PhysicalOp.Project(child, _) => depthFrom(child, seen + 1)
     case PhysicalOp.Pipeline(child, length) => depthFrom(child, seen + length)
     case PhysicalOp.Filter(child, PhysicalOp.Slot.Element) => depthFrom(child, seen + 1)
     case _ => seen

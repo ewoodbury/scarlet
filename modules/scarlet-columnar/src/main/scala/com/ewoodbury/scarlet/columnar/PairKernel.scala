@@ -228,6 +228,57 @@ object PairKernel:
       length,
     )
 
+  /**
+   * Scans `[start, start + length)` and writes one `(Int32, Int64)` row per input row. An empty
+   * range publishes an empty batch and does not call `mapper`. A row with any clear bit, or a
+   * result that is not `(Int, Long)`, throws [[ColumnarFallback]] before the batch is published.
+   */
+  def mapToIntLong(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      mapper: IntTripleMap,
+  ): ColumnBatch =
+    if (length == 0) then ColumnBatches.emptyIntLongSum
+    else
+      val (keys, leftValues, rightValues) = tripleColumns(batch, start, length)
+      val outKeys = new Array[Int](length)
+      val outValues = new Array[Long](length)
+      val keyArr = keys.values
+      val leftArr = leftValues.values
+      val rightArr = rightValues.values
+      val inKeyWords = keys.validity.words
+      val inLeftWords = leftValues.validity.words
+      val inRightWords = rightValues.validity.words
+      val end = start + length
+      var row = start
+      var out = 0
+      while (row < end) {
+        val present =
+          Validity.isSet(inKeyWords, row) &&
+            Validity.isSet(inLeftWords, row) &&
+            Validity.isSet(inRightWords, row)
+        if (!present) then declinePair("absent triple component")
+        else
+          writeIntLong(
+            mapper(keyArr(row), leftArr(row), rightArr(row)),
+            outKeys,
+            outValues,
+            out,
+          )
+        out += 1
+        row += 1
+      }
+      val present = Validity.allValid(length)
+      new ColumnBatch(
+        Vector(LogicalType.Int32, LogicalType.Int64),
+        Vector(
+          Int32Column.of(outKeys, present, length),
+          Int64Column.of(outValues, present, length),
+        ),
+        length,
+      )
+
   private def publish(
       schema: IndexedSeq[LogicalType],
       outKeys: Array[Int],
@@ -317,9 +368,34 @@ object PairKernel:
         Validity.setBit(words, out)
       case other => decline(foundName(other))
 
+  /**
+   * `productElement` keeps a null visible. Anything other than a present `(Int, Long)` is
+   * [[ColumnarFallback]], thrown before the output batch is published.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
+  private def writeIntLong(
+      projected: Any,
+      keys: Array[Int],
+      values: Array[Long],
+      out: Int,
+  ): Unit =
+    projected match
+      case null => declinePair("null")
+      case row: Product if row.productArity == 2 =>
+        (row.productElement(0), row.productElement(1)) match
+          case (key: Int, value: Long) =>
+            keys(out) = key
+            values(out) = value
+          case (key, value) => declinePair(s"${foundName(key)}, ${foundName(value)}")
+      case other => declinePair(foundName(other))
+
   @SuppressWarnings(Array("org.wartremover.warts.Throw"))
   private def decline(found: String): Nothing =
     throw new ColumnarFallback(s"triple map did not stay (Int, (Int, Int)): found $found")
+
+  @SuppressWarnings(Array("org.wartremover.warts.Throw"))
+  private def declinePair(found: String): Nothing =
+    throw new ColumnarFallback(s"int-long map did not return (Int, Long): found $found")
 
   @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
   private def foundName(value: Any): String = value match
