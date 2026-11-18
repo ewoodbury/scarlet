@@ -18,10 +18,10 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * in the kernel: a null key is dropped, and a null value is dropped and creates no group. The
  * merged batch is the only result, so a failure during the fold publishes nothing.
  *
- * Only [[HashReduce.byKey]] and [[HashReduce.byKeySelected]] call this, and only for the
- * post-exchange bucket. The partial combine before the exchange stays in memory. The spill path
- * never holds more than the input bucket, its sub-partitioned copy, the current piece's morsels,
- * one read-back copy, the running partial, the fold table, and one open file.
+ * Only the post-exchange bucket of [[HashReduce.byKey]], [[HashReduce.byKeySelected]], and a
+ * projected pair reduce calls this. The partial combine before the exchange stays in memory. The
+ * spill path never holds more than the input bucket, its sub-partitioned copy, the current piece's
+ * morsels, one read-back copy, the running partial, the fold table, and one open file.
  * [[HashExchange.partitionAll]] materialises the sub-partitioned copy and [[ColumnBatches.slice]]
  * materialises the current piece's morsels before the fold.
  */

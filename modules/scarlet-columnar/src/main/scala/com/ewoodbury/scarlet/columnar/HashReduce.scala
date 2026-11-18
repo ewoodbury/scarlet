@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import com.ewoodbury.scarlet.core.ScarletConf
 
 /**
@@ -88,6 +90,7 @@ object HashReduce:
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    val _ = byKeyCalls.incrementAndGet()
     if (batches.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs)
     else
       val combined = PartialCombine.perBatch(
@@ -127,9 +130,36 @@ object HashReduce:
       reduceExchanged(combined, numPartitions, parallelism, batchSize, op)
 
   /**
-   * Exchange combined partials and reduce each bucket. Shared by [[byKey]] and [[byKeySelected]].
+   * Reduce pairs a caller supplies. No pair column is read.
+   *
+   * `rows` sizes the table the way [[int32]] sizes one morsel. A zero estimate publishes an empty
+   * pair batch and does not call `supply`. `supply` receives `add` and calls it once per present
+   * pair. A null key or a null value is the caller's to skip. This is not [[byKey]]: nothing here
+   * is a published pair project.
    */
-  private def reduceExchanged(
+  private[scarlet] def partialPairs(
+      rows: Int,
+      op: IntBinOp,
+  )(supply: IntPairProject.IntPairSink => Unit): ColumnBatch =
+    require(rows >= 0, s"row estimate must be >= 0, got $rows")
+    if (rows == 0) then ColumnBatches.emptyIntPairs
+    else
+      val table = new Table(ColumnHash.tableSize(rows), op)
+      table.supplyPairs(supply)
+      table.compact()
+
+  /** [[byKey]] entries since the last [[resetByKeyForTest]]. */
+  private[scarlet] def byKeyCallsForTest: Int = byKeyCalls.get
+
+  /** Clears [[byKeyCallsForTest]]. */
+  private[scarlet] def resetByKeyForTest(): Unit =
+    byKeyCalls.set(0)
+
+  /**
+   * Exchange combined partials and reduce each bucket. Shared by [[byKey]], [[byKeySelected]], and
+   * a projected pair reduce. [[byKey]] is not called.
+   */
+  private[scarlet] def reduceExchanged(
       combined: Vector[ColumnBatch],
       numPartitions: Int,
       parallelism: Int,
@@ -240,6 +270,12 @@ object HashReduce:
         rows,
       )
 
+    /** Hands `add` to `supply`. The lambda stays inside [[Table]] so `add` stays private. */
+    def supplyPairs(supply: IntPairProject.IntPairSink => Unit): Unit =
+      val sink = new IntPairProject.IntPairSink:
+        def add(key: Int, value: Int): Unit = Table.this.add(key, value)
+      supply(sink)
+
     private def add(key: Int, value: Int): Unit =
       val slot = locate(key)
       if (state(slot) == 0) then
@@ -256,3 +292,5 @@ object HashReduce:
       var slot = ColumnHash.mix(key) & mask
       while (state(slot) != 0 && keys(slot) != key) slot = (slot + 1) & mask
       slot
+
+  private val byKeyCalls = new AtomicInteger
