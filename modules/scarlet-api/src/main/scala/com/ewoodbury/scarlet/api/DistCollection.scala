@@ -427,9 +427,10 @@ final case class DistCollection[A](plan: Plan[A]):
    * Sums the left value of an int inner join once per match, grouped by the join key.
    *
    * The row path maps each match to `(key, left.toLong)` and adds with [[LongSum]]. A null key was
-   * already dropped by the join. A null left value unboxes to zero. An unhinted or shuffle-hash
-   * join can update that sum from the probe. Broadcast, sort-merge, outer joins, and any other
-   * reducer stay on this same row path.
+   * already dropped by the join. A null left value unboxes to zero. An unhinted, shuffle-hash, or
+   * explicit sort-merge join updates that sum from the probe. Sort-merge is hash-partitioned on
+   * both sides and is not sorted. Broadcast, outer joins, and any other reducer stay on the row
+   * path.
    */
   def sumJoinLeft(using ev: A =:= (Int, (Int, Int))): DistCollection[(Int, Long)] =
     sumJoinColumn(JoinSumColumn.Left)

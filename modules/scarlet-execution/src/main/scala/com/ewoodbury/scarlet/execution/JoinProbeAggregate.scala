@@ -9,12 +9,16 @@ import com.ewoodbury.scarlet.core.{Partition, Plan}
  *
  * The logical plan stays `map` then `reduceByKey`. Only [[JoinSumProjection]] and [[LongSum]] name
  * the column and the addition. Any other map or reducer returns `None`, and so does a join that is
- * not an unhinted or shuffle-hash int inner join. A [[PhysicalOp.MapKey]] on either arm is
- * admitted. Its kind stays [[PhysicalOp.Kind.Pairs]]. The exchange drops a null key, the function
- * is not called on that key, and the key is not a probe hit. The function is not inspected. A
- * filter, `keys`, or `values` above the map still declines in those parents. Execution reads the
- * projection again and updates [[com.ewoodbury.scarlet.columnar.HashAggregate]] from the probe.
- * The published pairs are the groups, not the match columns.
+ * not an int inner join with no hint, a shuffle-hash hint, or an explicit sort-merge hint.
+ * Sort-merge emits [[PhysicalOp.JoinProbeSum]] over two hash exchanges. It does not sort and it
+ * does not emit [[PhysicalOp.SortMergeJoin]]. The left child stays the build, so
+ * [[PhysicalOp.ProbeMeasure.Left]] is still the left column. Broadcast stays on the row path. A
+ * [[PhysicalOp.MapKey]] on either arm is admitted. Its kind stays [[PhysicalOp.Kind.Pairs]]. The
+ * exchange drops a null key, the function is not called on that key, and the key is not a probe
+ * hit. The function is not inspected. A filter, `keys`, or `values` above the map still declines
+ * in those parents. Execution reads the projection again and updates
+ * [[com.ewoodbury.scarlet.columnar.HashAggregate]] from the probe. The published pairs are the
+ * groups, not the match columns.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Throw"))
 private[execution] object JoinProbeAggregate:
@@ -28,7 +32,7 @@ private[execution] object JoinProbeAggregate:
       case LongSum =>
         source match
           case Plan.MapOp(Plan.JoinOp(left, right, strategy), projection: JoinSumProjection[?])
-              if JoinLowering.acceptsShuffleHash(strategy) =>
+              if admits(strategy) =>
             (lowerChild(left), lowerChild(right)) match
               case (Some(leftOp), Some(rightOp)) if accepts(leftOp) && accepts(rightOp) =>
                 Some(
@@ -66,6 +70,16 @@ private[execution] object JoinProbeAggregate:
     }
 
   /**
+   * No hint, shuffle-hash, or an explicit sort-merge. Broadcast is a different physical join.
+   * Sort-merge is admitted here only: both sides are hash-partitioned, and the merge is not run.
+   */
+  private def admits(strategy: Option[Plan.JoinStrategy]): Boolean =
+    strategy match
+      case None | Some(Plan.JoinStrategy.ShuffleHash) | Some(Plan.JoinStrategy.SortMerge) =>
+        true
+      case Some(Plan.JoinStrategy.Broadcast) => false
+
+  /**
    * Int pairs, including a key map. This sum does not publish a null key, so it does not consult
    * [[MapIntKey.inTree]]. A parent that would publish that key still declines.
    */
@@ -88,7 +102,7 @@ private[execution] object JoinProbeAggregate:
             PhysicalOp.Exchange(rightOp),
             measure,
           ),
-        ) if JoinLowering.acceptsShuffleHash(strategy) =>
+        ) if admits(strategy) =>
       val kernel = (measureOf(projection.column), measure) match
         case (PhysicalOp.ProbeMeasure.Left, PhysicalOp.ProbeMeasure.Left) =>
           JoinProbeSum.Measure.Left
