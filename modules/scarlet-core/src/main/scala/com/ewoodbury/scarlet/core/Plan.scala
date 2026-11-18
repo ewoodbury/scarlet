@@ -396,9 +396,9 @@ object Plan {
    *   Stored with the plan. The row executor ignores it and always runs shuffle-hash. The columnar
    *   planner accepts a broadcast hint, a shuffle-hash hint, or an absent hint for int pairs. The
    *   left input is the probe side. An absent hint uses the shuffle-hash op, matching an inner
-   *   join. A null value on shuffle-hash or broadcast stays columnar. Sort-merge keeps a null
-   *   value on the row path. An explicit sort-merge hint on int pairs lowers to
-   *   `SortMergeLeftOuter`. `(Long, Long)` pairs lower to `LongHashLeftOuter`,
+   *   join. A null value on an int shuffle-hash, broadcast, or sort-merge stays columnar. A long
+   *   or string left outer join still declines a null value. An explicit sort-merge hint on int
+   *   pairs lowers to `SortMergeLeftOuter`. `(Long, Long)` pairs lower to `LongHashLeftOuter`,
    *   `LongBroadcastLeftOuter`, or `LongSortMergeLeftOuter` for the same hints. `(String, Int)`
    *   pairs lower to `StringHashLeftOuter`, `StringBroadcastLeftOuter`, or
    *   `StringSortMergeLeftOuter` for the same hints.
@@ -427,9 +427,9 @@ object Plan {
    *   Stored with the plan. The row executor ignores it and always runs shuffle-hash. The columnar
    *   planner accepts a broadcast hint, a shuffle-hash hint, or an absent hint for int pairs. The
    *   right input is the probe side. An absent hint uses the shuffle-hash op, matching an inner
-   *   join. A null value on shuffle-hash or broadcast stays columnar. Sort-merge keeps a null
-   *   value on the row path. An explicit sort-merge hint on int pairs lowers to
-   *   `SortMergeRightOuter`. `(Long, Long)` pairs lower to `LongHashRightOuter`,
+   *   join. A null value on an int shuffle-hash, broadcast, or sort-merge stays columnar. A long
+   *   or string right outer join still declines a null value. An explicit sort-merge hint on int
+   *   pairs lowers to `SortMergeRightOuter`. `(Long, Long)` pairs lower to `LongHashRightOuter`,
    *   `LongBroadcastRightOuter`, or `LongSortMergeRightOuter` for the same hints. `(String, Int)`
    *   pairs lower to `StringHashRightOuter`, `StringBroadcastRightOuter`, or
    *   `StringSortMergeRightOuter` for the same hints.
@@ -460,12 +460,13 @@ object Plan {
    * @param joinStrategy
    *   Stored with the plan. The row executor ignores it and always runs shuffle-hash. The columnar
    *   planner accepts a broadcast hint, a shuffle-hash hint, or an absent hint for int pairs. The
-   *   left input is the probe side. An absent hint uses the shuffle-hash op. A null value stays on
-   *   the row path. An explicit sort-merge hint on int pairs lowers to `SortMergeFullOuter`.
-   *   `(Long, Long)` pairs lower to `LongHashFullOuter`, `LongBroadcastFullOuter`, or
-   *   `LongSortMergeFullOuter` for the same hints. `(String, Int)` pairs lower to
-   *   `StringHashFullOuter`, `StringBroadcastFullOuter`, or `StringSortMergeFullOuter` for the
-   *   same hints.
+   *   left input is the probe side. An absent hint uses the shuffle-hash op. A null value on an
+   *   int full outer join stays a clear validity bit. A long or string full outer join still
+   *   declines a null value. An explicit sort-merge hint on int pairs lowers to
+   *   `SortMergeFullOuter`. `(Long, Long)` pairs lower to `LongHashFullOuter`,
+   *   `LongBroadcastFullOuter`, or `LongSortMergeFullOuter` for the same hints. `(String, Int)`
+   *   pairs lower to `StringHashFullOuter`, `StringBroadcastFullOuter`, or
+   *   `StringSortMergeFullOuter` for the same hints.
    * @tparam K
    *   The key type.
    * @tparam V

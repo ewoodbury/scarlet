@@ -554,16 +554,22 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     )
   }
 
-  "hash full outer" should "decline a null value and match the row path" in {
-    val left = source(Seq(Seq(1 -> 10, pair(Some(2), None))))
-    val right = source(Seq(Seq(1 -> 100)))
+  "hash full outer" should "keep a null value columnar and match the row path" in {
+    // Key 1 matches with a null left value. Key 2 matches with a null right value.
+    // Key 3 has no partner. Key 4 is only on the right.
+    // A present pair comes first, so the source still witnesses int pairs. The null value is later.
+    val left = source(Seq(Seq(2 -> 20, pair(Some(1), None), 3 -> 30)))
+    val right = source(Seq(Seq(1 -> 100, pair(Some(2), None), 4 -> 40)))
     val plan = Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.ShuffleHash))
     ScarletConf.set(shuffledConf)
     ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
       "HashFullOuter(Exchange(Scan), Exchange(Scan))",
     )
-    ColumnarPlanner.tryRun(plan) shouldBe None
-    agree(collect(plan, columnar = true), collect(plan, columnar = false))
+    ColumnarPlanner.tryRun(plan).isDefined shouldBe true
+    val columnar = collect(plan, columnar = true)
+    agree(columnar, collect(plan, columnar = false))
+    containsInt(columnar, 30) shouldBe true
+    containsInt(columnar, 40) shouldBe true
   }
 
   it should "bound each partition build table by the broadcast budget" in {

@@ -38,12 +38,13 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * [[broadcastOuterKeepNull]] keeps the same bit for a broadcast left or right outer join. A
  * broadcast right outer join swaps the value columns. A broadcast left outer join does not: the
  * probe is already the left input. [[sortMergeLeftOuterJoin]] keeps that same bit and does not
- * swap. Sort-merge right, sort-merge full, and full outer still require every value to be present.
- * Match order is a kernel detail. The published multiset is multiplicity, values, and null
- * semantics. A full outer join probes the left input and also emits build rows no probe matched.
- * Broadcast gives each probe thread its own bitmap and ORs them after the probes join. Shuffle
- * keeps one bitmap per partition and finishes that partition immediately. Null build keys are
- * carried outside the table and emitted once. Those bitmaps are not part of the build budget.
+ * swap. Sort-merge right, sort-merge full, and full outer copy that same bit. A missing partner is
+ * still the other column's absence bit. Match order is a kernel detail. The published multiset is
+ * multiplicity, values, and null semantics. A full outer join probes the left input and also emits
+ * build rows no probe matched. Broadcast gives each probe thread its own bitmap and ORs them after
+ * the probes join. Shuffle keeps one bitmap per partition and finishes that partition immediately.
+ * Null build keys are carried outside the table and emitted once. Those bitmaps are not part of
+ * the build budget.
  */
 object ColumnPipeline:
 
@@ -487,7 +488,7 @@ object ColumnPipeline:
    * Right outer sort-merge. The right exchange carries a null key. The left exchange drops one.
    * [[SortMerge.rightOuter]] runs the left-outer walk on swapped inputs and swaps the value
    * columns back to `(key, left, right)`. This method does not swap again. Absence is the left
-   * value's absence bit. Call this only when both value columns are fully valid.
+   * value's absence bit. A null value is a clear validity bit and moves with its column.
    */
   def sortMergeRightOuterJoin(
       left: Vector[ColumnBatch],
@@ -496,10 +497,6 @@ object ColumnPipeline:
       parallelism: Int,
       batchSize: Int,
   ): Vector[ColumnBatch] =
-    require(
-      valuesFullyPresent(left) && valuesFullyPresent(right),
-      "a right outer join needs fully present value columns",
-    )
     sortMergeOuter(
       left,
       right,
@@ -514,7 +511,7 @@ object ColumnPipeline:
   /**
    * Full outer sort-merge. Both exchanges carry a null key to partition 0. A group on only one
    * side is emitted, and an empty side emits every row of the other side. Either value's absence
-   * bit marks a missing partner. Call this only when both value columns are fully valid.
+   * bit marks a missing partner. A null value is a clear validity bit and is copied.
    */
   def sortMergeFullOuterJoin(
       left: Vector[ColumnBatch],
@@ -523,10 +520,6 @@ object ColumnPipeline:
       parallelism: Int,
       batchSize: Int,
   ): Vector[ColumnBatch] =
-    require(
-      valuesFullyPresent(left) && valuesFullyPresent(right),
-      "a full outer join needs fully present value columns",
-    )
     sortMergeOuter(
       left,
       right,
@@ -695,8 +688,8 @@ object ColumnPipeline:
    * once for the table. The threads use plain stores. After they join, the bitmaps are OR'd. A
    * clear bit is an unmatched build row. Null build keys are not inserted and are emitted once as
    * `(key, absent left, build value)`. An empty probe does not return early: every build row,
-   * including a null key, is emitted. An empty table emits nothing from the table. Call this only
-   * when both value columns are fully valid. A null value is not absence. `buildBudgetBytes`
+   * including a null key, is emitted. An empty table emits nothing from the table. A null value is
+   * a clear validity bit on its column and is copied. It is not an absence bit. `buildBudgetBytes`
    * bounds the build table only. The matched-row bitmaps sit beside that table and are not part of
    * the budget. A build with a null key also copies its present-key rows once, so the table never
    * sees a null key; that copy is outside the budget too.
@@ -708,10 +701,6 @@ object ColumnPipeline:
       buildBudgetBytes: Long,
   ): Vector[ColumnBatch] =
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
-    require(
-      valuesFullyPresent(probe) && valuesFullyPresent(build),
-      "a full outer join needs fully present value columns",
-    )
     val (present, nullKeys) = HashJoin.separateNullBuildKeys(buildSides(build))
     val table = HashJoin.openInt32(present, buildBudgetBytes)
     val bitsets =
@@ -735,7 +724,7 @@ object ColumnPipeline:
    * keys, probes with one bitmap, and emits that partition's unmatched build rows before the next
    * partition is joined. There is no cross-partition OR. A null build key is carried out of that
    * partition's table and emitted once. A partition with build rows and an empty probe still emits
-   * every build row. Call this only when both value columns are fully valid. Output columns are
+   * every build row. A null value is a clear validity bit and is copied. Output columns are
    * `(key, left, right)`. `buildBudgetBytes` bounds each partition's table only, not the bitmap.
    */
   def hashFullOuterJoin(
@@ -746,10 +735,6 @@ object ColumnPipeline:
       batchSize: Int,
       buildBudgetBytes: Long,
   ): Vector[ColumnBatch] =
-    require(
-      valuesFullyPresent(probe) && valuesFullyPresent(build),
-      "a full outer join needs fully present value columns",
-    )
     val probeBuckets = HashExchange.partitionAll(
       sliceAll(probe, batchSize),
       keyOrdinal = 0,

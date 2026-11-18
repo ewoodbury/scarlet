@@ -603,9 +603,12 @@ class TestRightOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
       .map(_.shape) shouldBe Some("SortMergeFullOuter(Exchange(Scan), Exchange(Scan))")
   }
 
-  "full outer and sort-merge right" should "decline a null value and match the row path" in {
-    val left = source(Seq(Seq(1 -> 10, pair(Some(2), None))))
-    val right = source(Seq(Seq(1 -> 100)))
+  "full outer and sort-merge right" should "keep a null value columnar and match the row path" in {
+    // Key 1 matches with a null left value. Key 2 matches with a null right value.
+    // Key 3 has no partner and is dropped by the right outer. Key 4 is only on the right.
+    // A present pair comes first, so the source still witnesses int pairs. The null value is later.
+    val left = source(Seq(Seq(2 -> 20, pair(Some(1), None), 3 -> 30)))
+    val right = source(Seq(Seq(1 -> 100, pair(Some(2), None), 4 -> 40)))
     val plans = Seq(
       (
         "full outer",
@@ -622,8 +625,10 @@ class TestRightOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
       withClue(s"$label: ") {
         ScarletConf.set(shuffledConf)
         ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(shape)
-        ColumnarPlanner.tryRun(plan) shouldBe None
-        agree(collect(plan, columnar = true), collect(plan, columnar = false))
+        ColumnarPlanner.tryRun(plan).isDefined shouldBe true
+        val columnar = collect(plan, columnar = true)
+        agree(columnar, collect(plan, columnar = false))
+        containsInt(columnar, 40) shouldBe true
       }
     }
   }
@@ -706,34 +711,35 @@ class TestRightOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     spilledBoth.isEmpty shouldBe true
   }
 
-  it should "keep a null value on the row path" in {
-    val left = source(Seq(Seq(1 -> 10, pair(Some(2), None))))
-    val right = source(Seq(Seq(1 -> 100)))
+  it should "keep a null value columnar and match the row path" in {
+    // Key 1 matches and the left value is null. Key 3 has no partner and is dropped.
+    // Key 5 is only on the right, so the left value is absent.
+    // A present pair comes first, so the source still witnesses int pairs. The null value is later.
+    val left = source(Seq(Seq(3 -> 30, pair(Some(1), None))))
+    val right = source(Seq(Seq(1 -> 100, 5 -> 50)))
     val plan = Plan.RightOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge))
     ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
       "SortMergeRightOuter(Exchange(Scan), Exchange(Scan))",
     )
-    ColumnarPlanner.tryRun(plan) shouldBe None
-    canonical(collect(plan, columnar = true)) should contain theSameElementsAs canonical(
-      collect(plan, columnar = false),
+    ColumnarPlanner.tryRun(plan).isDefined shouldBe true
+    val columnar = collect(plan, columnar = true)
+    agree(columnar, collect(plan, columnar = false))
+    containsInt(columnar, 30) shouldBe false
+    containsInt(columnar, 50) shouldBe true
+    val leftBatch = BatchCodec.nullableIntPairs(Seq((Some(1), None), (Some(3), Some(30))))
+    val rightBatch = BatchCodec.nullableIntPairs(Seq((Some(1), Some(100)), (Some(5), Some(50))))
+    val joined = ColumnPipeline.sortMergeRightOuterJoin(
+      Vector(leftBatch),
+      Vector(rightBatch),
+      numPartitions = 1,
+      parallelism = 1,
+      batchSize = 8,
     )
-    // The plan's null value is on the left. The direct call uses that same side.
-    val leftBatch = BatchCodec.nullableIntPairs(Seq((Some(1), Some(10)), (Some(2), None)))
-    val rightBatch = BatchCodec.nullableIntPairs(Seq((Some(1), Some(100))))
-    val refused = intercept[IllegalArgumentException] {
-      ColumnPipeline.sortMergeRightOuterJoin(
-        Vector(leftBatch),
-        Vector(rightBatch),
-        numPartitions = 1,
-        parallelism = 1,
-        batchSize = 8,
-      )
-    }
-    refused.getMessage should include("fully present")
-    val kernel = intercept[IllegalArgumentException] {
-      SortMerge.rightOuter(leftBatch, rightBatch)
-    }
-    kernel.getMessage should include("fully present")
+    joined.flatMap(bitMarks) should contain theSameElementsAs Seq(
+      "key=1 left=null right=present:100",
+      "key=5 left=absent right=present:50",
+    )
+    SortMerge.rightOuter(leftBatch, rightBatch).length shouldBe 2
   }
 
   private def shuffledConf: ScarletConf =
