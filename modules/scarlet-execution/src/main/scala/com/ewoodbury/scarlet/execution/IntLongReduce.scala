@@ -18,7 +18,8 @@ import ColumnarInterpreter.{Columns, interpretAt}
  * are folded with [[com.ewoodbury.scarlet.columnar.HashAggregate.mergeSumPartials]]. The reducer
  * has to be addition. Any other `(Long, Long) => Long` declines before a sum is published. A map
  * result that is not `(Int, Long)` declines first, with that name. The join under the project is
- * what runs, so the match columns are still written.
+ * what runs, so the match columns are still written. An explicit int inner sort-merge or broadcast
+ * has already been rewritten to that hash join.
  * [[com.ewoodbury.scarlet.execution.JoinProbeAggregate]] is a different plan and is not built
  * here.
  */

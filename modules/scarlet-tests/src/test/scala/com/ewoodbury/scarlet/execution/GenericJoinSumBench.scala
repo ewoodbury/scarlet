@@ -1,14 +1,17 @@
 package com.ewoodbury.scarlet.execution
 
 import java.lang.management.ManagementFactory
+import java.util.concurrent.atomic.AtomicInteger
 
+import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import com.sun.management.ThreadMXBean
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
-import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
+import com.ewoodbury.scarlet.core.{Partition, Plan, RetryPolicy, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.runtime.api.{RunnableTask, TaskScheduler}
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
@@ -20,6 +23,8 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  *
  * `CROSS_MODE=row` times only the row path. `CROSS_MODE=both` times the row path, then the
  * columnar path, in one JVM. Spill is on for this process. Warmup defaults to 80 and rounds to 30.
+ * `CROSS_JOIN=hash` is the unhinted join. `CROSS_JOIN=sort-merge` is
+ * `filteredLeft.sortMergeJoin(filteredRight)`. The default is `hash`.
  *
  * {{{
  * CROSS_ROWS=1000000 CROSS_FILTERS=2 CROSS_THREADS=4 CROSS_WARMUP=80 CROSS_ROUNDS=30 \
@@ -55,6 +60,7 @@ object GenericJoinSumBench:
     val warmup = readPositive("CROSS_WARMUP", 80)
     val rounds = readPositive("CROSS_ROUNDS", 30)
     val mode = readMode()
+    val join = readJoin()
     val savedConf = ScarletConf.get
     val savedRuntime = ScarletRuntime.get
     val scheduler = new LocalTaskScheduler(threads)
@@ -69,7 +75,7 @@ object GenericJoinSumBench:
         ),
       )
       ScarletRuntime.set(savedRuntime.copy(scheduler = scheduler))
-      val summed = query(rows, filters)
+      val summed = query(rows, filters, join)
       val shape = ColumnarPlanner.lower(summed.plan).map(_.shape).getOrElse("row")
       println(s"arm $shape")
       println(s"sort_merge ${shape.contains("SortMergeJoin")}")
@@ -96,6 +102,7 @@ object GenericJoinSumBench:
             println(f"ratio_row_over_columnar $ratio%.3f")
             val matches = if (shape.contains("JoinProbeSum")) "not_written" else "written"
             println(s"match_columns $matches")
+            println(s"sort_merge_task ${sortMergeTasks(summed.plan)}")
         case _ => ()
     finally
       try scheduler.shutdown().unsafeRunSync()
@@ -107,7 +114,7 @@ object GenericJoinSumBench:
    * Filtered int join, then `(key, leftValue.toLong)` and `reduceByKey(_ + _)`. The lambda is not
    * [[com.ewoodbury.scarlet.api.LongSum]] and the map is not `sumJoinLeft`.
    */
-  private def query(rows: Int, filters: Int): DistCollection[(Int, Long)] =
+  private def query(rows: Int, filters: Int, join: String): DistCollection[(Int, Long)] =
     val width = 10 * groups
     val joinKeys = Array.tabulate(width)(row => row % groups)
     val joinValues = Array.tabulate(width)(row => row % 100)
@@ -117,8 +124,11 @@ object GenericJoinSumBench:
     val right = DistCollection.ofIntPairs(joinKeys, joinValues, sourcePartitions)
     val filteredLeft = applyFilters(left, filters, (value: Int) => value >= 0)
     val filteredRight = applyFilters(right, filters, (value: Int) => value < 50)
-    filteredLeft
-      .join(filteredRight)
+    val joined = join match
+      case "hash" => filteredLeft.join(filteredRight)
+      case "sort-merge" => filteredLeft.sortMergeJoin(filteredRight)
+      case other => refuse(s"CROSS_JOIN must be hash or sort-merge, found $other")
+    joined
       .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
       .reduceByKey((left: Long, right: Long) => left + right)
 
@@ -256,6 +266,46 @@ object GenericJoinSumBench:
     readInt(name, default) match
       case value if allowed.contains(value) => value
       case value => refuse(s"$name must be one of ${allowed.mkString(", ")}, found $value")
+
+  /**
+   * One columnar collect. Counts [[com.ewoodbury.scarlet.execution.Task.SortMergeJoinTask]]
+   * submissions. This is not part of the timed rounds.
+   */
+  private def sortMergeTasks(plan: Plan[(Int, Long)]): Int =
+    val counter = new AtomicInteger
+    val saved = ScarletRuntime.get
+    val inner = saved.scheduler
+    val probe = new TaskScheduler[IO]:
+      override def submit[A, B](tasks: Seq[RunnableTask[A, B]]): IO[Seq[Partition[B]]] =
+        note(tasks, counter)
+        inner.submit(tasks)
+      override def submitWithRetry[A, B](
+          tasks: Seq[RunnableTask[A, B]],
+          policy: RetryPolicy,
+      ): IO[Seq[Partition[B]]] =
+        note(tasks, counter)
+        inner.submitWithRetry(tasks, policy)
+      override def shutdown(): IO[Unit] = IO.unit
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = true))
+    ScarletRuntime.set(saved.copy(scheduler = probe))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      val _ = CrossEngineShapes.sumChecksum(DistCollection(plan).collect())
+      counter.get
+    finally ScarletRuntime.set(saved)
+
+  private def note[A, B](tasks: Seq[RunnableTask[A, B]], counter: AtomicInteger): Unit =
+    tasks.foreach { task =>
+      if (task.getClass.getName.contains("SortMergeJoinTask")) then
+        val _ = counter.incrementAndGet()
+    }
+
+  private def readJoin(): String =
+    sys.env.get("CROSS_JOIN") match
+      case None => "hash"
+      case Some("hash") => "hash"
+      case Some("sort-merge") => "sort-merge"
+      case Some(other) => refuse(s"CROSS_JOIN must be hash or sort-merge, found $other")
 
   private def readMode(): String =
     sys.env.get("CROSS_MODE") match

@@ -293,6 +293,16 @@ private[execution] object JoinLowering:
       case Some(Plan.JoinStrategy.Broadcast) | Some(Plan.JoinStrategy.SortMerge) => false
 
   /**
+   * Sort-merge or broadcast whose physical node is already a hash join of two exchanges.
+   * [[ReduceByKeyLowering]] builds that node for an int-long project. Collect of the hinted join
+   * still uses [[acceptsShuffleHash]] and does not take this predicate.
+   */
+  private[execution] def hashedHint(strategy: Option[Plan.JoinStrategy]): Boolean =
+    strategy match
+      case Some(Plan.JoinStrategy.SortMerge) | Some(Plan.JoinStrategy.Broadcast) => true
+      case None | Some(Plan.JoinStrategy.ShuffleHash) => false
+
+  /**
    * Shuffle-hash exchanges both children. Broadcast keeps both children and records
    * [[PhysicalOp.BuildSide.Right]]. A later cost-based pass may choose the left side.
    */

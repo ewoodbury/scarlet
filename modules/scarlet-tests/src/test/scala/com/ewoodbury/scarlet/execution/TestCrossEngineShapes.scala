@@ -178,6 +178,92 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     CrossEngineShapes.sumChecksum(aggregated.collect()) shouldBe 133L
   }
 
+  "a hinted generic join sum" should "hash-partition sort-merge and broadcast" in {
+    val left = DistCollection.ofIntPairs(
+      Array(1, 2, 3, 4, 5),
+      Array(10, 20, 5, -1, 7),
+      partitions,
+    )
+    val right = DistCollection.ofIntPairs(
+      Array(1, 1, 2, 3, 4, 5),
+      Array(10, 20, 10, 5, 0, 60),
+      partitions,
+    )
+    val filteredLeft = left
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+    val filteredRight = right
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value < 50)
+    val sortJoin = filteredLeft.sortMergeJoin(filteredRight)
+    val broadcastJoin = filteredLeft.broadcastJoin(filteredRight)
+    ColumnarPlanner.lower(sortJoin.plan).map(_.shape).get should include("SortMergeJoin")
+    ColumnarPlanner.lower(broadcastJoin.plan).map(_.shape).get should include("BroadcastJoin")
+    val expected = Map(1 -> 20L, 2 -> 20L)
+    val sortSum = projectSum(sortJoin)
+    val sortOp = ColumnarPlanner.lower(sortSum.plan).get
+    sortOp.shape should startWith("HashAggregate(Exchange(Project(")
+    sortOp.shape should include("HashJoin(Exchange(")
+    sortOp.shape should not include "SortMergeJoin"
+    sortOp.schema shouldBe Vector(LogicalType.Int32, LogicalType.Int64)
+    ColumnarPlanner.tryRun(sortSum.plan).isDefined shouldBe true
+    val sortRows = sortSum.collect().toMap
+    sortRows shouldBe expected
+    CrossEngineShapes.sumChecksum(sortRows) shouldBe 133L
+    val broadcastSum = projectSum(broadcastJoin)
+    val broadcastOp = ColumnarPlanner.lower(broadcastSum.plan).get
+    broadcastOp.shape should startWith("HashAggregate(Exchange(Project(")
+    broadcastOp.shape should not include "BroadcastJoin"
+    broadcastOp.shape should not include "SortMergeJoin"
+    broadcastSum.collect().toMap shouldBe expected
+    CrossEngineShapes.sumChecksum(broadcastSum.collect()) shouldBe 133L
+    val plainOp = ColumnarPlanner.lower(projectSum(filteredLeft.join(filteredRight)).plan).get
+    plainOp.shape should startWith("HashAggregate(Exchange(Project(HashJoin(")
+    val aggregated = CrossEngineShapes.joinAgg(left, right, filters = 2)
+    ColumnarPlanner.lower(aggregated.plan).map(_.shape) shouldBe Some(
+      "JoinProbeSumLeft(Exchange(FilterValue(FilterKey(Scan))), Exchange(FilterValue(FilterKey(Scan))))",
+    )
+    val changed = sortJoin
+      .map { case (key, (leftValue, _)) => (leftValue, key.toLong) }
+      .reduceByKey((left: Long, right: Long) => left + right)
+    val changedShape = ColumnarPlanner.lower(changed.plan).map(_.shape).get
+    changedShape should include("HashAggregate(Exchange(Project(")
+    changedShape should not include "SortMergeJoin"
+    changed.collect().toMap shouldBe Map(10 -> 2L, 20 -> 2L)
+    val filteredSum = sortJoin
+      .filter((row: (Int, (Int, Int))) => row._1 > 0)
+      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+      .reduceByKey((left: Long, right: Long) => left + right)
+    val filteredShape = ColumnarPlanner.lower(filteredSum.plan).map(_.shape).get
+    filteredShape should startWith("HashAggregate(Exchange(Project(Filter")
+    filteredShape should not include "SortMergeJoin"
+    filteredSum.collect().toMap shouldBe expected
+    val nested = sortJoin
+      .map { case (key, pair) => (key, pair) }
+      .reduceByKey((left: (Int, Int), right: (Int, Int)) =>
+        (left._1 + right._1, left._2 + right._2),
+      )
+    ColumnarPlanner.lower(nested.plan).isDefined shouldBe true
+    ColumnarPlanner.tryRun(nested.plan).isEmpty shouldBe true
+    val declined = intercept[ColumnarFallback] {
+      ColumnarInterpreter.interpret(nested.plan, ColumnarPlanner.lower(nested.plan).get)
+    }
+    declined.getMessage should include("(Int, Long)")
+    val saved = ScarletConf.get
+    ScarletConf.set(saved.copy(columnarExecution = false))
+    val rowPairs = sortSum.collect().toMap
+    val broadcastRow = broadcastSum.collect().toMap
+    ScarletConf.set(saved)
+    sortSum.collect().toMap shouldBe rowPairs
+    broadcastSum.collect().toMap shouldBe broadcastRow
+    ScarletConf.set(saved.copy(columnarBatchSize = 1))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      sortSum.collect().toMap shouldBe expected
+      broadcastSum.collect().toMap shouldBe expected
+    finally ScarletConf.set(saved.copy(columnarBatchSize = 8192))
+  }
+
   "a generic value sort" should "decline tryRun and stay off the columnar arm" in {
     val data = filtered(topKeys, topValues)
     val plan = data
@@ -189,6 +275,13 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     ColumnarPlanner.partitioning(plan).isEmpty shouldBe true
     ColumnarPlanner.tryRun(plan).isEmpty shouldBe true
   }
+
+  private def projectSum(
+      joined: DistCollection[(Int, (Int, Int))],
+  ): DistCollection[(Int, Long)] =
+    joined
+      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+      .reduceByKey((left: Long, right: Long) => left + right)
 
   private def filtered(keys: Array[Int], values: Array[Int]): DistCollection[(Int, Int)] =
     DistCollection

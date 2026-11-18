@@ -825,7 +825,7 @@ object ColumnarPlanner:
     case Plan.ReduceByKeyOp(source, reduce) =>
       JoinProbeAggregate
         .lower(source, reduce, lowerChild)
-        .orElse(lowerChild(source).flatMap(ReduceByKeyLowering.apply))
+        .orElse(lowerChild(source).flatMap(child => ReduceByKeyLowering(child, source)))
     case Plan.GroupByKeyOp(source) =>
       lowerChild(source).flatMap(GroupByKeyLowering.apply)
     case Plan.CountByKeyOp(source) =>

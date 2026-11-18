@@ -560,8 +560,11 @@ private[execution] object ColumnarInterpreter:
     case (
           Plan.JoinOp(left, right, strategy),
           PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
-        ) if JoinLowering.acceptsShuffleHash(strategy) =>
+        ) if JoinLowering.acceptsShuffleHash(strategy) || JoinLowering.hashedHint(strategy) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
+      // A sort-merge or broadcast hint reaches this arm only after ReduceByKeyLowering has
+      // replaced that node with a hash join of two exchanges. Collect of the hinted join still
+      // matches SortMergeJoin or BroadcastJoin.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
       Columns.Triples(
         JoinArms.inner(
