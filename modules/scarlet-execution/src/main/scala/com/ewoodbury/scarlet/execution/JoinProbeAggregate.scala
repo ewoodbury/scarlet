@@ -16,8 +16,8 @@ import com.ewoodbury.scarlet.core.{Partition, Plan}
  * [[PhysicalOp.ProbeMeasure.Left]] is still the left column. A [[PhysicalOp.MapKey]] on either arm
  * is admitted. Its kind stays [[PhysicalOp.Kind.Pairs]]. A null key is not a probe hit. On a
  * shuffled arm the exchange drops it, and the key map is not called on it. The function is not
- * inspected. A filter, `keys`, or `values` above the map still declines in those parents.
- * Execution reads the projection again and updates
+ * inspected. One key or value slot above that map is interpreted after the map. `keys` and
+ * `values` above the map still decline. Execution reads the projection again and updates
  * [[com.ewoodbury.scarlet.columnar.HashAggregate]] from the probe. The published pairs are the
  * groups, not the match columns.
  */

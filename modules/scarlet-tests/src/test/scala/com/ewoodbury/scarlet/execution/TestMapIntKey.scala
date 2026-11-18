@@ -16,7 +16,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  *
  * A null key stays null and the function is not called. `countByKey` then drops that key. A
  * generic `(Int, Int)` pair `map` lowers as `Project` and calls the function on a null key. A
- * filter, `keys`, or `values` above this key map declines: the row path unboxes the null key.
+ * One `filterKeys` or `filterValues` above this key map lowers. The key predicate sees the mapped
+ * key and is not called on a null. `keys`, `values`, a second map above that filter, and a
+ * whole-row filter stay empty.
  * `partitionBy` then this map drops the hash, so `countByKey` is one global row per new key.
  */
 class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
@@ -146,13 +148,105 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     )
   }
 
-  it should "decline a filter, keys, and values above a key map" in {
+  it should "lower one slot filter above a key map and still refuse keys and values" in {
     val mapped = nullable.mapIntKey(key => key + 1)
-    ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).plan) shouldBe None
-    ColumnarPlanner.lower(mapped.filterValues((value: Int) => value >= 0).plan) shouldBe None
+    ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).plan).map(_.shape) shouldBe
+      Some("FilterKey(MapKey(Scan))")
+    ColumnarPlanner.lower(mapped.filterValues((value: Int) => value >= 0).plan).map(_.shape) shouldBe
+      Some("FilterValue(MapKey(Scan))")
     ColumnarPlanner.lower(mapped.keys.plan) shouldBe None
     ColumnarPlanner.lower(mapped.values.plan) shouldBe None
-    ColumnarPlanner.tryRun(mapped.filterKeys((key: Int) => key > 0).plan) shouldBe None
+    ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).mapIntKey(_ + 1).plan) shouldBe
+      None
+    ColumnarPlanner.lower(mapped.filter { case (key, _) => key > 0 }.plan) shouldBe None
+    ColumnarPlanner.lower(
+      mapped.filterKeys((key: Int) => key > 0).filterValues((value: Int) => value > 0).plan,
+    ) shouldBe None
+    ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).union(mapped).plan) shouldBe None
+  }
+
+  it should "count a key filter above the map without publishing the pair batch" in {
+    val counted = DistCollection
+      .ofIntPairs(Array(1, 2, 1, 3), Array(10, 20, 30, 40), 2)
+      .mapIntKey(_ + 1)
+      .filterKeys((key: Int) => key > 2)
+      .countByKey
+    ColumnarPlanner.lower(counted.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(FilterKey(MapKey(Scan))))",
+    )
+    val at = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size, columnarExecution = true))
+      ScarletRuntime.get.shuffle.clear()
+      MapIntKey.resetPublishedForTest()
+      FoldedCount.resetPassesForTest()
+      val found = counts(counted.collect())
+      (found, MapIntKey.publishedForTest, FoldedCount.passesForTest)
+    }
+    val wide = at(8192)
+    wide shouldBe (Map(3 -> 1, 4 -> 1), 0, 1)
+    at(1) shouldBe wide
+    counts(run(columnar = false)(counted.collect())) shouldBe Map(3 -> 1, 4 -> 1)
+  }
+
+  it should "skip a null key above the map and still count a null value" in {
+    val mapCalls = new AtomicInteger
+    val keyCalls = new AtomicInteger
+    val mapped = nullable.mapIntKey { key =>
+      mapCalls.incrementAndGet()
+      key + 1
+    }
+    val filtered = mapped.filterKeys { (key: Int) =>
+      keyCalls.incrementAndGet()
+      key > 0
+    }
+    mapCalls.set(0)
+    keyCalls.set(0)
+    MapIntKey.resetPublishedForTest()
+    val columnar = fingerprint(run(columnar = true)(filtered.collect()))
+    mapCalls.get() shouldBe 4
+    keyCalls.get() shouldBe 4
+    MapIntKey.publishedForTest should be > 0
+    columnar shouldBe Seq("2:4", "2:5", "3:-1", "3:6")
+    columnar shouldBe fingerprint(run(columnar = false)(filtered.collect()))
+
+    val valueCalls = new AtomicInteger
+    val byValue = nullable.mapIntKey { key =>
+      mapCalls.incrementAndGet()
+      key + 1
+    }.filterValues { (value: Int) =>
+      valueCalls.incrementAndGet()
+      value >= 0
+    }
+    mapCalls.set(0)
+    valueCalls.set(0)
+    val kept = fingerprint(run(columnar = true)(byValue.collect()))
+    mapCalls.get() shouldBe 4
+    valueCalls.get() shouldBe 6
+    kept shouldBe fingerprint(run(columnar = false)(byValue.collect()))
+    kept shouldBe Seq("2:4", "2:5", "3:6", "null:8", "null:9")
+
+    val counted = nullable.mapIntKey { key =>
+      mapCalls.incrementAndGet()
+      key + 1
+    }.filterKeys { (key: Int) =>
+      keyCalls.incrementAndGet()
+      key > 0
+    }.countByKey
+    mapCalls.set(0)
+    keyCalls.set(0)
+    MapIntKey.resetPublishedForTest()
+    FoldedCount.resetPassesForTest()
+    val countsByKey = counts(run(columnar = true)(counted.collect()))
+    mapCalls.get() shouldBe 4
+    keyCalls.get() shouldBe 4
+    MapIntKey.publishedForTest shouldBe 0
+    FoldedCount.passesForTest shouldBe 1
+    countsByKey shouldBe counts(run(columnar = false)(counted.collect()))
+    countsByKey shouldBe Map(2 -> 2, 3 -> 2)
+
+    val nullValues = nullValue.mapIntKey(_ * 2).filterKeys((key: Int) => key > 0).countByKey
+    counts(run(columnar = true)(nullValues.collect())) shouldBe Map(2 -> 1, 8 -> 1)
+    counts(run(columnar = false)(nullValues.collect())) shouldBe Map(2 -> 1, 8 -> 1)
   }
 
   it should "shuffle again after partitionBy because the key changed" in {

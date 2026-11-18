@@ -234,13 +234,14 @@ private[scarlet] object FoldedCount:
         Some(execute(batches, steps, numPartitions, parallelism, batchSize))
 
   /** [[counted]] with [[MappedKeyFold]]. The dense source-key counter does not apply. */
-  private def countedMapped(
+  private[columnar] def countedMapped(
       batches: Vector[ColumnBatch],
       steps: List[Selection.Step],
       mapKey: Int => Int,
       numPartitions: Int,
       parallelism: Int,
       batchSize: Int,
+      above: Option[Selection.Step] = None,
   ): Option[Vector[ColumnBatch]] =
     if (batches.isEmpty) then
       notePass()
@@ -251,7 +252,16 @@ private[scarlet] object FoldedCount:
       else
         notePass()
         Some(
-          execute(batches, steps, numPartitions, parallelism, batchSize, mapKey, mapping = true),
+          execute(
+            batches,
+            steps,
+            numPartitions,
+            parallelism,
+            batchSize,
+            mapKey,
+            mapping = true,
+            above,
+          ),
         )
 
   /** Int key or value slots, including none. A whole-row or string step is false. */
@@ -285,6 +295,7 @@ private[scarlet] object FoldedCount:
       batchSize: Int,
       mapKey: Int => Int,
       mapping: Boolean,
+      above: Option[Selection.Step] = None,
   ): Vector[ColumnBatch] =
     try
       val (counts, morsels) = pieces(batches, batchSize)
@@ -298,7 +309,7 @@ private[scarlet] object FoldedCount:
         val insertStarted = System.nanoTime()
         val partials = MorselScheduler
           .map(stripes(morsels, width), width) { (_, pieces) =>
-            foldStripe(pieces, steps, mapKey, mapping)
+            foldStripe(pieces, steps, mapKey, mapping, above)
           }
           .flatten
         val mergeStarted = System.nanoTime()
@@ -352,6 +363,7 @@ private[scarlet] object FoldedCount:
       steps: List[Selection.Step],
       mapKey: Int => Int,
       mapping: Boolean,
+      above: Option[Selection.Step],
   ): Vector[ColumnBatch] =
     val rows = pieces.toArray
     val total = rows.length
@@ -363,7 +375,7 @@ private[scarlet] object FoldedCount:
       while (end < total && rows(end).batchId == batchId) {
         end += 1
       }
-      acc = acc :+ foldSegment(rows, index, end, steps, mapKey, mapping)
+      acc = acc :+ foldSegment(rows, index, end, steps, mapKey, mapping, above)
       index = end
     }
     acc
@@ -421,6 +433,7 @@ private[scarlet] object FoldedCount:
       steps: List[Selection.Step],
       mapKey: Int => Int,
       mapping: Boolean,
+      above: Option[Selection.Step],
   ): ColumnBatch =
     val count = until - from
     val starts = new Array[Int](count)
@@ -437,7 +450,7 @@ private[scarlet] object FoldedCount:
     if (maxLength == 0) then ColumnBatches.emptyIntPairs
     else
       val batch = rows(from).morsel.batch
-      if (mapping) then scanMapped(batch, starts, lengths, count, maxLength, steps, mapKey)
+      if (mapping) then scanMapped(batch, starts, lengths, count, maxLength, steps, mapKey, above)
       else
         DirectCount.aggregateRanges(batch, starts, lengths, steps) match
           case null =>
@@ -465,12 +478,13 @@ private[scarlet] object FoldedCount:
       maxLength: Int,
       steps: List[Selection.Step],
       mapKey: Int => Int,
+      above: Option[Selection.Step],
   ): ColumnBatch =
     val table = borrow(maxLength)
     var index = 0
     while (index < count) {
       val length = lengths(index)
-      if (length > 0) then table.scanMapped(batch, starts(index), length, steps, mapKey)
+      if (length > 0) then table.scanMapped(batch, starts(index), length, steps, mapKey, above)
       index += 1
     }
     table.compact()
@@ -640,7 +654,11 @@ private[scarlet] object FoldedCount:
     val covered = fullWords + (if (tail == 0) then 0 else 1)
     words.length >= covered && Validity.livePresent(keys.validity, live)
 
-  private def requirePositive(numPartitions: Int, parallelism: Int, batchSize: Int): Unit =
+  private[columnar] def requirePositive(
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Unit =
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
@@ -656,7 +674,9 @@ private[scarlet] object FoldedCount:
    * for this length. Do not return this batch: the partition still owns those arrays, and a writer
    * would change the shared bits. The count does not write them.
    */
-  private def presentParts(parts: Vector[(Array[Int], Array[Int])]): Vector[ColumnBatch] =
+  private[columnar] def presentParts(
+      parts: Vector[(Array[Int], Array[Int])],
+  ): Vector[ColumnBatch] =
     parts.map { (keys, values) =>
       require(keys.length == values.length, "key and value arrays differ in length")
       val rows = keys.length
@@ -733,8 +753,12 @@ private[scarlet] object FoldedCount:
         length: Int,
         steps: List[Selection.Step],
         mapKey: Int => Int,
+        above: Option[Selection.Step] = None,
     ): Unit =
-      MappedKeyFold.scan(batch, start, length, steps, (key, weight) => add(key, weight), mapKey)
+      val add = (key: Int, weight: Int) => this.add(key, weight)
+      above match
+        case Some(step) => MappedKeyFold.scanAbove(batch, start, length, steps, add, mapKey, step)
+        case None => MappedKeyFold.scan(batch, start, length, steps, add, mapKey)
 
     def scan(batch: ColumnBatch, start: Int, length: Int, steps: List[Selection.Step]): Unit =
       val readMask = ordinalMask(steps)
