@@ -242,7 +242,7 @@ class TestLongPairFilter extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     assertColumnar(filtered, "FilterKey(LongHashAggregate(Exchange(Scan)))")
   }
 
-  "filterKeys above a map, a long sort, or a long join" should "stay empty" in {
+  "filterKeys above a map, a long sort, or a long join" should "stay empty while an identity long map projects" in {
     val source = DistCollection.ofLongPairs(Array(1L, 2L), Array(10L, 20L), 1)
     val mapped = source.map((pair: (Long, Long)) => (pair._1, pair._2))
     val sorted = source.sortByLongKey
@@ -255,7 +255,7 @@ class TestLongPairFilter extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
       "LongHashJoin(Exchange(Scan), Exchange(Scan))",
     )
-    assertEmpty(mapped)
+    assertColumnar(mapped, "Project(Scan)")
   }
 
   "an empty input" should "lower and call nothing" in {

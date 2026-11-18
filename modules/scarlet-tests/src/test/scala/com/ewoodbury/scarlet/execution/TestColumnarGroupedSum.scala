@@ -42,9 +42,12 @@ class TestColumnarGroupedSum
     ColumnarPlanner.groupedSumPeel(widenedPairs) shouldBe Some("GroupedSum(MapPair(Scan))")
     DistCollection(widenedPairs).collect().toList shouldBe rowResult(widenedPairs).toList
 
-    ColumnarPlanner.lower(
-      Plan.MapOp(longPairSource, (pair: (Long, Long)) => (pair._1, pair._2)),
-    ) shouldBe None
+    val longMapped = Plan.MapOp(longPairSource, (pair: (Long, Long)) => (pair._1, pair._2))
+    ColumnarPlanner.lower(longMapped).map(_.shape) shouldBe Some("Project(Scan)")
+    ColumnarPlanner.tryGroupedSum(longMapped) shouldBe None
+    ColumnarPlanner.tryRun(longMapped).map(_.flatMap(_.data).toList) shouldBe Some(
+      rowResult(longMapped).toList,
+    )
     ColumnarPlanner.lower(
       Plan.MapOp(stringKeySource, (pair: (String, Int)) => (pair._1, pair._2)),
     ) shouldBe None

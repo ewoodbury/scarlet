@@ -25,12 +25,12 @@ class TestColumnarContract
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    accepted.size shouldBe 223
+    accepted.size shouldBe 225
     // A null key refuses the shape rather than excluding it. Outer joins are covered by execution
     // tests, not contract fixtures, because the contract does not track the int refusals either.
     // A type-changing pair map lowers and declines at tryRun, so it is in neither list.
     excluded.size shouldBe 34
-    (accepted.size + excluded.size) shouldBe 257
+    (accepted.size + excluded.size) shouldBe 259
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -106,6 +106,8 @@ class TestColumnarContract
       Plan.FilterOp(longPairSource, (pair: (Long, Long)) => pair._1 > 0L)
     val longKeyFilter = Plan.FilterKeysOp(longPairSource, (key: Long) => key > 0L)
     val longValueFilter = Plan.FilterValuesOp(longPairSource, (value: Long) => value > 0L)
+    val longPairMap =
+      Plan.MapOp(longPairSource, (pair: (Long, Long)) => (pair._1 + 1L, pair._2))
     val reduced = Plan.ReduceByKeyOp(pairSource, (left: Int, right: Int) => left + right)
     val reducedAfterFilter = Plan.ReduceByKeyOp(
       pairValueFilter,
@@ -412,6 +414,18 @@ class TestColumnarContract
         Plan.CountByKeyOp(longPairSource),
         hashedInfo(layout),
         Some("CountByKey(Exchange(Scan))"),
+      ),
+      AcceptedCase(
+        "long pair map",
+        longPairMap,
+        narrowInfo(2, layout),
+        Some("Project(Scan)"),
+      ),
+      AcceptedCase(
+        "countByKey of long pair map",
+        Plan.CountByKeyOp(longPairMap),
+        hashedInfo(layout),
+        Some("CountByKey(Exchange(Project(Scan)))"),
       ),
       AcceptedCase(
         "countByKey string",
