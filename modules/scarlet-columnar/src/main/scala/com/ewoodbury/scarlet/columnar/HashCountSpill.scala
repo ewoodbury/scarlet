@@ -19,15 +19,15 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * already `(key, count)` partials. The merged batch is the only result, so a failure during the
  * fold publishes nothing.
  *
- * Only [[HashCount.byKey]] and [[HashCount.byKeySelected]] call this, and only for the
- * post-exchange bucket. The partial combine before the exchange stays in memory. One store is open
- * per over-budget bucket and is closed before the next bucket. Under-budget buckets open no store.
- * There is no probe side. The running partial is the result so far, so it is `O(distinct keys)`
- * and cannot be bounded by the budget. A morsel or a fold whose [[HashCount.inputRowBytes]]
- * estimate is over the budget throws [[ClosedKernelRefusal]] before its table is allocated. The
- * store deletes its files on that throw. [[HashExchange.partitionAll]] materialises the
- * sub-partitioned copy, and [[ColumnBatches.slice]] materialises one piece's morsels as the fold
- * reaches that piece.
+ * [[HashCount.byKey]], [[HashCount.byKeySelected]], and a pair-project count call this, and only
+ * for the post-exchange bucket. The partial combine before the exchange stays in memory. One store
+ * is open per over-budget bucket and is closed before the next bucket. Under-budget buckets open
+ * no store. There is no probe side. The running partial is the result so far, so it is
+ * `O(distinct keys)` and cannot be bounded by the budget. A morsel or a fold whose
+ * [[HashCount.inputRowBytes]] estimate is over the budget throws [[ClosedKernelRefusal]] before
+ * its table is allocated. The store deletes its files on that throw. [[HashExchange.partitionAll]]
+ * materialises the sub-partitioned copy, and [[ColumnBatches.slice]] materialises one piece's
+ * morsels as the fold reaches that piece.
  */
 private[scarlet] object HashCountSpill:
 
