@@ -17,8 +17,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * A null key stays null and the function is not called. `countByKey` then drops that key. A
  * generic `(Int, Int)` pair `map` lowers as `Project` and calls the function on a null key. A
  * One `filterKeys` or `filterValues` above this key map lowers. The key predicate sees the mapped
- * key and is not called on a null. `keys`, `values`, a second map above that filter, and a
- * whole-row filter stay empty.
+ * key and is not called on a null. `keys` directly above the map lowers as `Key(MapKey(...))`.
+ * A null input key stays null and the function is not called. `values`, `mapValues`, a second
+ * map above that filter, and a whole-row filter stay empty.
  * `partitionBy` then this map drops the hash, so `countByKey` is one global row per new key.
  */
 class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
@@ -148,14 +149,16 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     )
   }
 
-  it should "lower one slot filter above a key map and still refuse keys and values" in {
+  it should "lower one slot filter above a key map and keys of that map, and still refuse values" in {
     val mapped = nullable.mapIntKey(key => key + 1)
     ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).plan).map(_.shape) shouldBe
       Some("FilterKey(MapKey(Scan))")
     ColumnarPlanner.lower(mapped.filterValues((value: Int) => value >= 0).plan).map(_.shape) shouldBe
       Some("FilterValue(MapKey(Scan))")
-    ColumnarPlanner.lower(mapped.keys.plan) shouldBe None
+    ColumnarPlanner.lower(mapped.keys.plan).map(_.shape) shouldBe Some("Key(MapKey(Scan))")
     ColumnarPlanner.lower(mapped.values.plan) shouldBe None
+    ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).keys.plan) shouldBe None
+    ColumnarPlanner.lower(mapped.mapValues((value: Int) => value + 1).plan) shouldBe None
     ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).mapIntKey(_ + 1).plan) shouldBe
       None
     ColumnarPlanner.lower(mapped.filter { case (key, _) => key > 0 }.plan) shouldBe None
@@ -163,6 +166,42 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       mapped.filterKeys((key: Int) => key > 0).filterValues((value: Int) => value > 0).plan,
     ) shouldBe None
     ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).union(mapped).plan) shouldBe None
+  }
+
+  it should "collect mapped keys in partition order and keep a null key" in {
+    val keyed = DistCollection
+      .ofIntPairs(Array(1, 2, 1, 3), Array(10, 20, 30, 40), 2)
+      .mapIntKey(_ + 1)
+      .keys
+    ColumnarPlanner.lower(keyed.plan).map(_.shape) shouldBe Some("Key(MapKey(Scan))")
+    ColumnarPlanner.tryCount(keyed.plan) shouldBe Some(4L)
+    val at = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size, columnarExecution = true))
+      ScarletRuntime.get.shuffle.clear()
+      keyed.collect().toList
+    }
+    val wide = at(8192)
+    wide shouldBe List(2, 3, 2, 4)
+    at(1) shouldBe wide
+
+    val calls = new AtomicInteger
+    val nullKeys = nullable.mapIntKey { key =>
+      calls.incrementAndGet()
+      key + 1
+    }.keys
+    calls.set(0)
+    MapIntKey.resetPublishedForTest()
+    ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 8192, columnarExecution = true))
+    val columnar = keyText(run(columnar = true)(nullKeys.collect()))
+    calls.get() shouldBe 4
+    MapIntKey.publishedForTest should be > 0
+    calls.set(0)
+    val rows = keyText(run(columnar = false)(nullKeys.collect()))
+    calls.get() shouldBe 4
+    columnar shouldBe rows
+    columnar shouldBe Seq("2", "null", "2", "3", "3", "null")
+    ColumnarPlanner.tryCount(nullKeys.plan) shouldBe Some(6L)
+    run(columnar = false)(nullKeys.count()) shouldBe 6L
   }
 
   it should "count a key filter above the map without publishing the pair batch" in {
@@ -478,6 +517,21 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     finally
       ScarletConf.set(saved)
       ScarletRuntime.get.shuffle.clear()
+
+  /** A null key stays the string `null`. `String.valueOf` does not unbox it to `0`. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Equals",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def keyText(rows: Iterable[Any]): Seq[String] =
+    rows.toSeq.map { row =>
+      val ref = row.asInstanceOf[AnyRef]
+      if (ref == null) then "null" else String.valueOf(ref)
+    }
 
   /** `productElement` does not unbox a null int, and tuple equality would. */
   @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.AsInstanceOf"))

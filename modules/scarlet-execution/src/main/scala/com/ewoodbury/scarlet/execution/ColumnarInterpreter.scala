@@ -198,7 +198,9 @@ private[execution] object ColumnarInterpreter:
    * returns long pairs, so collect and take use that decoder and do not call the int-pair
    * function. A long column projected from a long pair keeps a clear bit via
    * [[BatchCodec.decodeLongsPreservingAbsence]]. An element long scan still uses
-   * [[BatchCodec.decodeLongs]], which rejects a clear bit. Int triples use
+   * [[BatchCodec.decodeLongs]], which rejects a clear bit. `keys` of one [[PhysicalOp.MapKey]]
+   * keeps a clear bit via [[BatchCodec.decodeIntsPreservingAbsence]]. Every other int column uses
+   * [[BatchCodec.decodeInts]], which rejects a clear bit. Int triples use
    * [[BatchCodec.decodeIntTriplesPreservingAbsence]] for a triple [[PhysicalOp.Project]] and for
    * an int inner join: [[PhysicalOp.HashJoin]], [[PhysicalOp.BroadcastJoin]], or
    * [[PhysicalOp.SortMergeJoin]]. A map or that join may keep a null component. An int-pair
@@ -215,7 +217,14 @@ private[execution] object ColumnarInterpreter:
    */
   private[execution] def decodeFor(columns: Columns, op: PhysicalOp): Seq[Partition[_]] =
     if (PhysicalSchema.isIntLongAggregate(op)) then intLongSums(columns)
-    else decodeWith(columns, intPairDecoder(op), longDecoder(op), tripleDecoder(op))
+    else
+      decodeWith(
+        columns,
+        ColumnDecoders.ints(op),
+        ColumnDecoders.intPairs(op),
+        ColumnDecoders.longs(op),
+        ColumnDecoders.triples(op),
+      )
 
   /** Groups of an int-long reduce. A non-pair batch is a bug in the arm, not a row fallback. */
   private def intLongSums(columns: Columns): Seq[Partition[_]] = columns match
@@ -225,85 +234,23 @@ private[execution] object ColumnarInterpreter:
       throw new IllegalStateException("int-long reduceByKey expected pair batches")
 
   /**
-   * Prefix of [[decodeFor]]. The same op chooses the int-pair decoder and the long decoder.
+   * Prefix of [[decodeFor]]. The same op chooses the int, int-pair, long, and triple decoders.
    * `limit <= 0` returns empty without reading a batch.
    */
   private[execution] def decodePrefixFor(columns: Columns, limit: Int, op: PhysicalOp): Seq[Any] =
-    decodePrefixWith(columns, limit, intPairDecoder(op), longDecoder(op), tripleDecoder(op))
-
-  /**
-   * Long decoder for `op`. A key or value column of a long pair keeps a null. Every other long
-   * column rejects one.
-   */
-  private def longDecoder(op: PhysicalOp): (ColumnBatch, Int) => Seq[Long] =
-    if (absentLongColumn(op)) then BatchCodec.decodeLongsPreservingAbsence
-    else (batch, rows) => BatchCodec.decodeLongs(batch, rows)
-
-  private def absentLongColumn(op: PhysicalOp): Boolean = op match
-    case PhysicalOp.Column(child, _) =>
-      child.kind match
-        case PhysicalOp.Kind.LongPairs => true
-        case _ => false
-    case _ => false
-
-  /**
-   * Int-pair decoder for `op`. [[PhysicalOp.SortByLongKey]] and [[PhysicalOp.SortByStringKey]] are
-   * their own arms. Those decoders do not call the returned function, and these arms must not fall
-   * through to [[BatchCodec.decodeIntPairs]], which rejects a clear bit. [[MapIntKey.keepsNull]]
-   * and an int-pair [[PhysicalOp.Project]] keep a null key or value, so they use the
-   * absence-preserving decoder. A triple [[PhysicalOp.Project]] does not: its kind is not
-   * [[PhysicalOp.Kind.Pairs]], and [[tripleDecoder]] is the arm that runs.
-   */
-  private def intPairDecoder(op: PhysicalOp): (ColumnBatch, Int) => Seq[(Int, Int)] =
-    op match
-      case kept if MapIntKey.keepsNull(kept) =>
-        (batch, rows) => BatchCodec.decodeIntPairsPreservingAbsence(batch, rows)
-      case project: PhysicalOp.Project if intPairProject(project) =>
-        (batch, rows) => BatchCodec.decodeIntPairsPreservingAbsence(batch, rows)
-      case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByIntValueDesc =>
-        (batch, rows) =>
-          val started = System.nanoTime()
-          val decoded = BatchCodec.decodeIntPairsPreservingAbsence(batch, rows)
-          RankSplitTrace.addOutput(System.nanoTime() - started)
-          decoded
-      case _: PhysicalOp.SortByLongKey =>
-        (_, _) =>
-          throw new IllegalStateException(
-            "SortByLongKey is decoded as long pairs, not int pairs",
-          )
-      case _: PhysicalOp.SortByStringKey =>
-        (_, _) =>
-          throw new IllegalStateException(
-            "SortByStringKey is decoded as string pairs, not int pairs",
-          )
-      case _ => (batch, rows) => BatchCodec.decodeIntPairs(batch, rows)
-
-  /** An int-pair project. A triple project stays on [[tripleDecoder]]. */
-  private def intPairProject(op: PhysicalOp.Project): Boolean = op.kind match
-    case PhysicalOp.Kind.Pairs => true
-    case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
-        PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools |
-        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
-        PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
-        PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
-        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums =>
-      false
-
-  /**
-   * An int inner join or a triple map may keep a null component. A filter or other triple op
-   * rejects a clear bit. A whole-row filter drops that row before decode. Outer joins are
-   * [[Columns.Outer]] and do not use this decoder.
-   */
-  private def tripleDecoder(op: PhysicalOp): (ColumnBatch, Int) => Seq[(Int, (Int, Int))] =
-    op match
-      case _: PhysicalOp.Project | _: PhysicalOp.HashJoin | _: PhysicalOp.BroadcastJoin |
-          _: PhysicalOp.SortMergeJoin =>
-        BatchCodec.decodeIntTriplesPreservingAbsence
-      case _ => (batch, rows) => BatchCodec.decodeIntTriples(batch, rows)
+    decodePrefixWith(
+      columns,
+      limit,
+      ColumnDecoders.ints(op),
+      ColumnDecoders.intPairs(op),
+      ColumnDecoders.longs(op),
+      ColumnDecoders.triples(op),
+    )
 
   private def decodePrefixWith(
       columns: Columns,
       limit: Int,
+      decodeInts: (ColumnBatch, Int) => Seq[Int],
       decodePairs: (ColumnBatch, Int) => Seq[(Int, Int)],
       decodeLongs: (ColumnBatch, Int) => Seq[Long],
       decodeTriples: (ColumnBatch, Int) => Seq[(Int, (Int, Int))],
@@ -312,7 +259,7 @@ private[execution] object ColumnarInterpreter:
     else
       columns match
         case Columns.Ints(parts) =>
-          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeInts(batch, rows))
+          prefixRows(parts, limit, decodeInts)
         case Columns.Longs(parts) =>
           prefixRows(parts, limit, decodeLongs)
         case Columns.Floats(parts) =>
@@ -1155,12 +1102,13 @@ private[execution] object ColumnarInterpreter:
 
   private def decodeWith(
       columns: Columns,
+      decodeInts: (ColumnBatch, Int) => Seq[Int],
       decodePairs: (ColumnBatch, Int) => Seq[(Int, Int)],
       decodeLongs: (ColumnBatch, Int) => Seq[Long],
       decodeTriples: (ColumnBatch, Int) => Seq[(Int, (Int, Int))],
   ): Seq[Partition[_]] = columns match
     case Columns.Ints(parts) =>
-      parts.map(batch => Partition(BatchCodec.decodeInts(batch)))
+      parts.map(batch => Partition(decodeInts(batch, batch.length)))
     case Columns.Longs(parts) =>
       parts.map(batch => Partition(decodeLongs(batch, batch.length)))
     case Columns.Floats(parts) =>
