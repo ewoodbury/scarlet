@@ -920,6 +920,7 @@ object ColumnarPlanner:
     if (MapIntKey.inTree(child)) then None
     else
       step match
+        case ElementStep.Filter(_) if LongPairSlot.inTree(child) => None
         case ElementStep.Filter(predicate) =>
           child.kind match
             case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs =>
@@ -1069,26 +1070,19 @@ object ColumnarPlanner:
 
   private def columnFilter(source: Plan[_], slot: PhysicalOp.Slot): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
-      // One key or value slot above one int key map. The key predicate sees the mapped key and
-      // is not called on a null. A value predicate sees the original value. A second slot, and
-      // the same filter above a long-pair or string-pair project, stays empty.
-      if (MapIntKey.slotAbove(child, slot)) then Some(PhysicalOp.Filter(child, slot))
-      else if (MapIntKey.inTree(child) || longPairProject(child) || stringPairProject(child)) then
-        None
+      // One key or value slot above one int key map, or above one long-pair project on a scan
+      // or a long-pair filter stack. A second slot, a string-pair project, and any other
+      // long-pair project stay empty.
+      if (MapIntKey.slotAbove(child, slot) || LongPairSlot.above(child, slot)) then
+        Some(PhysicalOp.Filter(child, slot))
+      else if (MapIntKey.inTree(child) || LongPairSlot.inTree(child) || stringPairProject(child))
+      then None
       else
         child.kind match
           case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.LongPairs =>
             Some(PhysicalOp.Filter(child, slot))
           case _ => None
     }
-
-  /** A long-pair [[PhysicalOp.Project]]. Slot filters above that project stay on the row path. */
-  private def longPairProject(op: PhysicalOp): Boolean = op match
-    case PhysicalOp.Project(child) =>
-      child.kind match
-        case PhysicalOp.Kind.LongPairs => true
-        case _ => false
-    case _ => false
 
   /** A string-pair [[PhysicalOp.Project]]. A filter above that project stays on the row path. */
   private def stringPairProject(op: PhysicalOp): Boolean = op match

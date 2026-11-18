@@ -8,7 +8,8 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * The project's input morsels are already filtered. Each row is handed to the same adapter the
  * interpreter uses, including a null key and a null value. Only a present projected key is
  * inserted. The value cell is checked and dropped, so the pair batch is never published and
- * [[LongHashCount.byKey]] does not see it. The function is not inspected.
+ * [[LongHashCount.byKey]] does not see it. [[countSlot]] applies one key or value slot after the
+ * adapter and still does not publish the pair batch. The function is not inspected.
  *
  * Partials are one count per morsel, merged per input batch, then exchanged like
  * [[LongHashCount]]. Spill stays on the post-exchange bucket. A morsel whose row estimate does not
@@ -27,6 +28,67 @@ private[scarlet] object ProjectedLongPairCount:
       parallelism: Int,
       batchSize: Int,
   ): Vector[ColumnBatch] =
+    counted(batches, numPartitions, parallelism, batchSize) { morsel =>
+      partial(morsel, mapper)
+    }
+
+  /**
+   * [[count]] after one slot. `keySlot` keeps a projected key `keep` accepts. A value slot keeps a
+   * present projected value `keep` accepts. A null projected key is dropped either way. A null
+   * projected value still counts when `keySlot` is true.
+   */
+  def countSlot(
+      batches: Vector[ColumnBatch],
+      mapper: LongPairProject.LongPairMap,
+      keySlot: Boolean,
+      keep: ColumnKernel.Int64Predicate,
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    counted(batches, numPartitions, parallelism, batchSize) { morsel =>
+      partialSlot(morsel, mapper, keySlot, keep)
+    }
+
+  /**
+   * [[countSlot]] over survivor ids. The source pair columns stay shared. Each partial sees one
+   * slice of those ids, so a long filter under the project does not compact a parent-sized copy
+   * per morsel. The pair batch is not published.
+   */
+  def countSelected(
+      selected: Vector[Selected],
+      mapper: LongPairProject.LongPairMap,
+      keySlot: Boolean,
+      keep: ColumnKernel.Int64Predicate,
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    if (selected.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyLongCounts)
+    else
+      try
+        selected.foreach(one => LongHashCount.requireKey(one.batch))
+        val rows = selected.iterator.map(_.count.toLong).sum
+        if (LongHashCount.refuseBeforeCombine) then LongHashCount.refuse(rows)
+        val combined = PartialCombine.perBatchSelected(
+          selected,
+          batchSize,
+          parallelism,
+          (one, from, until) => partialSelected(one, from, until, mapper, keySlot, keep),
+          LongHashCount.addCounts,
+        )
+        finish(combined, numPartitions, parallelism, batchSize)
+      finally LongHashCount.releaseWorkers()
+
+  private def counted(
+      batches: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  )(one: Morsel => ColumnBatch): Vector[ColumnBatch] =
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
@@ -38,7 +100,7 @@ private[scarlet] object ProjectedLongPairCount:
         if (LongHashCount.refuseBeforeCombine) then LongHashCount.refuse(rows)
         val groups = batches.map(batch => Morsels.of(batch, batchSize))
         val partials = MorselScheduler.map(groups.flatten, parallelism) { (_, morsel) =>
-          partial(morsel, mapper)
+          one(morsel)
         }
         val sizes = groups.map(_.length)
         val combined =
@@ -51,6 +113,47 @@ private[scarlet] object ProjectedLongPairCount:
   private def partial(morsel: Morsel, mapper: LongPairProject.LongPairMap): ColumnBatch =
     LongHashCount.partialKeys(morsel.length) { add =>
       LongPairProject.visitKeys(morsel.batch, morsel.start, morsel.length, mapper, add)
+      ColumnMetrics.fused()
+    }
+
+  private def partialSlot(
+      morsel: Morsel,
+      mapper: LongPairProject.LongPairMap,
+      keySlot: Boolean,
+      keep: ColumnKernel.Int64Predicate,
+  ): ColumnBatch =
+    LongHashCount.partialKeys(morsel.length) { add =>
+      LongPairProject.visitSlot(
+        morsel.batch,
+        morsel.start,
+        morsel.length,
+        mapper,
+        keySlot,
+        keep,
+        add,
+      )
+      ColumnMetrics.fused()
+    }
+
+  private def partialSelected(
+      one: Selected,
+      from: Int,
+      until: Int,
+      mapper: LongPairProject.LongPairMap,
+      keySlot: Boolean,
+      keep: ColumnKernel.Int64Predicate,
+  ): ColumnBatch =
+    LongHashCount.partialKeys(until - from) { add =>
+      LongPairProject.visitSelected(
+        one.batch,
+        one.rows,
+        from,
+        until,
+        mapper,
+        keySlot,
+        keep,
+        add,
+      )
       ColumnMetrics.fused()
     }
 

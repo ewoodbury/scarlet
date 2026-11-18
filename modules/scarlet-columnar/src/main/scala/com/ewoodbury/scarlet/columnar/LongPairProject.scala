@@ -163,6 +163,77 @@ object LongPairProject:
       mapper: LongPairMap,
       add: Long => Unit,
   ): Unit =
+    visit(batch, start, length, mapper, projected => offer(projected, add))
+
+  /**
+   * [[visitKeys]] then one slot. `keySlot` reads the projected key. Otherwise the slot reads the
+   * projected value.
+   *
+   * A null input key is passed to `mapper`. A null projected key is dropped and a key predicate is
+   * not called. A key slot still counts a null projected value. A value slot drops a null
+   * projected value and does not call `keep`. This does not allocate an output column.
+   */
+  private[scarlet] def visitSlot(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      mapper: LongPairMap,
+      keySlot: Boolean,
+      keep: ColumnKernel.Int64Predicate,
+      add: Long => Unit,
+  ): Unit =
+    visit(batch, start, length, mapper, projected => offerSlot(projected, keySlot, keep, add))
+
+  /**
+   * [[visitSlot]] on absolute ids in `rows`, the half-open index range `[from, until)`.
+   *
+   * A survivor filter already dropped the other source rows. A null component that remains is
+   * passed to `mapper`, the same as [[visitSparse]]. An empty range does not call `mapper`.
+   */
+  private[scarlet] def visitSelected(
+      batch: ColumnBatch,
+      rows: Array[Int],
+      from: Int,
+      until: Int,
+      mapper: LongPairMap,
+      keySlot: Boolean,
+      keep: ColumnKernel.Int64Predicate,
+      add: Long => Unit,
+  ): Unit =
+    if (from == until) then ()
+    else
+      require(
+        batch.columns.length == 2,
+        s"pair project expected 2 columns, got ${batch.columns.length}",
+      )
+      val keys = int64At(batch, 0)
+      val values = int64At(batch, 1)
+      require(keys.length == values.length, "key and value columns differ in length")
+      val keyArr = keys.values
+      val valueArr = values.values
+      val keyIn = keys.validity.words
+      val valueIn = values.validity.words
+      var slot = from
+      while (slot < until) {
+        val row = rows(slot)
+        val keyOn = Validity.isSet(keyIn, row)
+        val valueOn = Validity.isSet(valueIn, row)
+        val projected =
+          if (keyOn && valueOn) then mapper(keyArr(row), valueArr(row))
+          else if (keyOn) then mapper.applyNullValue(keyArr(row))
+          else if (valueOn) then mapper.applyNullKey(valueArr(row))
+          else mapper.applyNulls()
+        offerSlot(projected, keySlot, keep, add)
+        slot += 1
+      }
+
+  private def visit(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      mapper: LongPairMap,
+      accept: Any => Unit,
+  ): Unit =
     require(
       batch.columns.length == 2,
       s"pair project expected 2 columns, got ${batch.columns.length}",
@@ -176,8 +247,8 @@ object LongPairProject:
         Validity.rangePresent(keys.validity, start, length) &&
         Validity.rangePresent(values.validity, start, length)
       )
-    then visitDense(keys, values, start, length, mapper, add)
-    else visitSparse(keys, values, start, length, mapper, add)
+    then visitDense(keys, values, start, length, mapper, accept)
+    else visitSparse(keys, values, start, length, mapper, accept)
 
   private def visitDense(
       keys: Int64Column,
@@ -185,14 +256,14 @@ object LongPairProject:
       start: Int,
       length: Int,
       mapper: LongPairMap,
-      add: Long => Unit,
+      accept: Any => Unit,
   ): Unit =
     val keyArr = keys.values
     val valueArr = values.values
     val end = start + length
     var row = start
     while (row < end) {
-      offer(mapper(keyArr(row), valueArr(row)), add)
+      accept(mapper(keyArr(row), valueArr(row)))
       row += 1
     }
 
@@ -202,7 +273,7 @@ object LongPairProject:
       start: Int,
       length: Int,
       mapper: LongPairMap,
-      add: Long => Unit,
+      accept: Any => Unit,
   ): Unit =
     val keyArr = keys.values
     val valueArr = values.values
@@ -218,9 +289,55 @@ object LongPairProject:
         else if (keyOn) then mapper.applyNullValue(keyArr(row))
         else if (valueOn) then mapper.applyNullKey(valueArr(row))
         else mapper.applyNulls()
-      offer(projected, add)
+      accept(projected)
       row += 1
     }
+
+  /**
+   * One slot after [[offer]]. A null projected key is not counted, and a key predicate is not
+   * called. A key slot still counts a null projected value. A value slot drops a null projected
+   * value without calling `keep`. A present projected value is tested even when the key is null:
+   * the row path calls that predicate, then `countByKey` drops the null key.
+   */
+  private def offerSlot(
+      projected: Any,
+      keySlot: Boolean,
+      keep: ColumnKernel.Int64Predicate,
+      add: Long => Unit,
+  ): Unit =
+    projected match
+      case null => decline("null")
+      case row: Product if row.productArity == 2 =>
+        val key = longCell(row.productElement(0))
+        val value = longCell(row.productElement(1))
+        if (keptBySlot(keySlot, key, value, keep)) then
+          key match
+            case Some(present) => add(present)
+            case None => ()
+        else ()
+      case other => decline(foundName(other))
+
+  /** Key slot reads a present key. Value slot reads a present value and ignores a null. */
+  private def keptBySlot(
+      keySlot: Boolean,
+      key: Option[Long],
+      value: Option[Long],
+      keep: ColumnKernel.Int64Predicate,
+  ): Boolean =
+    if (keySlot) then
+      key match
+        case Some(present) => keep(present)
+        case None => false
+    else
+      value match
+        case Some(present) => keep(present)
+        case None => false
+
+  /** A present long, or none when the cell is null. Any other cell declines. */
+  private def longCell(cell: Any): Option[Long] = cell match
+    case null => None
+    case present: Long => Some(present)
+    case other => decline(foundName(other))
 
   /** Keeps a present key. A null key is dropped. The value is only a type check. */
   private def offer(projected: Any, add: Long => Unit): Unit =

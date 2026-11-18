@@ -16,7 +16,8 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  *
  * Keys are `row % 1024`. Values are the cross-engine LCG, stored as longs. The action is
  * `map { case (k, v) => (k % 100, v) }.countByKey`. `CROSS_FILTERS=2` is `k % 3 != 0` then
- * `v >= 0` before that map. `CROSS_FILTERS=0` is the dense scan. [[CrossEngineShapes.keyMod]]
+ * `v >= 0` before that map. `CROSS_FILTERS=0` is the dense scan. `CROSS_ABOVE=1` adds
+ * `filterKeys(_ < 50)` after the map. `CROSS_ABOVE=0` is the map alone. [[CrossEngineShapes.keyMod]]
  * stays `mapIntKey` on int pairs and is not this action.
  *
  * Spill is on for this process only. Warmup 80, rounds 30, and four threads are the defaults.
@@ -25,6 +26,7 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  *
  * {{{
  * CROSS_ROWS=10000000 CROSS_THREADS=4 CROSS_WARMUP=80 CROSS_ROUNDS=30 CROSS_FILTERS=2 \
+ *   CROSS_ABOVE=1 \
  *   sbt -J-Xmx4g "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.LongPairMapBench"
  * }}}
  */
@@ -49,6 +51,7 @@ object LongPairMapBench:
   def main(args: Array[String]): Unit =
     val rows = readInt("CROSS_ROWS", 10000000)
     val filters = readChoice("CROSS_FILTERS", 2, Set(0, 1, 2))
+    val above = readChoice("CROSS_ABOVE", 0, Set(0, 1))
     val threads = readPositive("CROSS_THREADS", 4)
     val warmup = readPositive("CROSS_WARMUP", 80)
     val rounds = readPositive("CROSS_ROUNDS", 30)
@@ -66,10 +69,10 @@ object LongPairMapBench:
         ),
       )
       ScarletRuntime.set(savedRuntime.copy(scheduler = scheduler))
-      val counted = query(rows, filters)
+      val counted = query(rows, filters, above)
       val lowered = ColumnarPlanner.lower(counted.plan)
       val shape = lowered.map(_.shape).getOrElse("row")
-      println(s"arm $shape")
+      println(s"arm $shape above=$above filters=$filters")
       val row = time("row", counted.plan, warmup, rounds, columnar = false)
       if (lowered.isEmpty) then println(render(row))
       else
@@ -88,8 +91,11 @@ object LongPairMapBench:
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)
 
-  /** Long pairs, optional key and value filters, then `(k % 100, v)`, then `countByKey`. */
-  private def query(rows: Int, filters: Int): DistCollection[(Long, Int)] =
+  /**
+   * Long pairs, optional key and value filters, then `(k % 100, v)`. `above` is one `filterKeys`
+   * on that mapped key. `countByKey` is the action.
+   */
+  private def query(rows: Int, filters: Int, above: Int): DistCollection[(Long, Int)] =
     val keys = Array.tabulate(rows)(row => (row % groups).toLong)
     val values = lcgValues(rows)
     val data = DistCollection.ofLongPairs(keys, values, sourcePartitions)
@@ -100,7 +106,11 @@ object LongPairMapBench:
         data
           .filterKeys((key: Long) => key % 3L != 0L)
           .filterValues((value: Long) => value >= 0L)
-    filtered.map { case (key, value) => (key % 100L, value) }.countByKey
+    val mapped = filtered.map { case (key, value) => (key % 100L, value) }
+    val slotted =
+      if (above == 0) then mapped
+      else mapped.filterKeys((key: Long) => key < 50L)
+    slotted.countByKey
 
   private def time(
       name: String,
