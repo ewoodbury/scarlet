@@ -15,10 +15,11 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * Same-session row and columnar times for a remapped string key.
  *
  * Keys are `(row % 1024).toString`. Values are the cross-engine LCG. Two source partitions. The
- * action is `map { case (k, v) => (k + "!", v) }.countByKey`, with no filter. Spill stays off.
- * At 1e7 rows that budget throws `ClosedKernelRefusal`, so the default is 1e6. Warmup 80, rounds
- * 30, and four threads are the defaults. The row arm runs first. The checksum is the
- * order-independent sum of `key.hashCode.toLong * 31 + count`.
+ * action is `map { case (k, v) => (k + "!", v) }.filterKeys(_ != "!").countByKey`. No generated
+ * key is `"!"`, so the filter keeps every row. Spill stays off. At 1e7 rows that budget throws
+ * `ClosedKernelRefusal`, so the default is 1e6. Warmup 80, rounds 30, and four threads are the
+ * defaults. The row arm runs first. The checksum is the order-independent sum of
+ * `key.hashCode.toLong * 31 + count`.
  *
  * {{{
  * sbt "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.StringPairCountBench"
@@ -67,8 +68,10 @@ object StringPairCountBench:
         .map(_.shape)
         .getOrElse(refuse("string pair map did not lower"))
       println(s"arm $shape")
-      if (!shape.contains("CountByKey") || !shape.contains("Project")) then
-        refuse(s"arm $shape is not CountByKey of a Project")
+      if (
+        !shape.contains("CountByKey") || !shape.contains("Filter") || !shape.contains("Project") ||
+        shape.contains("row")
+      ) then refuse(s"arm $shape is not CountByKey of a Filter and a Project")
       val expected = expectedChecksum(rows)
       val row = time("row", counted.plan, warmup, rounds, columnar = false)
       val columnar = time("columnar", counted.plan, warmup, rounds, columnar = true)
@@ -93,13 +96,14 @@ object StringPairCountBench:
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)
 
-  /** `(row % 1024).toString` with LCG values, then `(k + "!", v)`, then `countByKey`. */
+  /** `(row % 1024).toString` with LCG values, then `(k + "!", v)`, drop `"!"`, then `countByKey`. */
   private def query(rows: Int): DistCollection[(String, Int)] =
     val pool = Array.tabulate(groups)(_.toString)
     val keys = Array.tabulate(rows)(row => pool(row % groups))
     val values = lcgValues(rows)
     DistCollection(keys.zip(values).toSeq, sourcePartitions)
       .map { case (key, value) => (key + "!", value) }
+      .filterKeys((key: String) => key != "!")
       .countByKey
 
   private def time(

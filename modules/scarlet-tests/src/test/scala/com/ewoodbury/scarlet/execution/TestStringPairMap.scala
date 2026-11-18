@@ -15,8 +15,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * A `(String, Int) => (String, Int)` map lowers to a project and feeds `countByKey`.
  *
  * The function runs on every row the row path would, including a null key. `""` stays a present
- * key. `"é"` and `"e\u0301"` stay distinct. A filter above the project, and a map under
- * `sortByStringKey`, stay on the row path.
+ * key. `"é"` and `"e\u0301"` stay distinct. One key or value filter above that project lowers.
+ * A whole-row filter, a second slot, a second map, and a map under `sortByStringKey` stay empty.
  */
 class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -100,16 +100,105 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     StringPairProject.publishedForTest should be > 0
   }
 
-  it should "refuse a filter above the project and a map under sortByStringKey" in {
+  it should "lower one slot above the project and refuse a second slot, a second map, and sort" in {
     val source = DistCollection(Seq("a" -> 1, "b" -> 2, "" -> 3), 1)
     val mapped = source.map((pair: (String, Int)) => (pair._1 + "!", pair._2))
     ColumnarPlanner.lower(mapped.filter((pair: (String, Int)) => pair._2 > 0).plan) shouldBe None
-    ColumnarPlanner.lower(mapped.filterKeys((key: String) => key.nonEmpty).plan) shouldBe None
-    ColumnarPlanner.lower(mapped.filterValues((value: Int) => value > 0).plan) shouldBe None
+    val byKey = mapped.filterKeys((key: String) => key.nonEmpty)
+    val byValue = mapped.filterValues((value: Int) => value > 0)
+    ColumnarPlanner.lower(byKey.plan).map(_.shape) shouldBe Some("FilterKey(Project(Scan))")
+    ColumnarPlanner.lower(byValue.plan).map(_.shape) shouldBe Some("FilterValue(Project(Scan))")
     ColumnarPlanner.lower(mapped.sortByStringKey.plan) shouldBe None
     ColumnarPlanner.lower(
       mapped.filter((pair: (String, Int)) => pair._2 > 0).countByKey.plan,
     ) shouldBe None
+    ColumnarPlanner.lower(byKey.filterKeys((key: String) => key != "x").plan) shouldBe None
+    ColumnarPlanner.lower(byValue.filterKeys((key: String) => key.nonEmpty).plan) shouldBe None
+    ColumnarPlanner.lower(
+      byKey.map((pair: (String, Int)) => (pair._1 + "?", pair._2)).plan,
+    ) shouldBe None
+    val twice = mapped.map((pair: (String, Int)) => (pair._1 + "?", pair._2))
+    ColumnarPlanner.lower(twice.filterKeys((key: String) => key.nonEmpty).plan) shouldBe None
+    val stacked = source
+      .filterKeys((key: String) => key != "b")
+      .map((pair: (String, Int)) => (pair._1 + "!", pair._2))
+      .filterKeys((key: String) => key != "!")
+    ColumnarPlanner.lower(stacked.plan).map(_.shape) shouldBe Some(
+      "FilterKey(Project(FilterKey(Scan)))",
+    )
+    ColumnarPlanner.lower(stacked.countByKey.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(FilterKey(Project(FilterKey(Scan)))))",
+    )
+  }
+
+  it should "count a remapped key after filterKeys and match batch size 1 and 8192" in {
+    val source = DistCollection(Seq("a" -> 1, "a" -> 2, "b" -> 3, "" -> 4), 1)
+    val counted = source
+      .map((pair: (String, Int)) => (pair._1 + "!", pair._2))
+      .filterKeys((key: String) => key != "!")
+      .countByKey
+    ColumnarPlanner.lower(counted.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(FilterKey(Project(Scan))))",
+    )
+    val expected = Map("a!" -> 2, "b!" -> 1)
+    countsOf(counted.collect()) shouldBe expected
+    countsOf(row(counted.collect())) shouldBe expected
+    val filtered = source
+      .map((pair: (String, Int)) => (pair._1 + "!", pair._2))
+      .filterKeys((key: String) => key != "!")
+    shown(filtered.collect()) shouldBe Seq("a!:1", "a!:2", "b!:3")
+    StringPairProject.resetPublishedForTest()
+    countsOf(counted.collect()) shouldBe expected
+    StringPairProject.publishedForTest should be > 0
+    countsAt(counted, 1) shouldBe countsAt(counted, 8192)
+  }
+
+  it should "match the row path for a null input key, an empty key, and a null projected key" in {
+    val (rowCounts, rowCalls) = countKept(nullKeySource(), columnar = false)
+    val (columnarCounts, columnarCalls) = countKept(nullKeySource(), columnar = true)
+    rowCounts shouldBe Map("a!" -> 2, "n" -> 2)
+    columnarCounts shouldBe rowCounts
+    columnarCalls shouldBe rowCalls
+    columnarCalls shouldBe 5
+    val keptEmpty = DistCollection(Seq("" -> 1, "a" -> 2), 1)
+      .map((pair: (String, Int)) => (pair._1, pair._2))
+      .filterKeys((key: String) => key != "a")
+      .countByKey
+    countsOf(keptEmpty.collect()) shouldBe Map("" -> 1)
+    countsOf(row(keptEmpty.collect())) shouldBe Map("" -> 1)
+    val calls = new AtomicInteger
+    val dropped = DistCollection(Seq("drop" -> 1, "b" -> 2, "" -> 3), 1)
+      .map(projectNull(calls))
+      .filterKeys((key: String) => key != "!")
+      .countByKey
+    calls.set(0)
+    countsOf(dropped.collect()) shouldBe Map("b!" -> 1)
+    calls.get() shouldBe 3
+    countsOf(row(dropped.collect())) shouldBe Map("b!" -> 1)
+    val composed = "é"
+    val decomposed = "e\u0301"
+    val accents = DistCollection(Seq(composed -> 3, decomposed -> 4, composed -> 5), 1)
+      .map((pair: (String, Int)) => (pair._1 + "!", pair._2))
+      .filterKeys((key: String) => key != "!")
+      .countByKey
+    val accentCounts = Map(composed + "!" -> 2, decomposed + "!" -> 1)
+    countsOf(accents.collect()) shouldBe accentCounts
+    countsOf(row(accents.collect())) shouldBe accentCounts
+    (composed + "!") should not be (decomposed + "!")
+  }
+
+  it should "lower filterValues above the project and match the row path" in {
+    val source = DistCollection(Seq("a" -> 1, "a" -> 2, "b" -> 3, "" -> 4), 1)
+    val counted = source
+      .map((pair: (String, Int)) => (pair._1 + "!", pair._2))
+      .filterValues((value: Int) => value > 1)
+      .countByKey
+    ColumnarPlanner.lower(counted.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(FilterValue(Project(Scan))))",
+    )
+    val expected = Map("a!" -> 1, "b!" -> 1, "!" -> 1)
+    countsOf(counted.collect()) shouldBe expected
+    countsOf(row(counted.collect())) shouldBe expected
   }
 
   it should "lower a filter under the map and match the row path" in {
@@ -145,6 +234,38 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     widened.collect().toList shouldBe row(widened.collect().toList)
   }
 
+  private def countsAt(
+      counted: DistCollection[(String, Int)],
+      batchSize: Int,
+  ): Map[String, Int] =
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(saved.copy(columnarExecution = true, columnarBatchSize = batchSize))
+      ScarletRuntime.get.shuffle.clear()
+      countsOf(counted.collect())
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
+
+  private def countKept(
+      source: DistCollection[(String, Int)],
+      columnar: Boolean,
+  ): (Map[String, Int], Int) =
+    val calls = new AtomicInteger
+    val counted = source
+      .map(shiftNullKey(calls))
+      .filterKeys((key: String) => key != "!")
+      .countByKey
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(saved.copy(columnarExecution = columnar))
+      ScarletRuntime.get.shuffle.clear()
+      calls.set(0)
+      (countsOf(counted.collect()), calls.get())
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
+
   private def countShifted(
       source: DistCollection[(String, Int)],
       columnar: Boolean,
@@ -177,6 +298,26 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       val value = product.productElement(1)
       val key = product.productElement(0) match
         case null => "n"
+        case present: String => present + "!"
+        case other => throw new IllegalArgumentException(s"pair map saw $other")
+      Tuple2(key, value).asInstanceOf[(String, Int)]
+    }
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+      "org.wartremover.warts.Throw",
+    ),
+  )
+  private def projectNull(calls: AtomicInteger): ((String, Int)) => (String, Int) =
+    pair => {
+      val _ = calls.incrementAndGet()
+      val product = pair.asInstanceOf[Product]
+      val value = product.productElement(1)
+      val key = product.productElement(0) match
+        case "drop" => null
         case present: String => present + "!"
         case other => throw new IllegalArgumentException(s"pair map saw $other")
       Tuple2(key, value).asInstanceOf[(String, Int)]
