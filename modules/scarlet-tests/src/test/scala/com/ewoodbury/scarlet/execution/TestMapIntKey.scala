@@ -7,7 +7,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.FoldedCount
+import com.ewoodbury.scarlet.columnar.{FoldedCount, HashReduce}
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -294,10 +294,104 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   }
 
   it should "drop a null key in reduceByKey and match the row path" in {
-    val reduced = nullable.mapIntKey(key => key + 1).reduceByKey[Int, Int](_ + _)
-    counts(run(columnar = true)(reduced.collect())) shouldBe counts(
-      run(columnar = false)(reduced.collect()),
+    val calls = new AtomicInteger
+    val mapped = nullable.mapIntKey { key =>
+      calls.incrementAndGet()
+      key + 1
+    }
+    val reduced = mapped.reduceByKey[Int, Int](_ + _)
+    ColumnarPlanner.lower(reduced.plan).map(_.shape) shouldBe Some(
+      "HashAggregate(Exchange(MapKey(Scan)))",
     )
+    calls.set(0)
+    MapIntKey.resetPublishedForTest()
+    HashReduce.resetByKeyForTest()
+    val columnar = counts(run(columnar = true)(reduced.collect()))
+    calls.get() shouldBe 4
+    MapIntKey.publishedForTest shouldBe 0
+    HashReduce.byKeyCallsForTest shouldBe 0
+    calls.set(0)
+    val rows = counts(run(columnar = false)(reduced.collect()))
+    calls.get() shouldBe 4
+    columnar shouldBe rows
+    columnar shouldBe Map(2 -> 9, 3 -> 5)
+  }
+
+  it should "reduce a mapped key without publishing the pair batch" in {
+    val source = DistCollection.ofIntPairs(Array(1, 2, 1, 3), Array(10, 20, 30, 40), 1)
+    val mapped = source.mapIntKey(_ + 1)
+    val changed = mapped.reduceByKey[Int, Int](_ + _)
+    ColumnarPlanner.lower(changed.plan).map(_.shape) shouldBe Some(
+      "HashAggregate(Exchange(MapKey(Scan)))",
+    )
+    val expected = Map(2 -> 40, 3 -> 20, 4 -> 40)
+    val atBatch = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      MapIntKey.resetPublishedForTest()
+      HashReduce.resetByKeyForTest()
+      val found = counts(changed.collect())
+      MapIntKey.publishedForTest shouldBe 0
+      HashReduce.byKeyCallsForTest shouldBe 0
+      found
+    }
+    atBatch(8192) shouldBe expected
+    atBatch(1) shouldBe expected
+    atBatch(8192) shouldBe counts(run(columnar = false)(changed.collect()))
+
+    MapIntKey.resetPublishedForTest()
+    val projected = mapped.collect()
+    MapIntKey.publishedForTest should be > 0
+    fingerprint(projected) shouldBe Seq("2:10", "2:30", "3:20", "4:40")
+  }
+
+  it should "call the key function on a null value and drop that group" in {
+    val calls = new AtomicInteger
+    val reduced = nullThenValue
+      .mapIntKey { key =>
+        calls.incrementAndGet()
+        key * 2
+      }
+      .reduceByKey[Int, Int](_ + _)
+    calls.set(0)
+    MapIntKey.resetPublishedForTest()
+    HashReduce.resetByKeyForTest()
+    val columnar = counts(run(columnar = true)(reduced.collect()))
+    calls.get() shouldBe 2
+    MapIntKey.publishedForTest shouldBe 0
+    HashReduce.byKeyCallsForTest shouldBe 0
+    columnar shouldBe Map(8 -> 4)
+    calls.set(0)
+    val _ = run(columnar = false)(reduced.collect())
+    calls.get() shouldBe 2
+  }
+
+  it should "reduce filtered owned pairs by the mapped key and skip dropped rows" in {
+    val calls = new AtomicInteger
+    val reduced = DistCollection
+      .ofIntPairs(Array(1, 2, 3, 4, -5), Array(1, -1, 2, 3, 1), 2)
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+      .mapIntKey { key =>
+        calls.incrementAndGet()
+        key % 100
+      }
+      .reduceByKey[Int, Int](_ + _)
+    ColumnarPlanner.lower(reduced.plan).map(_.shape) shouldBe Some(
+      "HashAggregate(Exchange(MapKey(FilterValue(FilterKey(Scan)))))",
+    )
+    calls.set(0)
+    MapIntKey.resetPublishedForTest()
+    HashReduce.resetByKeyForTest()
+    val columnar = counts(run(columnar = true)(reduced.collect()))
+    calls.get() shouldBe 3
+    MapIntKey.publishedForTest shouldBe 0
+    HashReduce.byKeyCallsForTest shouldBe 0
+    calls.set(0)
+    val rows = counts(run(columnar = false)(reduced.collect()))
+    calls.get() shouldBe 3
+    columnar shouldBe rows
+    columnar shouldBe Map(1 -> 1, 4 -> 3, -5 -> 1)
   }
 
   private val present: DistCollection[(Int, Int)] =
