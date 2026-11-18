@@ -392,7 +392,7 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       None
   }
 
-  it should "count a long pair map from two long columns" in {
+  it should "count a long pair map without publishing the pair batch" in {
     val source = DistCollection.ofLongPairs(Array(1L, 2L, 1L, 3L), Array(10L, 20L, 30L, 40L), 1)
     val mapped = source.map((pair: (Long, Long)) => (pair._1 + 1L, pair._2))
     val changed = mapped.countByKey
@@ -403,7 +403,17 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val atBatch = (size: Int) => {
       ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size))
       ScarletRuntime.get.shuffle.clear()
-      countsOf(changed.collect())
+      LongPairProject.resetPublishedForTest()
+      LongHashCount.resetByKeyForTest()
+      val sink = new CountingSink
+      val previous = ColumnMetrics.install(sink)
+      val found =
+        try countsOf(changed.collect())
+        finally ColumnMetrics.restore(previous)
+      LongPairProject.publishedForTest shouldBe 0
+      LongHashCount.byKeyCallsForTest shouldBe 0
+      sink.fusedCount should be > 0L
+      found
     }
     val counted = atBatch(8192)
     counted shouldBe Map(2L -> 2, 3L -> 1, 4L -> 1)

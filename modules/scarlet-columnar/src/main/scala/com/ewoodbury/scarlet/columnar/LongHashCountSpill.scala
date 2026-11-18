@@ -21,15 +21,15 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * validity bit is not an absence bitmap, and this store does not write one. The merged batch is
  * the only result, so a failure during the fold publishes nothing.
  *
- * Only [[LongHashCount.byKey]] and [[LongHashCount.byKeySelected]] call this, and only for the
- * post-exchange bucket. The partial combine before the exchange stays in memory. One store is open
- * per over-budget bucket and is closed before the next bucket. Under-budget buckets open no store.
- * There is no probe side. The running partial is the result so far, so it is `O(distinct keys)`
- * and cannot be bounded by the budget. A morsel or a fold whose [[LongHashCount.inputRowBytes]]
- * estimate is over the budget throws [[ClosedKernelRefusal]] before its table is allocated. The
- * store deletes its files on that throw. [[HashExchange.partitionAllInt64]] materialises the
- * sub-partitioned copy, and [[ColumnBatches.slice]] materialises one piece's morsels as the fold
- * reaches that piece.
+ * [[LongHashCount.byKey]], [[LongHashCount.byKeySelected]], and [[ProjectedLongPairCount]] call
+ * this, and only for the post-exchange bucket. The partial combine before the exchange stays in
+ * memory. One store is open per over-budget bucket and is closed before the next bucket.
+ * Under-budget buckets open no store. There is no probe side. The running partial is the result so
+ * far, so it is `O(distinct keys)` and cannot be bounded by the budget. A morsel or a fold whose
+ * [[LongHashCount.inputRowBytes]] estimate is over the budget throws [[ClosedKernelRefusal]]
+ * before its table is allocated. The store deletes its files on that throw.
+ * [[HashExchange.partitionAllInt64]] materialises the sub-partitioned copy, and
+ * [[ColumnBatches.slice]] materialises one piece's morsels as the fold reaches that piece.
  */
 private[scarlet] object LongHashCountSpill:
 
