@@ -172,6 +172,7 @@ object MorselScheduler:
             HashAggregate.releaseSumWorkers()
             LongHashReduce.releaseOversized()
             HashCount.releaseWorkers()
+            LongHashCount.releaseWorkers()
             FoldedCount.releaseWorkers()
         finally
           onPool.set(false)

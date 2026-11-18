@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import com.ewoodbury.scarlet.core.ScarletConf
 
 /**
@@ -81,6 +83,7 @@ object LongHashCount:
       batchSize: Int,
   ): Vector[ColumnBatch] =
     requirePositive(numPartitions, parallelism, batchSize)
+    val _ = byKeyCalls.incrementAndGet()
     if (batches.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyLongCounts)
     else
       batches.foreach(requireKey)
@@ -116,6 +119,30 @@ object LongHashCount:
         addCounts,
       )
       finish(combined, numPartitions, parallelism, batchSize)
+
+  /**
+   * Count keys a caller supplies. No key column is read and no value is stored.
+   *
+   * `rows` is the estimate [[int64]] charges for one morsel. A non-positive estimate publishes an
+   * empty count batch and does not call `supply`. `supply` receives `add` and calls it once per
+   * present key. A null key is the caller's to skip. This is not [[byKey]]: nothing here is a
+   * published pair project.
+   */
+  private[scarlet] def partialKeys(rows: Int)(supply: (Long => Unit) => Unit): ColumnBatch =
+    require(rows >= 0, s"row estimate must be >= 0, got $rows")
+    if (rows == 0) then ColumnBatches.emptyLongCounts
+    else
+      refuse(rows.toLong)
+      val table = borrow(rows)
+      table.supplyKeys(supply)
+      table.compact()
+
+  /** [[byKey]] entries since the last [[resetByKeyForTest]]. */
+  private[scarlet] def byKeyCallsForTest: Int = byKeyCalls.get
+
+  /** Clears [[byKeyCallsForTest]]. */
+  private[scarlet] def resetByKeyForTest(): Unit =
+    byKeyCalls.set(0)
 
   /**
    * Estimated bytes of a count table for `rows` input keys.
@@ -178,7 +205,7 @@ object LongHashCount:
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
 
-  private def requireKey(batch: ColumnBatch): Unit =
+  private[scarlet] def requireKey(batch: ColumnBatch): Unit =
     val keyType = batch.schema.headOption.getOrElse {
       throw new ColumnarFallback("countByKey expects an Int64 key column")
     }
@@ -198,7 +225,7 @@ object LongHashCount:
    * budget that can hold one row skips this check. Morsels still refuse themselves, and an
    * over-budget bucket spills after the exchange.
    */
-  private def refuseBeforeCombine: Boolean =
+  private[scarlet] def refuseBeforeCombine: Boolean =
     val conf = ScarletConf.get
     !conf.spillEnabled || inputRowBytes(1L) > conf.spillBudgetBytes
 
@@ -208,10 +235,33 @@ object LongHashCount:
    * whole-input call when spill is on and a one-row table fits. A morsel, a partial combine, and a
    * spill fold still call this.
    */
-  private def refuse(rows: Long): Unit =
+  private[scarlet] def refuse(rows: Long): Unit =
     val budget = ScarletConf.get.spillBudgetBytes
     val bytes = inputRowBytes(rows)
     if (bytes > budget) then throw new ClosedKernelRefusal(rows, bytes, budget)
+
+  private val byKeyCalls = new AtomicInteger
+
+  /**
+   * One table per thread for [[partialKeys]]. A later morsel clears occupied slots instead of
+   * zeroing a new array. [[byKey]] still allocates. [[MorselScheduler]] drops the holder when a
+   * pool task returns, and [[releaseWorkers]] drops the caller's.
+   */
+  private val locals: ThreadLocal[Table | Null] = new ThreadLocal[Table | Null]()
+
+  private[columnar] def releaseWorkers(): Unit =
+    locals.remove()
+
+  private def borrow(rows: Int): Table =
+    val need = ColumnHash.tableSize(rows)
+    locals.get() match
+      case current: Table if current.accepts(need) =>
+        current.clear()
+        current
+      case _ =>
+        val created = new Table(need)
+        locals.set(created)
+        created
 
   private final class Table(capacity: Int):
     private val mask: Int = capacity - 1
@@ -221,6 +271,18 @@ object LongHashCount:
     private val state: Array[Byte] = new Array[Byte](capacity)
     private val slots: Array[Int] = new Array[Int](capacity)
     private var occupied: Int = 0
+
+    def accepts(need: Int): Boolean = keys.length >= need
+
+    /** Drops keys this batch inserted. The arrays stay, so the next batch does not zero them. */
+    def clear(): Unit =
+      var cursor = 0
+      val rows = occupied
+      while (cursor < rows) {
+        state(slots(cursor)) = 0
+        cursor += 1
+      }
+      occupied = 0
 
     def scanDense(keyColumn: Int64Column): Unit =
       val keyValues = keyColumn.values
@@ -309,6 +371,10 @@ object LongHashCount:
         Vector(Int64Column.of(outKeys, present, rows), Int32Column.of(outCounts, present, rows)),
         rows,
       )
+
+    /** Hands `add` to `supply`. The lambda stays inside [[Table]] so `add` stays private. */
+    def supplyKeys(supply: (Long => Unit) => Unit): Unit =
+      supply(key => add(key, 1))
 
     private def add(key: Long, weight: Int): Unit =
       val slot = locate(key)

@@ -148,6 +148,94 @@ object LongPairProject:
     }
     publish(schema, outKeys, outValues, keyWords, valueWords, length)
 
+  /**
+   * Runs `mapper` on `[start, start + length)` and passes each present projected key to `add`.
+   *
+   * The calls match [[project]]: a null key and a null value are passed in, and an empty range
+   * does not call `mapper`. The value cell is checked and dropped. A null projected key is not
+   * passed to `add`. A result that is not a pair of longs throws [[ColumnarFallback]] and
+   * publishes nothing. This does not allocate an output column.
+   */
+  private[scarlet] def visitKeys(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      mapper: LongPairMap,
+      add: Long => Unit,
+  ): Unit =
+    require(
+      batch.columns.length == 2,
+      s"pair project expected 2 columns, got ${batch.columns.length}",
+    )
+    val keys = int64At(batch, 0)
+    val values = int64At(batch, 1)
+    require(keys.length == values.length, "key and value columns differ in length")
+    Ranges.check(start, length, keys.length)
+    if (length == 0) then ()
+    else if (
+        Validity.rangePresent(keys.validity, start, length) &&
+        Validity.rangePresent(values.validity, start, length)
+      )
+    then visitDense(keys, values, start, length, mapper, add)
+    else visitSparse(keys, values, start, length, mapper, add)
+
+  private def visitDense(
+      keys: Int64Column,
+      values: Int64Column,
+      start: Int,
+      length: Int,
+      mapper: LongPairMap,
+      add: Long => Unit,
+  ): Unit =
+    val keyArr = keys.values
+    val valueArr = values.values
+    val end = start + length
+    var row = start
+    while (row < end) {
+      offer(mapper(keyArr(row), valueArr(row)), add)
+      row += 1
+    }
+
+  private def visitSparse(
+      keys: Int64Column,
+      values: Int64Column,
+      start: Int,
+      length: Int,
+      mapper: LongPairMap,
+      add: Long => Unit,
+  ): Unit =
+    val keyArr = keys.values
+    val valueArr = values.values
+    val keyIn = keys.validity.words
+    val valueIn = values.validity.words
+    val end = start + length
+    var row = start
+    while (row < end) {
+      val keyOn = Validity.isSet(keyIn, row)
+      val valueOn = Validity.isSet(valueIn, row)
+      val projected =
+        if (keyOn && valueOn) then mapper(keyArr(row), valueArr(row))
+        else if (keyOn) then mapper.applyNullValue(keyArr(row))
+        else if (valueOn) then mapper.applyNullKey(valueArr(row))
+        else mapper.applyNulls()
+      offer(projected, add)
+      row += 1
+    }
+
+  /** Keeps a present key. A null key is dropped. The value is only a type check. */
+  private def offer(projected: Any, add: Long => Unit): Unit =
+    projected match
+      case null => decline("null")
+      case row: Product if row.productArity == 2 =>
+        row.productElement(1) match
+          case null | _: Long => ()
+          case other => decline(foundName(other))
+        row.productElement(0) match
+          case null => ()
+          case present: Long => add(present)
+          case other => decline(foundName(other))
+      case other => decline(foundName(other))
+
   /** Bit 0 is a present key. Bit 1 is a present value. Any other shape declines. */
   private def write(projected: Any, keys: Array[Long], values: Array[Long], out: Int): Int =
     projected match

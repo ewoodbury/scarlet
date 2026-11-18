@@ -19,14 +19,15 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * from that project's input morsels. The interpreter's adapter runs on every row, including a null
  * key, and only the projected key is stored. The pair batch is not published. The function is not
  * inspected. A filter above that project, a flatMap, and a mapPartitions stay on the interpreted
- * path. A long-pair map is interpreted into two long columns. [[LongHashCount.byKey]] hashes that
- * key column and does not decode the pairs. A string-pair map does not lower. No filters and no
- * such map, a whole-row or string step, a non-int slot, and a null component the encoder throws on
- * stay on the old path. That path partial-counts survivor ids, including one row, key, or value
- * filter. A scan and a non-pair child stay on the dense count. The value column is not read on
- * that path, so a null value still counts. A long count publishes [[Columns.LongCounts]]. A string
- * count publishes [[Columns.StringPairs]]. The stored count is an `Int`. A null string key is
- * dropped and `""` is kept.
+ * path. A long-pair [[PhysicalOp.Project]] uses [[LongPairProject]] the same way and does not
+ * publish the pair batch. [[LongHashCount.byKey]] counts a long scan or filter and does not see
+ * that project. A string-pair map does not lower. No filters and no such map, a whole-row or
+ * string step, a non-int slot, and a null component the encoder throws on stay on the old path.
+ * That path partial-counts survivor ids, including one row, key, or value filter. A scan and a
+ * non-pair child stay on the dense count. The value column is not read on that path, so a null
+ * value still counts. A long count publishes [[Columns.LongCounts]]. A string count publishes
+ * [[Columns.StringPairs]]. The stored count is an `Int`. A null string key is dropped and `""` is
+ * kept.
  */
 private[execution] object CountByKeyArms:
 
@@ -80,18 +81,31 @@ private[execution] object CountByKeyArms:
                 )
         Columns.Pairs(counted)
       case PhysicalOp.Kind.LongPairs =>
-        val counted = FilterChain.selected(
+        val counted = countProjectedLong(
           source,
           child,
           selectedPartition,
           preserveAbsence,
           ordinals,
+          width,
+          workers,
+          batchSize,
         ) match
-          case Some(parts) => LongHashCount.byKeySelected(parts, width, workers, batchSize)
+          case Some(projected) => projected
           case None =>
-            val batches =
-              longPairsOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals))
-            LongHashCount.byKey(batches, width, workers, batchSize)
+            FilterChain.selected(
+              source,
+              child,
+              selectedPartition,
+              preserveAbsence,
+              ordinals,
+            ) match
+              case Some(parts) => LongHashCount.byKeySelected(parts, width, workers, batchSize)
+              case None =>
+                val batches = longPairsOf(
+                  interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),
+                )
+                LongHashCount.byKey(batches, width, workers, batchSize)
         Columns.LongCounts(counted)
       case PhysicalOp.Kind.StringPairs =>
         // A null int is not unboxed: string-pair encode reads productElement. This arm does not
@@ -225,6 +239,37 @@ private[execution] object CountByKeyArms:
           ProjectedPairCount.count(batches, adapted, width, workers, batchSize)
         case _ =>
           throw new IllegalStateException("pair project count expected int pairs")
+    }
+
+  /**
+   * One long-pair [[Plan.MapOp]]. The input of the project is interpreted, then each morsel is
+   * counted through [[LongPairProject.visitKeys]]. `None` when this child is not that project. A
+   * null key is passed to the adapter. The value cell is not stored. [[LongHashCount.byKey]] is
+   * not called.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def countProjectedLong(
+      source: Plan[_],
+      child: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    pairProject(source, child).map { (inner, under, fn) =>
+      val adapted = LongPairProject.adapt(fn)
+      val columns =
+        try interpretAt(inner, under, selectedPartition, preserveAbsence, ordinals)
+        catch
+          case _: NullPointerException =>
+            throw new ColumnarFallback("countByKey source has a null pair component")
+      columns match
+        case Columns.LongPairs(batches) =>
+          ProjectedLongPairCount.count(batches, adapted, width, workers, batchSize)
+        case _ =>
+          throw new IllegalStateException("pair project count expected long pairs")
     }
 
   /** The plan under a pair project and the function the interpreter would adapt. */
