@@ -1059,9 +1059,10 @@ private[execution] object ColumnarInterpreter:
       Columns.LongPairs(onEachMorsel(parts) { morsel =>
         LongPairProject.project(morsel.batch, morsel.start, morsel.length, adapted)
       })
+    case Columns.StringPairs(parts) => StringPairWalk.project(parts, mapper)
     case Columns.Bools(_) | Columns.LongCounts(_) | Columns.CountSums(_) | Columns.LongTriples(_) |
-        Columns.StringPairs(_) | Columns.StringTriples(_) | Columns.Outer(_, _) |
-        Columns.GroupedInts(_) | Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
+        Columns.StringTriples(_) | Columns.Outer(_, _) | Columns.GroupedInts(_) |
+        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
       throw new IllegalStateException(
         s"columnar map expects ${elementColumnList(includeBooleans = false)}",
       )
