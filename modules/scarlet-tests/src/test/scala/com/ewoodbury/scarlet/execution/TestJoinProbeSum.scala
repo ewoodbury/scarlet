@@ -15,8 +15,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Probe-time join sums against the row path.
  *
  * The oracle is a columnar-off `collect`, not a stored checksum. A null measured value that
- * matches adds as zero. A null that does not match stays columnar. Keys `0` and `80` share
- * a home slot in a 16-slot table and the same shuffle partition; their sums stay separate.
+ * matches adds as zero. A null that does not match stays columnar. Keys `0` and `80` share a home
+ * slot in a 16-slot table and the same shuffle partition; their sums stay separate.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Null"))
 class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
@@ -70,6 +70,13 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val rightSums = joined.sumJoinRight.collect().toMap
     rightSums shouldBe rowMap(joined.sumJoinRight)
     rightSums shouldBe Map(leftKey -> 8L, rightKey -> 30L)
+
+    val sorted = left.sortMergeJoin(right).sumJoinLeft
+    sorted.collect().toMap shouldBe leftSums
+    sorted.collect().toMap shouldBe rowMap(sorted)
+    val sortedArm = ColumnarPlanner.lower(sorted.plan).map(_.shape).getOrElse("")
+    sortedArm.contains("JoinProbeSum") shouldBe true
+    sortedArm.contains("SortMergeJoin") shouldBe false
   }
 
   it should "add zero for a null measured value only when that row matches" in {
@@ -105,6 +112,12 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       ColumnarPlanner.lower(summed.plan).isDefined shouldBe true
       ColumnarPlanner.tryRun(summed.plan) shouldBe None
       summed.collect().toMap shouldBe rowMap(summed)
+      val sorted = pairs(Array(1, 2), Array(10, 20))
+        .sortMergeJoin(pairs(Array(1, 2), Array(3, 4)))
+        .sumJoinLeft
+      ColumnarPlanner.lower(sorted.plan).isDefined shouldBe true
+      ColumnarPlanner.tryRun(sorted.plan).isEmpty shouldBe true
+      sorted.collect().toMap shouldBe rowMap(sorted)
     finally
       ScarletConf.set(saved)
       ScarletRuntime.get.shuffle.clear()
@@ -123,6 +136,9 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.tryRun(noLeft.plan).isDefined shouldBe true
     ColumnarPlanner.tryRun(noRight.plan).isDefined shouldBe true
     ColumnarPlanner.tryRun(neither.plan).isDefined shouldBe true
+    val sortedEmpty = empty.sortMergeJoin(present).sumJoinLeft
+    sortedEmpty.collect().toMap shouldBe rowMap(sortedEmpty)
+    ColumnarPlanner.tryRun(sortedEmpty.plan).isDefined shouldBe true
   }
 
   it should "sum a high-cardinality key set" in {
@@ -136,7 +152,7 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.tryRun(summed.plan).isDefined shouldBe true
   }
 
-  it should "drop a null key and stay off broadcast and sort-merge" in {
+  it should "drop a null key, hash an explicit sort-merge sum, and stay off broadcast" in {
     val joined = nullPairs(Seq(cell(1, 4), cell(null, 9)), Seq(cell(1, 2), cell(null, 8)))
     joined.sumJoinLeft.collect().toMap shouldBe Map(1 -> 4L)
     joined.sumJoinLeft.collect().toMap shouldBe rowMap(joined.sumJoinLeft)
@@ -145,11 +161,55 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val left = pairs(Array(1, 2), Array(10, 20))
     val right = pairs(Array(1), Array(3))
     val sorted = left.sortMergeJoin(right).sumJoinLeft
+    val sortedRight = left.sortMergeJoin(right).sumJoinRight
     val broadcast = left.broadcastJoin(right).sumJoinLeft
-    ColumnarPlanner.lower(sorted.plan).isEmpty shouldBe true
-    ColumnarPlanner.lower(broadcast.plan).isEmpty shouldBe true
+    val arm = ColumnarPlanner.lower(sorted.plan).map(_.shape).getOrElse("")
+    arm shouldBe "JoinProbeSumLeft(Exchange(Scan), Exchange(Scan))"
+    arm.contains("JoinProbeSum") shouldBe true
+    arm.contains("SortMergeJoin") shouldBe false
+    ColumnarPlanner.tryRun(sorted.plan).isDefined shouldBe true
+    sorted.collect().toMap shouldBe Map(1 -> 10L)
     sorted.collect().toMap shouldBe rowMap(sorted)
+    val rightArm = ColumnarPlanner.lower(sortedRight.plan).map(_.shape).getOrElse("")
+    rightArm shouldBe "JoinProbeSumRight(Exchange(Scan), Exchange(Scan))"
+    rightArm.contains("SortMergeJoin") shouldBe false
+    sortedRight.collect().toMap shouldBe Map(1 -> 3L)
+    sortedRight.collect().toMap shouldBe rowMap(sortedRight)
+    ColumnarPlanner.lower(broadcast.plan).isEmpty shouldBe true
+    ColumnarPlanner.tryRun(broadcast.plan).isEmpty shouldBe true
     broadcast.collect().toMap shouldBe rowMap(broadcast)
+
+    val sortedNull = nullPairs(
+      Seq(cell(1, 4), cell(null, 9)),
+      Seq(cell(1, 2), cell(null, 8)),
+      Some(Plan.JoinStrategy.SortMerge),
+    ).sumJoinLeft
+    sortedNull.collect().toMap shouldBe Map(1 -> 4L)
+    sortedNull.collect().toMap shouldBe rowMap(sortedNull)
+    ColumnarPlanner.tryRun(sortedNull.plan).isDefined shouldBe true
+
+    val sortedNullValue = nullPairs(
+      Seq(cell(2, 5), cell(1, null)),
+      Seq(cell(1, 1), cell(2, 1)),
+      Some(Plan.JoinStrategy.SortMerge),
+    ).sumJoinLeft
+    sortedNullValue.collect().toMap shouldBe Map(1 -> 0L, 2 -> 5L)
+    sortedNullValue.collect().toMap shouldBe rowMap(sortedNullValue)
+
+    val filtered = pairs(Array(1, 2, 3, 4), Array(10, -1, 7, 8))
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+      .sortMergeJoin(
+        pairs(Array(1, 2, 4, 5), Array(3, 60, 1, 9))
+          .filterKeys((key: Int) => key % 3 != 0)
+          .filterValues((value: Int) => value < 50),
+      )
+      .sumJoinLeft
+    ColumnarPlanner.lower(filtered.plan).map(_.shape) shouldBe Some(
+      "JoinProbeSumLeft(Exchange(FilterValue(FilterKey(Scan))), " +
+        "Exchange(FilterValue(FilterKey(Scan))))",
+    )
+    filtered.collect().toMap shouldBe rowMap(filtered)
   }
 
   it should "sum a remapped key from the probe without writing matches" in {
@@ -300,7 +360,8 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
   private def nullPairs(
       left: Seq[(Any, Any)],
       right: Seq[(Any, Any)],
+      strategy: Option[Plan.JoinStrategy] = None,
   ): DistCollection[(Int, (Int, Int))] =
     def source(rows: Seq[(Any, Any)]): DistCollection[(Int, Int)] =
       DistCollection(Plan.Source(Seq(Partition(rows))).asInstanceOf[Plan[(Int, Int)]])
-    source(left).join(source(right))
+    DistCollection(Plan.JoinOp(source(left).plan, source(right).plan, strategy))
