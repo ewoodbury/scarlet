@@ -115,6 +115,22 @@ private[execution] object CountByKeyArms:
         )
 
   /**
+   * Present keys [[columns]] publishes for an int-pair source. Each occupied slot of the count
+   * table is one row. A null key is absent here.
+   */
+  private[execution] def groupRows(
+      source: Plan[_],
+      child: PhysicalOp,
+      ordinals: Set[Int],
+  ): Long =
+    columns(source, child, None, false, ordinals) match
+      case Columns.Pairs(batches) => ColumnReduce.count(batches)
+      case other =>
+        throw new IllegalStateException(
+          s"distinct key count expected int pairs, found $other",
+        )
+
+  /**
    * True when [[tryFold]] has a source scan, or a pair project is counted without its batch. That
    * is a non-empty int slot stack whose child is not a map, one [[Plan.MapValuesOp]] whose child
    * is not a map, one [[Plan.MapIntKeyOp]] whose filters are int slots and whose child is not a
