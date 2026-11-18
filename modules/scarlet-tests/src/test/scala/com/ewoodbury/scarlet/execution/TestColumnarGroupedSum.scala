@@ -21,22 +21,33 @@ class TestColumnarGroupedSum
     ()
 
   "the columnar contract" should "keep fused grouped sum action-level and bounded take on its accepted physical shape" in {
-    // A pair map that stays (Int, Int) is refused by lower, so partitioning and tryRun are the
-    // row path. tryGroupedSum still fuses that map. The peel label names the walked steps.
+    // A pair map that stays (Int, Int) lowers. tryGroupedSum still fuses that map. The peel label
+    // names the walked steps, not the physical project.
     val mappedPairs =
       Plan.MapOp(pairSource, (pair: (Int, Int)) => (pair._1 + 1, pair._2 + pair._1))
-    ColumnarPlanner.partitioning(mappedPairs) shouldBe Option.empty[PartitioningInfo]
-    ColumnarPlanner.lower(mappedPairs) shouldBe Option.empty[PhysicalOp]
-    ColumnarPlanner.tryRun(mappedPairs) shouldBe None
+    ColumnarPlanner.lower(mappedPairs).map(_.shape) shouldBe Some("Project(Scan)")
+    ColumnarPlanner.tryRun(mappedPairs).map(_.flatMap(_.data).toList) shouldBe Some(
+      rowResult(mappedPairs).toList,
+    )
+    ColumnarPlanner.tryTake(mappedPairs, 1) shouldBe Some(Seq(2 -> 11))
     ColumnarPlanner.tryGroupedSum(mappedPairs) shouldBe Some(66L)
     ColumnarPlanner.groupedSumPeel(mappedPairs) shouldBe Some("GroupedSum(MapPair(Scan))")
 
-    // A type-changing pair map is excluded. lower refuses it, and tryGroupedSum does not fuse it.
-    // The peel label is the walked MapPair step, not an action shape.
+    // Erasure admits (Int, Int) => (Long, Int). The kernel declines, and tryGroupedSum does not
+    // fuse it. The peel label is the walked MapPair step, not an action shape.
     val widenedPairs = Plan.MapOp(pairSource, (pair: (Int, Int)) => (pair._1.toLong, pair._2))
-    assertRowPath(widenedPairs)
+    ColumnarPlanner.lower(widenedPairs).map(_.shape) shouldBe Some("Project(Scan)")
+    ColumnarPlanner.tryRun(widenedPairs) shouldBe None
     ColumnarPlanner.tryGroupedSum(widenedPairs) shouldBe None
     ColumnarPlanner.groupedSumPeel(widenedPairs) shouldBe Some("GroupedSum(MapPair(Scan))")
+    DistCollection(widenedPairs).collect().toList shouldBe rowResult(widenedPairs).toList
+
+    ColumnarPlanner.lower(
+      Plan.MapOp(longPairSource, (pair: (Long, Long)) => (pair._1, pair._2)),
+    ) shouldBe None
+    ColumnarPlanner.lower(
+      Plan.MapOp(stringKeySource, (pair: (String, Int)) => (pair._1, pair._2)),
+    ) shouldBe None
 
     ColumnarPlanner.tryGroupedSum(pairSource) shouldBe Some(60L)
     ColumnarPlanner.groupedSumPeel(pairSource) shouldBe Some("GroupedSum(Scan)")

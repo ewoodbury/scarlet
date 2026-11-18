@@ -207,7 +207,7 @@ class TestSelectionPushdown extends AnyFlatSpec with Matchers with BeforeAndAfte
     val op = ColumnarPlanner.lower(plan).getOrElse(fail("expected a columnar plan"))
     ColumnUse.ordinals(plan, op)
 
-  /** A pair `map` does not lower. This is `keys` or `values` above `Project` of the pair scan. */
+  /** `keys` or `values` above `Project` of the pair scan. The pair map lowers to that shape. */
   private def projectedMap(source: DistCollection[_], ordinal: Int): PhysicalOp =
     PhysicalOp.Column(PhysicalOp.Project(pairScan(source)), ordinal)
 

@@ -26,9 +26,10 @@ object ColumnarPlanner:
    * physical tree and that tree's layout is valid. `None` means the plan is not accepted, which is
    * the row path. There is no second layout source. A string filter or map reports
    * [[Layout.Utf8Dict]]. An int, long, boolean, double, or int-pair plan reports
-   * [[Layout.Columnar]]. A long-pair plan reports that layout too. A pair map, including one that
-   * [[tryGroupedSum]] fuses and one that changes `(Int, Int)` to another pair type, is not
-   * accepted, so this is `None`.
+   * [[Layout.Columnar]]. A long-pair plan reports that layout too. An `(Int, Int)` pair map whose
+   * function declares `apply(Tuple2): Tuple2` is accepted and stays [[PhysicalOp.Kind.Pairs]]. A
+   * long-pair or string-pair map is `None`. Erasure also accepts `(Long, Int)`; the kernel
+   * declines that cell.
    */
   def partitioning[A](plan: Plan[A]): Option[PartitioningInfo] =
     accepted(plan).map(infoOf)
@@ -379,10 +380,10 @@ object ColumnarPlanner:
    * steps. A 2-tuple of `Int` or null still witnesses a pair, so a leading null does not refuse
    * the encode. Any other cell type fails. This does not decode. A mistyped function throws
    * `ClassCastException` and is refused after any rows it already touched. Any other shape is
-   * refused. A pair map that stays `(Int, Int)` is the case [[lower]] refuses while this still
-   * succeeds. There is no layout for that map. [[groupedSumPeel]] labels the walked steps and is
-   * not this action. A map to another pair type, such as `(Long, Int)`, throws
-   * [[ColumnarFallback]] from the pair unbox and this catch returns `None`.
+   * refused. A pair map that stays `(Int, Int)` lowers as well, and this sum still fuses it.
+   * [[groupedSumPeel]] labels the walked steps and is not this action. A map to another pair type,
+   * such as `(Long, Int)`, throws [[ColumnarFallback]] from the pair unbox and this catch returns
+   * `None`. Erasure still lets [[lower]] accept that map.
    */
   def tryGroupedSum(plan: Plan[_]): Option[Long] =
     if (!ScarletConf.get.columnarExecution) then None
@@ -512,8 +513,9 @@ object ColumnarPlanner:
   /**
    * Pair filters and pair maps above `base`, in source order. A filter prefix is
    * [[PredicatePlan.pairKeeps]]: one [[PredicatePlan.compile]], then [[PredicatePlan.pairSteps]].
-   * The map arm is cast here and called later, during the aggregate scan. [[lower]] refuses that
-   * map. A function that is not `(Int, Int)` throws [[ColumnarFallback]] when the scan unboxes it.
+   * The map arm is cast here and called later, during the aggregate scan. A function that is not
+   * `(Int, Int)` throws [[ColumnarFallback]] when the scan unboxes it. [[lower]] does not use this
+   * peel.
    */
   private[execution] def peelPairOps(plan: Plan[_]): (Plan[_], List[PairStep]) =
     @tailrec
@@ -551,9 +553,9 @@ object ColumnarPlanner:
    * not a [[com.ewoodbury.scarlet.core.Plan]] node, and not a [[PhysicalOp]]. `None` means the
    * plan is not that peel: columnar execution is off, or the base is not a grouped pair source. An
    * int-pair source is `GroupedSum(Scan)`. Pair filters and a pair map wrap it, in source order,
-   * as `FilterRow`, `FilterKey`, `FilterValue`, or `MapPair`. [[lower]] refuses the map, so
-   * [[partitioning]] is `None`. [[tryGroupedSum]] still runs a map that stays `(Int, Int)`. A
-   * type-changing pair map keeps this peel label, and its run returns `None`.
+   * as `FilterRow`, `FilterKey`, `FilterValue`, or `MapPair`. [[tryGroupedSum]] runs a map that
+   * stays `(Int, Int)`. A type-changing pair map keeps this peel label, and its run returns
+   * `None`.
    */
   def groupedSumPeel(plan: Plan[_]): Option[String] =
     GroupedSumPeel.of(plan)
@@ -906,10 +908,13 @@ object ColumnarPlanner:
                   Some(PhysicalOp.Filter(child, PhysicalOp.Slot.TripleRow))
                 case None => None
             case _ => None
-        case ElementStep.Project(_) =>
-          Option.when(child.kind == PhysicalOp.Kind.Triples && child.isInnerTriple)(
-            PhysicalOp.Project(child),
-          )
+        case ElementStep.Project(mapper) =>
+          child.kind match
+            case PhysicalOp.Kind.Triples if child.isInnerTriple =>
+              Some(PhysicalOp.Project(child))
+            case PhysicalOp.Kind.Pairs if returnsIntPair(mapper) =>
+              Some(PhysicalOp.Project(child))
+            case _ => None
 
   private def tripleFilterSlot(predicate: Any): Option[PhysicalOp.Slot] = predicate match
     case recognized: IntJoinTriplePredicate[?] =>
@@ -1001,6 +1006,14 @@ object ColumnarPlanner:
   /** Unboxed `Int => Int` via [[FunctionWitness]], same as an int element project. */
   private def returnsUnboxedInt(function: Any): Boolean =
     FunctionWitness.declaredElement(PhysicalOp.Kind.Ints, function)
+
+  /**
+   * `Tuple2 => Tuple2` via [[FunctionWitness]], the same witness shape as [[returnsUnboxedInt]].
+   * Erasure does not separate `(Int, Int)` from `(Long, Int)`. The pair kernel declines a cell
+   * that is not an int. This does not call `function` and does not read its body.
+   */
+  private def returnsIntPair(function: Any): Boolean =
+    FunctionWitness.declaredElement(PhysicalOp.Kind.Pairs, function)
 
   /** Unboxed `Long => Long` via [[FunctionWitness]], same as a long element project. */
   private def returnsUnboxedLong(function: Any): Boolean =

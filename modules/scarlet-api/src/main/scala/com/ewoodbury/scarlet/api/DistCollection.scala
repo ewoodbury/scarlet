@@ -143,9 +143,9 @@ final case class DistCollection[A](plan: Plan[A]):
 
   /**
    * Maps the key of an `(Int, Int)` pair. A null key stays null and `f` is not called. The value
-   * is unchanged. Generic [[map]] of a pair stays an opaque [[Plan.MapOp]] and does not lower.
-   * This drops a hash partitioner, because the key changed: `partitionBy`, then this map, then
-   * `countByKey` shuffles on the new key.
+   * is unchanged. Generic [[map]] of an `(Int, Int)` pair is a [[Plan.MapOp]] and lowers when the
+   * function declares `Tuple2 => Tuple2`. This drops a hash partitioner, because the key changed:
+   * `partitionBy`, then this map, then `countByKey` shuffles on the new key.
    */
   def mapIntKey(f: Int => Int)(using ev: A =:= (Int, Int)): DistCollection[(Int, Int)] =
     DistCollection(Plan.MapIntKeyOp(kvPlan, f))
