@@ -17,6 +17,12 @@ package com.ewoodbury.scarlet.columnar
  * Partials are combined per input batch, exchanged on the key, then merged. Empty input is
  * `numPartitions` empty batches of this schema. There is no spill path: a partial is
  * `O(distinct keys)`.
+ *
+ * [[byKeyOwned]] is that aggregate over fully present arrays. The stripe walk aliases those
+ * arrays, applies an int slot stack inside the scan, and observes into the thread-local table. It
+ * does not copy either column and it does not build a survivor index. A null key or a null value
+ * never reaches that walk. The encoded scans below still drop a null key and count a null value
+ * without adding it.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object CountSum:
@@ -89,6 +95,29 @@ object CountSum:
         merge,
       )
       finish(combined, numPartitions, parallelism)
+
+  /**
+   * [[byKey]] for fully present owned arrays.
+   *
+   * `steps` may be empty, which observes every row. A non-empty stack is int key and value slots
+   * in source order. One worker stripe folds into one partial, so a repeated key updates the
+   * thread-local table instead of being concatenated across morsels. [[HashExchange.partitionAll]]
+   * still concatenates each shuffle bucket. `batchSize` is the planner morsel width. The stripe is
+   * not cut into those morsels: the table grows with distinct keys, not with the morsel.
+   */
+  private[scarlet] def byKeyOwned(
+      parts: Vector[(Array[Int], Array[Int])],
+      steps: List[Selection.Step],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    val partials = OwnedCountSum.fold(parts, steps, parallelism, () => open(), publish)
+    if (partials.isEmpty) then Vector.fill(numPartitions)(emptyBatch())
+    else finish(partials, numPartitions, parallelism)
 
   private def finish(
       combined: Vector[ColumnBatch],
