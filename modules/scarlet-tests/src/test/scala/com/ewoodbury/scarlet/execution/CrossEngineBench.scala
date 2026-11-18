@@ -17,10 +17,12 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * Each query builds its own input and drops it before the next query starts. `encode_ms` times one
  * encode of that input before warmup and is not subtracted from the action. The action timer still
  * includes the scan encode. A columnar action that publishes no column batch and folds nothing
- * fails the process. A plan [[ColumnarPlanner]] declines is not timed: `batches`, `fused`, and
- * `arm` say `row`, and one execution supplies the checksum. That run is not a speed.
- * `CROSS_TIME_ROW=true` times that decline with the same warmup, rounds, and steady window. The
- * arm stays `row`. A published batch on a declined plan still fails the process.
+ * fails the process. When [[ColumnarPlanner]] declines a plan, the arm is `row`. That is not a
+ * measurement. The run fails unless the shape is listed in [[rowArms]] with a reason. An
+ * allowlisted decline is not timed: `batches` and `fused` say `row`, and one execution supplies
+ * the checksum. `CROSS_TIME_ROW=true` times that listed decline with the same warmup, rounds, and
+ * steady window. The arm stays `row`. A published batch on a declined plan still fails the
+ * process. Stderr prints a summary table whose arm column is the same value as the JSON `arm`.
  *
  * Owned int arrays use [[BatchCodec.intPairs]]. Owned long arrays use
  * [[BatchCodec.copiedLongPairs]], the scan's array encode. A null long value is timed with
@@ -57,7 +59,7 @@ object CrossEngineBench:
   private val batchSize = 8192
   private val sourcePartitions = 2
   private val nullStride = 4096
-  private val queryNames = Vector(
+  private[execution] val queryNames = Vector(
     "filter-count",
     "filter-sum",
     "filter-groupbykey",
@@ -72,6 +74,21 @@ object CrossEngineBench:
     "filter-keymod",
     "filter-joinagg",
   )
+
+  /**
+   * Scored shapes that still report `row`.
+   *
+   * An entry is debt. `reason` says why [[ColumnarPlanner]] declines that shape.
+   * [[TestCrossEngineRowDebt]] fails once the shape lowers, so the entry has to come off.
+   * A shape that reports `row` and is absent here fails the run.
+   *
+   * Empty. The thirteen names in [[queryNames]] lower for one filter and for two, with a null
+   * value and without one. `filter-joinagg` with nulls is refused before a plan exists, so it
+   * has no arm. `filter-keymod` and `filter-joinagg` used to decline. Both lower now.
+   */
+  private[execution] final case class RowArm(shape: String, reason: String)
+
+  private[execution] val rowArms: Vector[RowArm] = Vector.empty
 
   private final case class Settings(
       rows: Int,
@@ -125,7 +142,9 @@ object CrossEngineBench:
         ),
       )
       ScarletRuntime.set(savedRuntime.copy(scheduler = scheduler))
-      println(render(settings, run(settings)))
+      val results = run(settings)
+      System.err.println(humanSummary(results))
+      println(render(settings, results))
     catch case _: HarnessRefusal => status = 1
     finally
       try scheduler.shutdown().unsafeRunSync()
@@ -149,7 +168,8 @@ object CrossEngineBench:
     val sample = measure(name, built, settings.warmup, settings.rounds, settings.timeRow)
     val endUptime = java.lang.management.ManagementFactory.getRuntimeMXBean.getUptime
     System.err.println(
-      s"QUERY_END $name ${System.currentTimeMillis()} uptime=$endUptime p50=${sample.p50Ms} checksum=${sample.checksum}",
+      s"QUERY_END $name ${System.currentTimeMillis()} uptime=$endUptime " +
+        s"p50=${sample.p50Ms} checksum=${sample.checksum} arm=${sample.arm}",
     )
     sample
 
@@ -389,16 +409,57 @@ object CrossEngineBench:
       rounds: Int,
       timeRow: Boolean,
   ): Sample =
-    armOf(built.plan) match
+    val arm = armOf(built.plan)
+    rowArmRefusal(name, arm).foreach(refuse)
+    arm match
       case None if timeRow => timedSample(name, built, "row", warmup, rounds, columnar = false)
       case None => rowSample(name, built)
       case Some(shape) => timedSample(name, built, shape, warmup, rounds, columnar = true)
 
   /**
+   * `Some` when a scored shape reports `row` and [[rowArms]] does not list it. A columnar arm
+   * returns `None` without reading the list. The lookup sits outside the timed loop.
+   */
+  private[execution] def rowArmRefusal(name: String, arm: Option[String]): Option[String] =
+    arm match
+      case Some(_) => None
+      case None => unlistedRow(name, rowArms.map(_.shape))
+
+  /** `Some` when `name` reports `row` and `listed` does not contain it. */
+  private[execution] def unlistedRow(name: String, listed: Seq[String]): Option[String] =
+    if (listed.contains(name)) then None
+    else
+      Some(
+        s"$name reports arm=row and is not on the row-arm allowlist. " +
+          "A row fallback is not a scored measurement.",
+      )
+
+  /**
+   * Plan [[build]] would time for `name`, without running it. `filter-joinagg` with nulls
+   * refuses before a plan exists.
+   */
+  private[execution] def scoredPlan(
+      name: String,
+      rows: Int,
+      filters: Int,
+      nulls: Boolean,
+  ): Plan[_] =
+    build(name, Settings(rows, filters, nulls, None, 0, 0, false)).plan
+
+  /** [[armOf]] of [[scoredPlan]]. `None` is `row`. */
+  private[execution] def scoredArm(
+      name: String,
+      rows: Int,
+      filters: Int,
+      nulls: Boolean,
+  ): Option[String] =
+    armOf(scoredPlan(name, rows, filters, nulls))
+
+  /**
    * Physical shape when [[ColumnarPlanner]] accepts `plan`. `None` is the row path, including a
    * lowered tree whose layout is invalid. This does not run the plan.
    */
-  private def armOf(plan: Plan[_]): Option[String] =
+  private[execution] def armOf(plan: Plan[_]): Option[String] =
     ColumnarPlanner.partitioning(plan) match
       case None => None
       case Some(_) => ColumnarPlanner.lower(plan).map(_.shape)
@@ -411,7 +472,7 @@ object CrossEngineBench:
     val observed = observe(built.action)
     if (observed.batches != 0L || observed.fused != 0L) then
       refuse(s"$name declined but published batches=${observed.batches} fused=${observed.fused}")
-    System.err.println(s"ROW $name checksum=${checksumOf(observed.value)}")
+    System.err.println(s"ROW $name arm=row checksum=${checksumOf(observed.value)}")
     Sample(
       Double.NaN,
       checksumOf(observed.value),
@@ -613,6 +674,18 @@ object CrossEngineBench:
   private def boxedInt(value: Int): java.lang.Integer = java.lang.Integer.valueOf(value)
 
   private def boxedLong(value: Long): java.lang.Long = java.lang.Long.valueOf(value)
+
+  /** One row per shape. The arm column is the JSON `arm`, including `row`. */
+  private def humanSummary(results: Vector[(String, Sample)]): String =
+    val header = Vector(
+      "| shape | arm | p50_ms | checksum | steady |",
+      "| --- | --- | ---: | ---: | --- |",
+    )
+    val body = results.map { case (name, sample) =>
+      val p50 = jsonDouble(sample.p50Ms)
+      s"| $name | ${sample.arm} | $p50 | ${sample.checksum} | ${sample.verdict} |"
+    }
+    (header ++ body).mkString("\n")
 
   private def render(settings: Settings, results: Vector[(String, Sample)]): String =
     val body = results.map { case (name, sample) => queryJson(name, sample) }.mkString(",\n")
