@@ -28,9 +28,11 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * [[byKeyOwnedMapped]] is [[byKeyOwned]] after an int key function. [[byKeyMapped]] is the same
  * aggregate over encoded morsels: a null key is not passed to the function, and a null value is
- * counted and not added. [[suppliedPartial]] is that aggregate for pairs a caller projects. A null
- * projected key is the caller's to drop. A null projected value is counted and not added. None of
- * these call [[byKey]], so a published pair batch is not the input.
+ * counted and not added. [[byKeyOwnedMappedAbove]] and [[byKeyMappedAbove]] run one int slot after
+ * that function. A key slot sees the mapped key. A value slot sees the original value. None of
+ * these call [[byKey]], so a published pair batch is not the input. [[suppliedPartial]] is that
+ * aggregate for pairs a caller projects. A null projected key is the caller's to drop. A null
+ * projected value is counted and not added.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object CountSum:
@@ -200,6 +202,63 @@ object CountSum:
       finish(combined, numPartitions, parallelism)
 
   /**
+   * [[byKeyOwnedMapped]] after one int slot above the key function. `under` sees the source and
+   * may be empty. `above` is an int key or value. This does not call [[byKey]].
+   */
+  private[scarlet] def byKeyOwnedMappedAbove(
+      parts: Vector[(Array[Int], Array[Int])],
+      under: List[Selection.Step],
+      above: Selection.Step,
+      mapKey: Int => Int,
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    val partials = MappedAboveCountSum.foldOwned(
+      parts,
+      under,
+      above,
+      mapKey,
+      parallelism,
+      () => open(),
+      publish,
+    )
+    if (partials.isEmpty) then Vector.fill(numPartitions)(emptyBatch())
+    else finish(partials, numPartitions, parallelism)
+
+  /**
+   * [[byKeyMapped]] after one int slot above the key function. `under` may be empty. A null key is
+   * not passed to `mapKey` or to a key slot. A value slot still sees that row. A null value the
+   * slot keeps is counted and not added. This does not call [[byKey]].
+   */
+  private[scarlet] def byKeyMappedAbove(
+      batches: Vector[ColumnBatch],
+      under: List[Selection.Step],
+      above: Selection.Step,
+      mapKey: Int => Int,
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    if (batches.isEmpty) then Vector.fill(numPartitions)(emptyBatch())
+    else
+      val prepared = MappedAboveCountSum.prepare(under, above)
+      val combined = PartialCombine.perBatch(
+        batches,
+        batchSize,
+        parallelism,
+        batch => abovePartial(batch, prepared, mapKey),
+        merge,
+      )
+      finish(combined, numPartitions, parallelism)
+
+  /**
    * One partial from rows the caller supplies. No pair column is read.
    *
    * `rows` of zero publishes an empty count-sum batch and does not call `supply`. `supply`
@@ -247,6 +306,17 @@ object CountSum:
   /** Clears [[byKeyCallsForTest]]. */
   private[scarlet] def resetByKeyForTest(): Unit =
     byKeyCalls.set(0)
+
+  private def abovePartial(
+      batch: ColumnBatch,
+      prepared: MappedAboveCountSum.Prepared,
+      mapKey: Int => Int,
+  ): ColumnBatch =
+    if (batch.length == 0) then emptyBatch()
+    else
+      val table = open()
+      MappedAboveCountSum.scan(batch, prepared, mapKey, table)
+      publish(table)
 
   private def mappedPartial(
       batch: ColumnBatch,
