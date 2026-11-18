@@ -52,6 +52,9 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     joined.sumJoinRight.collect().toMap shouldBe Map(1 -> 8L, 2 -> 11L)
     joined.sumJoinRight.collect().toMap shouldBe rowMap(joined.sumJoinRight)
     ColumnarPlanner.tryRun(joined.sumJoinLeft.plan).isDefined shouldBe true
+    ColumnarPlanner.lower(joined.sumJoinLeft.plan).map(_.shape) shouldBe Some(
+      "JoinProbeSumLeft(Exchange(Scan), Exchange(Scan))",
+    )
   }
 
   it should "keep two keys that share a hash slot" in {
@@ -77,6 +80,13 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val sortedArm = ColumnarPlanner.lower(sorted.plan).map(_.shape).getOrElse("")
     sortedArm.contains("JoinProbeSum") shouldBe true
     sortedArm.contains("SortMergeJoin") shouldBe false
+
+    val broadcast = left.broadcastJoin(right).sumJoinLeft
+    broadcast.collect().toMap shouldBe leftSums
+    broadcast.collect().toMap shouldBe rowMap(broadcast)
+    val broadcastArm = ColumnarPlanner.lower(broadcast.plan).map(_.shape).getOrElse("")
+    broadcastArm.contains("JoinProbeSum") shouldBe true
+    broadcastArm.contains("Exchange") shouldBe false
   }
 
   it should "add zero for a null measured value only when that row matches" in {
@@ -90,6 +100,15 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     matched.sumJoinLeft.collect().toMap shouldBe Map(1 -> 0L, 2 -> 5L)
     matched.sumJoinLeft.collect().toMap shouldBe rowMap(matched.sumJoinLeft)
     ColumnarPlanner.tryRun(matched.sumJoinLeft.plan).isDefined shouldBe true
+
+    val broadcastMatched = nullPairs(
+      Seq(cell(2, 5), cell(1, null)),
+      Seq(cell(1, 1), cell(2, 1)),
+      Some(Plan.JoinStrategy.Broadcast),
+    ).sumJoinLeft
+    broadcastMatched.collect().toMap shouldBe Map(1 -> 0L, 2 -> 5L)
+    broadcastMatched.collect().toMap shouldBe rowMap(broadcastMatched)
+    ColumnarPlanner.tryRun(broadcastMatched.plan).isDefined shouldBe true
   }
 
   it should "sum a match when the unmeasured side is null" in {
@@ -139,6 +158,9 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val sortedEmpty = empty.sortMergeJoin(present).sumJoinLeft
     sortedEmpty.collect().toMap shouldBe rowMap(sortedEmpty)
     ColumnarPlanner.tryRun(sortedEmpty.plan).isDefined shouldBe true
+    val broadcastEmpty = empty.broadcastJoin(present).sumJoinLeft
+    broadcastEmpty.collect().toMap shouldBe rowMap(broadcastEmpty)
+    ColumnarPlanner.tryRun(broadcastEmpty.plan).isDefined shouldBe true
   }
 
   it should "sum a high-cardinality key set" in {
@@ -150,9 +172,14 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val summed = pairs(keys, values).join(pairs(probeKeys, probeValues)).sumJoinLeft
     summed.collect().toMap shouldBe rowMap(summed)
     ColumnarPlanner.tryRun(summed.plan).isDefined shouldBe true
+    val broadcast = pairs(keys, values)
+      .broadcastJoin(pairs(probeKeys, probeValues))
+      .sumJoinLeft
+    broadcast.collect().toMap shouldBe rowMap(broadcast)
+    ColumnarPlanner.tryRun(broadcast.plan).isDefined shouldBe true
   }
 
-  it should "drop a null key, hash an explicit sort-merge sum, and stay off broadcast" in {
+  it should "drop a null key, hash an explicit sort-merge sum, and probe a broadcast sum" in {
     val joined = nullPairs(Seq(cell(1, 4), cell(null, 9)), Seq(cell(1, 2), cell(null, 8)))
     joined.sumJoinLeft.collect().toMap shouldBe Map(1 -> 4L)
     joined.sumJoinLeft.collect().toMap shouldBe rowMap(joined.sumJoinLeft)
@@ -163,6 +190,7 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val sorted = left.sortMergeJoin(right).sumJoinLeft
     val sortedRight = left.sortMergeJoin(right).sumJoinRight
     val broadcast = left.broadcastJoin(right).sumJoinLeft
+    val broadcastRight = left.broadcastJoin(right).sumJoinRight
     val arm = ColumnarPlanner.lower(sorted.plan).map(_.shape).getOrElse("")
     arm shouldBe "JoinProbeSumLeft(Exchange(Scan), Exchange(Scan))"
     arm.contains("JoinProbeSum") shouldBe true
@@ -175,9 +203,28 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     rightArm.contains("SortMergeJoin") shouldBe false
     sortedRight.collect().toMap shouldBe Map(1 -> 3L)
     sortedRight.collect().toMap shouldBe rowMap(sortedRight)
-    ColumnarPlanner.lower(broadcast.plan).isEmpty shouldBe true
-    ColumnarPlanner.tryRun(broadcast.plan).isEmpty shouldBe true
+    val broadcastArm = ColumnarPlanner.lower(broadcast.plan).map(_.shape).getOrElse("")
+    broadcastArm shouldBe "JoinProbeSumLeft(Scan, Scan)"
+    broadcastArm.contains("JoinProbeSum") shouldBe true
+    broadcastArm.contains("Exchange") shouldBe false
+    ColumnarPlanner.tryRun(broadcast.plan).isDefined shouldBe true
+    broadcast.collect().toMap shouldBe Map(1 -> 10L)
     broadcast.collect().toMap shouldBe rowMap(broadcast)
+    val broadcastRightArm = ColumnarPlanner.lower(broadcastRight.plan).map(_.shape).getOrElse("")
+    broadcastRightArm shouldBe "JoinProbeSumRight(Scan, Scan)"
+    broadcastRightArm.contains("Exchange") shouldBe false
+    ColumnarPlanner.tryRun(broadcastRight.plan).isDefined shouldBe true
+    broadcastRight.collect().toMap shouldBe Map(1 -> 3L)
+    broadcastRight.collect().toMap shouldBe rowMap(broadcastRight)
+
+    val broadcastNull = nullPairs(
+      Seq(cell(1, 4), cell(null, 9)),
+      Seq(cell(1, 2), cell(null, 8)),
+      Some(Plan.JoinStrategy.Broadcast),
+    ).sumJoinLeft
+    broadcastNull.collect().toMap shouldBe Map(1 -> 4L)
+    broadcastNull.collect().toMap shouldBe rowMap(broadcastNull)
+    ColumnarPlanner.tryRun(broadcastNull.plan).isDefined shouldBe true
 
     val sortedNull = nullPairs(
       Seq(cell(1, 4), cell(null, 9)),
@@ -210,6 +257,42 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
         "Exchange(FilterValue(FilterKey(Scan))))",
     )
     filtered.collect().toMap shouldBe rowMap(filtered)
+
+    val broadcastFiltered = pairs(Array(1, 2, 3, 4), Array(10, -1, 7, 8))
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+      .broadcastJoin(
+        pairs(Array(1, 2, 4, 5), Array(3, 60, 1, 9))
+          .filterKeys((key: Int) => key % 3 != 0)
+          .filterValues((value: Int) => value < 50),
+      )
+      .sumJoinLeft
+    ColumnarPlanner.lower(broadcastFiltered.plan).map(_.shape) shouldBe Some(
+      "JoinProbeSumLeft(FilterValue(FilterKey(Scan)), FilterValue(FilterKey(Scan)))",
+    )
+    broadcastFiltered.collect().toMap shouldBe rowMap(broadcastFiltered)
+  }
+
+  it should "fall back when a broadcast build exceeds the broadcast budget" in {
+    val saved = ScarletConf.get
+    try
+      val left = pairs(Array(1, 2), Array(10, 20))
+      val right = pairs(Array(1), Array(3))
+      val summed = left.broadcastJoin(right).sumJoinLeft
+      val estimate = HashJoin.retainedBuildBytes(2)
+      ScarletConf.set(saved.copy(broadcastBuildBudgetBytes = estimate - 1L))
+      ScarletRuntime.get.shuffle.clear()
+      ColumnarPlanner.lower(summed.plan).map(_.shape) shouldBe Some(
+        "JoinProbeSumLeft(Scan, Scan)",
+      )
+      ColumnarPlanner.tryRun(summed.plan) shouldBe None
+      summed.collect().toMap shouldBe rowMap(summed)
+      val emptyLeft = pairs(Array.empty[Int], Array.empty[Int]).broadcastJoin(right).sumJoinLeft
+      ColumnarPlanner.tryRun(emptyLeft.plan).isDefined shouldBe true
+      emptyLeft.collect().toMap shouldBe rowMap(emptyLeft)
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
   }
 
   it should "sum a remapped key from the probe without writing matches" in {
@@ -222,6 +305,14 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.tryRun(remapped.plan).isDefined shouldBe true
     remapped.collect().toMap shouldBe Map(1 -> 18L)
     remapped.collect().toMap shouldBe rowMap(remapped)
+
+    val broadcastMapped = mapped.broadcastJoin(right).sumJoinLeft
+    ColumnarPlanner.lower(broadcastMapped.plan).map(_.shape) shouldBe Some(
+      "JoinProbeSumLeft(MapKey(Scan), Scan)",
+    )
+    ColumnarPlanner.tryRun(broadcastMapped.plan).isDefined shouldBe true
+    broadcastMapped.collect().toMap shouldBe Map(1 -> 18L)
+    broadcastMapped.collect().toMap shouldBe rowMap(broadcastMapped)
 
     val remappedRight = mapped.join(right).sumJoinRight
     ColumnarPlanner.lower(remappedRight.plan).map(_.shape) shouldBe Some(
@@ -287,6 +378,25 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       "JoinProbeSumLeft(Exchange(MapKey(Scan)), Exchange(Scan))",
     )
     ColumnarPlanner.tryRun(summed.plan).isDefined shouldBe true
+
+    val broadcast = boxedPairs(Seq(cell(1, 4), cell(null, 9), cell(2, 5)))
+      .mapIntKey { key =>
+        calls.incrementAndGet()
+        key + 1
+      }
+      .broadcastJoin(boxedPairs(Seq(cell(2, 7), cell(null, 8), cell(3, 1))))
+      .sumJoinLeft
+    calls.set(0)
+    val broadcastSums = broadcast.collect().toMap
+    calls.get() shouldBe 2
+    calls.set(0)
+    broadcastSums shouldBe rowMap(broadcast)
+    calls.get() shouldBe 2
+    broadcastSums shouldBe Map(2 -> 4L, 3 -> 5L)
+    val broadcastShape = ColumnarPlanner.lower(broadcast.plan).map(_.shape).getOrElse("")
+    broadcastShape shouldBe "JoinProbeSumLeft(MapKey(Scan), Scan)"
+    broadcastShape.contains("Exchange") shouldBe false
+    ColumnarPlanner.tryRun(broadcast.plan).isDefined shouldBe true
   }
 
   "decodeSums" should "reject a hole and a short column" in {

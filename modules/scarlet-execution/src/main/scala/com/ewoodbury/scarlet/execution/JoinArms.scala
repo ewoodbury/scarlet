@@ -1,7 +1,13 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{ColumnBatch, ColumnPipeline, JoinProbeSum, Selected}
-import com.ewoodbury.scarlet.core.Plan
+import com.ewoodbury.scarlet.columnar.{
+  ColumnBatch,
+  ColumnPipeline,
+  JoinProbeSum,
+  Selected,
+  Selection,
+}
+import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 
 import ColumnPipeline.JoinInput
 
@@ -116,6 +122,36 @@ private[execution] object JoinArms:
     if (build.slice && probe.slice) then
       ColumnPipeline.sumInner(build.batches, probe.batches, width, workers, batchSize, measure)
     else ColumnPipeline.sumInner(build.input, probe.input, width, workers, measure)
+
+  /**
+   * Broadcast grouped sum. The left input is the build and the right input is the probe, so
+   * [[JoinProbeSum.Measure.Left]] is the left column. There is no exchange.
+   * [[JoinProbeSum.sumBroadcast]] checks `broadcastBuildBudgetBytes` before it concatenates or
+   * calls [[JoinProbeSum.sum]]. [[ColumnPipeline.broadcastJoin]] is not called, and the match
+   * columns are not written.
+   */
+  def broadcastSum(
+      left: Plan[_],
+      right: Plan[_],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      measure: JoinProbeSum.Measure,
+      ordinals: Set[Int],
+  ): Vector[ColumnBatch] =
+    val build = dense(arm(left, leftOp, None, false, ordinals))
+    val probe = dense(arm(right, rightOp, None, false, ordinals))
+    Vector(
+      JoinProbeSum.sumBroadcast(
+        build,
+        probe,
+        ScarletConf.get.broadcastBuildBudgetBytes,
+        measure,
+      ),
+    )
+
+  private def dense(armed: Armed): Vector[ColumnBatch] = armed.input match
+    case JoinInput.Dense(batches) => batches
+    case JoinInput.Selected(parts) => parts.map(Selection.materialize)
 
   private final case class Armed(
       input: JoinInput,

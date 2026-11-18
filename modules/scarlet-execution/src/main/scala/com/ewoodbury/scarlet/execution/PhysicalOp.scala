@@ -96,12 +96,16 @@ enum PhysicalOp:
   /**
    * Sum of one int join column, grouped by the join key, updated from the probe.
    *
-   * `left` and `right` are exchanges. The kernel builds the left bucket and probes the right. A
-   * null key is dropped. Each match adds the measured column as a `Long`. The group key is that
-   * match's key column, not the hash slot. The match columns are not written. [[ProbeMeasure]]
-   * records which side. Output kind is [[PhysicalOp.Kind.IntLongSums]], schema `(Int32, Int64)`. A
-   * null measured value adds as zero. An over-budget build bucket declines and does not write the
-   * matches. Broadcast, sort-merge, and outer joins do not use this node.
+   * Shuffle-hash and sort-merge wrap `left` and `right` in exchanges. The kernel builds the left
+   * bucket and probes the right. Sort-merge is that hash probe: it does not sort. An explicit
+   * broadcast hint leaves both children unexchanged. The left child is still the build, so
+   * [[ProbeMeasure.Left]] is the left column. A null key is not a probe hit. Each match adds the
+   * measured column as a `Long`. The group key is that match's key column, not the hash slot. The
+   * match columns are not written. [[ProbeMeasure]] records which side. Output kind is
+   * [[PhysicalOp.Kind.IntLongSums]], schema `(Int32, Int64)`. A null measured value adds as zero.
+   * A shuffled build bucket over the spill budget declines and does not write the matches. A
+   * broadcast build whose retained estimate is above `broadcastBuildBudgetBytes` declines before
+   * the table is allocated and does not write the matches. Outer joins do not use this node.
    */
   case JoinProbeSum(left: PhysicalOp, right: PhysicalOp, measure: PhysicalOp.ProbeMeasure)
 
