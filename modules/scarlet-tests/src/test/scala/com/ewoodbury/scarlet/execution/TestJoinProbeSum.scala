@@ -13,8 +13,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Probe-time join sums against the row path.
  *
  * The oracle is a columnar-off `collect`, not a stored checksum. A null measured value that
- * matches adds as zero. A null that does not match stays columnar. Keys `0` and `80` share
- * a home slot in a 16-slot table and the same shuffle partition; their sums stay separate.
+ * matches adds as zero. A null that does not match stays columnar. Keys `0` and `80` share a home
+ * slot in a 16-slot table and the same shuffle partition; their sums stay separate.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Null"))
 class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
@@ -68,6 +68,9 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val rightSums = joined.sumJoinRight.collect().toMap
     rightSums shouldBe rowMap(joined.sumJoinRight)
     rightSums shouldBe Map(leftKey -> 8L, rightKey -> 30L)
+    val broadcast = left.broadcastJoin(right)
+    broadcast.sumJoinLeft.collect().toMap shouldBe leftSums
+    broadcast.sumJoinRight.collect().toMap shouldBe rightSums
   }
 
   it should "add zero for a null measured value only when that row matches" in {
@@ -81,6 +84,13 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     matched.sumJoinLeft.collect().toMap shouldBe Map(1 -> 0L, 2 -> 5L)
     matched.sumJoinLeft.collect().toMap shouldBe rowMap(matched.sumJoinLeft)
     ColumnarPlanner.tryRun(matched.sumJoinLeft.plan).isDefined shouldBe true
+
+    val broadcast = nullBroadcast(
+      Seq(cell(2, 5), cell(1, null)),
+      Seq(cell(1, 1), cell(2, 1)),
+    )
+    broadcast.sumJoinLeft.collect().toMap shouldBe Map(1 -> 0L, 2 -> 5L)
+    broadcast.sumJoinLeft.collect().toMap shouldBe rowMap(broadcast.sumJoinLeft)
   }
 
   it should "sum a match when the unmeasured side is null" in {
@@ -103,6 +113,30 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       ColumnarPlanner.lower(summed.plan).isDefined shouldBe true
       ColumnarPlanner.tryRun(summed.plan) shouldBe None
       summed.collect().toMap shouldBe rowMap(summed)
+
+      ScarletRuntime.get.shuffle.clear()
+      val broadcast = pairs(Array(1, 2), Array(10, 20))
+        .broadcastJoin(pairs(Array(1, 2), Array(3, 4)))
+        .sumJoinLeft
+      ColumnarPlanner.lower(broadcast.plan).isDefined shouldBe true
+      ColumnarPlanner.tryRun(broadcast.plan) shouldBe None
+      broadcast.collect().toMap shouldBe rowMap(broadcast)
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
+  }
+
+  it should "fall back when a broadcast build exceeds the table budget" in {
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(saved.copy(spillEnabled = false, broadcastBuildBudgetBytes = 1L))
+      ScarletRuntime.get.shuffle.clear()
+      val summed = pairs(Array(1, 2), Array(10, 20))
+        .broadcastJoin(pairs(Array(1, 2), Array(3, 4)))
+        .sumJoinLeft
+      ColumnarPlanner.lower(summed.plan).isDefined shouldBe true
+      ColumnarPlanner.tryRun(summed.plan) shouldBe None
+      summed.collect().toMap shouldBe rowMap(summed)
     finally
       ScarletConf.set(saved)
       ScarletRuntime.get.shuffle.clear()
@@ -121,6 +155,9 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.tryRun(noLeft.plan).isDefined shouldBe true
     ColumnarPlanner.tryRun(noRight.plan).isDefined shouldBe true
     ColumnarPlanner.tryRun(neither.plan).isDefined shouldBe true
+    val broadcastEmpty = present.broadcastJoin(empty).sumJoinLeft
+    broadcastEmpty.collect().toMap shouldBe rowMap(broadcastEmpty)
+    ColumnarPlanner.tryRun(broadcastEmpty.plan).isDefined shouldBe true
   }
 
   it should "sum a high-cardinality key set" in {
@@ -134,25 +171,61 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.tryRun(summed.plan).isDefined shouldBe true
   }
 
-  it should "drop a null key and stay off broadcast and sort-merge" in {
+  it should "drop a null key and stay off sort-merge" in {
     val joined = nullPairs(Seq(cell(1, 4), cell(null, 9)), Seq(cell(1, 2), cell(null, 8)))
     joined.sumJoinLeft.collect().toMap shouldBe Map(1 -> 4L)
     joined.sumJoinLeft.collect().toMap shouldBe rowMap(joined.sumJoinLeft)
     ColumnarPlanner.tryRun(joined.sumJoinLeft.plan).isDefined shouldBe true
+    val dropped = nullBroadcast(
+      Seq(cell(1, 4), cell(null, 9)),
+      Seq(cell(1, 2), cell(null, 8)),
+    )
+    dropped.sumJoinLeft.collect().toMap shouldBe Map(1 -> 4L)
+    dropped.sumJoinLeft.collect().toMap shouldBe rowMap(dropped.sumJoinLeft)
 
     val left = pairs(Array(1, 2), Array(10, 20))
     val right = pairs(Array(1), Array(3))
     val sorted = left.sortMergeJoin(right).sumJoinLeft
-    val broadcast = left.broadcastJoin(right).sumJoinLeft
     ColumnarPlanner.lower(sorted.plan).isEmpty shouldBe true
-    ColumnarPlanner.lower(broadcast.plan).isEmpty shouldBe true
     sorted.collect().toMap shouldBe rowMap(sorted)
+
+    val broadcast = left.broadcastJoin(right).sumJoinLeft
+    val shape = ColumnarPlanner.lower(broadcast.plan).map(_.shape).getOrElse("")
+    shape should include("JoinProbeSum")
+    shape.contains("Exchange") shouldBe false
+    ColumnarPlanner.tryRun(broadcast.plan).isDefined shouldBe true
+    broadcast.collect().toMap shouldBe Map(1 -> 10L)
     broadcast.collect().toMap shouldBe rowMap(broadcast)
+    val rightSum = left.broadcastJoin(right).sumJoinRight
+    rightSum.collect().toMap shouldBe Map(1 -> 3L)
+    rightSum.collect().toMap shouldBe rowMap(rightSum)
+    ColumnarPlanner.lower(rightSum.plan).map(_.shape).getOrElse("") should include(
+      "JoinProbeSumRight",
+    )
 
     val mapped = pairs(Array(11, 21), Array(4, 5)).mapIntKey(key => key % 10)
     val remapped = mapped.join(pairs(Array(1, 1), Array(3, 4))).sumJoinLeft
     ColumnarPlanner.lower(remapped.plan).isEmpty shouldBe true
     remapped.collect().toMap shouldBe rowMap(remapped)
+    val remappedBroadcast = mapped.broadcastJoin(pairs(Array(1, 1), Array(3, 4))).sumJoinLeft
+    ColumnarPlanner.lower(remappedBroadcast.plan).isEmpty shouldBe true
+    remappedBroadcast.collect().toMap shouldBe rowMap(remappedBroadcast)
+  }
+
+  it should "sum a filtered broadcast without an exchange" in {
+    val left = pairs(Array(1, 2, 3, 4, 5), Array(10, 20, 5, -1, 7))
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+    val right = pairs(Array(1, 1, 2, 3, 4, 5), Array(10, 20, 10, 5, 0, 60))
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value < 50)
+    val summed = left.broadcastJoin(right).sumJoinLeft
+    ColumnarPlanner.lower(summed.plan).map(_.shape) shouldBe Some(
+      "JoinProbeSumLeft(FilterValue(FilterKey(Scan)), FilterValue(FilterKey(Scan)))",
+    )
+    ColumnarPlanner.tryRun(summed.plan).isDefined shouldBe true
+    summed.collect().toMap shouldBe Map(1 -> 20L, 2 -> 20L)
+    summed.collect().toMap shouldBe rowMap(summed)
   }
 
   "decodeSums" should "reject a hole and a short column" in {
@@ -206,6 +279,18 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       ScarletConf.set(saved)
       ScarletRuntime.get.shuffle.clear()
 
+  private def nullPairs(
+      left: Seq[(Any, Any)],
+      right: Seq[(Any, Any)],
+  ): DistCollection[(Int, (Int, Int))] =
+    nullJoined(left, right, broadcast = false)
+
+  private def nullBroadcast(
+      left: Seq[(Any, Any)],
+      right: Seq[(Any, Any)],
+  ): DistCollection[(Int, (Int, Int))] =
+    nullJoined(left, right, broadcast = true)
+
   @SuppressWarnings(
     Array(
       "org.wartremover.warts.Any",
@@ -213,10 +298,13 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       "org.wartremover.warts.Null",
     ),
   )
-  private def nullPairs(
+  private def nullJoined(
       left: Seq[(Any, Any)],
       right: Seq[(Any, Any)],
+      broadcast: Boolean,
   ): DistCollection[(Int, (Int, Int))] =
     def source(rows: Seq[(Any, Any)]): DistCollection[(Int, Int)] =
       DistCollection(Plan.Source(Seq(Partition(rows))).asInstanceOf[Plan[(Int, Int)]])
-    source(left).join(source(right))
+    val lhs = source(left)
+    val rhs = source(right)
+    if (broadcast) then lhs.broadcastJoin(rhs) else lhs.join(rhs)

@@ -1,7 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{ColumnBatch, ColumnPipeline, JoinProbeSum, Selected}
-import com.ewoodbury.scarlet.core.Plan
+import com.ewoodbury.scarlet.columnar.*
+import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 
 import ColumnPipeline.JoinInput
 
@@ -22,6 +22,11 @@ import ColumnPipeline.JoinInput
  * uses that same exchange and sums chain lengths. [[sumValuePair]] uses that same exchange and
  * adds `build * 31 + probe` per present match. It does not write the match columns. [[inner]]
  * still does.
+ *
+ * [[broadcastSum]] is the int broadcast arm of the same probe sum. The left child is the build and
+ * the right child is the probe. There is no exchange. The call is [[JoinProbeSum.sum]], not
+ * [[ColumnPipeline.broadcastJoin]]. An over-budget build declines before the sides are
+ * concatenated and before the probe runs.
  */
 private[execution] object JoinArms:
 
@@ -117,6 +122,35 @@ private[execution] object JoinArms:
       ColumnPipeline.sumInner(build.batches, probe.batches, width, workers, batchSize, measure)
     else ColumnPipeline.sumInner(build.input, probe.input, width, workers, measure)
 
+  /**
+   * Grouped sum of one broadcast join column. The left child is the build and the right child is
+   * the probe, so [[JoinProbeSum.Measure.Left]] is the left column. Neither side is exchanged.
+   * Match columns are not written. A build whose retained estimate exceeds the spill budget, when
+   * spill is on, or the broadcast build budget, declines before the batches are concatenated.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Throw"))
+  def broadcastSum(
+      left: Plan[_],
+      right: Plan[_],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      measure: JoinProbeSum.Measure,
+      ordinals: Set[Int],
+  ): Vector[ColumnBatch] =
+    val build = arm(left, leftOp, None, false, ordinals)
+    val probe = arm(right, rightOp, None, false, ordinals)
+    if (overBudget(liveRows(build))) then
+      throw new ColumnarFallback(
+        "a broadcast join sum over the build budget stays on the row path",
+      )
+    Vector(
+      JoinProbeSum.sum(
+        HashJoin.JoinSide(dense(build), key = 0, value = 1),
+        HashJoin.JoinSide(dense(probe), key = 0, value = 1),
+        measure,
+      ),
+    )
+
   private final case class Armed(
       input: JoinInput,
       batches: Vector[ColumnBatch],
@@ -160,4 +194,43 @@ private[execution] object JoinArms:
   ): Vector[ColumnBatch] =
     ColumnarInterpreter.pairsOf(
       ColumnarInterpreter.interpretAt(plan, op, selectedPartition, preserveAbsence, ordinals),
+    )
+
+  /** Rows that would enter the build table. A selection counts survivors, not the source width. */
+  private def liveRows(armed: Armed): Long = armed.input match
+    case JoinInput.Dense(batches) => batches.iterator.map(_.length.toLong).sum
+    case JoinInput.Selected(parts) => parts.iterator.map(_.count.toLong).sum
+
+  /**
+   * True when one build table for `rows` is over budget. Spill off ignores the spill budget. An
+   * empty build is false: the probe publishes an empty sum and allocates nothing.
+   */
+  private def overBudget(rows: Long): Boolean =
+    if (rows <= 0L) then false
+    else if (rows > Int.MaxValue.toLong) then true
+    else
+      val estimate = HashJoin.retainedBuildBytes(rows.toInt)
+      val conf = ScarletConf.get
+      val spill = conf.spillEnabled && estimate > conf.spillBudgetBytes
+      val table = estimate > conf.broadcastBuildBudgetBytes
+      spill || table
+
+  /** One batch for [[JoinProbeSum.sum]]. A selection is gathered here, not by an exchange. */
+  private def dense(armed: Armed): ColumnBatch =
+    val batches = armed.input match
+      case JoinInput.Dense(found) => found
+      case JoinInput.Selected(parts) => parts.map(Selection.materialize)
+    batches match
+      case Vector() => emptyPairs
+      case Vector(only) => only
+      case many => ColumnBatches.concat(many)
+
+  private def emptyPairs: ColumnBatch =
+    new ColumnBatch(
+      Vector(LogicalType.Int32, LogicalType.Int32),
+      Vector(
+        Int32Column.of(Array.empty[Int], Validity.allValid(0), 0),
+        Int32Column.of(Array.empty[Int], Validity.allValid(0), 0),
+      ),
+      0,
     )

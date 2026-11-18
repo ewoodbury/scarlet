@@ -9,9 +9,11 @@ import com.ewoodbury.scarlet.core.{Partition, Plan}
  *
  * The logical plan stays `map` then `reduceByKey`. Only [[JoinSumProjection]] and [[LongSum]] name
  * the column and the addition. Any other map or reducer returns `None`, and so does a join that is
- * not an unhinted or shuffle-hash int inner join. Execution reads the projection again and updates
- * [[com.ewoodbury.scarlet.columnar.HashAggregate]] from the probe. The published pairs are the
- * groups, not the match columns.
+ * not an unhinted, shuffle-hash, or broadcast int inner join. Sort-merge stays on the row path.
+ * Shuffle-hash exchanges both children. Broadcast does not: the left child is the build and the
+ * right child is the probe, so [[JoinSumColumn.Left]] is still the left column. Execution reads
+ * the projection again and updates [[com.ewoodbury.scarlet.columnar.HashAggregate]] from the
+ * probe. The published pairs are the groups, not the match columns.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Throw"))
 private[execution] object JoinProbeAggregate:
@@ -25,16 +27,10 @@ private[execution] object JoinProbeAggregate:
       case LongSum =>
         source match
           case Plan.MapOp(Plan.JoinOp(left, right, strategy), projection: JoinSumProjection[?])
-              if JoinLowering.acceptsShuffleHash(strategy) =>
+              if admits(strategy) =>
             (lowerChild(left), lowerChild(right)) match
               case (Some(leftOp), Some(rightOp)) if accepts(leftOp) && accepts(rightOp) =>
-                Some(
-                  PhysicalOp.JoinProbeSum(
-                    PhysicalOp.Exchange(leftOp),
-                    PhysicalOp.Exchange(rightOp),
-                    measureOf(projection.column),
-                  ),
-                )
+                Some(node(strategy, leftOp, rightOp, measureOf(projection.column)))
               case _ => None
           case _ => None
       case _ => None
@@ -62,6 +58,32 @@ private[execution] object JoinProbeAggregate:
       (keys.values(row), values.values(row))
     }
 
+  /** Unhinted, shuffle-hash, and broadcast. Sort-merge stays on the row path. */
+  private def admits(strategy: Option[Plan.JoinStrategy]): Boolean = strategy match
+    case None | Some(Plan.JoinStrategy.ShuffleHash) | Some(Plan.JoinStrategy.Broadcast) => true
+    case Some(Plan.JoinStrategy.SortMerge) => false
+
+  /**
+   * Shuffle-hash exchanges both children. Broadcast keeps them, so the left child stays the build
+   * and [[PhysicalOp.ProbeMeasure.Left]] stays the left column.
+   */
+  private def node(
+      strategy: Option[Plan.JoinStrategy],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      measure: PhysicalOp.ProbeMeasure,
+  ): PhysicalOp = strategy match
+    case Some(Plan.JoinStrategy.Broadcast) =>
+      PhysicalOp.JoinProbeSum(leftOp, rightOp, measure)
+    case None | Some(Plan.JoinStrategy.ShuffleHash) =>
+      PhysicalOp.JoinProbeSum(
+        PhysicalOp.Exchange(leftOp),
+        PhysicalOp.Exchange(rightOp),
+        measure,
+      )
+    case Some(Plan.JoinStrategy.SortMerge) =>
+      throw new IllegalStateException("sort-merge join sum stays on the row path")
+
   private def accepts(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Pairs => !MapIntKey.inTree(op)
     case _ => false
@@ -76,12 +98,8 @@ private[execution] object JoinProbeAggregate:
             Plan.MapOp(Plan.JoinOp(left, right, strategy), projection: JoinSumProjection[?]),
             LongSum,
           ),
-          PhysicalOp.JoinProbeSum(
-            PhysicalOp.Exchange(leftOp),
-            PhysicalOp.Exchange(rightOp),
-            measure,
-          ),
-        ) if JoinLowering.acceptsShuffleHash(strategy) =>
+          PhysicalOp.JoinProbeSum(leftChild, rightChild, measure),
+        ) =>
       val kernel = (measureOf(projection.column), measure) match
         case (PhysicalOp.ProbeMeasure.Left, PhysicalOp.ProbeMeasure.Left) =>
           JoinProbeSum.Measure.Left
@@ -89,6 +107,17 @@ private[execution] object JoinProbeAggregate:
           JoinProbeSum.Measure.Right
         case _ =>
           throw new IllegalStateException("join probe sum column does not match the plan")
-      JoinArms.sum(left, right, leftOp, rightOp, kernel, ColumnUse.ordinals(plan, op))
+      val ordinals = ColumnUse.ordinals(plan, op)
+      strategy match
+        case Some(Plan.JoinStrategy.Broadcast) =>
+          JoinArms.broadcastSum(left, right, leftChild, rightChild, kernel, ordinals)
+        case None | Some(Plan.JoinStrategy.ShuffleHash) =>
+          (leftChild, rightChild) match
+            case (PhysicalOp.Exchange(build), PhysicalOp.Exchange(probe)) =>
+              JoinArms.sum(left, right, build, probe, kernel, ordinals)
+            case _ =>
+              throw new IllegalStateException("shuffle join sum exchanges both int sides")
+        case Some(Plan.JoinStrategy.SortMerge) =>
+          throw new IllegalStateException("join probe sum is a witnessed reduce over an int join")
     case _ =>
       throw new IllegalStateException("join probe sum is a witnessed reduce over an int join")

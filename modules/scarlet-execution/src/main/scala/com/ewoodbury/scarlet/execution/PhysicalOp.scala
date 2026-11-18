@@ -95,12 +95,14 @@ enum PhysicalOp:
   /**
    * Sum of one int join column, grouped by the join key, updated from the probe.
    *
-   * `left` and `right` are exchanges. The kernel builds the left bucket and probes the right. A
-   * null key is dropped. Each match adds the measured column as a `Long`. The group key is that
-   * match's key column, not the hash slot. The match columns are not written. [[ProbeMeasure]]
-   * records which side. Output kind is [[PhysicalOp.Kind.IntLongSums]], schema `(Int32, Int64)`. A
-   * null measured value adds as zero. An over-budget build bucket declines and does not write the
-   * matches. Broadcast, sort-merge, and outer joins do not use this node.
+   * Shuffle-hash wraps `left` and `right` in exchanges and builds the left bucket. Broadcast
+   * passes both children through with no exchange and still builds the left child, so
+   * [[ProbeMeasure.Left]] is the left column. The kernel probes the right. A null key is dropped.
+   * Each match adds the measured column as a `Long`. The group key is that match's key column, not
+   * the hash slot. The match columns are not written. [[ProbeMeasure]] records which side. Output
+   * kind is [[PhysicalOp.Kind.IntLongSums]], schema `(Int32, Int64)`. A null measured value adds
+   * as zero. An over-budget build declines and does not write the matches. Sort-merge and outer
+   * joins do not use this node.
    */
   case JoinProbeSum(left: PhysicalOp, right: PhysicalOp, measure: PhysicalOp.ProbeMeasure)
 
@@ -721,7 +723,7 @@ object PhysicalOp:
       CountSums,
       IntLongSums
 
-  /** Which value column [[JoinProbeSum]] adds. `Left` is the build side. */
+  /** Which value column [[JoinProbeSum]] adds. `Left` is the left child, which is the build. */
   enum ProbeMeasure:
     case Left, Right
 
