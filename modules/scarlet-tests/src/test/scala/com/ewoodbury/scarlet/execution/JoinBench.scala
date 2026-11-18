@@ -28,11 +28,10 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * physical tree is a broadcast join, and `shuffle-hash` otherwise. An outer join's row path is
  * always `shuffle-hash`: the row executor ignores the hint. The columnar path follows the hint.
  * Absent is `unhinted` and still shuffle-hashes. These cases do not exercise an outer sort-merge;
- * that hint lowers on the columnar path now, and the row path still shuffle-hashes it. A null
- * value on a full outer join, or on a sort-merge right or full outer join, stays on the row path.
- * That case publishes no column batch, so the run fails it instead of labeling the row path as
- * columnar. An int shuffle-hash left or right outer join, an int broadcast left or right outer
- * join, and an int sort-merge left outer join keep the null.
+ * that hint lowers on the columnar path now, and the row path still shuffle-hashes it. An int
+ * outer join keeps a null value: shuffle-hash, broadcast, and sort-merge, on the left, the
+ * right, and the full side. A long or string outer join still declines a null value. That case
+ * publishes no column batch, so the run fails it instead of labeling the row path as columnar.
  * `broadcastJoinThreshold` and `enableSortMergeJoin` are restored after every case.
  *
  * `runMain` executes in the sbt JVM. `Test / fork` is left false, so absolute times carry sbt and

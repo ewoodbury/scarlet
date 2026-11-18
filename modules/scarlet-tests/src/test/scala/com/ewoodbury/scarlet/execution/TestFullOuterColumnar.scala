@@ -266,22 +266,23 @@ class TestFullOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     copies(decoded, (Some(1), None, Some(101))) shouldBe 0
   }
 
-  it should "stay on the row path when a value is null" in {
+  it should "keep a null value columnar and match the row path" in {
+    // A null value is matched. Key 3 and key 4 have no partner at all.
     val nullProbe = Plan.FullOuterJoinOp(
-      source(Seq(Seq(pair(Some(2), Some(20)), pair(Some(1), None)))),
+      source(Seq(Seq(pair(Some(2), Some(20)), pair(Some(1), None), 3 -> 30))),
       source(Seq(Seq(1 -> 100, 2 -> 200))),
       Some(Plan.JoinStrategy.Broadcast),
     )
     val nullBuild = Plan.FullOuterJoinOp(
       source(Seq(Seq(1 -> 10, 2 -> 20))),
-      source(Seq(Seq(pair(Some(2), Some(200)), pair(Some(1), None)))),
+      source(Seq(Seq(pair(Some(2), Some(200)), pair(Some(1), None), 4 -> 40))),
       Some(Plan.JoinStrategy.Broadcast),
     )
     Seq(nullProbe, nullBuild).foreach { plan =>
       ScarletConf.set(runningConf)
       ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some("BroadcastFullOuter(Scan, Scan)")
-      ColumnarPlanner.tryRun(plan) shouldBe None
-      sameRows(collect(plan, columnar = true), collect(plan, columnar = false))
+      ColumnarPlanner.tryRun(plan).isDefined shouldBe true
+      agree(collect(plan, columnar = true), collect(plan, columnar = false))
     }
   }
 
@@ -472,12 +473,13 @@ class TestFullOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     canonical(collect(bothEmpty, columnar = false)) shouldBe empty
   }
 
-  it should "stay on the row path when a shuffled value is null" in {
+  it should "keep a shuffled null value columnar and match the row path" in {
+    // A null value is matched. Key 3 and key 4 have no partner at all.
     val nullProbe = Plan.FullOuterJoinOp(
       source(
         Seq(
           Seq(pair(Some(2), Some(20))),
-          Seq(pair(Some(1), None)),
+          Seq(pair(Some(1), None), 3 -> 30),
           Seq.empty[(Int, Int)],
           Seq.empty[(Int, Int)],
         ),
@@ -490,7 +492,7 @@ class TestFullOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
       source(
         Seq(
           Seq(pair(Some(2), Some(200))),
-          Seq(pair(Some(1), None)),
+          Seq(pair(Some(1), None), 4 -> 40),
           Seq.empty[(Int, Int)],
           Seq.empty[(Int, Int)],
         ),
@@ -502,32 +504,41 @@ class TestFullOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
       ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
         "HashFullOuter(Exchange(Scan), Exchange(Scan))",
       )
-      ColumnarPlanner.tryRun(plan) shouldBe None
-      sameRows(collect(plan, columnar = true), collect(plan, columnar = false))
+      ColumnarPlanner.tryRun(plan).isDefined shouldBe true
+      agree(collect(plan, columnar = true), collect(plan, columnar = false))
     }
   }
 
-  it should "refuse a null value before the kernel runs" in {
-    val probe = BatchCodec.nullableIntPairs(Seq((Some(1), Some(10)), (Some(2), None)))
-    val build = BatchCodec.nullableIntPairs(Seq((Some(1), Some(100))))
-    val present = BatchCodec.intPairs(Seq((1, 10)))
-    val nullBuild = BatchCodec.nullableIntPairs(Seq((Some(1), None)))
+  it should "copy a null value and mark a missing partner absent" in {
+    val probe = BatchCodec.nullableIntPairs(Seq((Some(1), None), (Some(3), Some(30))))
+    val build = BatchCodec.nullableIntPairs(Seq((Some(1), Some(100)), (Some(4), Some(40))))
+    val present = BatchCodec.intPairs(Seq((1, 10), (3, 30)))
+    val nullBuild = BatchCodec.nullableIntPairs(Seq((Some(1), None), (Some(4), Some(40))))
     val budget = ScarletConf.get.broadcastBuildBudgetBytes
-    val refusedProbe = intercept[IllegalArgumentException] {
-      ColumnPipeline.broadcastFullOuterJoin(Vector(probe), Vector(build), parallelism = 1, budget)
-    }
-    refusedProbe.getMessage should include("fully present")
-    val refusedBuild = intercept[IllegalArgumentException] {
-      ColumnPipeline.hashFullOuterJoin(
-        Vector(present),
-        Vector(nullBuild),
-        numPartitions = 4,
-        parallelism = 1,
-        batchSize = 8,
-        budget,
-      )
-    }
-    refusedBuild.getMessage should include("fully present")
+    val broadcast = ColumnPipeline.broadcastFullOuterJoin(
+      Vector(probe),
+      Vector(build),
+      parallelism = 1,
+      budget,
+    )
+    broadcast.flatMap(validityRows) should contain theSameElementsAs Seq(
+      ValidityRow(Some(1), leftValid = false, rightValid = true, leftAbsent = false, rightAbsent = false),
+      ValidityRow(Some(3), leftValid = true, rightValid = false, leftAbsent = false, rightAbsent = true),
+      ValidityRow(Some(4), leftValid = false, rightValid = true, leftAbsent = true, rightAbsent = false),
+    )
+    val hashed = ColumnPipeline.hashFullOuterJoin(
+      Vector(present),
+      Vector(nullBuild),
+      numPartitions = 1,
+      parallelism = 1,
+      batchSize = 8,
+      budget,
+    )
+    hashed.flatMap(validityRows) should contain theSameElementsAs Seq(
+      ValidityRow(Some(1), leftValid = true, rightValid = false, leftAbsent = false, rightAbsent = false),
+      ValidityRow(Some(3), leftValid = true, rightValid = false, leftAbsent = false, rightAbsent = true),
+      ValidityRow(Some(4), leftValid = false, rightValid = true, leftAbsent = true, rightAbsent = false),
+    )
   }
 
   it should "charge the build table and not the matched-row bitmap" in {
@@ -710,31 +721,38 @@ class TestFullOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     spilledBoth.isEmpty shouldBe true
   }
 
-  it should "keep a null value on the row path" in {
-    val left = source(Seq(Seq(1 -> 10, pair(Some(2), None))))
-    val right = source(Seq(Seq(1 -> 100)))
+  it should "keep a null value columnar and match the row path" in {
+    // Key 1 matches with a null left value. Key 2 matches with a null right value.
+    // Key 3 and key 4 have no partner.
+    // A present pair comes first, so the source still witnesses int pairs. The null value is later.
+    val left = source(Seq(Seq(2 -> 20, pair(Some(1), None), 3 -> 30)))
+    val right = source(Seq(Seq(1 -> 100, pair(Some(2), None), 4 -> 40)))
     val plan = Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.SortMerge))
     ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(
       "SortMergeFullOuter(Exchange(Scan), Exchange(Scan))",
     )
-    ColumnarPlanner.tryRun(plan) shouldBe None
-    sameRows(collect(plan, columnar = true), collect(plan, columnar = false))
-    val probe = BatchCodec.nullableIntPairs(Seq((Some(1), Some(10)), (Some(2), None)))
-    val build = BatchCodec.nullableIntPairs(Seq((Some(1), Some(100))))
-    val refused = intercept[IllegalArgumentException] {
-      ColumnPipeline.sortMergeFullOuterJoin(
-        Vector(probe),
-        Vector(build),
-        numPartitions = 1,
-        parallelism = 1,
-        batchSize = 8,
-      )
-    }
-    refused.getMessage should include("fully present")
-    val kernel = intercept[IllegalArgumentException] {
-      SortMerge.fullOuter(probe, build)
-    }
-    kernel.getMessage should include("fully present")
+    ColumnarPlanner.tryRun(plan).isDefined shouldBe true
+    agree(collect(plan, columnar = true), collect(plan, columnar = false))
+    val probe = BatchCodec.nullableIntPairs(
+      Seq((Some(1), None), (Some(2), Some(20)), (Some(3), Some(30))),
+    )
+    val build = BatchCodec.nullableIntPairs(
+      Seq((Some(1), Some(100)), (Some(2), None), (Some(4), Some(40))),
+    )
+    val joined = ColumnPipeline.sortMergeFullOuterJoin(
+      Vector(probe),
+      Vector(build),
+      numPartitions = 1,
+      parallelism = 1,
+      batchSize = 8,
+    )
+    joined.flatMap(validityRows) should contain theSameElementsAs Seq(
+      ValidityRow(Some(1), leftValid = false, rightValid = true, leftAbsent = false, rightAbsent = false),
+      ValidityRow(Some(2), leftValid = true, rightValid = false, leftAbsent = false, rightAbsent = false),
+      ValidityRow(Some(3), leftValid = true, rightValid = false, leftAbsent = false, rightAbsent = true),
+      ValidityRow(Some(4), leftValid = false, rightValid = true, leftAbsent = true, rightAbsent = false),
+    )
+    SortMerge.fullOuter(probe, build).length shouldBe 4
   }
 
   "left and right outer joins" should "keep the batch and visit counts from before full outer" in {
@@ -882,6 +900,14 @@ class TestFullOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
   private def sameRows(actual: Seq[Any], expected: Seq[Any]): org.scalatest.Assertion =
     actual should contain theSameElementsAs expected
+
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def agree(actual: Seq[Any], expected: Seq[Any]): org.scalatest.Assertion =
+    val left = JoinDigest.fromOuter(actual)
+    val right = JoinDigest.fromOuter(expected)
+    withClue(JoinDigest.difference(left, right)) {
+      JoinDigest.agrees(left, right) shouldBe true
+    }
 
   @SuppressWarnings(
     Array(

@@ -30,9 +30,9 @@ import com.ewoodbury.scarlet.core.Partition
  * child is probed in place. A hash or broadcast left outer join always builds the right input. The
  * left input is the probe side. A hash or broadcast right outer join always builds the left input
  * and probes the right. A probe-side row with no partner sets the build value's absence bit. A
- * null value is not absence. A sort-merge left outer join copies a clear validity bit and does not
- * swap. A sort-merge right or full outer join still declines a null value. A sort-merge outer join
- * has no build table. Long outer joins are the `LongHash*Outer`, `LongBroadcast*Outer`, and
+ * null value is not absence. A sort-merge left, right, or full outer join copies a clear validity
+ * bit. Right outer swaps the value columns. Left and full do not. A sort-merge outer join has no
+ * build table. Long outer joins are the `LongHash*Outer`, `LongBroadcast*Outer`, and
  * `LongSortMerge*Outer` nodes. Their kind is [[PhysicalOp.Kind.LongOuter]]. String outer joins are
  * the `StringHash*Outer`, `StringBroadcast*Outer`, and `StringSortMerge*Outer` nodes. Their kind
  * is [[PhysicalOp.Kind.StringOuter]]. Hash and broadcast do not spill. Sort-merge runs in memory
@@ -201,8 +201,8 @@ enum PhysicalOp:
    * Sort-merge right outer join of int pairs. `left` and `right` are exchanges. The right exchange
    * carries a null key to partition 0. The left exchange drops a null key. The left-outer walk
    * runs with the inputs swapped, then the value columns are swapped back to `(key, left, right)`.
-   * Absence is the left value's absence bit. A null value stays on the row path. Output columns
-   * are `(key, left, right)`. One batch per partition.
+   * Absence is the left value's absence bit. A null value is a clear validity bit and is copied.
+   * Output columns are `(key, left, right)`. One batch per partition.
    */
   case SortMergeRightOuter(left: PhysicalOp, right: PhysicalOp)
 
@@ -210,8 +210,9 @@ enum PhysicalOp:
    * Sort-merge full outer join of int pairs. `left` and `right` are exchanges. Both exchanges
    * carry a null key to partition 0. A group on only one side is emitted, with the other value
    * absent. A null key on either side is emitted once and does not match. An empty side emits
-   * every row of the other side. Either value's absence bit is a missing partner. A null value
-   * stays on the row path. Output columns are `(key, left, right)`. One batch per partition.
+   * every row of the other side. Either value's absence bit is a missing partner. A null value is
+   * a clear validity bit and is copied. Output columns are `(key, left, right)`. One batch per
+   * partition.
    */
   case SortMergeFullOuter(left: PhysicalOp, right: PhysicalOp)
 
@@ -271,9 +272,9 @@ enum PhysicalOp:
    * key to partition 0. The left input is the probe side. The right input is the build side. Each
    * partition builds one table, probes with one bitmap, and emits that partition's unmatched build
    * rows. A null build key is carried outside the table and emitted once. Output columns are
-   * `(key, left, right)`. Either value's absence bit is a missing partner. A null value is not
-   * absence and stays on the row path. The build table uses the same budget as a broadcast join.
-   * The bitmap is not part of that budget.
+   * `(key, left, right)`. Either value's absence bit is a missing partner. A null value is a clear
+   * validity bit and stays columnar. The build table uses the same budget as a broadcast join. The
+   * bitmap is not part of that budget.
    */
   case HashFullOuter(left: PhysicalOp, right: PhysicalOp)
 
@@ -283,8 +284,8 @@ enum PhysicalOp:
    * thread keeps its own matched-row bitmap. The bitmaps are OR'd after the probes join. A clear
    * bit emits that build row with the left value absent. A null build key is carried outside the
    * table and emitted once. An empty probe still emits every build row. Output columns are
-   * `(key, left, right)`. Either value's absence bit is a missing partner. A null value stays on
-   * the row path. The bitmap is not part of the build budget.
+   * `(key, left, right)`. Either value's absence bit is a missing partner. A null value is a clear
+   * validity bit and stays columnar. The bitmap is not part of the build budget.
    */
   case BroadcastFullOuter(left: PhysicalOp, right: PhysicalOp)
 

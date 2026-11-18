@@ -441,19 +441,13 @@ private[execution] object PipelineJoinArms:
       ordinals: Set[Int],
   ): Columns =
     // preserveAbsence keeps null keys. The kernel swaps the value columns back. Do not swap
-    // again here.
+    // again here. A null value is a clear validity bit on either column. The kernel copies it.
+    // Absence is the left value's absence bit, set only for a missing partner.
     val leftBatches = pairsOf(
       interpretAt(left, leftOp, selectedPartition, preserveAbsence = true, ordinals),
     )
     val rightBatches =
       pairsOf(interpretAt(right, rightOp, selectedPartition, preserveAbsence = true, ordinals))
-    val valuesPresent =
-      ColumnPipeline.valuesFullyPresent(leftBatches) &&
-        ColumnPipeline.valuesFullyPresent(rightBatches)
-    if (!valuesPresent) then
-      throw new ColumnarFallback(
-        "a null value on a right outer join stays on the row path",
-      )
     Columns.Outer(
       ColumnPipeline.sortMergeRightOuterJoin(
         leftBatches,
@@ -496,7 +490,7 @@ private[execution] object PipelineJoinArms:
    * restore `(key, left, right)`. The kernel writes `(key, probe value, build value)`, so the
    * value columns arrive as `(right, left)`. The build value's absence bit moves with the left
    * column. A null value is a clear validity bit. Shuffle-hash and broadcast both call this.
-   * Sort-merge right does not.
+   * Sort-merge right swaps inside the kernel and does not swap again here.
    */
   private def rightOuter(
       probe: Vector[ColumnBatch],
@@ -506,17 +500,12 @@ private[execution] object PipelineJoinArms:
 
   /**
    * Run a full outer join. The kernel writes `(key, probe value, build value)`. The probe is the
-   * left input, so the batch is already `(key, left, right)`. Either value's absence bit marks a
-   * missing partner. A null value is not absence, and this path cannot represent one.
+   * left input, so the batch is already `(key, left, right)`. A null value is a clear validity bit
+   * on that value column and the row is kept. Either value's absence bit marks a missing partner,
+   * and that bit stays clear. A null value is not that absence bit.
    */
   private def fullOuter(
       probe: Vector[ColumnBatch],
       build: Vector[ColumnBatch],
   )(join: (Vector[ColumnBatch], Vector[ColumnBatch]) => Vector[ColumnBatch]): Columns =
-    val valuesPresent =
-      ColumnPipeline.valuesFullyPresent(probe) && ColumnPipeline.valuesFullyPresent(build)
-    if (!valuesPresent) then
-      throw new ColumnarFallback(
-        "a null value on a full outer join stays on the row path",
-      )
     Columns.Outer(join(probe, build), AbsentSide.Both)

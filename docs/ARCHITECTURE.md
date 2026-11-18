@@ -111,15 +111,15 @@ null. A null string key orders as `""` and stays null. Shape strings are exact.
 | Explicit broadcast string join. The planner builds the right input and probes the left in place. Neither side is exchanged. A null key is dropped. A null value stays columnar. `""` matches `""`. `"é"` and `"e\u0301"` do not match. Output is `(key, left, right)`. An over-budget build throws and writes nothing. Order is unspecified | `StringTriple` | `StringBroadcastJoin(Scan, Scan)` |
 | Explicit sort-merge int join. Both sides are hash-partitioned, sorted inside each partition, and merged. Null keys are dropped before the sort | `Columnar` | `SortMergeJoin(Exchange(Scan), Exchange(Scan))` |
 | Explicit sort-merge left outer int join. Both sides are hash-partitioned. The left exchange carries a null key to partition 0. The right exchange drops a null key. A null key does not match. A preserved null key publishes a clear key bit. Absence is the right value's absence bit. A null value is a clear validity bit and stays columnar. A stored `0` stays a present zero. The inputs are not swapped | `Columnar` | `SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))` |
-| Explicit sort-merge right outer int join. The right exchange carries a null key. The left exchange drops one. The left-outer walk runs on swapped inputs, then the value columns are swapped back to `(key, left, right)`. Absence is the left value's absence bit. A null value stays on the row path | `Columnar` | `SortMergeRightOuter(Exchange(Scan), Exchange(Scan))` |
-| Explicit sort-merge full outer int join. Both exchanges carry a null key to partition 0. A group on only one side is emitted. An empty side emits every row of the other side. Either value's absence bit is a missing partner. A null value stays on the row path | `Columnar` | `SortMergeFullOuter(Exchange(Scan), Exchange(Scan))` |
+| Explicit sort-merge right outer int join. The right exchange carries a null key. The left exchange drops one. The left-outer walk runs on swapped inputs, then the value columns are swapped back to `(key, left, right)`. Absence is the left value's absence bit. A null value is a clear validity bit and stays columnar | `Columnar` | `SortMergeRightOuter(Exchange(Scan), Exchange(Scan))` |
+| Explicit sort-merge full outer int join. Both exchanges carry a null key to partition 0. A group on only one side is emitted. An empty side emits every row of the other side. Either value's absence bit is a missing partner. A null value is a clear validity bit and stays columnar | `Columnar` | `SortMergeFullOuter(Exchange(Scan), Exchange(Scan))` |
 | Explicit broadcast int join. The planner builds the right input. A later pass may build the left. Neither side is exchanged. Order is unspecified | `Columnar` | `BroadcastJoin(Scan, Scan)` |
 | Broadcast left outer int join. The planner builds the right input. The left input is the probe side, and the op records no left build. Absence is a probe-side row with no partner: the right value's absence bit is set. A null value is a clear validity bit and stays columnar | `Columnar` | `BroadcastLeftOuter(Scan, Scan)` |
 | Shuffle-hash left outer int join, including an absent hint. The left input is the probe side. Its exchange carries a null key to partition 0. The right exchange drops a null key. Each partition builds one table under the broadcast budget. A null value stays a clear validity bit. A missing partner is the right value's absence bit | `Columnar` | `HashLeftOuter(Exchange(Scan), Exchange(Scan))` |
 | Broadcast right outer int join. The planner builds the left input and probes the right. The left-outer kernel runs, then the value columns are swapped back to `(key, left, right)`. Absence is the left value's absence bit. A null value stays a clear validity bit | `Columnar` | `BroadcastRightOuter(Scan, Scan)` |
 | Shuffle-hash right outer int join, including an absent hint. The right input is the probe side. Its exchange carries a null key to partition 0. The left exchange drops a null key. Each partition builds the left bucket, probes, and swaps the value columns. A null value stays a clear validity bit. A missing partner is the left value's absence bit | `Columnar` | `HashRightOuter(Exchange(Scan), Exchange(Scan))` |
-| Broadcast full outer int join. The right input is built. The left input is probed in place. Each probe thread keeps its own matched-row bitmap, and the bitmaps are OR'd after the probes join. A clear matched bit emits that build row with the left value absent. Null build keys are carried outside the table and emitted once. An empty probe still emits every build row. A null value stays on the row path. The bitmaps are not part of `broadcastBuildBudgetBytes` | `Columnar` | `BroadcastFullOuter(Scan, Scan)` |
-| Shuffle-hash full outer int join, including an absent hint. Both exchanges carry a null key to partition 0. Each partition keeps one bitmap and emits its own unmatched build rows. There is no cross-partition OR | `Columnar` | `HashFullOuter(Exchange(Scan), Exchange(Scan))` |
+| Broadcast full outer int join. The right input is built. The left input is probed in place. Each probe thread keeps its own matched-row bitmap, and the bitmaps are OR'd after the probes join. A clear matched bit emits that build row with the left value absent. Null build keys are carried outside the table and emitted once. An empty probe still emits every build row. A null value is a clear validity bit and stays columnar. The bitmaps are not part of `broadcastBuildBudgetBytes` | `Columnar` | `BroadcastFullOuter(Scan, Scan)` |
+| Shuffle-hash full outer int join, including an absent hint. Both exchanges carry a null key to partition 0. Each partition keeps one bitmap and emits its own unmatched build rows. There is no cross-partition OR. A null value is a clear validity bit and stays columnar. A missing partner is that value's absence bit | `Columnar` | `HashFullOuter(Exchange(Scan), Exchange(Scan))` |
 | Join after an int aggregate | `Columnar` | `HashJoin(Exchange(HashAggregate(Exchange(Scan))), Exchange(Scan))` |
 | Int join key/left-value/right-value filters | `Columnar` | `FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))`, `FilterTripleLeftValue(HashJoin(Exchange(Scan), Exchange(Scan)))`, `FilterTripleRightValue(HashJoin(Exchange(Scan), Exchange(Scan)))` |
 | Int join whole-row filter and same-type map | `Columnar` | `FilterTripleRow(HashJoin(Exchange(Scan), Exchange(Scan)))`, `Project(HashJoin(Exchange(Scan), Exchange(Scan)))` |
@@ -306,7 +306,7 @@ Output distribution follows that probe side. A sort-merge join is
 `SortMergeJoin(Exchange, Exchange)`. Outer sort-merge is `SortMergeLeftOuter(Exchange, Exchange)`,
 `SortMergeRightOuter(Exchange, Exchange)`, or `SortMergeFullOuter(Exchange, Exchange)`.
 Distribution follows the key hash on both sides. A preserved side carries a null key to
-partition 0. Absence is an absence bit on that value column. A null value on sort-merge left stays a clear validity bit. A null value on sort-merge right or full stays on the row path.
+partition 0. Absence is an absence bit on that value column. A null value on an int sort-merge outer join, left, right, or full, stays a clear validity bit.
 When columnar execution is off, the row-path sort-merge task still groups by key.
 Output columns stay `(key, left, right)`. Multiplicity, values, and null semantics match the
 shuffle-hash join. Order is unspecified. The broadcast build table is estimated before it is
@@ -424,11 +424,10 @@ and the row path runs instead. A `ClassCastException` from a filter, or from a s
 declares `String` and returns another value, is also a fallback, and that function may already
 have run. An `IllegalStateException` from a physical/logical mismatch or a broadcast build table
 above `broadcastBuildBudgetBytes` is not a fallback, and neither is the `IllegalArgumentException`
-from a partition-selector `require`. A null value on an int shuffle-hash left or right outer
-join, an int broadcast left or right outer join, or an int sort-merge left outer join, stays
-columnar. A null value on a full outer join, a sort-merge right or full outer join, or a long or
-string outer join is a `ColumnarFallback`. A null
-value on a long inner hash join stays columnar. A clear validity bit
+from a partition-selector `require`. A null value on an int shuffle-hash, broadcast, or
+sort-merge outer join, on the left, the right, or the full side, stays columnar. A null value
+on a long or string outer join is a `ColumnarFallback`. A null value on a long inner hash join
+stays columnar. A clear validity bit
 is a null value, not an absence bit. A
 selected null and a null on the dense side of a mixed int hash join stay columnar. A null on a
 dropped row stays columnar. The absence bit is only a missing partner. A null value on a string
@@ -470,8 +469,8 @@ That exception does not extend `ClassCastException`, so a refusal does not rerun
 
 An outer join marks an absent side by setting that value column's absence bit. The validity bit
 stays clear because no int is stored. A clear validity bit is a null value. An int shuffle-hash
-left or right outer join, an int broadcast left or right outer join, and an int sort-merge left
-outer join publish that bit. Every other outer arm declines it. Absence is never
+outer join, an int broadcast outer join, and an int sort-merge outer join, on the left, the
+right, or the full side, publish that bit. A long or string outer join declines it. Absence is never
 a sentinel key or value, so a real `0` and a real null stay distinguishable from "no partner".
 
 The rules that hold for every kind:
@@ -480,12 +479,14 @@ The rules that hold for every kind:
   with the other side absent. A null key on the other side is dropped, because no row can match
   it. Inside the shuffle, the preserved side's exchange carries a null key to partition 0 so the
   row survives to the task; every other exchange keeps dropping null keys.
-- **Values.** A null *value* is not absence. An int shuffle-hash left or right outer join, an
-  int broadcast left or right outer join, and an int sort-merge left outer join keep a null value.
-  Sort-merge left does not swap sides. A missing partner stays the absence bit. On a right outer
-  join that bit is the left value's absence bit. On a left outer join it is the right value's
-  absence bit. A full outer join, a sort-merge right or full outer join, and a long or string
-  outer join stay on the row path when a value is null.
+- **Values.** A null *value* is not absence. An int shuffle-hash, broadcast, or sort-merge outer
+  join keeps a null value on the left, the right, and the full side. The row is kept. A matched
+  null is emitted. An unmatched row on the preserved side is emitted with the other value absent.
+  An unmatched row on the non-preserved side of a left or right outer join is dropped. Sort-merge
+  left does not swap sides. A missing partner stays the absence bit. On a right outer join that
+  bit is the left value's absence bit. On a left outer join it is the right value's absence bit.
+  A long or string outer join stays on the row path when a value is null, because outer decode
+  throws on a clear validity bit that is not an absence mark.
 - **Layout.** The published batch is always `(key, left, right)`. Left outer leaves the right
   column absent, right outer leaves the left column absent, and full outer can leave either or
   both. A right outer over a left-built table swaps the two value columns back before publishing.
@@ -609,18 +610,17 @@ Still open inside the set, and therefore not a promise of this commit:
 - The long inner hash join spills an over-budget build bucket when `spillEnabled` is on. A piece
   still over the budget throws. The string inner hash join spills an over-budget build bucket when
   `spillEnabled` is on. A piece still over the budget throws.
-- A null value on an int shuffle-hash left or right outer join, an int broadcast left or right
-  outer join, or an int sort-merge left outer join, stays columnar. A null value on a full outer
-  join, a sort-merge right or full outer join, or a long or string outer join is a
-  `ColumnarFallback`. A null value on a long inner hash join stays
+- A null value on an int shuffle-hash, broadcast, or sort-merge outer join, left, right, or
+  full, stays columnar. A null value on a long or string outer join is a `ColumnarFallback`.
+  A null value on a long inner hash join stays
   columnar. A selected null and a null on the dense side of a mixed int hash join stay columnar. A
   null on a dropped row stays columnar. A null value on a string inner hash join stays columnar.
   String `reduceByKey` and string `groupByKey` with a live null value are a `ColumnarFallback`. A
   value projection that kept a null int is the same decline. A string-pair filter keeps that null
   int. An inner sort-merge keeps a null value. The absence bit is only a missing partner. A clear
-  validity bit is a null value. An int shuffle-hash left or right outer join, an int broadcast
-  left or right outer join, and an int sort-merge left outer join publish it. The other outer arms
-  do not, so a null value on those arms cannot use the absence bit.
+  validity bit is a null value. An int shuffle-hash, broadcast, or sort-merge outer join, on the
+  left, the right, or the full side, publishes it. A long or string outer join does not: outer
+  decode throws on a clear validity bit that is not an absence mark.
 - An int, long, or string sort of one or more filters, including a row filter, sorts the survivor
   index. Over the budget, with spill on, that index is spilled. Dropped rows are not written.
 - `groupByKey`, `distinct`, and `union` already have a columnar path and are not part of the closed

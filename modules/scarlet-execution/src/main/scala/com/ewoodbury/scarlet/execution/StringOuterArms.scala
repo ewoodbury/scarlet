@@ -9,10 +9,11 @@ import ColumnarInterpreter.{Columns, interpretAt}
  * Outer joins of `(String, Int)` pairs.
  *
  * Each arm forces `preserveAbsence` on and does not read the flag the caller passed. A null value
- * throws [[ColumnarFallback]] before the kernel, with the same message as the int outer arm. Hash
- * and broadcast right outer run the left-outer kernel on swapped inputs and swap the value columns
- * back once. Sort-merge right does not swap again: [[StringOuterPipeline.sortMergeRightOuterJoin]]
- * already restored `(key, left, right)`.
+ * throws [[ColumnarFallback]] before the kernel. String outer decode throws on a clear validity
+ * bit that is not an absence mark, so the null cannot be emitted. Hash and broadcast right outer
+ * run the left-outer kernel on swapped inputs and swap the value columns back once. Sort-merge
+ * right does not swap again: [[StringOuterPipeline.sortMergeRightOuterJoin]] already restored
+ * `(key, left, right)`.
  */
 private[execution] object StringOuterArms:
 
