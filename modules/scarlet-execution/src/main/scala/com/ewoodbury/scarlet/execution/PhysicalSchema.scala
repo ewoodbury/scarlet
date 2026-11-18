@@ -34,6 +34,14 @@ private[execution] object PhysicalSchema:
     case PhysicalOp.HashAggregate(child) if isIntLong(of(child)) => true
     case _ => false
 
+  /**
+   * A triple [[PhysicalOp.Project]]. [[of]] reports `[Int32, Int64]` and the kind stays triples.
+   * The cells are whatever the function returns.
+   */
+  def isIntLongProject(op: PhysicalOp): Boolean = op match
+    case project: PhysicalOp.Project if isTriples(project.child) => isIntLong(of(project))
+    case _ => false
+
   private def isTriples(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Triples => true
     case _ => false

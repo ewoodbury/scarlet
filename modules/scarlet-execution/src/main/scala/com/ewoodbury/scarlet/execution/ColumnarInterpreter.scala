@@ -211,11 +211,20 @@ private[execution] object ColumnarInterpreter:
    * [[BatchCodec.decodeStringJoinKeepingNulls]]. A clear value bit is a null int, not an absence
    * bit. A clear key bit is still an error. A fully present batch still decodes to the same
    * strings and ints. An `[Int32, Int64]` hash aggregate uses [[JoinProbeAggregate.decodeSums]]:
-   * both columns are present, and the sum is a long.
+   * both columns are present, and the sum is a long. A triple project with that schema uses the
+   * same decoder when the map published pair batches. A same-type triple project still publishes
+   * three int columns, and [[tripleDecoder]] reads those.
    */
   private[execution] def decodeFor(columns: Columns, op: PhysicalOp): Seq[Partition[_]] =
     if (PhysicalSchema.isIntLongAggregate(op)) then intLongSums(columns)
+    else if (PhysicalSchema.isIntLongProject(op)) then decodeTripleProject(columns, op)
     else decodeWith(columns, intPairDecoder(op), longDecoder(op), tripleDecoder(op))
+
+  /** Pairs are an `(Int, Long)` project. Any other batch is the same-type triple map. */
+  private def decodeTripleProject(columns: Columns, op: PhysicalOp): Seq[Partition[_]] =
+    columns match
+      case Columns.Pairs(_) => intLongSums(columns)
+      case _ => decodeWith(columns, intPairDecoder(op), longDecoder(op), tripleDecoder(op))
 
   /** Groups of an int-long reduce. A non-pair batch is a bug in the arm, not a row fallback. */
   private def intLongSums(columns: Columns): Seq[Partition[_]] = columns match
@@ -1022,15 +1031,9 @@ private[execution] object ColumnarInterpreter:
         )
       })
     case Columns.Triples(parts) =>
-      // Named erasure boundary. The adapter returns Any. A type-changing triple throws
-      // ColumnarFallback inside the kernel, before the output batch is published, instead of a
-      // raw ClassCastException from this cast. The cast itself succeeds for any Function1.
-      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Any"))
-      val fn = mapper.asInstanceOf[((Int, (Int, Int))) => Any]
-      val adapted: PairKernel.IntTripleMap = (key, left, right) => fn((key, (left, right)))
-      Columns.Triples(onEachMorsel(parts) { morsel =>
-        PairKernel.mapTriple(morsel.batch, morsel.start, morsel.length, adapted)
-      })
+      // `[Int32, Int64]` does not name the cell. `(Int, Long)` publishes two columns.
+      // `(Int, (Int, Int))` stays three ints. The function body is not read.
+      TripleProject.columns(parts, mapper)
     case Columns.Pairs(parts) =>
       // The adapter returns Any. A cell that is not an int throws ColumnarFallback inside the
       // kernel, before the output batch is published. The declared apply(Tuple2) check does not

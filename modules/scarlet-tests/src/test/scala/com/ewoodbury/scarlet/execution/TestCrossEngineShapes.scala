@@ -136,7 +136,30 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     )
     projectedOp.kind shouldBe PhysicalOp.Kind.Triples
     projectedOp.schema shouldBe Vector(LogicalType.Int32, LogicalType.Int64)
-    ColumnarPlanner.tryRun(projected.plan).isEmpty shouldBe true
+    Task.resetSortMergeJoinRunsForTest()
+    ColumnarPlanner.tryRun(projected.plan).isDefined shouldBe true
+    Task.sortMergeJoinRunsForTest shouldBe 0
+    ScarletRuntime.get.shuffle.clear()
+    Task.resetSortMergeJoinRunsForTest()
+    val projectedRows = projected.collect()
+    Task.sortMergeJoinRunsForTest shouldBe 0
+    projectedRows should contain theSameElementsAs Seq((1, 10L), (1, 10L), (2, 20L))
+    CrossEngineShapes.sumChecksum(projectedRows) shouldBe 164L
+    val keptProject = ScarletConf.get
+    ScarletConf.set(keptProject.copy(columnarExecution = false))
+    val rowProjected =
+      try
+        ScarletRuntime.get.shuffle.clear()
+        projected.collect()
+      finally ScarletConf.set(keptProject)
+    projectedRows should contain theSameElementsAs rowProjected
+    ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 1))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      Task.resetSortMergeJoinRunsForTest()
+      projected.collect() should contain theSameElementsAs projectedRows
+      Task.sortMergeJoinRunsForTest shouldBe 0
+    finally ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 8192))
     val generic = projected.reduceByKey((left: Long, right: Long) => left + right)
     val genericOp = ColumnarPlanner.lower(generic.plan).get
     genericOp.shape should startWith("HashAggregate(Exchange(Project(")
