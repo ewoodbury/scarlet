@@ -63,6 +63,18 @@ private[execution] object StringPairWalk:
       case _ =>
         throw new IllegalStateException("columnar projection expected a pair")
 
+  /**
+   * One `(String, Int)` project. The function runs on every row, including a null key. Each morsel
+   * batch owns its dictionary. Regroup builds one dictionary per input partition.
+   */
+  def project(parts: Vector[ColumnBatch], mapper: Any): Columns =
+    val adapted = StringPairProject.adapt(mapper)
+    Columns.StringPairs(
+      ColumnarInterpreter.onEachMorsel(parts) { morsel =>
+        StringPairProject.project(morsel.batch, morsel.start, morsel.length, adapted)
+      },
+    )
+
   def mapValues(columns: Columns, mapper: Any): Columns =
     val fn = intMapper(mapper)
     Columns.StringPairs(

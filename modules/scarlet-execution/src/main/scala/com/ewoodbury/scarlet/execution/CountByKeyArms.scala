@@ -20,13 +20,14 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * key, and only the projected key is stored. The pair batch is not published. The function is not
  * inspected. A filter above that project, a flatMap, and a mapPartitions stay on the interpreted
  * path. A long-pair map is interpreted into two long columns. [[LongHashCount.byKey]] hashes that
- * key column and does not decode the pairs. A string-pair map does not lower. No filters and no
- * such map, a whole-row or string step, a non-int slot, and a null component the encoder throws on
- * stay on the old path. That path partial-counts survivor ids, including one row, key, or value
- * filter. A scan and a non-pair child stay on the dense count. The value column is not read on
- * that path, so a null value still counts. A long count publishes [[Columns.LongCounts]]. A string
- * count publishes [[Columns.StringPairs]]. The stored count is an `Int`. A null string key is
- * dropped and `""` is kept.
+ * key column and does not decode the pairs. A string-pair map is interpreted into a dictionary and
+ * an int column. [[StringHashCount.byKey]] hashes that dictionary and does not decode boxed pairs.
+ * No filters and no int-pair map, a whole-row or string step, a non-int slot, and a null component
+ * the encoder throws on stay on the old path. That path partial-counts survivor ids, including one
+ * row, key, or value filter. A scan and a non-pair child stay on the dense count. The value column
+ * is not read on that path, so a null value still counts. A long count publishes
+ * [[Columns.LongCounts]]. A string count publishes [[Columns.StringPairs]]. The stored count is an
+ * `Int`. A null string key is dropped and `""` is kept.
  */
 private[execution] object CountByKeyArms:
 

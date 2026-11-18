@@ -48,9 +48,12 @@ class TestColumnarGroupedSum
     ColumnarPlanner.tryRun(longMapped).map(_.flatMap(_.data).toList) shouldBe Some(
       rowResult(longMapped).toList,
     )
-    ColumnarPlanner.lower(
-      Plan.MapOp(stringKeySource, (pair: (String, Int)) => (pair._1, pair._2)),
-    ) shouldBe None
+    val stringMapped =
+      Plan.MapOp(stringKeySource, (pair: (String, Int)) => (pair._1, pair._2))
+    ColumnarPlanner.lower(stringMapped).map(_.shape) shouldBe Some("Project(Scan)")
+    ColumnarPlanner.tryRun(stringMapped).map(_.flatMap(_.data).toList) shouldBe Some(
+      rowResult(stringMapped).toList,
+    )
 
     ColumnarPlanner.tryGroupedSum(pairSource) shouldBe Some(60L)
     ColumnarPlanner.groupedSumPeel(pairSource) shouldBe Some("GroupedSum(Scan)")

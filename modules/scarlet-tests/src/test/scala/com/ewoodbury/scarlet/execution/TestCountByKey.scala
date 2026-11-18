@@ -388,8 +388,13 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       .lower(longPairs.map((pair: (Long, Long)) => (pair._1, pair._2)).plan)
       .map(_.shape) shouldBe Some("Project(Scan)")
     val strings = DistCollection(Seq("a" -> 1, "b" -> 2), 1)
-    ColumnarPlanner.lower(strings.map((pair: (String, Int)) => (pair._1, pair._2)).plan) shouldBe
-      None
+    ColumnarPlanner
+      .lower(strings.map((pair: (String, Int)) => (pair._1, pair._2)).plan)
+      .map(_.shape) shouldBe Some("Project(Scan)")
+    val remapped = strings.map { case (key, value) => (key + "!", value) }.countByKey
+    ColumnarPlanner.lower(remapped.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(Project(Scan)))",
+    )
   }
 
   it should "count a long pair map from two long columns" in {

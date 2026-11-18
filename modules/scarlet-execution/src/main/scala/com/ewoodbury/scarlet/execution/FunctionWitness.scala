@@ -9,9 +9,11 @@ package com.ewoodbury.scarlet.execution
  * Int)` is `apply(Tuple2): Tuple2`. Erasure gives that same `apply` to a long or string pair
  * function. The pair kernel declines a cell that is not an int. A long-pair project reuses this
  * tuple witness; [[declaredElement]] stays false for long pairs, and that kernel declines a cell
- * that is not a long. The check reads method descriptors and does not call the function. A
- * primitive specialized apply is not a bridge. `Boolean` has no specialized apply, so
- * [[declaredElement]] is false for that kind and does not inspect the function.
+ * that is not a long. A string-pair project reuses the same witness. [[declaredElement]] stays
+ * false for string pairs, and that kernel declines a cell that is not a string or an int. The
+ * check reads method descriptors and does not call the function. A primitive specialized apply is
+ * not a bridge. `Boolean` has no specialized apply, so [[declaredElement]] is false for that kind
+ * and does not inspect the function.
  */
 private[execution] object FunctionWitness:
 

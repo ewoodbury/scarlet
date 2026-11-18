@@ -28,10 +28,11 @@ object ColumnarPlanner:
    * [[Layout.Utf8Dict]]. An int, long, boolean, double, or int-pair plan reports
    * [[Layout.Columnar]]. A long-pair plan reports that layout too. An `(Int, Int)` pair map whose
    * function declares `apply(Tuple2): Tuple2` is accepted and stays [[PhysicalOp.Kind.Pairs]]. A
-   * `(Long, Long)` map with that witness is a project and stays [[PhysicalOp.Kind.LongPairs]]. The
-   * child kind selects the cell. A string-pair map is `None`. Erasure also accepts `(Long, Int)`;
-   * the int-pair kernel declines that cell, and a long-pair project declines a cell that is not a
-   * long.
+   * `(Long, Long)` map with that witness is a project and stays [[PhysicalOp.Kind.LongPairs]]. A
+   * `(String, Int)` map with that witness is a project and stays [[PhysicalOp.Kind.StringPairs]].
+   * The child kind selects the cell. Erasure also accepts `(Long, Int)` and an int pair on a
+   * string child. The matching kernel declines a cell that is not its type. A map under
+   * `sortByStringKey` stays `None`.
    */
   def partitioning[A](plan: Plan[A]): Option[PartitioningInfo] =
     accepted(plan).map(infoOf)
@@ -891,10 +892,19 @@ object ColumnarPlanner:
         PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums =>
       None
 
-  /** A whole-row string filter. A project still refuses the chain. */
+  /**
+   * A whole-row string filter, or one `(String, Int)` project.
+   *
+   * The project reuses the `apply(Tuple2): Tuple2` witness. The child kind selects the string
+   * cell. A filter above that project stays on the row path: the row path sees the new key. A
+   * filter under the project still lowers, and the project runs on its output.
+   */
   private def lowerStringRow(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
     step match
+      case ElementStep.Filter(_) if stringPairProject(child) => None
       case ElementStep.Filter(_) => Some(PhysicalOp.Filter(child, PhysicalOp.Slot.Row))
+      case ElementStep.Project(mapper) if returnsIntPair(mapper) =>
+        Some(PhysicalOp.Project(child))
       case ElementStep.Project(_) => None
 
   private def lowerElementStep(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
@@ -1018,8 +1028,9 @@ object ColumnarPlanner:
    * `Tuple2 => Tuple2` via [[FunctionWitness]], the same witness shape as [[returnsUnboxedInt]].
    * Erasure does not separate `(Int, Int)` from `(Long, Long)` or `(Long, Int)`. The child kind
    * selects the cell. The int-pair kernel declines a cell that is not an int. The long-pair kernel
-   * declines a cell that is not a long. This does not call `function` and does not read its body.
-   * [[FunctionWitness.declaredElement]] stays false for [[PhysicalOp.Kind.LongPairs]].
+   * declines a cell that is not a long. The string-pair kernel declines a cell that is not a
+   * string or an int. This does not call `function` and does not read its body.
+   * [[FunctionWitness.declaredElement]] stays false for long pairs and for string pairs.
    */
   private def returnsIntPair(function: Any): Boolean =
     FunctionWitness.declaredElement(PhysicalOp.Kind.Pairs, function)
@@ -1041,8 +1052,9 @@ object ColumnarPlanner:
   private def columnFilter(source: Plan[_], slot: PhysicalOp.Slot): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
       // A key or value filter above a key map drops or keeps a null the row path unboxes.
-      // The same filter above a long-pair project stays empty: the row path sees the new key.
-      if (MapIntKey.inTree(child) || longPairProject(child)) then None
+      // The same filter above a long-pair or string-pair project stays empty: the row path
+      // sees the new key.
+      if (MapIntKey.inTree(child) || longPairProject(child) || stringPairProject(child)) then None
       else
         child.kind match
           case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.LongPairs =>
@@ -1055,6 +1067,17 @@ object ColumnarPlanner:
     case PhysicalOp.Project(child) =>
       child.kind match
         case PhysicalOp.Kind.LongPairs => true
+        case _ => false
+    case _ => false
+
+  /**
+   * A string-pair [[PhysicalOp.Project]]. Slot filters and a whole-row filter above that project
+   * stay on the row path.
+   */
+  private def stringPairProject(op: PhysicalOp): Boolean = op match
+    case PhysicalOp.Project(child) =>
+      child.kind match
+        case PhysicalOp.Kind.StringPairs => true
         case _ => false
     case _ => false
 
