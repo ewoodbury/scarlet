@@ -270,8 +270,8 @@ object CrossEngineBench:
     joinBuilt(rows, filters, nulls)(joined => () => joined.count())
 
   /**
-   * Same inputs as [[joinQuery]]. The action sums `left * 31 + right` over the columns the join
-   * writes. The count action does not write those columns.
+   * Same inputs as [[joinQuery]]. The action sums `left * 31 + right` from the hash probe and
+   * does not write the match columns. The count action does not write them either.
    */
   private def joinSumQuery(rows: Int, filters: Int, nulls: Boolean): Built =
     joinBuilt(rows, filters, nulls)(joined => () => JoinValueSum.of(joined))

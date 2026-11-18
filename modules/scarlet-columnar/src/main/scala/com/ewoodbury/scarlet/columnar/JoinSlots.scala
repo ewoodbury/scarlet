@@ -121,6 +121,123 @@ private[columnar] final class JoinSlots(rowCount: Int, budget: Long):
     }
     total
 
+  /**
+   * `build * 31 + probe` over the matches [[countOutput]] would count. A null value on either side
+   * drops that match, which is what `SUM` does. Each chain is folded once. A probe hit adds
+   * `chainSum * 31 + probe * presentCount`, the same total as adding the pair on every match. No
+   * output column is allocated.
+   */
+  def foldValuePair(
+      buildValues: Array[Int],
+      buildValueWords: Array[Long],
+      buildRows: Int,
+      probeKeys: Array[Int],
+      probeKeyWords: Array[Long],
+      probeValues: Array[Int],
+      probeValueWords: Array[Long],
+      probeRows: Int,
+  ): Long =
+    if (probeRows == 0 || longest == 0) then 0L
+    else if (
+        Validity.livePresent(buildValueWords, buildRows) &&
+        Validity.livePresent(probeKeyWords, probeRows) &&
+        Validity.livePresent(probeValueWords, probeRows)
+      )
+    then sumPresent(buildValues, probeKeys, probeValues, probeRows)
+    else
+      sumNullable(
+        buildValues,
+        buildValueWords,
+        buildRows,
+        probeKeys,
+        probeKeyWords,
+        probeValues,
+        probeValueWords,
+        probeRows,
+      )
+
+  /** Every build value, probe key, and probe value is present. `chain` is the present count. */
+  private def sumPresent(
+      buildValues: Array[Int],
+      probeKeys: Array[Int],
+      probeValues: Array[Int],
+      probeRows: Int,
+  ): Long =
+    val sums = new Array[Long](capacity)
+    var slot = 0
+    while (slot < capacity) {
+      var row = head(slot)
+      if (row >= 0) then
+        var sum = 0L
+        while (row >= 0) {
+          sum += buildValues(row).toLong
+          row = links(row)
+        }
+        sums(slot) = sum
+      slot += 1
+    }
+    var total = 0L
+    var row = 0
+    while (row < probeRows) {
+      val found = locate(probeKeys(row))
+      if (found >= 0) then
+        total += sums(found) * 31L + probeValues(row).toLong * chain(found).toLong
+      row += 1
+    }
+    total
+
+  /** A null build or probe value contributes nothing. A null probe key is not a hit. */
+  private def sumNullable(
+      buildValues: Array[Int],
+      buildValueWords: Array[Long],
+      buildRows: Int,
+      probeKeys: Array[Int],
+      probeKeyWords: Array[Long],
+      probeValues: Array[Int],
+      probeValueWords: Array[Long],
+      probeRows: Int,
+  ): Long =
+    val buildDense = Validity.livePresent(buildValueWords, buildRows)
+    val sums = new Array[Long](capacity)
+    val counts = new Array[Int](capacity)
+    var slot = 0
+    while (slot < capacity) {
+      var row = head(slot)
+      if (row >= 0) then
+        var sum = 0L
+        var count = 0
+        if (buildDense) then
+          while (row >= 0) {
+            sum += buildValues(row).toLong
+            count += 1
+            row = links(row)
+          }
+        else
+          while (row >= 0) {
+            if (Validity.isSet(buildValueWords, row)) then
+              sum += buildValues(row).toLong
+              count += 1
+            row = links(row)
+          }
+        sums(slot) = sum
+        counts(slot) = count
+      slot += 1
+    }
+    val keysDense = Validity.livePresent(probeKeyWords, probeRows)
+    val valuesDense = Validity.livePresent(probeValueWords, probeRows)
+    var total = 0L
+    var row = 0
+    while (row < probeRows) {
+      val keyOk = keysDense || Validity.isSet(probeKeyWords, row)
+      if (keyOk && (valuesDense || Validity.isSet(probeValueWords, row))) then
+        val found = locate(probeKeys(row))
+        if (found >= 0) then
+          val count = counts(found)
+          if (count != 0) then total += sums(found) * 31L + probeValues(row).toLong * count.toLong
+      row += 1
+    }
+    total
+
   /** A null probe key is a miss. The bit test stays inside the row loop. */
   private def countSparse(
       probeKeys: Array[Int],

@@ -70,6 +70,70 @@ object HashJoin:
     else indexed(buildKeys, buildValues).countMatches(probeKeys)
 
   /**
+   * `build * 31 + probe` over the matches [[countInner]] would count. A null value on either side
+   * drops that match. An empty side is zero. The chain is folded once per build slot. This does
+   * not call [[JoinWrite.writeGrouped]], [[JoinWrite.writeDense]], or the per-row writer.
+   */
+  private[scarlet] def sumValuePair(build: JoinSide, probe: JoinSide): Long =
+    val buildKeys = ColumnHash.int32At(build.batch, build.key)
+    val buildValues = ColumnHash.int32At(build.batch, build.value)
+    val probeKeys = ColumnHash.int32At(probe.batch, probe.key)
+    val probeValues = ColumnHash.int32At(probe.batch, probe.value)
+    require(buildKeys.length == buildValues.length, "build key and value columns differ in length")
+    require(probeKeys.length == probeValues.length, "probe key and value columns differ in length")
+    if (buildKeys.length == 0 || probeKeys.length == 0) then 0L
+    else indexed(buildKeys, buildValues).foldValuePair(probeKeys, probeValues)
+
+  /**
+   * Sum of triples an inner join already wrote. Column 1 is the build value and column 2 is the
+   * probe value, which is what [[innerInt32]] publishes. A null on either value drops the row. The
+   * in-budget probe uses [[sumValuePair]] and does not write these columns.
+   */
+  private[scarlet] def sumWrittenPairs(batches: Vector[ColumnBatch]): Long =
+    batches.foldLeft(0L)((total, batch) => total + sumWrittenPair(batch))
+
+  private def sumWrittenPair(batch: ColumnBatch): Long =
+    val rows = batch.length
+    if (rows == 0) then 0L
+    else
+      val left = ColumnHash.int32At(batch, 1)
+      val right = ColumnHash.int32At(batch, 2)
+      val leftDense = Validity.livePresent(left.validity, rows)
+      val rightDense = Validity.livePresent(right.validity, rows)
+      if (leftDense && rightDense) then sumDenseWritten(left.values, right.values, rows)
+      else sumSparseWritten(left, right, rows, leftDense, rightDense)
+
+  private def sumDenseWritten(left: Array[Int], right: Array[Int], rows: Int): Long =
+    var row = 0
+    var sum = 0L
+    while (row < rows) {
+      sum += left(row).toLong * 31L + right(row).toLong
+      row += 1
+    }
+    sum
+
+  private def sumSparseWritten(
+      left: Int32Column,
+      right: Int32Column,
+      rows: Int,
+      leftDense: Boolean,
+      rightDense: Boolean,
+  ): Long =
+    val leftValues = left.values
+    val rightValues = right.values
+    val leftWords = left.validity.words
+    val rightWords = right.validity.words
+    var row = 0
+    var sum = 0L
+    while (row < rows) {
+      val leftOk = leftDense || Validity.isSet(leftWords, row)
+      if (leftOk && (rightDense || Validity.isSet(rightWords, row))) then
+        sum += leftValues(row).toLong * 31L + rightValues(row).toLong
+      row += 1
+    }
+    sum
+
+  /**
    * One build table for every batch in `sides`, in vector order. An empty input, or batches whose
    * live lengths sum to zero, probes to an empty batch and allocates nothing. A non-int column or
    * a bad ordinal fails before the table is built. Otherwise [[retainedBuildBytes]] is compared
@@ -204,6 +268,19 @@ object HashJoin:
         probeKeys.validity.words,
         probeKeys.length,
         keepMisses = false,
+      )
+
+    /** [[countMatches]] as `build * 31 + probe`. A null value on either side adds nothing. */
+    def foldValuePair(probeKeys: Int32Column, probeValues: Int32Column): Long =
+      slots.foldValuePair(
+        buildValues.values,
+        buildValues.validity.words,
+        rows,
+        probeKeys.values,
+        probeKeys.validity.words,
+        probeValues.values,
+        probeValues.validity.words,
+        probeKeys.length,
       )
 
     def write(probeKeys: Int32Column, probeValues: Int32Column): ColumnBatch =

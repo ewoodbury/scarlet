@@ -10,10 +10,11 @@ import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
- * The cross-engine join sum reads the columns [[MatchCount]] does not write.
+ * The cross-engine join sum folds `left * 31 + right` from the probe.
  *
  * Same keys as `filter-join`: `row % 1024` on the build, ten probe copies, two filters. The
- * checksum is `left * 31 + right` over each match.
+ * checksum is that pair over each match. [[MatchCount]] and this fold both skip the match
+ * columns. `collect` of the same join still returns the triples.
  */
 class TestJoinValueSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -43,28 +44,38 @@ class TestJoinValueSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     )
 
     val summed = JoinValueSum.of(joined)
-    summed shouldBe fold(joined.collect())
+    val triples = joined.collect()
+    summed shouldBe fold(triples)
+    triples.iterator.map(_ => 1L).sum shouldBe joined.count()
     ScarletRuntime.get.shuffle.clear()
     summed shouldBe fold(row(joined.collect()))
 
     val parts = interpreted(joined)
     parts.iterator.map(_.length.toLong).sum shouldBe joined.count()
+    summed shouldBe JoinValueSum.ofColumns(parts)
   }
 
-  it should "write match columns where the count writes none" in {
+  it should "fold the value pair without the match columns collect still writes" in {
     val joined = crossJoin(512)
     val counted = new CountingSink
+    val folded = new CountingSink
     val written = new CountingSink
     ColumnMetrics.withSink(counted) {
       val _ = joined.count()
     }
     ScarletRuntime.get.shuffle.clear()
-    ColumnMetrics.withSink(written) {
-      val _ = JoinValueSum.of(joined)
+    val total = ColumnMetrics.withSink(folded) {
+      JoinValueSum.of(joined)
+    }
+    ScarletRuntime.get.shuffle.clear()
+    val parts = ColumnMetrics.withSink(written) {
+      interpreted(joined)
     }
 
     counted.batchCount shouldBe 0L
-    written.batchCount should be > 0L
+    total shouldBe JoinValueSum.ofColumns(parts)
+    parts.iterator.map(_.length.toLong).sum shouldBe joined.count()
+    written.batchCount should be > folded.batchCount
   }
 
   it should "skip a null value and keep a present partner" in {
@@ -78,6 +89,15 @@ class TestJoinValueSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     // A null left value is a match. SUM skips it. The row path would unbox that null to 0.
     JoinValueSum.of(joined) shouldBe 10L * 31L + 7L
     joined.count() shouldBe 2L
+
+    val present = DistCollection.ofIntPairs(Array(1), Array(10), 1)
+    val probe = DistCollection(
+      Seq(intPair(boxedInt(1), boxedInt(7)), intPair(boxedInt(1), absentInt)),
+      1,
+    )
+    // A null right value is a match. SUM skips it too.
+    JoinValueSum.of(present.join(probe)) shouldBe 10L * 31L + 7L
+    present.join(probe).count() shouldBe 2L
   }
 
   it should "sum duplicate build keys" in {

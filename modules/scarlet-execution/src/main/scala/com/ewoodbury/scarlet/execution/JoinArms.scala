@@ -19,7 +19,9 @@ import ColumnPipeline.JoinInput
  * null key is dropped by the exchange. A selected side skips the slice; both dense sides use the
  * caller's flag and slice. An owned filter copy is already dense and is not sliced. [[count]] of
  * two owned int-pair sides multiplies per-key counts and does not copy values. Any other count
- * uses that same exchange and sums chain lengths.
+ * uses that same exchange and sums chain lengths. [[sumValuePair]] uses that same exchange and
+ * adds `build * 31 + probe` per present match. It does not write the match columns. [[inner]]
+ * still does.
  */
 private[execution] object JoinArms:
 
@@ -70,6 +72,29 @@ private[execution] object JoinArms:
         if (build.slice && probe.slice) then
           ColumnPipeline.countInner(build.batches, probe.batches, width, workers, batchSize)
         else ColumnPipeline.countInner(build.input, probe.input, width, workers)
+
+  /**
+   * `build * 31 + probe` over the rows [[inner]] would publish. The match columns are not written.
+   * An empty side is zero. A null value on either side is skipped. The exchange is the non-product
+   * arm of [[count]], including a selected side and a slice.
+   */
+  def sumValuePair(
+      left: Plan[_],
+      right: Plan[_],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): Long =
+    val width = ColumnarPlanner.shuffleWidth
+    val workers = ColumnarPlanner.parallelism
+    val batchSize = ColumnarPlanner.batchSize
+    val build = arm(left, leftOp, selectedPartition, preserveAbsence, ordinals)
+    val probe = arm(right, rightOp, selectedPartition, preserveAbsence, ordinals)
+    if (build.slice && probe.slice) then
+      ColumnPipeline.sumValuePair(build.batches, probe.batches, width, workers, batchSize)
+    else ColumnPipeline.sumValuePair(build.input, probe.input, width, workers)
 
   /**
    * Grouped sum of one join column. The exchange matches [[inner]]. Match columns are not written.

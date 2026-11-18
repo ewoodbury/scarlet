@@ -276,6 +276,47 @@ object ColumnPipeline:
         .foldLeft(0L)((total, matches) => total + matches.toLong)
 
   /**
+   * Scalar `build * 31 + probe` for [[innerJoin]]. Same exchange, including the slice. A bucket
+   * over the spill budget is joined and then summed from the written columns. A bucket that fits
+   * folds each chain in [[HashJoin.sumValuePair]] and does not call [[JoinWrite]].
+   */
+  def sumValuePair(
+      build: Vector[ColumnBatch],
+      probe: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Long =
+    sumValuePair(
+      JoinInput.Dense(sliceAll(build, batchSize)),
+      JoinInput.Dense(sliceAll(probe, batchSize)),
+      numPartitions,
+      parallelism,
+    )
+
+  /** [[sumValuePair]] for sides that are already sliced, or that name a survivor index. */
+  def sumValuePair(
+      build: JoinInput,
+      probe: JoinInput,
+      numPartitions: Int,
+      parallelism: Int,
+  ): Long =
+    val buildBuckets = exchange(build, numPartitions, parallelism)
+    val probeBuckets = exchange(probe, numPartitions, parallelism)
+    val conf = ScarletConf.get
+    if (buildBuckets.exists(bucket => HashJoinSpill.exceeds(bucket, conf))) then
+      HashJoin.sumWrittenPairs(HashJoinSpill.finish(buildBuckets, probeBuckets, parallelism, conf))
+    else
+      MorselScheduler
+        .map(probeBuckets, parallelism) { (part, probeBatch) =>
+          HashJoin.sumValuePair(
+            HashJoin.JoinSide(bucketAt(buildBuckets, part), key = 0, value = 1),
+            HashJoin.JoinSide(probeBatch, key = 0, value = 1),
+          )
+        }
+        .foldLeft(0L)((total, partSum) => total + partSum)
+
+  /**
    * [[innerJoin]] for a grouped sum of one int column. The exchange matches [[countInner]]. A
    * build bucket over the spill budget declines before any match columns are written. A bucket
    * that fits updates [[JoinProbeSum]] and does not call [[JoinWrite]].
