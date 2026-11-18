@@ -15,12 +15,48 @@ package com.ewoodbury.scarlet.columnar
  * A null measured value adds as zero, the same unbox as the row path, including a group whose only
  * matches are null. A null on the other side still matches. An empty build or probe publishes an
  * empty sum and does not touch the aggregate table.
+ *
+ * [[sumBroadcast]] is that sum with no exchange. Both sides are concatenated, the left input stays
+ * the build, and a build whose [[HashJoin.retainedBuildBytes]] estimate is above the broadcast
+ * budget declines before [[sum]] allocates a table. The match columns are not written.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[scarlet] object JoinProbeSum:
 
   enum Measure:
     case Left, Right
+
+  /**
+   * [[sum]] for one broadcast build. `build` is the left input and `probe` is the right. Neither
+   * side is exchanged. An empty side publishes an empty sum and does not allocate a table. A
+   * non-empty build whose [[HashJoin.retainedBuildBytes]] estimate is above `buildBudgetBytes`
+   * declines before the sides are concatenated and before [[sum]] allocates a table. The match
+   * columns are not written. [[JoinWrite]] and [[ColumnPipeline.broadcastJoin]] are not called.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Throw"))
+  def sumBroadcast(
+      build: Vector[ColumnBatch],
+      probe: Vector[ColumnBatch],
+      buildBudgetBytes: Long,
+      measure: Measure,
+  ): ColumnBatch =
+    val buildRows = build.iterator.map(_.length.toLong).sum
+    val probeRows = probe.iterator.map(_.length.toLong).sum
+    if (buildRows > 0L && probeRows > 0L) then
+      require(buildRows <= Int.MaxValue.toLong, s"build side has $buildRows rows")
+      val count = buildRows.toInt
+      val estimate = HashJoin.retainedBuildBytes(count)
+      if (estimate > buildBudgetBytes) then
+        throw new ColumnarFallback(
+          "a broadcast join sum over the build budget stays on the row path",
+        )
+    sum(sideOf(build), sideOf(probe), measure)
+
+  private def sideOf(batches: Vector[ColumnBatch]): HashJoin.JoinSide =
+    val batch =
+      if (batches.isEmpty) then ColumnBatches.emptyIntPairs
+      else ColumnBatches.concat(batches)
+    HashJoin.JoinSide(batch, key = 0, value = 1)
 
   def sum(build: HashJoin.JoinSide, probe: HashJoin.JoinSide, measure: Measure): ColumnBatch =
     val buildKeys = ColumnHash.int32At(build.batch, build.key)
