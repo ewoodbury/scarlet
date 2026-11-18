@@ -399,6 +399,29 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.tryRun(broadcast.plan).isDefined shouldBe true
   }
 
+  it should "sum the same groups at batch size 1 and 8192" in {
+    val left = pairs(Array(0, 1, 2, 3, 4, 80, 5), Array(10, -1, 7, 8, 3, 4, 9))
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+    val right = pairs(Array(1, 2, 4, 80, 5, 1), Array(3, 60, 1, 9, 2, 4))
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value < 50)
+    val summed = left.join(right).sumJoinLeft
+    val wide = summed.collect().toMap
+    wide shouldBe rowMap(summed)
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(saved.copy(columnarBatchSize = 1))
+      ScarletRuntime.get.shuffle.clear()
+      summed.collect().toMap shouldBe wide
+      ScarletConf.set(saved.copy(columnarBatchSize = 8192))
+      ScarletRuntime.get.shuffle.clear()
+      summed.collect().toMap shouldBe wide
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
+  }
+
   "decodeSums" should "reject a hole and a short column" in {
     val present = new ColumnBatch(
       Vector(LogicalType.Int32, LogicalType.Int64),

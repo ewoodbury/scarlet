@@ -8,21 +8,23 @@ import ColumnPipeline.JoinInput
 /**
  * Int inner shuffle-hash join.
  *
- * A slot-filter stack on an owned int-pair scan is copied by [[IntPairFilterEncode]]: one pass,
- * survivors only, no survivor index. The build reads that encoded key column. A boxed source, a
- * null, or any other stack still scatters survivor ids, including a stack of one. An int-pair row
- * filter does the same. The exchange reads those rows and does not slice them. A child with no
- * selection steps stays on the sliced dense exchange. [[FilterChain.selected]] interprets a stack
- * once. The `None` path is the only one that interprets that child.
+ * [[sum]] and [[sumValuePair]] hash-exchange an owned int-pair slot stack, or a dense owned scan,
+ * from the source arrays. Each survivor is written once into its shuffle bucket. Those arrays are
+ * the partition columns: the walk does not call [[IntPairFilterEncode.tryBatches]] or
+ * [[BatchCodec.copiedIntPairs]], and it does not `copyOf` a dense bucket. [[inner]] still copies a
+ * slot stack and writes triples. A boxed source, a null, or a whole-row filter still scatters
+ * survivor ids, including a stack of one. An int-pair row filter does the same. The exchange reads
+ * those rows and does not slice them. A child with no selection steps, when it is not an owned
+ * pair scan, stays on the sliced dense exchange. [[FilterChain.selected]] interprets a stack once.
+ * The `None` path is the only one that interprets that child.
  *
  * A null value is a clear bit in the output, including a selection. It is not an absence bit. A
  * null key is dropped by the exchange. A selected side skips the slice; both dense sides use the
  * caller's flag and slice. An owned filter copy is already dense and is not sliced. [[count]] of
  * two owned int-pair sides multiplies per-key counts and does not copy values. Any other count
- * uses that same exchange and sums chain lengths. [[sumValuePair]] uses that same exchange and
- * adds `build * 31 + probe` per present match. It does not write the match columns. [[projectSum]]
- * uses that same exchange, projects each hit, and sums under the projected key. [[inner]] still
- * writes the match columns.
+ * uses that same exchange and sums chain lengths. [[sumValuePair]] adds `build * 31 + probe` per
+ * present match. It does not write the match columns. [[projectSum]] uses the copying exchange,
+ * projects each hit, and sums under the projected key. [[inner]] still writes the match columns.
  */
 private[execution] object JoinArms:
 
@@ -88,14 +90,21 @@ private[execution] object JoinArms:
       preserveAbsence: Boolean,
       ordinals: Set[Int],
   ): Long =
-    val width = ColumnarPlanner.shuffleWidth
-    val workers = ColumnarPlanner.parallelism
-    val batchSize = ColumnarPlanner.batchSize
-    val build = arm(left, leftOp, selectedPartition, preserveAbsence, ordinals)
-    val probe = arm(right, rightOp, selectedPartition, preserveAbsence, ordinals)
-    if (build.slice && probe.slice) then
-      ColumnPipeline.sumValuePair(build.batches, probe.batches, width, workers, batchSize)
-    else ColumnPipeline.sumValuePair(build.input, probe.input, width, workers)
+    val exchanged =
+      if (selectedPartition.nonEmpty) then None
+      else ownedBuckets(left, leftOp, right, rightOp, ordinals)
+    exchanged match
+      case Some((build, probe)) =>
+        ColumnPipeline.sumValuePairBuckets(build, probe, ColumnarPlanner.parallelism)
+      case None =>
+        val width = ColumnarPlanner.shuffleWidth
+        val workers = ColumnarPlanner.parallelism
+        val batchSize = ColumnarPlanner.batchSize
+        val build = arm(left, leftOp, selectedPartition, preserveAbsence, ordinals)
+        val probe = arm(right, rightOp, selectedPartition, preserveAbsence, ordinals)
+        if (build.slice && probe.slice) then
+          ColumnPipeline.sumValuePair(build.batches, probe.batches, width, workers, batchSize)
+        else ColumnPipeline.sumValuePair(build.input, probe.input, width, workers)
 
   /**
    * Grouped sum of a triple project over the exchange [[inner]] uses. Match columns are not
@@ -154,14 +163,18 @@ private[execution] object JoinArms:
       measure: JoinProbeSum.Measure,
       ordinals: Set[Int],
   ): Vector[ColumnBatch] =
-    val width = ColumnarPlanner.shuffleWidth
-    val workers = ColumnarPlanner.parallelism
-    val batchSize = ColumnarPlanner.batchSize
-    val build = arm(left, leftOp, None, false, ordinals)
-    val probe = arm(right, rightOp, None, false, ordinals)
-    if (build.slice && probe.slice) then
-      ColumnPipeline.sumInner(build.batches, probe.batches, width, workers, batchSize, measure)
-    else ColumnPipeline.sumInner(build.input, probe.input, width, workers, measure)
+    ownedBuckets(left, leftOp, right, rightOp, ordinals) match
+      case Some((build, probe)) =>
+        ColumnPipeline.sumBuckets(build, probe, ColumnarPlanner.parallelism, measure)
+      case None =>
+        val width = ColumnarPlanner.shuffleWidth
+        val workers = ColumnarPlanner.parallelism
+        val batchSize = ColumnarPlanner.batchSize
+        val build = arm(left, leftOp, None, false, ordinals)
+        val probe = arm(right, rightOp, None, false, ordinals)
+        if (build.slice && probe.slice) then
+          ColumnPipeline.sumInner(build.batches, probe.batches, width, workers, batchSize, measure)
+        else ColumnPipeline.sumInner(build.input, probe.input, width, workers, measure)
 
   /**
    * Broadcast grouped sum. The left input is the build and the right input is the probe, so
@@ -188,6 +201,32 @@ private[execution] object JoinArms:
         measure,
       ),
     )
+
+  /**
+   * Shuffle buckets for two owned int-pair sides, filtered or dense. `None` when either side is
+   * boxed, null, or not an int slot stack: the caller keeps [[arm]].
+   */
+  private def ownedBuckets(
+      left: Plan[_],
+      leftOp: PhysicalOp,
+      right: Plan[_],
+      rightOp: PhysicalOp,
+      ordinals: Set[Int],
+  ): Option[(Vector[ColumnBatch], Vector[ColumnBatch])] =
+    (
+      IntPairFilterEncode.tryOwned(left, leftOp, ordinals),
+      IntPairFilterEncode.tryOwned(right, rightOp, ordinals),
+    ) match
+      case (Some(build), Some(probe)) =>
+        val width = ColumnarPlanner.shuffleWidth
+        val workers = ColumnarPlanner.parallelism
+        Some(
+          (
+            OwnedPairExchange.buckets(build.parts, build.steps, width, workers),
+            OwnedPairExchange.buckets(probe.parts, probe.steps, width, workers),
+          ),
+        )
+      case _ => None
 
   private def sides(
       left: Plan[_],

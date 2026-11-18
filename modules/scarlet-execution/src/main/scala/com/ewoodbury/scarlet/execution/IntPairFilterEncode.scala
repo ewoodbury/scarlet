@@ -16,6 +16,27 @@ import com.ewoodbury.scarlet.core.{IntPairArrays, Partition, Plan}
 private[execution] object IntPairFilterEncode:
 
   /**
+   * Owned int pairs and the slot stack [[tryCount]] would walk, or `None` when this side is boxed,
+   * null, or not an int slot stack on an owned scan. An empty step list keeps every row. The
+   * arrays are the partition's own arrays.
+   */
+  def tryOwned(
+      plan: Plan[_],
+      op: PhysicalOp,
+      ordinals: Set[Int],
+  ): Option[OwnedPairs] =
+    if (!ordinals.contains(0) || !ordinals.contains(1)) then None
+    else
+      op.kind match
+        case PhysicalOp.Kind.Pairs =>
+          owned(plan, op).flatMap { parts =>
+            sideSteps(plan, op, ordinals).map { steps =>
+              new OwnedPairs(arraysOf(parts), steps)
+            }
+          }
+        case _ => None
+
+  /**
    * Dense survivor batches, one per source partition, or `None` when this encode does not apply.
    */
   def tryBatches(
@@ -136,6 +157,26 @@ private[execution] object IntPairFilterEncode:
   private enum Mode:
     case All
     case Filtered(gate: Gate)
+
+  private def sideSteps(
+      plan: Plan[_],
+      op: PhysicalOp,
+      ordinals: Set[Int],
+  ): Option[List[Selection.Step]] =
+    PredicatePlan.compile(plan, op) match
+      case None =>
+        (plan, op) match
+          case (_: Plan.Source[_], PhysicalOp.Scan(PhysicalOp.Kind.Pairs, _)) =>
+            Some(Nil)
+          case _ => None
+      case Some(compiled) =>
+        PredicatePlan.selectionSteps(PredicatePlan.encoded(compiled, ordinals)) match
+          case Some(steps) if steps.nonEmpty && pack(steps).isDefined =>
+            Some(steps.toList)
+          case _ => None
+
+  private def arraysOf(parts: Vector[IntPairArrays]): Vector[(Array[Int], Array[Int])] =
+    parts.map(pairs => (pairs.keys, pairs.values))
 
   private def slotsOf(
       plan: Plan[_],
@@ -366,6 +407,12 @@ private[execution] object IntPairFilterEncode:
       ),
       rows,
     )
+
+  /** Source arrays and the int slot stack. Empty `steps` keeps every row. */
+  private[execution] final class OwnedPairs(
+      val parts: Vector[(Array[Int], Array[Int])],
+      val steps: List[Selection.Step],
+  )
 
   private final class Job(
       val part: Int,

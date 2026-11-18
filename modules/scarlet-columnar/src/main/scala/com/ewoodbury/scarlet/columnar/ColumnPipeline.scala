@@ -303,8 +303,26 @@ object ColumnPipeline:
       numPartitions: Int,
       parallelism: Int,
   ): Long =
-    val buildBuckets = exchange(build, numPartitions, parallelism)
-    val probeBuckets = exchange(probe, numPartitions, parallelism)
+    sumValuePairBuckets(
+      exchange(build, numPartitions, parallelism),
+      exchange(probe, numPartitions, parallelism),
+      parallelism,
+    )
+
+  /**
+   * [[sumValuePair]] after the exchange. `buildBuckets(i)` is already the build rows of shuffle
+   * partition `i`. This does not call [[HashExchange]].
+   */
+  private[scarlet] def sumValuePairBuckets(
+      buildBuckets: Vector[ColumnBatch],
+      probeBuckets: Vector[ColumnBatch],
+      parallelism: Int,
+  ): Long =
+    require(
+      buildBuckets.length == probeBuckets.length,
+      s"partition counts ${buildBuckets.length} and ${probeBuckets.length} differ",
+    )
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     val conf = ScarletConf.get
     if (buildBuckets.exists(bucket => HashJoinSpill.exceeds(bucket, conf))) then
       HashJoin.sumWrittenPairs(HashJoinSpill.finish(buildBuckets, probeBuckets, parallelism, conf))
@@ -339,7 +357,6 @@ object ColumnPipeline:
       measure,
     )
 
-  @SuppressWarnings(Array("org.wartremover.warts.Throw"))
   def sumInner(
       build: JoinInput,
       probe: JoinInput,
@@ -347,8 +364,30 @@ object ColumnPipeline:
       parallelism: Int,
       measure: JoinProbeSum.Measure,
   ): Vector[ColumnBatch] =
-    val buildBuckets = exchange(build, numPartitions, parallelism)
-    val probeBuckets = exchange(probe, numPartitions, parallelism)
+    sumBuckets(
+      exchange(build, numPartitions, parallelism),
+      exchange(probe, numPartitions, parallelism),
+      parallelism,
+      measure,
+    )
+
+  /**
+   * [[sumInner]] after the exchange. `buildBuckets(i)` is already the build rows of shuffle
+   * partition `i`. This does not call [[HashExchange]]. A build bucket over the spill budget
+   * declines before any match columns are written.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Throw"))
+  private[scarlet] def sumBuckets(
+      buildBuckets: Vector[ColumnBatch],
+      probeBuckets: Vector[ColumnBatch],
+      parallelism: Int,
+      measure: JoinProbeSum.Measure,
+  ): Vector[ColumnBatch] =
+    require(
+      buildBuckets.length == probeBuckets.length,
+      s"partition counts ${buildBuckets.length} and ${probeBuckets.length} differ",
+    )
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     val conf = ScarletConf.get
     if (buildBuckets.exists(bucket => HashJoinSpill.exceeds(bucket, conf))) then
       throw new ColumnarFallback("a join sum over the spill budget stays on the row path")
