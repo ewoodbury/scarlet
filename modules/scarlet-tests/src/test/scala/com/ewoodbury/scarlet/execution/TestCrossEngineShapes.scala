@@ -5,6 +5,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
+import com.ewoodbury.scarlet.columnar.{ColumnarFallback, LogicalType}
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -127,15 +128,52 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
       "HashJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(FilterValue(FilterKey(Scan))))",
     )
     val projected = joined.map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
-    ColumnarPlanner.lower(projected.plan).map(_.shape) shouldBe Some(
+    val projectedOp = ColumnarPlanner.lower(projected.plan).get
+    projectedOp.shape shouldBe (
       "Project(" +
         "HashJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(FilterValue(FilterKey(Scan))))" +
-        ")",
+        ")"
     )
+    projectedOp.kind shouldBe PhysicalOp.Kind.Triples
+    projectedOp.schema shouldBe Vector(LogicalType.Int32, LogicalType.Int64)
     ColumnarPlanner.tryRun(projected.plan).isEmpty shouldBe true
     val generic = projected.reduceByKey((left: Long, right: Long) => left + right)
-    ColumnarPlanner.lower(generic.plan).isEmpty shouldBe true
-    generic.collect().toMap shouldBe Map(1 -> 20L, 2 -> 20L)
+    val genericOp = ColumnarPlanner.lower(generic.plan).get
+    genericOp.shape should startWith("HashAggregate(Exchange(Project(")
+    genericOp.shape should not include "SortMergeJoin"
+    genericOp.schema shouldBe Vector(LogicalType.Int32, LogicalType.Int64)
+    ColumnarPlanner.tryRun(generic.plan).isDefined shouldBe true
+    val summed = generic.collect().toMap
+    summed shouldBe Map(1 -> 20L, 2 -> 20L)
+    CrossEngineShapes.sumChecksum(summed) shouldBe 133L
+    ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 1))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      generic.collect().toMap shouldBe summed
+    finally ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 8192))
+    val changed = joined
+      .map { case (key, (leftValue, _)) => (leftValue, key.toLong) }
+      .reduceByKey((left: Long, right: Long) => left + right)
+    val changedShape = ColumnarPlanner.lower(changed.plan).map(_.shape).get
+    changedShape should include("HashAggregate(Exchange(Project(")
+    changed.collect().toMap shouldBe Map(10 -> 2L, 20 -> 2L)
+    val nested = joined
+      .map { case (key, pair) => (key, pair) }
+      .reduceByKey((left: (Int, Int), right: (Int, Int)) =>
+        (left._1 + right._1, left._2 + right._2),
+      )
+    ColumnarPlanner.lower(nested.plan).isDefined shouldBe true
+    ColumnarPlanner.tryRun(nested.plan).isEmpty shouldBe true
+    val declined = intercept[ColumnarFallback] {
+      ColumnarInterpreter.interpret(nested.plan, ColumnarPlanner.lower(nested.plan).get)
+    }
+    declined.getMessage should include("(Int, Long)")
+    val columnarOn = ScarletConf.get
+    ScarletConf.set(columnarOn.copy(columnarExecution = false))
+    val rowPairs = nested.collect().toMap
+    ScarletConf.set(columnarOn)
+    nested.collect().toMap shouldBe rowPairs
+    rowPairs shouldBe Map(1 -> (20, 30), 2 -> (20, 10))
     aggregated.collect().toMap shouldBe Map(1 -> 20L, 2 -> 20L)
     CrossEngineShapes.sumChecksum(aggregated.collect()) shouldBe 133L
   }

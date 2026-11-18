@@ -48,8 +48,9 @@ object CrossEngineShapes:
    * 682 keys. Each matching right row adds the left value once. `filters` is 1 or 2.
    *
    * The group key is the join key. [[DistCollection.sumJoinLeft]] is the witness: the probe adds
-   * the left value and does not write the match columns. A generic `map` and `_ + _` of the same
-   * arithmetic stays on the row path, because that map does not stay `(Int, (Int, Int))`.
+   * the left value and does not write the match columns. A generic `map` to `(Int, Long)` and
+   * `_ + _` is a hash aggregate of that project. The join under the project still writes the
+   * match columns.
    */
   def joinAgg(
       left: DistCollection[(Int, Int)],
