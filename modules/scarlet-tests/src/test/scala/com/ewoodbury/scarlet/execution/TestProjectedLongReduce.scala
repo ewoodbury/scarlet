@@ -15,8 +15,11 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * A long-pair `Project` reduced without publishing the pair batch.
  *
  * The adapter runs on every row, including a null key. A null projected key is dropped. A null
- * projected value stays a null group until another value arrives. [[LongHashReduce.byKey]] is the
- * published-column path and does not see this project.
+ * projected value stays a null group until another value arrives. One `filterKeys` or
+ * `filterValues` directly above that project applies the slot and still does not publish. A key
+ * predicate is not called on a null projected key. A value predicate is not called on a null
+ * projected value. [[LongHashReduce.byKey]] is the published-column path and does not see this
+ * project.
  */
 class TestProjectedLongReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -157,17 +160,296 @@ class TestProjectedLongReduce extends AnyFlatSpec with Matchers with BeforeAndAf
     calls.get shouldBe seen
   }
 
-  it should "leave a filter above the long project on the row path" in {
+  it should "reduce one slot above a long pair map without publishing" in {
     val source = DistCollection.ofLongPairs(Array(1L, 2L, 1L, 3L), Array(10L, 20L, 30L, 40L), 1)
-    val above = source
-      .map((pair: (Long, Long)) => (pair._1 + 1L, pair._2))
+    val mapped = source.map((pair: (Long, Long)) => (pair._1 + 1L, pair._2))
+    val reduced = mapped.filterKeys((key: Long) => key > 2L).reduceByKey[Long, Long](_ + _)
+    ColumnarPlanner.lower(reduced.plan).map(_.shape) shouldBe Some(
+      "LongHashAggregate(Exchange(FilterKey(Project(Scan))))",
+    )
+    val expected = Map(3L -> 20L, 4L -> 40L)
+    val atBatch = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      LongPairProject.resetPublishedForTest()
+      LongHashReduce.resetByKeyForTest()
+      val sink = new CountingSink
+      val previous = ColumnMetrics.install(sink)
+      val found =
+        try reduced.collect().toMap
+        finally ColumnMetrics.restore(previous)
+      LongPairProject.publishedForTest shouldBe 0
+      LongHashReduce.byKeyCallsForTest shouldBe 0
+      sink.fusedCount should be > 0L
+      found
+    }
+    val summed = atBatch(8192)
+    summed shouldBe expected
+    atBatch(1) shouldBe summed
+    summed shouldBe row(reduced.collect().toMap)
+
+    LongPairProject.resetPublishedForTest()
+    LongHashReduce.resetByKeyForTest()
+    val projected = mapped.filterKeys((key: Long) => key > 2L).collect()
+    LongPairProject.publishedForTest should be > 0
+    LongHashReduce.byKeyCallsForTest shouldBe 0
+    projected.toList.sorted shouldBe List((3L, 20L), (4L, 40L))
+
+    val byValue = mapped.filterValues((value: Long) => value >= 20L).reduceByKey[Long, Long](_ + _)
+    ColumnarPlanner.lower(byValue.plan).map(_.shape) shouldBe Some(
+      "LongHashAggregate(Exchange(FilterValue(Project(Scan))))",
+    )
+    val valueAt = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      LongPairProject.resetPublishedForTest()
+      LongHashReduce.resetByKeyForTest()
+      val found = byValue.collect().toMap
+      LongPairProject.publishedForTest shouldBe 0
+      LongHashReduce.byKeyCallsForTest shouldBe 0
+      found
+    }
+    val valueSums = valueAt(8192)
+    valueSums shouldBe Map(2L -> 30L, 3L -> 20L, 4L -> 40L)
+    valueAt(1) shouldBe valueSums
+    valueSums shouldBe row(byValue.collect().toMap)
+  }
+
+  it should "pass a null input key through the slot and keep the row-path sums" in {
+    val calls = new AtomicInteger
+    val reduced = nullLongKeySource()
+      .map(shiftNullLongKey(calls, nullKey = 7L))
       .filterKeys((key: Long) => key > 0L)
       .reduceByKey[Long, Long](_ + _)
-    ColumnarPlanner.lower(above.plan) shouldBe Option.empty[PhysicalOp]
-    above.collect().toMap shouldBe Map(2L -> 40L, 3L -> 20L, 4L -> 40L)
+    ColumnarPlanner.lower(reduced.plan).map(_.shape) shouldBe Some(
+      "LongHashAggregate(Exchange(FilterKey(Project(Scan))))",
+    )
+    val nullAt = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      calls.set(0)
+      LongPairProject.resetPublishedForTest()
+      LongHashReduce.resetByKeyForTest()
+      val found = reduced.collect().toMap
+      LongPairProject.publishedForTest shouldBe 0
+      LongHashReduce.byKeyCallsForTest shouldBe 0
+      (found, calls.get)
+    }
+    val (sums, seen) = nullAt(8192)
+    sums shouldBe Map(2L -> 9L, 3L -> 5L, 7L -> 17L)
+    nullAt(1) shouldBe (sums, seen)
+    calls.set(0)
+    row(reduced.collect().toMap) shouldBe sums
+    calls.get shouldBe seen
+  }
+
+  it should "drop a null projected key above the slot and skip the key predicate" in {
+    val calls = new AtomicInteger
+    val preds = new AtomicInteger
+    val source = DistCollection.ofLongPairs(Array(1L, 2L, 1L, 3L), Array(10L, 20L, 30L, 40L), 1)
+    val reduced = source
+      .map(dropLongKey(calls, dropped = 2L))
+      .filterKeys { (key: Long) =>
+        val _ = preds.incrementAndGet()
+        key > 0L
+      }
+      .reduceByKey[Long, Long](_ + _)
+    val atBatch = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      calls.set(0)
+      preds.set(0)
+      LongPairProject.resetPublishedForTest()
+      LongHashReduce.resetByKeyForTest()
+      val found = reduced.collect().toMap
+      LongPairProject.publishedForTest shouldBe 0
+      LongHashReduce.byKeyCallsForTest shouldBe 0
+      (found, calls.get, preds.get)
+    }
+    val (sums, seen, kept) = atBatch(8192)
+    sums shouldBe Map(1L -> 40L, 3L -> 40L)
+    seen shouldBe 4
+    kept shouldBe 3
+    atBatch(1) shouldBe (sums, seen, kept)
+    calls.set(0)
+    row(reduced.collect().toMap) shouldBe sums
+    calls.get shouldBe seen
+  }
+
+  it should "keep a null projected value under a key filter and unbox it later" in {
+    val calls = new AtomicInteger
+    val preds = new AtomicInteger
+    val reduced = nullLongValueSource()
+      .map(shiftNullLongKey(calls, nullKey = 7L))
+      .filterKeys { (key: Long) =>
+        val _ = preds.incrementAndGet()
+        key > 0L
+      }
+      .reduceByKey[Long, Long](_ + _)
+    val atBatch = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      calls.set(0)
+      preds.set(0)
+      LongPairProject.resetPublishedForTest()
+      LongHashReduce.resetByKeyForTest()
+      val found = reduced.collect().toList
+      LongPairProject.publishedForTest shouldBe 0
+      LongHashReduce.byKeyCallsForTest shouldBe 0
+      (found, calls.get, preds.get)
+    }
+    val (sums, seen, kept) = atBatch(8192)
+    sums should contain theSameElementsAs Seq(
+      pair(longRef(5L), longRef(4L)),
+      pair(longRef(2L), absent),
+    )
+    seen shouldBe 2
+    kept shouldBe 2
+    val (again, againSeen, againKept) = atBatch(1)
+    again should contain theSameElementsAs sums
+    againSeen shouldBe seen
+    againKept shouldBe kept
+    calls.set(0)
+    preds.set(0)
+    row(reduced.collect().toList) should contain theSameElementsAs sums
+    calls.get shouldBe seen
+    preds.get shouldBe kept
+
+    ScarletConf.set(
+      originalConf.copy(columnarExecution = true, columnarBatchSize = 1, threadPoolSize = 2),
+    )
+    val input = Seq(
+      pair(longRef(3L), longRef(4L)),
+      pair(longRef(1L), absent),
+      pair(longRef(1L), longRef(5L)),
+    )
+    val rows = DistCollection(input, 1)
+    val combine = (left: Long, right: Long) => left + right + 1L
+    val later = rows
+      .map(keepNulls)
+      .filterKeys((key: Long) => key > 0L)
+      .reduceByKey[Long, Long](combine)
+    LongPairProject.resetPublishedForTest()
+    LongHashReduce.resetByKeyForTest()
+    val columnar = later.collect().toList
     LongPairProject.publishedForTest shouldBe 0
     LongHashReduce.byKeyCallsForTest shouldBe 0
-    above.collect().toMap shouldBe row(above.collect().toMap)
+    columnar should contain theSameElementsAs Seq(
+      pair(longRef(1L), longRef(6L)),
+      pair(longRef(3L), longRef(4L)),
+    )
+    columnar should contain theSameElementsAs row(
+      rows
+        .map(keepNulls)
+        .filterKeys((key: Long) => key > 0L)
+        .reduceByKey[Long, Long](combine)
+        .collect()
+        .toList,
+    )
+  }
+
+  it should "skip a null projected value and not call the value predicate" in {
+    val calls = new AtomicInteger
+    val preds = new AtomicInteger
+    val reduced = nullLongValueSource()
+      .map(shiftNullLongKey(calls, nullKey = 7L))
+      .filterValues { (value: Long) =>
+        val _ = preds.incrementAndGet()
+        value >= 0L
+      }
+      .reduceByKey[Long, Long](_ + _)
+    calls.set(0)
+    preds.set(0)
+    LongPairProject.resetPublishedForTest()
+    LongHashReduce.resetByKeyForTest()
+    val found = reduced.collect().toMap
+    calls.get shouldBe 2
+    preds.get shouldBe 1
+    found shouldBe Map(5L -> 4L)
+    LongPairProject.publishedForTest shouldBe 0
+    LongHashReduce.byKeyCallsForTest shouldBe 0
+    // The row path unboxes the null value to 0 and keeps that group. This slot does not call the
+    // predicate and does not create the group.
+    val rowFound = row(reduced.collect().toList)
+    rowFound should contain theSameElementsAs Seq(
+      pair(longRef(5L), longRef(4L)),
+      pair(longRef(2L), absent),
+    )
+  }
+
+  it should "call a value predicate on a null projected key and create no group" in {
+    val calls = new AtomicInteger
+    val preds = new AtomicInteger
+    val source = DistCollection.ofLongPairs(Array(1L, 2L, 1L, 3L), Array(10L, 20L, 30L, 40L), 1)
+    val reduced = source
+      .map(dropLongKey(calls, dropped = 2L))
+      .filterValues { (value: Long) =>
+        val _ = preds.incrementAndGet()
+        value >= 20L
+      }
+      .reduceByKey[Long, Long](_ + _)
+    val atBatch = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      calls.set(0)
+      preds.set(0)
+      LongPairProject.resetPublishedForTest()
+      LongHashReduce.resetByKeyForTest()
+      val found = reduced.collect().toMap
+      LongPairProject.publishedForTest shouldBe 0
+      LongHashReduce.byKeyCallsForTest shouldBe 0
+      (found, calls.get, preds.get)
+    }
+    val (sums, seen, kept) = atBatch(8192)
+    sums shouldBe Map(1L -> 30L, 3L -> 40L)
+    seen shouldBe 4
+    kept shouldBe 4
+    atBatch(1) shouldBe (sums, seen, kept)
+    calls.set(0)
+    preds.set(0)
+    row(reduced.collect().toMap) shouldBe sums
+    calls.get shouldBe seen
+    preds.get shouldBe kept
+  }
+
+  it should "leave a second slot, a whole-row filter, and a second map empty" in {
+    val source = DistCollection.ofLongPairs(Array(1L, 2L, 1L, 3L), Array(10L, 20L, 30L, 40L), 1)
+    val mapped = source.map((pair: (Long, Long)) => (pair._1 + 1L, pair._2))
+    val once = mapped.filterKeys((key: Long) => key > 2L)
+    ColumnarPlanner.lower(once.filterValues((value: Long) => value >= 20L).plan) shouldBe
+      Option.empty[PhysicalOp]
+    ColumnarPlanner.lower(mapped.filter((pair: (Long, Long)) => pair._1 > 0L).plan) shouldBe
+      Option.empty[PhysicalOp]
+    val nested = mapped.map((pair: (Long, Long)) => (pair._1, pair._2))
+    ColumnarPlanner.lower(nested.filterKeys((key: Long) => key > 0L).plan) shouldBe
+      Option.empty[PhysicalOp]
+    ColumnarPlanner.lower(
+      once.filterValues((value: Long) => value >= 20L).reduceByKey[Long, Long](_ + _).plan,
+    ) shouldBe Option.empty[PhysicalOp]
+    ColumnarPlanner.lower(
+      mapped.filter((pair: (Long, Long)) => pair._1 > 0L).reduceByKey[Long, Long](_ + _).plan,
+    ) shouldBe Option.empty[PhysicalOp]
+    ColumnarPlanner.lower(
+      nested.filterKeys((key: Long) => key > 0L).reduceByKey[Long, Long](_ + _).plan,
+    ) shouldBe Option.empty[PhysicalOp]
+  }
+
+  it should "reduce one slot above a filtered long pair map without publishing" in {
+    val source = DistCollection.ofLongPairs(Array(1L, 2L, 1L, 3L), Array(10L, 20L, 30L, 40L), 1)
+    val reduced = source
+      .filterKeys((key: Long) => key % 3L != 0L)
+      .filterValues((value: Long) => value >= 0L)
+      .map((pair: (Long, Long)) => (pair._1 + 1L, pair._2))
+      .filterKeys((key: Long) => key < 50L)
+      .reduceByKey[Long, Long](_ + _)
+    ColumnarPlanner.lower(reduced.plan).map(_.shape) shouldBe Some(
+      "LongHashAggregate(Exchange(FilterKey(Project(FilterValue(FilterKey(Scan))))))",
+    )
+    val found = reduced.collect().toMap
+    LongPairProject.publishedForTest shouldBe 0
+    LongHashReduce.byKeyCallsForTest shouldBe 0
+    found shouldBe Map(2L -> 40L, 3L -> 20L)
+    found shouldBe row(reduced.collect().toMap)
   }
 
   it should "reduce a filtered long project without publishing the pair batch" in {

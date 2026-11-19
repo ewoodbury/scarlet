@@ -21,23 +21,26 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * the projected pair and still does not publish. A key predicate is not called on a null projected
  * key. A value predicate is not called on a null projected value. A present partner on the other
  * column is still tested, and a null partner does not create a group. A second slot, a whole-row
- * filter, and a second map stay on the published selection path. Long and string slot-above are
- * not this arm. An int [[PhysicalOp.MapKey]] is reduced from that map's source morsels. Each
- * present key is passed to the `Int => Int` witness. A null key is not passed and is not inserted.
- * A null value is dropped and does not create a group. That pair batch is not published, and
- * [[HashReduce.byKey]] is not called. One [[Plan.FilterKeysOp]] or [[Plan.FilterValuesOp]]
- * directly above that map applies the slot after the witness and still does not publish. A null
- * input key is not passed to the witness or to a key predicate. A value predicate still sees that
- * row. A null mapped key is dropped. A null value does not create a group. A second slot, a
- * whole-row filter, and a second map stay off this arm. A long-pair [[PhysicalOp.Project]] is
- * reduced from that project's input morsels. The interpreter's adapter runs on every row, and a
- * present projected key and value are inserted into the [[LongHashReduce]] table. A null projected
- * key is dropped. A null projected value stays a null group until another value arrives, and a
- * later combine unboxes that null to `0`. The pair batch is not published, and
- * [[LongHashReduce.byKey]] is not called. The function is not inspected. A filter above that
- * project is not this arm. A string project stays on its own arm. A scan and a non-pair child stay
- * on the dense reduce. The `None` path is the only one that interprets a child the fold did not
- * already scan.
+ * filter, and a second map stay on the published selection path. A long slot above a long project
+ * has its own arm. A string slot-above is not this arm. An int [[PhysicalOp.MapKey]] is reduced
+ * from that map's source morsels. Each present key is passed to the `Int => Int` witness. A null
+ * key is not passed and is not inserted. A null value is dropped and does not create a group. That
+ * pair batch is not published, and [[HashReduce.byKey]] is not called. One [[Plan.FilterKeysOp]]
+ * or [[Plan.FilterValuesOp]] directly above that map applies the slot after the witness and still
+ * does not publish. A null input key is not passed to the witness or to a key predicate. A value
+ * predicate still sees that row. A null mapped key is dropped. A null value does not create a
+ * group. A second slot, a whole-row filter, and a second map stay off this arm. A long-pair
+ * [[PhysicalOp.Project]] is reduced from that project's input morsels. The interpreter's adapter
+ * runs on every row, and a present projected key and value are inserted into the
+ * [[LongHashReduce]] table. A null projected key is dropped. A null projected value stays a null
+ * group until another value arrives, and a later combine unboxes that null to `0`. The pair batch
+ * is not published, and [[LongHashReduce.byKey]] is not called. The function is not inspected. One
+ * [[Plan.FilterKeysOp]] or [[Plan.FilterValuesOp]] directly above that project applies the slot to
+ * the projected pair and still does not publish. A key predicate is not called on a null projected
+ * key. A null projected value stays a null group, and a value predicate is not called on it. A
+ * second slot, a whole-row filter, and a second map stay off this arm. A string project stays on
+ * its own arm. A scan and a non-pair child stay on the dense reduce. The `None` path is the only
+ * one that interprets a child the fold did not already scan.
  */
 private[execution] object ReduceArms:
 
@@ -339,15 +342,93 @@ private[execution] object ReduceArms:
     case PhysicalOp.Kind.Pairs => true
     case _ => false
 
-  /** A long-pair project. A filter above that project is not this arm. */
+  /** Long pairs, including a project and one slot above that project. */
   private def longPairs(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.LongPairs => true
     case _ => false
 
   /**
+   * One key or value slot directly above one long-pair project. The project's input is
+   * interpreted, then each morsel is reduced through [[LongPairProject.visitFiltered]]. `None`
+   * when a second map sits under the project, or when the step is not one long key or value. A
+   * null key and a null value are passed to the adapter. A null projected key is dropped and the
+   * key predicate is not called. A null projected value is a null group when the slot keeps the
+   * key, and a value predicate is not called. [[LongHashReduce.byKey]] is not called.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def reduceAboveProjectedLong(
+      source: Plan[_],
+      child: PhysicalOp,
+      binOp: LongHashReduce.LongBinOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    val matched = (source, child) match
+      case (
+            Plan.FilterKeysOp(Plan.MapOp(inner, fn), _),
+            PhysicalOp.Filter(PhysicalOp.Project(under), PhysicalOp.Slot.Key),
+          ) if longPairs(child) =>
+        Some((inner, under, fn))
+      case (
+            Plan.FilterValuesOp(Plan.MapOp(inner, fn), _),
+            PhysicalOp.Filter(PhysicalOp.Project(under), PhysicalOp.Slot.Value),
+          ) if longPairs(child) =>
+        Some((inner, under, fn))
+      case _ => None
+    matched.flatMap { (inner, under, fn) =>
+      if (deeperMap(inner, under)) then None
+      else
+        oneLongSlot(source, child).flatMap { step =>
+          // The stack under the project is applied per morsel. Interpreting it first compacts
+          // every morsel of a full partition into a partition-sized column.
+          val underSteps = PredicatePlan.compile(inner, under) match
+            case None => Some(Vector.empty[Selection.Step])
+            case Some(compiled) => PredicatePlan.selectionSteps(compiled)
+          underSteps.map { steps =>
+            val (sourcePlan, sourceOp) = PredicatePlan.childOf(inner, under)
+            val adapted = LongPairProject.adapt(fn)
+            val columns =
+              try interpretAt(sourcePlan, sourceOp, selectedPartition, preserveAbsence, ordinals)
+              catch
+                case _: NullPointerException =>
+                  throw new ColumnarFallback("reduceByKey source has a null pair component")
+            columns match
+              case Columns.LongPairs(batches) if batches.nonEmpty =>
+                ProjectedLongAboveReduce.reduce(
+                  batches,
+                  adapted,
+                  steps,
+                  step,
+                  width,
+                  workers,
+                  batchSize,
+                  binOp,
+                )
+              case Columns.LongPairs(_) =>
+                throw new IllegalStateException("columnar pairs have no partitions")
+              case _ =>
+                throw new IllegalStateException("pair project reduce expected long pairs")
+          }
+        }
+    }
+
+  /** One long key or value on the projected pair. A row step and a second slot are `None`. */
+  private def oneLongSlot(source: Plan[_], child: PhysicalOp): Option[Selection.Step] =
+    PredicatePlan.compile(source, child).flatMap { compiled =>
+      PredicatePlan.selectionSteps(compiled) match
+        case Some(Vector(step @ Selection.Step.Int64(column, _))) if column == 0 || column == 1 =>
+          Some(step)
+        case _ => None
+    }
+
+  /**
    * One long-pair [[Plan.MapOp]]. The input of the project is interpreted, then each morsel is
-   * reduced through [[LongPairProject.visitPairs]]. `None` when this child is not that project,
-   * including a filter above it. A null key and a null value are passed to the adapter. A null
+   * reduced through [[LongPairProject.visitPairs]]. `None` when this child is not that project. A
+   * filter above it has its own arm. A null key and a null value are passed to the adapter. A null
    * projected key is dropped. A null projected value is a null group. [[LongHashReduce.byKey]] is
    * not called.
    */
@@ -395,16 +476,16 @@ private[execution] object ReduceArms:
     // Named erasure boundary. Grouped long-pair reduction declares `(Long, Long) => Long`.
     @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
     val op = reduceFunc.asInstanceOf[(Long, Long) => Long]
-    // A long-pair project reduces from the input morsels and does not publish. A long key, value,
-    // or row stack folds the predicates into the partial table. The index path remains for a
-    // stack the fold does not admit. The `None` path is the only one that interprets a child the
-    // fold did not already scan. The same plan function keeps one adapter, so a retained partial
-    // table accepts the next collect.
+    // One long slot above a long-pair project, and the project itself, each reduce from the input
+    // morsels and do not publish. A long key, value, or row stack folds the predicates into the
+    // partial table. The index path remains for a stack the fold does not admit. The `None` path
+    // is the only one that interprets a child the fold did not already scan. The same plan
+    // function keeps one adapter, so a retained partial table accepts the next collect.
     val binOp = longBinOp(op)
     val width = ColumnarPlanner.shuffleWidth
     val workers = ColumnarPlanner.parallelism
     val batchSize = ColumnarPlanner.batchSize
-    val reduced = reduceProjectedLong(
+    val reduced = reduceAboveProjectedLong(
       source,
       child,
       binOp,
@@ -414,6 +495,18 @@ private[execution] object ReduceArms:
       width,
       workers,
       batchSize,
+    ).orElse(
+      reduceProjectedLong(
+        source,
+        child,
+        binOp,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
+        width,
+        workers,
+        batchSize,
+      ),
     ).orElse(
       foldLong(
         source,
