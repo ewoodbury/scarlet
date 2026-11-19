@@ -27,16 +27,18 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * survivor index, and the slot is applied to the projected key. A null projected value still
  * counts. A second slot, a whole-row filter above the project, and a second map stay interpreted.
  * [[LongHashCount.byKey]] counts a long scan or filter and does not see that project or that slot.
- * A string-pair [[PhysicalOp.Project]] is interpreted into a dictionary column and an int column,
- * then [[StringHashCount.byKey]] hashes that dictionary. The pairs are not decoded. One key or
- * value filter above that project publishes both columns, and the same [[StringHashCount.byKey]]
- * hashes those batches. A second slot does not lower. No filters, a whole-row or string step, a
- * non-int slot, and a null component the encoder throws on stay on the old path. That path
- * partial-counts survivor ids, including one row, key, or value filter. A scan and a non-pair
- * child stay on the dense count. The value column is not read on that path, so a null value still
- * counts. A long count publishes [[Columns.LongCounts]]. A string count publishes
- * [[Columns.StringPairs]]. The stored count is an `Int`. A null string key is dropped and `""` is
- * kept.
+ * One string-pair [[PhysicalOp.Project]] on a scan or a string-pair filter stack is counted from
+ * that project's input. The adapter runs on every row, including a null key, and only a present
+ * projected key is stored. Each partial owns its dictionary. The pair batch is not published, and
+ * [[StringHashCount.byKey]] is not called. The function is not inspected. A null projected value
+ * still counts. A filter above that project publishes both columns, and [[StringHashCount.byKey]]
+ * hashes those batches. A second map stays on that published path. A second slot does not lower.
+ * No filters, a whole-row or string step, a non-int slot, and a null component the encoder throws
+ * on stay on the old path. That path partial-counts survivor ids, including one row, key, or value
+ * filter. A scan and a non-pair child stay on the dense count. The value column is not read on
+ * that path, so a null value still counts. A long count publishes [[Columns.LongCounts]]. A string
+ * count publishes [[Columns.StringPairs]]. The stored count is an `Int`. A null string key is
+ * dropped and `""` is kept.
  */
 private[execution] object CountByKeyArms:
 
@@ -129,21 +131,34 @@ private[execution] object CountByKeyArms:
                     LongHashCount.byKey(batches, width, workers, batchSize)
         Columns.LongCounts(counted)
       case PhysicalOp.Kind.StringPairs =>
-        // A project child is already dictionary columns. byKey hashes those codes and does not
-        // decode the pairs. A null int is not a fallback. The value column is dropped first.
-        val counted = FilterChain.selected(
+        // One project on a scan or a filter stack is counted without a pair batch. A filter
+        // above the project, a second map, and every other child still publish, and byKey hashes
+        // those dictionaries. A null int is not a fallback.
+        val counted = countProjectedString(
           source,
           child,
           selectedPartition,
           preserveAbsence,
           ordinals,
+          width,
+          workers,
+          batchSize,
         ) match
-          case Some(parts) => StringHashCount.byKeySelected(parts, width, workers, batchSize)
+          case Some(projected) => projected
           case None =>
-            val batches = StringPairWalk.batches(
-              interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),
-            )
-            StringHashCount.byKey(batches, width, workers, batchSize)
+            FilterChain.selected(
+              source,
+              child,
+              selectedPartition,
+              preserveAbsence,
+              ordinals,
+            ) match
+              case Some(parts) => StringHashCount.byKeySelected(parts, width, workers, batchSize)
+              case None =>
+                val batches = StringPairWalk.batches(
+                  interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),
+                )
+                StringHashCount.byKey(batches, width, workers, batchSize)
         Columns.StringPairs(counted)
       case other =>
         throw new IllegalStateException(
@@ -498,6 +513,39 @@ private[execution] object CountByKeyArms:
   private def longPairs(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.LongPairs => true
     case _ => false
+
+  /**
+   * One string-pair [[Plan.MapOp]] on a scan or a string-pair filter stack. The input of the
+   * project is interpreted, then each morsel is counted through [[StringPairProject.visitKeys]].
+   * `None` when a filter sits above the project or a second map sits under it: those stay on
+   * [[StringHashCount.byKey]]. A null key is passed to the adapter. The value cell is not stored.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def countProjectedString(
+      source: Plan[_],
+      child: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    if (!StringPairSlot.oneProject(child)) then None
+    else
+      pairProject(source, child).map { (inner, under, fn) =>
+        val adapted = StringPairProject.adapt(fn)
+        val columns =
+          try interpretAt(inner, under, selectedPartition, preserveAbsence, ordinals)
+          catch
+            case _: NullPointerException =>
+              throw new ColumnarFallback("countByKey source has a null pair component")
+        columns match
+          case Columns.StringPairs(batches) =>
+            ProjectedStringPairCount.count(batches, adapted, width, workers, batchSize)
+          case _ =>
+            throw new IllegalStateException("pair project count expected string pairs")
+      }
 
   /**
    * One long-pair [[Plan.MapOp]]. The input of the project is interpreted, then each morsel is

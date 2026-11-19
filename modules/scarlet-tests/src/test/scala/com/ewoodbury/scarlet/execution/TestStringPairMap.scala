@@ -88,9 +88,10 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     shown(mapped.collect()) shouldBe Seq("a!:1", "n:9", "a!:null", "!:4", "n:8")
   }
 
-  it should "hash the projected dictionary without decoding the input pairs" in {
+  it should "count a remapped string key without publishing the pair batch" in {
     val source = DistCollection(Seq("a" -> 1, "a" -> 2, "b" -> 3, "" -> 4), 1)
-    val counted = source.map((pair: (String, Int)) => (pair._1 + "!", pair._2)).countByKey
+    val mapped = source.map((pair: (String, Int)) => (pair._1 + "!", pair._2))
+    val counted = mapped.countByKey
     StringPairProject.resetPublishedForTest()
     val sink = new CountingSink
     val rows = ColumnMetrics.withSink(sink) {
@@ -98,8 +99,27 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       counted.collect()
     }
     sink.decodedValueCount shouldBe rows.size.toLong
-    rows.size shouldBe 3
+    sink.fusedCount should be > 0L
+    countsOf(rows) shouldBe Map("a!" -> 2, "b!" -> 1, "!" -> 1)
+    StringPairProject.publishedForTest shouldBe 0
+    StringPairProject.resetPublishedForTest()
+    val _ = mapped.collect()
     StringPairProject.publishedForTest should be > 0
+  }
+
+  it should "count a value-dependent key and a shared projected key without publishing" in {
+    val source = DistCollection(Seq("a" -> 1, "a" -> 2, "b" -> 3), 1)
+    val dependent =
+      source.map((pair: (String, Int)) => (pair._1 + pair._2.toString, pair._2))
+    val shared = source.map((pair: (String, Int)) => ("k", pair._2))
+    StringPairProject.resetPublishedForTest()
+    val dependentRows = dependent.countByKey.collect()
+    countsOf(dependentRows) shouldBe Map("a1" -> 1, "a2" -> 1, "b3" -> 1)
+    countsOf(dependentRows) shouldBe countsOf(row(dependent.countByKey.collect()))
+    val sharedRows = shared.countByKey.collect()
+    countsOf(sharedRows) shouldBe Map("k" -> 3)
+    countsOf(sharedRows) shouldBe countsOf(row(shared.countByKey.collect()))
+    StringPairProject.publishedForTest shouldBe 0
   }
 
   it should "lower one slot above the project, sort that project, and refuse a second slot and a second map" in {
@@ -279,6 +299,12 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .map((pair: (String, Int)) => (pair._1 + "!", pair._2))
     ColumnarPlanner.lower(filtered.plan).map(_.shape) shouldBe Some("Project(FilterRow(Scan))")
     shown(filtered.collect()) shouldBe shown(row(filtered.collect()))
+    val counted = filtered.countByKey
+    StringPairProject.resetPublishedForTest()
+    val underCounts = Map("a!" -> 1, "!" -> 1)
+    countsOf(counted.collect()) shouldBe underCounts
+    StringPairProject.publishedForTest shouldBe 0
+    countsOf(row(counted.collect())) shouldBe underCounts
     val keyed = source
       .filterKeys((key: String) => key != "b")
       .map((pair: (String, Int)) => (pair._1 + "!", pair._2 + 1))
@@ -293,6 +319,10 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .map((pair: (String, Int)) => (pair._1 + "?", pair._2 + 1))
     ColumnarPlanner.lower(twice.plan).map(_.shape) shouldBe Some("Project(Project(Scan))")
     shown(twice.collect()) shouldBe Seq("a!?:2", "b!?:3")
+    val countedTwice = twice.countByKey
+    StringPairProject.resetPublishedForTest()
+    countsOf(countedTwice.collect()) shouldBe Map("a!?" -> 1, "b!?" -> 1)
+    StringPairProject.publishedForTest should be > 1
     val scalars = source.map((pair: (String, Int)) => pair._2)
     ColumnarPlanner.lower(scalars.plan) shouldBe None
   }
