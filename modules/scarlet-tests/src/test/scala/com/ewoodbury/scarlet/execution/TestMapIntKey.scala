@@ -18,7 +18,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * generic `(Int, Int)` pair `map` lowers as `Project` and calls the function on a null key. A
  * One `filterKeys` or `filterValues` above this key map lowers. The key predicate sees the mapped
  * key and is not called on a null. `keys` directly above the map lowers as `Key(MapKey(...))`.
- * A null input key stays null and the function is not called. `values`, `mapValues`, a second
+ * `values` directly above the map lowers as `Value(MapKey(...))`. The value column is the
+ * original value. A null input key stays null, the function is not called, and the value cell
+ * stays. A null value stays a clear bit. `keys` of a slot above the map, `mapValues`, a second
  * map above that filter, and a whole-row filter stay empty.
  * `partitionBy` then this map drops the hash, so `countByKey` is one global row per new key.
  */
@@ -149,15 +151,18 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     )
   }
 
-  it should "lower one slot filter above a key map and keys of that map, and still refuse values" in {
+  it should "lower one slot filter above a key map, and keys and values of that map" in {
     val mapped = nullable.mapIntKey(key => key + 1)
     ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).plan).map(_.shape) shouldBe
       Some("FilterKey(MapKey(Scan))")
     ColumnarPlanner.lower(mapped.filterValues((value: Int) => value >= 0).plan).map(_.shape) shouldBe
       Some("FilterValue(MapKey(Scan))")
     ColumnarPlanner.lower(mapped.keys.plan).map(_.shape) shouldBe Some("Key(MapKey(Scan))")
-    ColumnarPlanner.lower(mapped.values.plan) shouldBe None
+    ColumnarPlanner.lower(mapped.values.plan).map(_.shape) shouldBe Some("Value(MapKey(Scan))")
     ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).keys.plan) shouldBe None
+    ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).values.plan) shouldBe None
+    ColumnarPlanner.lower(mapped.filterValues((value: Int) => value >= 0).values.plan) shouldBe
+      None
     ColumnarPlanner.lower(mapped.mapValues((value: Int) => value + 1).plan) shouldBe None
     ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).mapIntKey(_ + 1).plan) shouldBe
       None
@@ -202,6 +207,61 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     columnar shouldBe Seq("2", "null", "2", "3", "3", "null")
     ColumnarPlanner.tryCount(nullKeys.plan) shouldBe Some(6L)
     run(columnar = false)(nullKeys.count()) shouldBe 6L
+  }
+
+  it should "collect mapped values in partition order and keep a value beside a null key" in {
+    val valued = DistCollection
+      .ofIntPairs(Array(1, 2, 1, 3), Array(10, 20, 30, 40), 2)
+      .mapIntKey(_ + 1)
+      .values
+    ColumnarPlanner.lower(valued.plan).map(_.shape) shouldBe Some("Value(MapKey(Scan))")
+    ColumnarPlanner.tryCount(valued.plan) shouldBe Some(4L)
+    val at = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size, columnarExecution = true))
+      ScarletRuntime.get.shuffle.clear()
+      valued.collect().toList
+    }
+    val wide = at(8192)
+    wide shouldBe List(10, 20, 30, 40)
+    at(1) shouldBe wide
+
+    val calls = new AtomicInteger
+    val nullKeys = nullable.mapIntKey { key =>
+      calls.incrementAndGet()
+      key + 1
+    }.values
+    calls.set(0)
+    MapIntKey.resetPublishedForTest()
+    ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 8192, columnarExecution = true))
+    val columnar = keyText(run(columnar = true)(nullKeys.collect()))
+    calls.get() shouldBe 4
+    MapIntKey.publishedForTest should be > 0
+    calls.set(0)
+    val rows = keyText(run(columnar = false)(nullKeys.collect()))
+    calls.get() shouldBe 4
+    columnar shouldBe rows
+    columnar shouldBe Seq("4", "9", "5", "-1", "6", "8")
+    ColumnarPlanner.tryCount(nullKeys.plan) shouldBe Some(6L)
+    run(columnar = false)(nullKeys.count()) shouldBe 6L
+
+    // A present pair witnesses the scan. The null value is the next cell, so it stays a clear bit.
+    val valueCalls = new AtomicInteger
+    val nulls = nullThenValue.mapIntKey { key =>
+      valueCalls.incrementAndGet()
+      key * 2
+    }.values
+    ColumnarPlanner.lower(nulls.plan).map(_.shape) shouldBe Some("Value(MapKey(Scan))")
+    valueCalls.set(0)
+    MapIntKey.resetPublishedForTest()
+    val columnarNulls = keyText(run(columnar = true)(nulls.collect()))
+    valueCalls.get() shouldBe 2
+    MapIntKey.publishedForTest should be > 0
+    valueCalls.set(0)
+    val rowNulls = keyText(run(columnar = false)(nulls.collect()))
+    valueCalls.get() shouldBe 2
+    columnarNulls shouldBe rowNulls
+    columnarNulls shouldBe Seq("4", "null")
+    ColumnarPlanner.tryCount(nulls.plan) shouldBe Some(2L)
   }
 
   it should "count a key filter above the map without publishing the pair batch" in {
