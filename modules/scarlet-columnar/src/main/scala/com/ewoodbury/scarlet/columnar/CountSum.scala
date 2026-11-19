@@ -172,6 +172,38 @@ object CountSum:
     else finish(partials, numPartitions, parallelism)
 
   /**
+   * [[byKeyOwnedProjected]] plus one int slot on the projected pair. Filters in `steps` see the
+   * source pair. `above` sees the projected key or value and is not inspected. A null projected
+   * key is dropped. A null projected value that the slot keeps is counted and not added. This does
+   * not call [[byKey]] and does not publish the pair batch.
+   */
+  private[scarlet] def byKeyOwnedAbove(
+      parts: Vector[(Array[Int], Array[Int])],
+      steps: List[Selection.Step],
+      mapper: IntPairProject.IntPairMap,
+      above: Selection.Step,
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    val (column, keep) = ProjectedAboveCountSum.slot(above)
+    val partials = OwnedProjectedCountSum.foldAbove(
+      parts,
+      steps,
+      mapper,
+      column,
+      keep,
+      parallelism,
+      () => open(),
+      publish,
+    )
+    if (partials.isEmpty) then Vector.fill(numPartitions)(emptyBatch())
+    else finish(partials, numPartitions, parallelism)
+
+  /**
    * [[byKey]] for encoded morsels under an int key function. `steps` may be empty. A null key is
    * dropped and `mapKey` is not called. A null value is counted and not added. This does not call
    * [[byKey]]: the morsel is the source, not a published map.
