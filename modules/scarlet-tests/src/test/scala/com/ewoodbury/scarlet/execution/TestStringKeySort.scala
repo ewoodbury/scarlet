@@ -14,8 +14,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * code units). A null key orders as `""` and stays null. Ties keep input order. The row path is
  * the oracle. Spill is [[TestStringSortSpill]]. This suite leaves spill off.
  *
- * An empty `(String, Int)` source has no string-pair descriptor and no witness, so it stays on
- * the row path. The zero-row kernel is called directly.
+ * An empty `(String, Int)` source has no string-pair descriptor and no witness, so it stays on the
+ * row path. The zero-row kernel is called directly.
  */
 class TestStringKeySort extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -203,16 +203,51 @@ class TestStringKeySort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     )
   }
 
-  it should "sort a whole-row filter and leave a map under the sort on the row path" in {
+  it should "sort a whole-row filter and one pair project, and leave other maps on the row path" in {
     val filtered = mixed.filter((pair: (String, Int)) => pair._2 != 1).sortByStringKey
-    val mapped = mixed.map((pair: (String, Int)) => (pair._1, pair._2)).sortByStringKey
+    val identity = (pair: (String, Int)) => (pair._1, pair._2)
+    val mapped = mixed.map(identity).sortByStringKey
+    val plain = mixed.sortByStringKey
+    val twice = mixed.map(identity).map(identity).sortByStringKey
+    val above = mixed
+      .map(identity)
+      .filter((pair: (String, Int)) => pair._2 != 1)
+      .sortByStringKey
 
     ColumnarPlanner.lower(filtered.plan).map(_.shape) shouldBe Some(
       "SortByStringKey(FilterRow(Scan))",
     )
-    ColumnarPlanner.lower(mapped.plan) shouldBe None
+    ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some(
+      "SortByStringKey(Project(Scan))",
+    )
     collect(filtered) shouldBe rowOf(filtered)
-    collect(mapped) shouldBe rowOf(mapped)
+    val found = collect(mapped)
+    found shouldBe collect(plain)
+    found shouldBe rowOf(mapped)
+    found.exists(pair => isNullKey(pair._1)) shouldBe true
+    effectiveKeys(found) shouldBe effectiveKeys(collect(plain))
+    collectAt(mapped, 1) shouldBe collectAt(mapped, 8192)
+    ColumnarPlanner.tryTake(mapped.plan, 3) shouldBe Some(rowOf(mapped).take(3))
+    StringPairProject.resetPublishedForTest()
+    StringRankSplitRuns.resetForTest()
+    val again = collect(mapped)
+    StringPairProject.publishedForTest should be > 0
+    StringRankSplitRuns.filesWrittenForTest shouldBe 0L
+    val projected = mixed.map(identity)
+    val project =
+      ColumnarPlanner.lower(projected.plan).getOrElse(fail("expected a string-pair project"))
+    val batches =
+      StringPairWalk.batches(ColumnarInterpreter.interpret(projected.plan, project))
+    val direct = StringRankSplit.sortAndSplit(
+      batches,
+      ColumnarPlanner.shuffleWidth,
+      ColumnarPlanner.parallelism,
+    )
+    direct.flatMap(batch => BatchCodec.decodeStringPairs(batch)) shouldBe again
+    ColumnarPlanner.lower(twice.plan) shouldBe None
+    ColumnarPlanner.lower(above.plan) shouldBe None
+    collect(twice) shouldBe rowOf(twice)
+    collect(above) shouldBe rowOf(above)
   }
 
   it should "lower filterKeys then sortByStringKey and match the row path" in {
@@ -318,10 +353,10 @@ class TestStringKeySort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
   private def pairSchema: Vector[LogicalType] = Vector(LogicalType.Utf8Dict, LogicalType.Int32)
 
   private def assertRankSplit(parts: Vector[ColumnBatch]): Unit =
-    val (low, high) = parts.map(_.length).foldLeft((Int.MaxValue, 0)) {
-      case ((smallest, largest), length) =>
+    val (low, high) =
+      parts.map(_.length).foldLeft((Int.MaxValue, 0)) { case ((smallest, largest), length) =>
         (math.min(smallest, length), math.max(largest, length))
-    }
+      }
     (high - low) should be <= 1
     parts.foreach(assertSortedPartition)
     parts.zip(parts.drop(1)).foreach { (current, next) =>
@@ -407,6 +442,15 @@ class TestStringKeySort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
   private def collect[A](collection: DistCollection[A]): List[A] =
     ScarletRuntime.get.shuffle.clear()
     collection.collect().toList
+
+  private def collectAt[A](collection: DistCollection[A], batch: Int): List[A] =
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(saved.copy(columnarBatchSize = batch, columnarExecution = true))
+      collect(collection)
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
 
   private def rowOf[A](collection: DistCollection[A]): List[A] =
     val saved = ScarletConf.get

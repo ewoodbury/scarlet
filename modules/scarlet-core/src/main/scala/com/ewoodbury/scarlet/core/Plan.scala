@@ -343,8 +343,10 @@ object Plan {
    * input order. This matches `sortBy(pair => if (pair._1 == null) "" else pair._1)`. Generic
    * [[SortByOp]] stays opaque. A scan of string pairs, or key and value filters over that scan,
    * lowers to a columnar rank split. Those filters sort the survivor index. A whole-row string
-   * filter does the same, including a stack of one. A map, aggregate, or join under the sort stays
-   * on the row path, as does a filter, join, aggregate, or projection above it. Over the budget,
+   * filter does the same, including a stack of one. One string-pair project on that scan or filter
+   * stack lowers too. The function is not read. `mapValues`, a second map, a slot or whole-row
+   * filter above that project, and any other map, aggregate, or join under the sort stay on the
+   * row path, as does a filter, join, aggregate, or projection above the sort. Over the budget,
    * with spill on, a survivor index is spilled and dropped rows are not written. A dense input
    * still writes one sorted run per partition and merges `spillFanIn` at a time. One input
    * partition is still sorted in memory. At or under the budget, and whenever spill is off, the

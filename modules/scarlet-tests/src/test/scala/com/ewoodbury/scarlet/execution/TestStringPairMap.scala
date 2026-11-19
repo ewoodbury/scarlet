@@ -15,8 +15,10 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * A `(String, Int) => (String, Int)` map lowers to a project and feeds `countByKey`.
  *
  * The function runs on every row the row path would, including a null key. `""` stays a present
- * key. `"é"` and `"e\u0301"` stay distinct. One key or value filter above that project lowers.
- * A whole-row filter, a second slot, a second map, and a map under `sortByStringKey` stay empty.
+ * key. `"é"` and `"e\u0301"` stay distinct. One key or value filter above that project lowers. A
+ * whole-row filter, a second slot, and a second map stay empty. One project under
+ * `sortByStringKey` lowers. `mapValues`, a second map, and a slot or whole-row filter above that
+ * project stay empty.
  */
 class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -100,7 +102,7 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     StringPairProject.publishedForTest should be > 0
   }
 
-  it should "lower one slot above the project and refuse a second slot, a second map, and sort" in {
+  it should "lower one slot above the project, sort that project, and refuse a second slot and a second map" in {
     val source = DistCollection(Seq("a" -> 1, "b" -> 2, "" -> 3), 1)
     val mapped = source.map((pair: (String, Int)) => (pair._1 + "!", pair._2))
     ColumnarPlanner.lower(mapped.filter((pair: (String, Int)) => pair._2 > 0).plan) shouldBe None
@@ -108,7 +110,9 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val byValue = mapped.filterValues((value: Int) => value > 0)
     ColumnarPlanner.lower(byKey.plan).map(_.shape) shouldBe Some("FilterKey(Project(Scan))")
     ColumnarPlanner.lower(byValue.plan).map(_.shape) shouldBe Some("FilterValue(Project(Scan))")
-    ColumnarPlanner.lower(mapped.sortByStringKey.plan) shouldBe None
+    ColumnarPlanner.lower(mapped.sortByStringKey.plan).map(_.shape) shouldBe Some(
+      "SortByStringKey(Project(Scan))",
+    )
     ColumnarPlanner.lower(
       mapped.filter((pair: (String, Int)) => pair._2 > 0).countByKey.plan,
     ) shouldBe None
@@ -129,6 +133,73 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.lower(stacked.countByKey.plan).map(_.shape) shouldBe Some(
       "CountByKey(Exchange(FilterKey(Project(FilterKey(Scan)))))",
     )
+  }
+
+  it should "sort a remapped string key through StringRankSplit" in {
+    val source = DistCollection(Seq("b" -> 2, "a" -> 1, "" -> 3), 1)
+    val mapped = source.map((pair: (String, Int)) => (pair._1 + "!", pair._2))
+    val sorted = mapped.sortByStringKey
+    ColumnarPlanner.lower(sorted.plan).map(_.shape) shouldBe Some(
+      "SortByStringKey(Project(Scan))",
+    )
+    shown(sorted.collect()) shouldBe Seq("!:3", "a!:1", "b!:2")
+    shown(sorted.collect()) shouldBe shown(row(sorted.collect()))
+    shownAt(sorted, 1) shouldBe shownAt(sorted, 8192)
+    StringPairProject.resetPublishedForTest()
+    StringRankSplitRuns.resetForTest()
+    val _ = sorted.collect()
+    StringPairProject.publishedForTest should be > 0
+    StringRankSplitRuns.filesWrittenForTest shouldBe 0L
+
+    val composed = "é"
+    val decomposed = "e\u0301"
+    val accents = DistCollection(Seq(composed -> 1, "a" -> 2, decomposed -> 3), 1)
+      .map((pair: (String, Int)) => (pair._1, pair._2))
+      .sortByStringKey
+    shown(accents.collect()) shouldBe Seq("a:2", s"$decomposed:3", s"$composed:1")
+    composed should not be decomposed
+    shown(accents.collect()) shouldBe shown(row(accents.collect()))
+
+    val nulls = nullEmptySource().map((pair: (String, Int)) => (pair._1, pair._2)).sortByStringKey
+    shown(nulls.collect()) shouldBe Seq("null:1", ":3", "null:4", "b:2")
+    shown(nulls.collect()) shouldBe shown(row(nulls.collect()))
+
+    val under = source
+      .filterKeys((key: String) => key != "b")
+      .map((pair: (String, Int)) => (pair._1 + "!", pair._2))
+      .sortByStringKey
+    ColumnarPlanner.lower(under.plan).map(_.shape) shouldBe Some(
+      "SortByStringKey(Project(FilterKey(Scan)))",
+    )
+    shown(under.collect()) shouldBe Seq("!:3", "a!:1")
+    shown(under.collect()) shouldBe shown(row(under.collect()))
+    val rowUnder = source
+      .filter((pair: (String, Int)) => pair._1 != "b")
+      .map((pair: (String, Int)) => (pair._1 + "!", pair._2))
+      .sortByStringKey
+    ColumnarPlanner.lower(rowUnder.plan).map(_.shape) shouldBe Some(
+      "SortByStringKey(Project(FilterRow(Scan)))",
+    )
+    shown(rowUnder.collect()) shouldBe shown(row(rowUnder.collect()))
+
+    ColumnarPlanner.lower(
+      mapped.filterKeys((key: String) => key.nonEmpty).sortByStringKey.plan,
+    ) shouldBe None
+    ColumnarPlanner.lower(
+      mapped.filter((pair: (String, Int)) => pair._2 > 0).sortByStringKey.plan,
+    ) shouldBe None
+    val twice = mapped.map((pair: (String, Int)) => (pair._1 + "?", pair._2))
+    ColumnarPlanner.lower(twice.sortByStringKey.plan) shouldBe None
+    ColumnarPlanner.lower(
+      source.mapValues((value: Int) => value + 1).sortByStringKey.plan,
+    ) shouldBe None
+    val bad = source.map(widen).sortByStringKey
+    ColumnarPlanner.lower(bad.plan).map(_.shape) shouldBe Some("SortByStringKey(Project(Scan))")
+    val lowered = ColumnarPlanner.lower(bad.plan).getOrElse(fail("expected a project sort"))
+    a[ColumnarFallback] should be thrownBy {
+      val _ = ColumnarInterpreter.interpret(bad.plan, lowered)
+    }
+    ColumnarPlanner.tryRun(bad.plan) shouldBe None
   }
 
   it should "count a remapped key after filterKeys and match batch size 1 and 8192" in {
@@ -234,6 +305,20 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     widened.collect().toList shouldBe row(widened.collect().toList)
   }
 
+  private def shownAt(collection: DistCollection[(String, Int)], batchSize: Int): Seq[String] =
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(saved.copy(columnarExecution = true, columnarBatchSize = batchSize))
+      ScarletRuntime.get.shuffle.clear()
+      shown(collection.collect())
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
+
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+  private def widen(pair: (String, Int)): (String, Int) =
+    (pair._1.length, pair._2).asInstanceOf[(String, Int)]
+
   private def countsAt(
       counted: DistCollection[(String, Int)],
       batchSize: Int,
@@ -324,6 +409,18 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     }
 
   /** A present string key witnesses the scan. Later null keys stay in the batch. */
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def nullEmptySource(): DistCollection[(String, Int)] =
+    DistCollection(
+      Seq(
+        stringPair("b", Integer.valueOf(2)),
+        stringPair(null, Integer.valueOf(1)),
+        stringPair("", Integer.valueOf(3)),
+        stringPair(null, Integer.valueOf(4)),
+      ),
+      1,
+    )
+
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def nullKeySource(): DistCollection[(String, Int)] =
     DistCollection(
