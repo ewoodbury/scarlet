@@ -391,6 +391,98 @@ object LongPairProject:
     }
 
   /**
+   * [[visitFiltered]] over absolute ids `ids[from until until)`.
+   *
+   * `dense` is true when both source columns are present for the whole batch. The caller computes
+   * that once, so a survivor index is not scanned again per morsel. The adapter calls match
+   * [[project]], including a null key and a null value at a selected id. A null projected key is
+   * dropped. A null projected value is [[LongPairSink.addMissing]] when the slot keeps the key.
+   * This does not allocate an output column and does not resize the source columns.
+   */
+  private[scarlet] def visitFilteredSelected(
+      batch: ColumnBatch,
+      ids: Array[Int],
+      from: Int,
+      until: Int,
+      mapper: LongPairMap,
+      column: Int,
+      keep: Long => Boolean,
+      sink: LongPairSink,
+      dense: Boolean,
+  ): Unit =
+    require(column == 0 || column == 1, s"pair slot must be a key or a value, got $column")
+    require(
+      batch.columns.length == 2,
+      s"pair project expected 2 columns, got ${batch.columns.length}",
+    )
+    require(from >= 0, s"selection start must be >= 0, got $from")
+    require(until >= from, s"selection end $until is before start $from")
+    require(until <= ids.length, s"selection end $until exceeds ids ${ids.length}")
+    val keys = int64At(batch, 0)
+    val values = int64At(batch, 1)
+    require(keys.length == values.length, "key and value columns differ in length")
+    if (until == from) then ()
+    else if (dense) then
+      visitFilteredIdsDense(keys, values, ids, from, until, mapper, column, keep, sink)
+    else visitFilteredIdsSparse(keys, values, ids, from, until, mapper, column, keep, sink)
+
+  /** Both live columns are present. One bitmap scan for a whole source batch. */
+  private[scarlet] def sourcesPresent(batch: ColumnBatch): Boolean =
+    val keys = int64At(batch, 0)
+    val values = int64At(batch, 1)
+    Validity.rangePresent(keys.validity, 0, keys.length) &&
+    Validity.rangePresent(values.validity, 0, values.length)
+
+  private def visitFilteredIdsDense(
+      keys: Int64Column,
+      values: Int64Column,
+      ids: Array[Int],
+      from: Int,
+      until: Int,
+      mapper: LongPairMap,
+      column: Int,
+      keep: Long => Boolean,
+      sink: LongPairSink,
+  ): Unit =
+    val keyArr = keys.values
+    val valueArr = values.values
+    var slot = from
+    while (slot < until) {
+      val row = ids(slot)
+      offerFiltered(mapper(keyArr(row), valueArr(row)), column, keep, sink)
+      slot += 1
+    }
+
+  private def visitFilteredIdsSparse(
+      keys: Int64Column,
+      values: Int64Column,
+      ids: Array[Int],
+      from: Int,
+      until: Int,
+      mapper: LongPairMap,
+      column: Int,
+      keep: Long => Boolean,
+      sink: LongPairSink,
+  ): Unit =
+    val keyArr = keys.values
+    val valueArr = values.values
+    val keyIn = keys.validity.words
+    val valueIn = values.validity.words
+    var slot = from
+    while (slot < until) {
+      val row = ids(slot)
+      val keyOn = Validity.isSet(keyIn, row)
+      val valueOn = Validity.isSet(valueIn, row)
+      val projected =
+        if (keyOn && valueOn) then mapper(keyArr(row), valueArr(row))
+        else if (keyOn) then mapper.applyNullValue(keyArr(row))
+        else if (valueOn) then mapper.applyNullKey(valueArr(row))
+        else mapper.applyNulls()
+      offerFiltered(projected, column, keep, sink)
+      slot += 1
+    }
+
+  /**
    * Keeps a present key. A null key is dropped. A null value is a null group. A cell that is not a
    * long declines, and the value is checked first.
    */
