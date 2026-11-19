@@ -218,7 +218,7 @@ object StringHashCount:
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
 
-  private def requireKey(batch: ColumnBatch): Unit =
+  private[scarlet] def requireKey(batch: ColumnBatch): Unit =
     val keyType = batch.schema.headOption.getOrElse {
       throw new ColumnarFallback("countByKey expects a Utf8Dict key column")
     }
@@ -238,7 +238,7 @@ object StringHashCount:
    * the action already publishes for that budget. A budget that can hold one row skips this check.
    * Morsels still refuse themselves, and an over-budget bucket spills after the exchange.
    */
-  private def refuseBeforeCombine: Boolean =
+  private[scarlet] def refuseBeforeCombine: Boolean =
     val conf = ScarletConf.get
     !conf.spillEnabled || inputRowBytes(1L, 1L, 0L) > conf.spillBudgetBytes
 
@@ -258,7 +258,7 @@ object StringHashCount:
    * whole-input call when spill is on and a one-row table fits. A morsel, a partial combine, and a
    * spill fold still call this. `rows` is the count the refusal reports.
    */
-  private def refuse(rows: Long, entries: Long, text: Long): Unit =
+  private[scarlet] def refuse(rows: Long, entries: Long, text: Long): Unit =
     val budget = ScarletConf.get.spillBudgetBytes
     val bytes = inputRowBytes(rows, entries, text)
     if (bytes > budget) then throw new ClosedKernelRefusal(rows, bytes, budget)

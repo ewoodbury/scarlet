@@ -46,6 +46,15 @@ object StringPairProject:
     def applyNulls(): Any
 
   /**
+   * One present projected key.
+   *
+   * `sourceCode` indexes the input dictionary. It is `-1` when that input key is null, because a
+   * null key has no dictionary entry.
+   */
+  trait PresentKey:
+    def add(sourceCode: Int, key: String): Unit
+
+  /**
    * Adapts a `Tuple2 => Tuple2`. The cast is not a call. A hidden lambda and an anonymous
    * `Function1` both land here after the declared `apply` check. Each absent apply builds the pair
    * the row path would pass, so a null stays null instead of unboxing to `0`.
@@ -157,6 +166,112 @@ object StringPairProject:
       row += 1
     }
     publish(schema, words, codes, outValues, keyWords, valueWords, length)
+
+  /**
+   * Runs `mapper` on `[start, start + length)` and passes each present projected key to `add`.
+   *
+   * The calls match [[project]]: a null key and a null value are passed in, and an empty range
+   * does not call `mapper`. The value cell is checked and dropped. A null projected key is not
+   * passed to `add`. A null int still counts when the key is present. `""` is a present key. `"é"`
+   * and `"e\u0301"` stay distinct because the key is the string the function returned. A result
+   * that is not a pair of a string and an int throws [[ColumnarFallback]] and publishes nothing.
+   * This does not allocate an output column. The function body is not inspected. `add` receives
+   * the input dictionary code, or `-1` when the input key is null.
+   */
+  private[scarlet] def visitKeys(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      mapper: StringPairMap,
+      add: PresentKey,
+  ): Unit =
+    require(
+      batch.columns.length == 2,
+      s"pair project expected 2 columns, got ${batch.columns.length}",
+    )
+    val keys = utf8At(batch, 0)
+    val values = int32At(batch, 1)
+    require(keys.length == values.length, "key and value columns differ in length")
+    Ranges.check(start, length, keys.length)
+    if (length == 0) then ()
+    else if (
+        Validity.rangePresent(keys.validity, start, length) &&
+        Validity.rangePresent(values.validity, start, length)
+      )
+    then visitDense(keys, values, start, length, mapper, add)
+    else visitSparse(keys, values, start, length, mapper, add)
+
+  /** Both columns are present in the range. The loop does not read validity. */
+  private def visitDense(
+      keys: DictUtf8Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      mapper: StringPairMap,
+      add: PresentKey,
+  ): Unit =
+    val dictionary = keys.dictionary
+    val keyCodes = keys.codes
+    val valueArr = values.values
+    val end = start + length
+    var row = start
+    while (row < end) {
+      offer(mapper(dictionary(keyCodes(row)), valueArr(row)), keyCodes(row), add)
+      row += 1
+    }
+
+  /** Every row is one call, including a null key, a null value, or both. */
+  private def visitSparse(
+      keys: DictUtf8Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      mapper: StringPairMap,
+      add: PresentKey,
+  ): Unit =
+    val dictionary = keys.dictionary
+    val keyCodes = keys.codes
+    val valueArr = values.values
+    val keyIn = keys.validity.words
+    val valueIn = values.validity.words
+    val end = start + length
+    var row = start
+    while (row < end) {
+      val keyOn = Validity.isSet(keyIn, row)
+      val valueOn = Validity.isSet(valueIn, row)
+      val projected =
+        if (keyOn && valueOn) then mapper(dictionary(keyCodes(row)), valueArr(row))
+        else if (keyOn) then mapper.applyNullValue(dictionary(keyCodes(row)))
+        else if (valueOn) then mapper.applyNullKey(valueArr(row))
+        else mapper.applyNulls()
+      val sourceCode = if (keyOn) then keyCodes(row) else -1
+      offer(projected, sourceCode, add)
+      row += 1
+    }
+
+  /** Keeps a present key. A null key is dropped. The value is only a type check. */
+  private def offer(projected: Any, sourceCode: Int, add: PresentKey): Unit =
+    projected match
+      case row: Tuple2[_, _] => offerCells(row._1, row._2, sourceCode, add)
+      case null => decline("null")
+      case row: Product if row.productArity == 2 =>
+        offerCells(row.productElement(0), row.productElement(1), sourceCode, add)
+      case other => decline(foundName(other))
+
+  /** Value is checked first, matching the order [[write]] declines in. */
+  private def offerCells(
+      keyCell: Any,
+      valueCell: Any,
+      sourceCode: Int,
+      add: PresentKey,
+  ): Unit =
+    valueCell match
+      case null | _: Int => ()
+      case other => decline(foundName(other))
+    keyCell match
+      case null => ()
+      case present: String => add.add(sourceCode, present)
+      case other => decline(foundName(other))
 
   /** Bit 0 is a present key. Bit 1 is a present value. Any other shape declines. */
   private def write(
