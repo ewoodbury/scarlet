@@ -289,21 +289,204 @@ class TestProjectedSlotReduce extends AnyFlatSpec with Matchers with BeforeAndAf
     doubled shouldBe row(nested.collect().toMap)
   }
 
-  it should "leave a slot above mapIntKey on the published byKey path" in {
+  it should "reduce one slot above mapIntKey without publishing the pair batch" in {
+    val source = pairs()
+    val mapped = source.mapIntKey((key: Int) => key + 1)
+    val reduced = mapped.filterKeys((key: Int) => key > 2).reduceByKey[Int, Int](_ + _)
+    shape(reduced) shouldBe "HashAggregate(Exchange(FilterKey(MapKey(Scan))))"
+    val expected = Map(3 -> 20, 4 -> 40)
+    val atBatch = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      MapIntKey.resetPublishedForTest()
+      IntPairProject.resetPublishedForTest()
+      HashReduce.resetByKeyForTest()
+      val found = reduced.collect().toMap
+      MapIntKey.publishedForTest shouldBe 0
+      IntPairProject.publishedForTest shouldBe 0
+      HashReduce.byKeyCallsForTest shouldBe 0
+      found
+    }
+    atBatch(8192) shouldBe expected
+    atBatch(1) shouldBe expected
+    atBatch(8192) shouldBe row(reduced.collect().toMap)
+
+    MapIntKey.resetPublishedForTest()
+    val projected = mapped.filterKeys((key: Int) => key > 2).collect()
+    MapIntKey.publishedForTest should be > 0
+    projected.toMap shouldBe expected
+
+    val byValue = mapped.filterValues((value: Int) => value >= 20).reduceByKey[Int, Int](_ + _)
+    shape(byValue) shouldBe "HashAggregate(Exchange(FilterValue(MapKey(Scan))))"
+    val values = Map(2 -> 30, 3 -> 20, 4 -> 40)
+    val atValue = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      MapIntKey.resetPublishedForTest()
+      HashReduce.resetByKeyForTest()
+      val found = byValue.collect().toMap
+      MapIntKey.publishedForTest shouldBe 0
+      HashReduce.byKeyCallsForTest shouldBe 0
+      found
+    }
+    atValue(8192) shouldBe values
+    atValue(1) shouldBe values
+    atValue(8192) shouldBe row(byValue.collect().toMap)
+  }
+
+  it should "skip a null key above mapIntKey and still test a value predicate" in {
+    val mapCalls = new AtomicInteger
+    val keyCalls = new AtomicInteger
+    val reduced = nullIntKeySource()
+      .mapIntKey { key =>
+        val _ = mapCalls.incrementAndGet()
+        key + 1
+      }
+      .filterKeys { (key: Int) =>
+        val _ = keyCalls.incrementAndGet()
+        key > 2
+      }
+      .reduceByKey[Int, Int](_ + _)
+    shape(reduced) shouldBe "HashAggregate(Exchange(FilterKey(MapKey(Scan))))"
+    mapCalls.set(0)
+    keyCalls.set(0)
+    MapIntKey.resetPublishedForTest()
+    HashReduce.resetByKeyForTest()
+    val found = reduced.collect().toMap
+    mapCalls.get shouldBe 4
+    keyCalls.get shouldBe 4
+    MapIntKey.publishedForTest shouldBe 0
+    HashReduce.byKeyCallsForTest shouldBe 0
+    found shouldBe Map(3 -> 5)
+    mapCalls.set(0)
+    keyCalls.set(0)
+    row(reduced.collect().toMap) shouldBe found
+    mapCalls.get shouldBe 4
+
+    val valueCalls = new AtomicInteger
+    val byValue = nullIntKeySource()
+      .mapIntKey { key =>
+        val _ = mapCalls.incrementAndGet()
+        key + 1
+      }
+      .filterValues { (value: Int) =>
+        val _ = valueCalls.incrementAndGet()
+        value >= 0
+      }
+      .reduceByKey[Int, Int](_ + _)
+    mapCalls.set(0)
+    valueCalls.set(0)
+    MapIntKey.resetPublishedForTest()
+    HashReduce.resetByKeyForTest()
+    val kept = byValue.collect().toMap
+    mapCalls.get shouldBe 4
+    valueCalls.get shouldBe 6
+    MapIntKey.publishedForTest shouldBe 0
+    HashReduce.byKeyCallsForTest shouldBe 0
+    kept shouldBe Map(2 -> 9, 3 -> 6)
+    mapCalls.set(0)
+    valueCalls.set(0)
+    row(byValue.collect().toMap) shouldBe kept
+    mapCalls.get shouldBe 4
+    valueCalls.get shouldBe 6
+
+    val nullValues = nullIntValueSource()
+      .mapIntKey { key =>
+        val _ = mapCalls.incrementAndGet()
+        key * 2
+      }
+      .filterKeys { (key: Int) =>
+        val _ = keyCalls.incrementAndGet()
+        key > 0
+      }
+      .reduceByKey[Int, Int](_ + _)
+    mapCalls.set(0)
+    keyCalls.set(0)
+    MapIntKey.resetPublishedForTest()
+    HashReduce.resetByKeyForTest()
+    val dropped = nullValues.collect().toMap
+    mapCalls.get shouldBe 2
+    keyCalls.get shouldBe 2
+    MapIntKey.publishedForTest shouldBe 0
+    HashReduce.byKeyCallsForTest shouldBe 0
+    dropped shouldBe Map(8 -> 4)
+    // The row reduce keeps a lone null value. This arm drops it, as the unfiltered map reduce does.
+    mapCalls.set(0)
+    keyCalls.set(0)
+    val _ = row(nullValues.collect())
+    mapCalls.get shouldBe 2
+    keyCalls.get shouldBe 2
+
+    val nullValueCalls = new AtomicInteger
+    val byNullValue = nullIntValueSource()
+      .mapIntKey { key =>
+        val _ = mapCalls.incrementAndGet()
+        key * 2
+      }
+      .filterValues { (value: Int) =>
+        val _ = nullValueCalls.incrementAndGet()
+        value >= 0
+      }
+      .reduceByKey[Int, Int](_ + _)
+    mapCalls.set(0)
+    nullValueCalls.set(0)
+    MapIntKey.resetPublishedForTest()
+    HashReduce.resetByKeyForTest()
+    val presentOnly = byNullValue.collect().toMap
+    mapCalls.get shouldBe 2
+    nullValueCalls.get shouldBe 1
+    MapIntKey.publishedForTest shouldBe 0
+    HashReduce.byKeyCallsForTest shouldBe 0
+    presentOnly shouldBe Map(8 -> 4)
+  }
+
+  it should "reduce one slot above a filtered mapIntKey without publishing" in {
     val reduced = pairs()
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
       .mapIntKey((key: Int) => key + 1)
       .filterKeys((key: Int) => key > 2)
       .reduceByKey[Int, Int](_ + _)
-    shape(reduced) shouldBe "HashAggregate(Exchange(FilterKey(MapKey(Scan))))"
-    IntPairProject.resetPublishedForTest()
+    shape(reduced) shouldBe
+      "HashAggregate(Exchange(FilterKey(MapKey(FilterValue(FilterKey(Scan))))))"
+    MapIntKey.resetPublishedForTest()
+    HashReduce.resetByKeyForTest()
+    val found = reduced.collect().toMap
+    MapIntKey.publishedForTest shouldBe 0
+    HashReduce.byKeyCallsForTest shouldBe 0
+    found shouldBe Map(3 -> 20)
+    found shouldBe row(reduced.collect().toMap)
+  }
+
+  it should "leave a second map above mapIntKey on the published byKey path" in {
+    val reduced = pairs()
+      .mapIntKey((key: Int) => key + 1)
+      .mapIntKey((key: Int) => key * 2)
+      .filterKeys((key: Int) => key > 2)
+      .reduceByKey[Int, Int](_ + _)
+    shape(reduced) shouldBe "HashAggregate(Exchange(FilterKey(MapKey(MapKey(Scan)))))"
     MapIntKey.resetPublishedForTest()
     HashReduce.resetByKeyForTest()
     val found = reduced.collect().toMap
     MapIntKey.publishedForTest should be > 0
     HashReduce.byKeyCallsForTest should be > 0
-    IntPairProject.publishedForTest shouldBe 0
-    found shouldBe Map(3 -> 20, 4 -> 40)
+    found shouldBe Map(4 -> 40, 6 -> 20, 8 -> 40)
     found shouldBe row(reduced.collect().toMap)
+
+    val stacked = pairs()
+      .mapIntKey((key: Int) => key + 1)
+      .filterKeys((key: Int) => key > 2)
+      .filterValues((value: Int) => value >= 20)
+      .reduceByKey[Int, Int](_ + _)
+    ColumnarPlanner.lower(stacked.plan) shouldBe None
+    stacked.collect().toMap shouldBe row(stacked.collect().toMap)
+
+    val whole = pairs()
+      .mapIntKey((key: Int) => key + 1)
+      .filter((pair: (Int, Int)) => pair._1 > 2 && pair._2 >= 20)
+      .reduceByKey[Int, Int](_ + _)
+    ColumnarPlanner.lower(whole.plan) shouldBe None
+    whole.collect().toMap shouldBe row(whole.collect().toMap)
   }
 
   private def pairs(): DistCollection[(Int, Int)] =
