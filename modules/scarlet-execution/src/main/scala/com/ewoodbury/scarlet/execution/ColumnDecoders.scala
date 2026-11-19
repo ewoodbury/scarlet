@@ -5,10 +5,10 @@ import com.ewoodbury.scarlet.columnar.{BatchCodec, ColumnBatch, RankSplitTrace}
 /**
  * Decoders for a finished columnar batch.
  *
- * A long key or value keeps a clear bit. `keys` and `values` of one int [[PhysicalOp.MapKey]] do
- * too. The stored payload of that null is `0`, and [[BatchCodec.decodeInts]] would publish the
- * zero. Every other int column rejects a clear bit. Int-pair and triple choices are the ones
- * [[ColumnarInterpreter]] used before this file existed.
+ * A long key or value keeps a clear bit. `keys` and `values` of one int [[PhysicalOp.MapKey]], or
+ * of one key or value filter on it, do too. The stored payload of that null is `0`, and
+ * [[BatchCodec.decodeInts]] would publish the zero. Every other int column rejects a clear bit.
+ * Int-pair and triple choices are the ones [[ColumnarInterpreter]] used before this file existed.
  */
 private[execution] object ColumnDecoders:
 
@@ -65,10 +65,13 @@ private[execution] object ColumnDecoders:
         BatchCodec.decodeIntTriplesPreservingAbsence
       case _ => (batch, rows) => BatchCodec.decodeIntTriples(batch, rows)
 
-  /** `keys` or `values` of one int key map. A clear bit stays null. The function is not read. */
+  /**
+   * `keys` or `values` of one int key map, or of one key or value filter on that map. A clear bit
+   * stays null. The function and the predicate are not read.
+   */
   private def mappedIntKey(op: PhysicalOp): Boolean = op match
-    case PhysicalOp.Column(_: PhysicalOp.MapKey, ordinal) if ordinal == 0 || ordinal == 1 =>
-      true
+    case PhysicalOp.Column(child, ordinal) if ordinal == 0 || ordinal == 1 =>
+      MapIntKey.admitsColumn(child)
     case _ => false
 
   private def absentLongColumn(op: PhysicalOp): Boolean = op match

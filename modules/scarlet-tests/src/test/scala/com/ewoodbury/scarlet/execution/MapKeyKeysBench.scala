@@ -9,12 +9,12 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
- * Same-session row and columnar times for `mapIntKey` then `keys` then `count`.
+ * Same-session row and columnar times for `mapIntKey`, one `filterKeys`, then `keys.count`.
  *
- * The generator is the one [[PairProjectReduceBench]] uses: keys are `row % 1024`, values are
- * the cross-engine LCG, two source partitions, then `key % 3 != 0` and `value >= 0`. The action
- * is `data.mapIntKey(_ % 100).keys.count`. The count is taken from the row path first. `% 100`
- * is one hundred groups; the timed result is the surviving row count, not that width.
+ * The generator is the one [[PairProjectReduceBench]] uses: keys are `row % 1024`, values are the
+ * cross-engine LCG, two source partitions, then `key % 3 != 0` and `value >= 0`. The action is
+ * `data.mapIntKey(_ % 100).filterKeys(_ < 50).keys.count`. The count is taken from the row path
+ * first. `% 100` is one hundred groups; the timed result is the surviving row count.
  *
  * Spill is on for this process only. Warmup 80, rounds 30, and four threads are the defaults.
  *
@@ -79,10 +79,9 @@ object MapKeyKeysBench:
       println(s"ratio row/columnar=$ratio")
       if (row.count != columnar.count) then
         refuse(s"counts differ row=${row.count} columnar=${columnar.count}")
-      if (folded != Some(row.count)) then
-        refuse(s"tryCount $folded != row count ${row.count}")
-      if (!shape.startsWith("Key(") || !shape.contains("MapKey")) then
-        refuse(s"arm $shape is not Key over MapKey")
+      if (folded != Some(row.count)) then refuse(s"tryCount $folded != row count ${row.count}")
+      if (!shape.startsWith("Key(") || !shape.contains("Filter") || !shape.contains("MapKey")) then
+        refuse(s"arm $shape is not Key over Filter over MapKey")
       if (row.batches != 0L || row.fused != 0L) then
         refuse(s"row published batches=${row.batches} fused=${row.fused}")
     finally
@@ -91,14 +90,14 @@ object MapKeyKeysBench:
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)
 
-  /** Filtered int pairs, then `k % 100`, then `keys`. */
+  /** Filtered int pairs, then `k % 100`, then `filterKeys(_ < 50)`, then `keys`. */
   private def query(rows: Int, filters: Int): DistCollection[Int] =
     val keys = Array.tabulate(rows)(row => row % groups)
     val values = lcgValues(rows)
     val data = DistCollection.ofIntPairs(keys, values, sourcePartitions)
     val keyed = data.filterKeys((key: Int) => key % 3 != 0)
     val filtered = if (filters == 1) then keyed else keyed.filterValues((value: Int) => value >= 0)
-    filtered.mapIntKey(key => key % 100).keys
+    filtered.mapIntKey(key => key % 100).filterKeys((key: Int) => key < 50).keys
 
   private def time(
       name: String,

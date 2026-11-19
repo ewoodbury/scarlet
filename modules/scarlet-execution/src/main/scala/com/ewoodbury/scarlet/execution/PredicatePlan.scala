@@ -70,7 +70,8 @@ private[execution] object PredicatePlan:
       Some(Compiled(found.map(layer => toAtom(op.kind, layer, strict)).toVector))
 
   /**
-   * One kernel on `[start, start + length)`. The predicate was adapted when the atom was built.
+   * One kernel on `[start, start + length)`. The predicate was adapted when the atom was built. An
+   * int filter sizes the other columns to `length`, the window, not the parent batch.
    */
   def applyAtom(batch: ColumnBatch, start: Int, length: Int, atom: Atom): ColumnBatch =
     atom match
@@ -80,7 +81,7 @@ private[execution] object PredicatePlan:
         val dense = ColumnBatches.presentStoredZeros(batch)
         PairKernel.filterTriple(dense, start, length, keep.onTriple)
       case Atom.Int32(ordinal, keep) =>
-        ColumnKernel.filterInt32(batch, ordinal, start, length, keep)
+        ColumnKernel.filterInt32(batch, ordinal, start, length, keep, length)
       case Atom.Int64(ordinal, keep) =>
         ColumnKernel.filterInt64(batch, ordinal, start, length, keep)
       case Atom.Float64(ordinal, keep) =>
@@ -102,9 +103,16 @@ private[execution] object PredicatePlan:
       case Atom.LongPairValue(ordinal, keep) =>
         ColumnKernel.filterInt64(batch, encodedOrdinal(batch, ordinal), start, length, keep)
       case Atom.PairKey(keep) =>
-        ColumnKernel.filterInt32(batch, encodedOrdinal(batch, 0), start, length, keep)
+        ColumnKernel.filterInt32(batch, encodedOrdinal(batch, 0), start, length, keep, length)
       case Atom.PairValue(ordinal, keep) =>
-        ColumnKernel.filterInt32(batch, encodedOrdinal(batch, ordinal), start, length, keep)
+        ColumnKernel.filterInt32(
+          batch,
+          encodedOrdinal(batch, ordinal),
+          start,
+          length,
+          keep,
+          length,
+        )
       case Atom.StringRow(keep) =>
         Selection(batch, start, length, Seq(Selection.Step.StringPair(keep)))
 
