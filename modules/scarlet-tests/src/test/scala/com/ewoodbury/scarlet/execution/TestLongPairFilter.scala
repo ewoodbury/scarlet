@@ -7,7 +7,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.Selection
+import com.ewoodbury.scarlet.columnar.{LongHashCount, LongPairProject, Selection}
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -105,7 +105,8 @@ class TestLongPairFilter extends AnyFlatSpec with Matchers with BeforeAndAfterEa
 
   it should "keep a clear value bit through a two-filter collect" in {
     // Two key filters, so the null value on key 2 survives the index. A decoder that rejects a
-    // clear bit leaves this collect. A decoder that stores the null as zero fails the absent check.
+    /* clear bit leaves this collect. A decoder that stores the null as zero fails the absent
+     * check. */
     val filtered = nullable
       .filterKeys[Long, Long]((key: Long) => key >= 0L)
       .filterKeys[Long, Long]((key: Long) => key < 10L)
@@ -256,7 +257,9 @@ class TestLongPairFilter extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     assertColumnar(valued, "FilterValue(Project(Scan))")
     assertEmpty(keyed.filterValues[Long, Long]((value: Long) => value > 0L))
     assertEmpty(mapped.filter((pair: (Long, Long)) => pair._1 > 0L))
-    assertEmpty(mapped.map((pair: (Long, Long)) => (pair._1, pair._2)).filterKeys[Long, Long](_ > 0L))
+    assertEmpty(
+      mapped.map((pair: (Long, Long)) => (pair._1, pair._2)).filterKeys[Long, Long](_ > 0L),
+    )
     assertEmpty(sorted.filterKeys[Long, Long](_ > 0L))
     assertEmpty(joined.filterKeys[Long, (Long, Long)]((key: Long) => key > 0L))
     ColumnarPlanner.lower(sorted.plan).map(_.shape) shouldBe Some("SortByLongKey(Scan)")
@@ -264,6 +267,151 @@ class TestLongPairFilter extends AnyFlatSpec with Matchers with BeforeAndAfterEa
       "LongHashJoin(Exchange(Scan), Exchange(Scan))",
     )
     assertColumnar(mapped, "Project(Scan)")
+  }
+
+  "countByKey above one long pair project" should "count the slot without a pair batch" in {
+    val source = DistCollection.ofLongPairs(Array(1L, 2L, 1L, 3L), Array(10L, 20L, 30L, 40L), 1)
+    val mapped = source.map((pair: (Long, Long)) => (pair._1 + 1L, pair._2))
+    val keyed = mapped.filterKeys[Long, Long]((key: Long) => key > 2L).countByKey
+    val valued = mapped.filterValues[Long, Long]((value: Long) => value >= 20L).countByKey
+
+    ColumnarPlanner.lower(keyed.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(FilterKey(Project(Scan))))",
+    )
+    ColumnarPlanner.lower(valued.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(FilterValue(Project(Scan))))",
+    )
+    val keyCounts = unpublished(keyed)
+    keyCounts shouldBe Map(3L -> 1, 4L -> 1)
+    keyCounts shouldBe row(keyed.collect().toMap)
+    val valueCounts = unpublished(valued)
+    // (2, 10) is the only projected value under 20. Key 2 remains once.
+    valueCounts shouldBe Map(2L -> 1, 3L -> 1, 4L -> 1)
+    valueCounts shouldBe row(valued.collect().toMap)
+
+    val stacked = source
+      .filterKeys[Long, Long]((key: Long) => key % 3L != 0L)
+      .filterValues[Long, Long]((value: Long) => value >= 0L)
+      .map((pair: (Long, Long)) => (pair._1 + 1L, pair._2))
+      .filterKeys[Long, Long]((key: Long) => key < 50L)
+      .countByKey
+    ColumnarPlanner.lower(stacked.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(FilterKey(Project(FilterValue(FilterKey(Scan))))))",
+    )
+    val stackedCounts = unpublished(stacked)
+    stackedCounts shouldBe Map(2L -> 2, 3L -> 1)
+    stackedCounts shouldBe row(stacked.collect().toMap)
+
+    val rowThenSlot = source
+      .filter((pair: (Long, Long)) => pair._2 >= 20L)
+      .map((pair: (Long, Long)) => (pair._1 + 1L, pair._2))
+      .filterKeys[Long, Long]((key: Long) => key > 2L)
+      .countByKey
+    ColumnarPlanner.lower(rowThenSlot.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(FilterKey(Project(FilterRow(Scan)))))",
+    )
+    val rowCounts = unpublished(rowThenSlot)
+    rowCounts shouldBe Map(3L -> 1, 4L -> 1)
+    rowCounts shouldBe row(rowThenSlot.collect().toMap)
+
+    ColumnarPlanner.lower(
+      mapped
+        .filterKeys[Long, Long]((key: Long) => key > 2L)
+        .filterValues[Long, Long]((value: Long) => value >= 20L)
+        .countByKey
+        .plan,
+    ) shouldBe Option.empty[PhysicalOp]
+    ColumnarPlanner.lower(
+      mapped.filter((pair: (Long, Long)) => pair._1 > 0L).countByKey.plan,
+    ) shouldBe Option.empty[PhysicalOp]
+    ColumnarPlanner.lower(
+      mapped
+        .map((pair: (Long, Long)) => (pair._1, pair._2))
+        .filterKeys[Long, Long]((key: Long) => key > 0L)
+        .countByKey
+        .plan,
+    ) shouldBe Option.empty[PhysicalOp]
+    val sorted = source.sortByLongKey
+    ColumnarPlanner.lower(sorted.filterKeys[Long, Long](_ > 0L).countByKey.plan) shouldBe
+      Option.empty[PhysicalOp]
+    ColumnarPlanner.lower(
+      sorted
+        .map((pair: (Long, Long)) => (pair._1 + 1L, pair._2))
+        .filterKeys[Long, Long]((key: Long) => key > 0L)
+        .countByKey
+        .plan,
+    ) shouldBe Option.empty[PhysicalOp]
+  }
+
+  it should "pass a null input key and count a null projected value" in {
+    val calls = new AtomicInteger
+    val shifted = nullKeyRows().map(shiftNullKey(calls, nullKey = 7L))
+    val keyed = shifted.filterKeys[Long, Long]((key: Long) => key > 0L).countByKey
+    ColumnarPlanner.lower(keyed.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(FilterKey(Project(Scan))))",
+    )
+    val nullAt = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      calls.set(0)
+      LongPairProject.resetPublishedForTest()
+      LongHashCount.resetByKeyForTest()
+      val found = keyed.collect().toMap
+      LongPairProject.publishedForTest shouldBe 0
+      LongHashCount.byKeyCallsForTest shouldBe 0
+      (found, calls.get)
+    }
+    val (nullCounts, nullCalls) = nullAt(8192)
+    nullCounts shouldBe Map(2L -> 2, 3L -> 1, 7L -> 1)
+    nullAt(1) shouldBe (nullCounts, nullCalls)
+    calls.set(0)
+    row(keyed.collect().toMap) shouldBe nullCounts
+    calls.get shouldBe nullCalls
+
+    val valueCalls = new AtomicInteger
+    val values = nullValueRows().map(keepCells(valueCalls))
+    val byKey = values.filterKeys[Long, Long]((key: Long) => key > 0L).countByKey
+    valueCalls.set(0)
+    LongPairProject.resetPublishedForTest()
+    LongHashCount.resetByKeyForTest()
+    byKey.collect().toMap shouldBe Map(4L -> 1, 1L -> 1)
+    valueCalls.get shouldBe 2
+    LongPairProject.publishedForTest shouldBe 0
+    LongHashCount.byKeyCallsForTest shouldBe 0
+    valueCalls.set(0)
+    row(byKey.collect().toMap) shouldBe Map(4L -> 1, 1L -> 1)
+    valueCalls.get shouldBe 2
+  }
+
+  it should "drop a null projected value and not call the value predicate" in {
+    val calls = new AtomicInteger
+    val preds = new AtomicInteger
+    val counted = nullValueRows()
+      .map(keepCells(calls))
+      .filterValues[Long, Long] { (value: Long) =>
+        val _ = preds.incrementAndGet()
+        value >= 0L
+      }
+      .countByKey
+    ColumnarPlanner.lower(counted.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(FilterValue(Project(Scan))))",
+    )
+    calls.set(0)
+    preds.set(0)
+    LongPairProject.resetPublishedForTest()
+    LongHashCount.resetByKeyForTest()
+    val found = counted.collect().toMap
+    calls.get shouldBe 2
+    preds.get shouldBe 1
+    found shouldBe Map(4L -> 1)
+    LongPairProject.publishedForTest shouldBe 0
+    LongHashCount.byKeyCallsForTest shouldBe 0
+    // The row path unboxes the null value to 0, the predicate keeps it, and that key counts.
+    calls.set(0)
+    preds.set(0)
+    row(counted.collect().toMap) shouldBe Map(4L -> 1, 1L -> 1)
+    calls.get shouldBe 2
+    preds.get shouldBe 2
   }
 
   "an empty input" should "lower and call nothing" in {
@@ -428,3 +576,78 @@ class TestLongPairFilter extends AnyFlatSpec with Matchers with BeforeAndAfterEa
 
   private def pairAt(values: Seq[(Long, Long)], index: Int): (Long, Long) =
     values.iterator.drop(index).next()
+
+  /** Both batch widths, and neither the project nor [[LongHashCount.byKey]] publishes. */
+  private def unpublished(collection: DistCollection[(Long, Int)]): Map[Long, Int] =
+    val at = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      LongPairProject.resetPublishedForTest()
+      LongHashCount.resetByKeyForTest()
+      val found = collection.collect().toMap
+      LongPairProject.publishedForTest shouldBe 0
+      LongHashCount.byKeyCallsForTest shouldBe 0
+      found
+    }
+    val wide = at(8192)
+    at(1) shouldBe wide
+    wide
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+      "org.wartremover.warts.Throw",
+    ),
+  )
+  private def shiftNullKey(calls: AtomicInteger, nullKey: Long): ((Long, Long)) => (Long, Long) =
+    pair => {
+      val _ = calls.incrementAndGet()
+      val product = pair.asInstanceOf[Product]
+      val value = product.productElement(1)
+      val key = product.productElement(0) match
+        case null => nullKey
+        case present: Long => present + 1L
+        case other => throw new IllegalArgumentException(s"pair map saw $other")
+      Tuple2(Long.box(key), value).asInstanceOf[(Long, Long)]
+    }
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def keepCells(calls: AtomicInteger)(pair: (Long, Long)): (Long, Long) =
+    val _ = calls.incrementAndGet()
+    val product = pair.asInstanceOf[Product]
+    Tuple2(product.productElement(0), product.productElement(1)).asInstanceOf[(Long, Long)]
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def nullKeyRows(): DistCollection[(Long, Long)] =
+    def cell(key: Any, value: Long): (Long, Long) =
+      Tuple2(key, Long.box(value)).asInstanceOf[(Long, Long)]
+    DistCollection(
+      Seq(cell(longRef(1L), 4L), cell(null, 9L), cell(longRef(1L), 5L), cell(longRef(2L), 6L)),
+      1,
+    )
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def nullValueRows(): DistCollection[(Long, Long)] =
+    def cell(key: Long, value: Any): (Long, Long) =
+      Tuple2(Long.box(key), value).asInstanceOf[(Long, Long)]
+    DistCollection(Seq(cell(4L, longRef(4L)), cell(1L, null)), 1)

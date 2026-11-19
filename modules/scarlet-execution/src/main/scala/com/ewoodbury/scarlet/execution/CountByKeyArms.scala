@@ -20,19 +20,23 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * original value. The mapped pair batch is not published. A [[Plan.MapOp]] that is a pair
  * [[PhysicalOp.Project]] is counted from that project's input morsels. The interpreter's adapter
  * runs on every row, including a null key, and only the projected key is stored. The pair batch is
- * not published. The function is not inspected. A filter above that project, a flatMap, and a
+ * not published. The function is not inspected. A filter above an int project, a flatMap, and a
  * mapPartitions stay on the interpreted path. A long-pair [[PhysicalOp.Project]] uses
- * [[LongPairProject]] the same way and does not publish the pair batch. [[LongHashCount.byKey]]
- * counts a long scan or filter and does not see that project. A string-pair [[PhysicalOp.Project]]
- * is interpreted into a dictionary column and an int column, then [[StringHashCount.byKey]] hashes
- * that dictionary. The pairs are not decoded. One key or value filter above that project publishes
- * both columns, and the same [[StringHashCount.byKey]] hashes those batches. A second slot does
- * not lower. No filters, a whole-row or string step, a non-int slot, and a null component the
- * encoder throws on stay on the old path. That path partial-counts survivor ids, including one
- * row, key, or value filter. A scan and a non-pair child stay on the dense count. The value column
- * is not read on that path, so a null value still counts. A long count publishes
- * [[Columns.LongCounts]]. A string count publishes [[Columns.StringPairs]]. The stored count is an
- * `Int`. A null string key is dropped and `""` is kept.
+ * [[LongPairProject]] the same way and does not publish the pair batch. One key or value slot
+ * above that long project is counted from the project's input: filters under the project stay a
+ * survivor index, and the slot is applied to the projected key. A null projected value still
+ * counts. A second slot, a whole-row filter above the project, and a second map stay interpreted.
+ * [[LongHashCount.byKey]] counts a long scan or filter and does not see that project or that slot.
+ * A string-pair [[PhysicalOp.Project]] is interpreted into a dictionary column and an int column,
+ * then [[StringHashCount.byKey]] hashes that dictionary. The pairs are not decoded. One key or
+ * value filter above that project publishes both columns, and the same [[StringHashCount.byKey]]
+ * hashes those batches. A second slot does not lower. No filters, a whole-row or string step, a
+ * non-int slot, and a null component the encoder throws on stay on the old path. That path
+ * partial-counts survivor ids, including one row, key, or value filter. A scan and a non-pair
+ * child stay on the dense count. The value column is not read on that path, so a null value still
+ * counts. A long count publishes [[Columns.LongCounts]]. A string count publishes
+ * [[Columns.StringPairs]]. The stored count is an `Int`. A null string key is dropped and `""` is
+ * kept.
  */
 private[execution] object CountByKeyArms:
 
@@ -86,7 +90,7 @@ private[execution] object CountByKeyArms:
                 )
         Columns.Pairs(counted)
       case PhysicalOp.Kind.LongPairs =>
-        val counted = countProjectedLong(
+        val counted = countAboveProjectedLong(
           source,
           child,
           selectedPartition,
@@ -96,21 +100,33 @@ private[execution] object CountByKeyArms:
           workers,
           batchSize,
         ) match
-          case Some(projected) => projected
+          case Some(above) => above
           case None =>
-            FilterChain.selected(
+            countProjectedLong(
               source,
               child,
               selectedPartition,
               preserveAbsence,
               ordinals,
+              width,
+              workers,
+              batchSize,
             ) match
-              case Some(parts) => LongHashCount.byKeySelected(parts, width, workers, batchSize)
+              case Some(projected) => projected
               case None =>
-                val batches = longPairsOf(
-                  interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),
-                )
-                LongHashCount.byKey(batches, width, workers, batchSize)
+                FilterChain.selected(
+                  source,
+                  child,
+                  selectedPartition,
+                  preserveAbsence,
+                  ordinals,
+                ) match
+                  case Some(parts) => LongHashCount.byKeySelected(parts, width, workers, batchSize)
+                  case None =>
+                    val batches = longPairsOf(
+                      interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),
+                    )
+                    LongHashCount.byKey(batches, width, workers, batchSize)
         Columns.LongCounts(counted)
       case PhysicalOp.Kind.StringPairs =>
         // A project child is already dictionary columns. byKey hashes those codes and does not
@@ -329,10 +345,165 @@ private[execution] object CountByKeyArms:
     }
 
   /**
+   * One key or value slot directly above one long-pair project. The project's input is counted
+   * through [[LongPairProject.visitFiltered]]. Filters under the project are a survivor index from
+   * [[FilterChain.selected]]: the ids are visited and the source columns are not compacted. `None`
+   * when a second map sits under the project, when the step is not one long key or value, or when
+   * those under-filters do not yield an index. A null key and a null value are passed to the
+   * adapter. A null projected key is dropped and the key predicate is not called. A null projected
+   * value still counts when the slot keeps the key, and a value predicate is not called on it.
+   * [[LongHashCount.byKey]] is not called.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def countAboveProjectedLong(
+      source: Plan[_],
+      child: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    val matched = (source, child) match
+      case (
+            Plan.FilterKeysOp(Plan.MapOp(inner, fn), _),
+            PhysicalOp.Filter(PhysicalOp.Project(under), PhysicalOp.Slot.Key),
+          ) if longPairs(child) =>
+        Some((inner, under, fn))
+      case (
+            Plan.FilterValuesOp(Plan.MapOp(inner, fn), _),
+            PhysicalOp.Filter(PhysicalOp.Project(under), PhysicalOp.Slot.Value),
+          ) if longPairs(child) =>
+        Some((inner, under, fn))
+      case _ => None
+    matched.flatMap { (inner, under, fn) =>
+      if (deeperMap(inner, under)) then None
+      else
+        oneLongSlot(source, child).flatMap { step =>
+          val adapted = LongPairProject.adapt(fn)
+          PredicatePlan.compile(inner, under) match
+            case None =>
+              countedScan(
+                inner,
+                under,
+                adapted,
+                step,
+                selectedPartition,
+                preserveAbsence,
+                ordinals,
+                width,
+                workers,
+                batchSize,
+              )
+            case Some(_) =>
+              indexedUnder(
+                inner,
+                under,
+                adapted,
+                step,
+                selectedPartition,
+                preserveAbsence,
+                ordinals,
+                width,
+                workers,
+                batchSize,
+              )
+        }
+    }
+
+  /** The project sits on a scan. There is no survivor index to apply. */
+  private def countedScan(
+      plan: Plan[_],
+      op: PhysicalOp,
+      adapted: LongPairProject.LongPairMap,
+      step: Selection.Step,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    val columns =
+      try interpretAt(plan, op, selectedPartition, preserveAbsence, ordinals)
+      catch
+        case _: NullPointerException =>
+          throw new ColumnarFallback("countByKey source has a null pair component")
+    columns match
+      case Columns.LongPairs(batches) =>
+        Some(
+          ProjectedLongPairCount.countFiltered(
+            batches,
+            adapted,
+            step,
+            width,
+            workers,
+            batchSize,
+          ),
+        )
+      case _ =>
+        throw new IllegalStateException("pair project count expected long pairs")
+
+  /**
+   * Filters under the project. `None` when the stack does not yield a survivor index, so the
+   * caller does not compact those columns.
+   */
+  private def indexedUnder(
+      plan: Plan[_],
+      op: PhysicalOp,
+      adapted: LongPairProject.LongPairMap,
+      step: Selection.Step,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    val selected =
+      try FilterChain.selected(plan, op, selectedPartition, preserveAbsence, ordinals)
+      catch
+        case _: NullPointerException =>
+          throw new ColumnarFallback("countByKey source has a null pair component")
+    selected.map { parts =>
+      ProjectedLongPairCount.countSelected(parts, adapted, step, width, workers, batchSize)
+    }
+
+  /** One long key or value on the projected pair. A row step and a second slot are `None`. */
+  private def oneLongSlot(source: Plan[_], child: PhysicalOp): Option[Selection.Step] =
+    PredicatePlan.compile(source, child).flatMap { compiled =>
+      PredicatePlan.selectionSteps(compiled) match
+        case Some(Vector(step @ Selection.Step.Int64(column, _))) if column == 0 || column == 1 =>
+          Some(step)
+        case _ => None
+    }
+
+  /** A second map under the project. Filters between the maps are peeled first. */
+  private def deeperMap(plan: Plan[_], op: PhysicalOp): Boolean =
+    val (underPlan, underOp) = PredicatePlan.childOf(plan, op)
+    val planned = underPlan match
+      case Plan.MapOp(_, _) | Plan.MapValuesOp(_, _) | Plan.MapIntKeyOp(_, _) |
+          Plan.FlatMapOp(_, _) | Plan.FlatMapValuesOp(_, _) | Plan.MapPartitionsOp(_, _) =>
+        true
+      case _ => false
+    val physical = underOp match
+      case PhysicalOp.Project(_) | PhysicalOp.MapKey(_) | PhysicalOp.MapValue(_) |
+          PhysicalOp.Pipeline(_, _) =>
+        true
+      case _ => false
+    planned || physical
+
+  /** Long pairs, including one slot above a long-pair project. */
+  private def longPairs(op: PhysicalOp): Boolean = op.kind match
+    case PhysicalOp.Kind.LongPairs => true
+    case _ => false
+
+  /**
    * One long-pair [[Plan.MapOp]]. The input of the project is interpreted, then each morsel is
    * counted through [[LongPairProject.visitKeys]]. `None` when this child is not that project. A
-   * null key is passed to the adapter. The value cell is not stored. [[LongHashCount.byKey]] is
-   * not called.
+   * filter above it has its own arm. A null key is passed to the adapter. The value cell is not
+   * stored. [[LongHashCount.byKey]] is not called.
    */
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
   private def countProjectedLong(
