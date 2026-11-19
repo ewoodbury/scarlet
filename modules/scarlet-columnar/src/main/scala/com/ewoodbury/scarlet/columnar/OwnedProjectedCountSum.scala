@@ -13,6 +13,10 @@ package com.ewoodbury.scarlet.columnar
  * [[com.ewoodbury.scarlet.core.IntPairArrays]] partition. A null source stays on the encoded
  * [[ProjectedPairCountSum]] walk. The arrays are aliased. Nothing here copies them, and
  * [[Selection.applySelected]] is not used.
+ *
+ * [[foldAbove]] is that walk plus one int slot on the projected pair. Filters under the project
+ * still see the source. The slot sees the projected key or value. A null projected key is dropped.
+ * A null projected value that a key slot keeps is counted and not added.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Var"))
 private[columnar] object OwnedProjectedCountSum:
@@ -181,6 +185,353 @@ private[columnar] object OwnedProjectedCountSum:
         require(next > cursor, "count-sum stripe did not advance")
         cursor = next
       part += 1
+    }
+
+  /**
+   * [[fold]] plus one int slot on the projected pair. `aboveColumn` is `0` for the key and `1` for
+   * the value. `aboveKeep` is not called on a null projected cell. A null source stays on the
+   * encoded walk: these arrays are fully present.
+   */
+  def foldAbove(
+      parts: Vector[(Array[Int], Array[Int])],
+      steps: List[Selection.Step],
+      mapper: IntPairProject.IntPairMap,
+      aboveColumn: Int,
+      aboveKeep: Int => Boolean,
+      parallelism: Int,
+      open: () => HashAggregate.GroupTable,
+      publish: HashAggregate.GroupTable => ColumnBatch,
+  ): Vector[ColumnBatch] =
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(
+      aboveColumn == 0 || aboveColumn == 1,
+      s"pair slot must be a key or a value, got $aboveColumn",
+    )
+    val prepared = prepare(steps)
+    if (parts.isEmpty) then Vector.empty
+    else
+      val sources = parts.toArray
+      val prefix = prefixOf(sources)
+      val total = prefix(sources.length)
+      if (total == 0L) then Vector.empty
+      else
+        val width = stripeWidth(total, parallelism)
+        MorselScheduler.map(bounds(total, width), parallelism) { (_, stripe) =>
+          val table = open()
+          val sink = new TableSink(table)
+          scanAbove(
+            sources,
+            prefix,
+            stripe.from,
+            stripe.until,
+            prepared,
+            mapper,
+            aboveColumn,
+            aboveKeep,
+            sink,
+          )
+          ColumnMetrics.fused()
+          publish(table)
+        }
+
+  private def scanAbove(
+      sources: Array[(Array[Int], Array[Int])],
+      prefix: Array[Long],
+      from: Long,
+      until: Long,
+      prepared: Prepared,
+      mapper: IntPairProject.IntPairMap,
+      aboveColumn: Int,
+      aboveKeep: Int => Boolean,
+      sink: IntPairProject.IntPairCountSink,
+  ): Unit =
+    var part = 0
+    while (part < sources.length && prefix(part + 1) <= from) do part += 1
+    var cursor = from
+    while (cursor < until) {
+      require(part < sources.length, "count-sum stripe ran past the source")
+      val partStart = prefix(part)
+      val partEnd = prefix(part + 1)
+      if (partEnd > cursor) then
+        val localStart = (cursor - partStart).toInt
+        val localEnd = (math.min(until, partEnd) - partStart).toInt
+        if (localEnd > localStart) then
+          val (keys, values) = sources(part)
+          applyAbove(
+            prepared,
+            keys,
+            values,
+            localStart,
+            localEnd,
+            mapper,
+            aboveColumn,
+            aboveKeep,
+            sink,
+          )
+        val next = math.min(until, partEnd)
+        require(next > cursor, "count-sum stripe did not advance")
+        cursor = next
+      part += 1
+    }
+
+  private def applyAbove(
+      prepared: Prepared,
+      keys: Array[Int],
+      values: Array[Int],
+      start: Int,
+      end: Int,
+      mapper: IntPairProject.IntPairMap,
+      aboveColumn: Int,
+      aboveKeep: Int => Boolean,
+      sink: IntPairProject.IntPairCountSink,
+  ): Unit =
+    prepared match
+      case All =>
+        denseAbove(keys, values, start, end, mapper, aboveColumn, aboveKeep, sink)
+      case filtered: KeyThenValue =>
+        keyThenValueAbove(
+          keys,
+          values,
+          start,
+          end,
+          filtered.keepKey,
+          filtered.keepValue,
+          mapper,
+          aboveColumn,
+          aboveKeep,
+          sink,
+        )
+      case filtered: ValueThenKey =>
+        valueThenKeyAbove(
+          keys,
+          values,
+          start,
+          end,
+          filtered.keepValue,
+          filtered.keepKey,
+          mapper,
+          aboveColumn,
+          aboveKeep,
+          sink,
+        )
+      case filtered: KeyOnly =>
+        keyOnlyAbove(
+          keys,
+          values,
+          start,
+          end,
+          filtered.keep,
+          mapper,
+          aboveColumn,
+          aboveKeep,
+          sink,
+        )
+      case filtered: ValueOnly =>
+        valueOnlyAbove(
+          keys,
+          values,
+          start,
+          end,
+          filtered.keep,
+          mapper,
+          aboveColumn,
+          aboveKeep,
+          sink,
+        )
+      case filtered: Two =>
+        twoAbove(
+          keys,
+          values,
+          start,
+          end,
+          filtered.leftOrdinal,
+          filtered.keepLeft,
+          filtered.rightOrdinal,
+          filtered.keepRight,
+          mapper,
+          aboveColumn,
+          aboveKeep,
+          sink,
+        )
+      case filtered: Slots =>
+        slotsAbove(
+          keys,
+          values,
+          start,
+          end,
+          filtered.slots,
+          mapper,
+          aboveColumn,
+          aboveKeep,
+          sink,
+        )
+
+  private def denseAbove(
+      keys: Array[Int],
+      values: Array[Int],
+      start: Int,
+      end: Int,
+      mapper: IntPairProject.IntPairMap,
+      aboveColumn: Int,
+      aboveKeep: Int => Boolean,
+      sink: IntPairProject.IntPairCountSink,
+  ): Unit =
+    var row = start
+    while (row < end) {
+      IntPairProject.acceptCountFiltered(
+        mapper(keys(row), values(row)),
+        aboveColumn,
+        aboveKeep,
+        sink,
+      )
+      row += 1
+    }
+
+  private def keyThenValueAbove(
+      keys: Array[Int],
+      values: Array[Int],
+      start: Int,
+      end: Int,
+      keepKey: Int => Boolean,
+      keepValue: Int => Boolean,
+      mapper: IntPairProject.IntPairMap,
+      aboveColumn: Int,
+      aboveKeep: Int => Boolean,
+      sink: IntPairProject.IntPairCountSink,
+  ): Unit =
+    var row = start
+    while (row < end) {
+      val key = keys(row)
+      if (keepKey(key)) then
+        val value = values(row)
+        if (keepValue(value)) then
+          IntPairProject.acceptCountFiltered(
+            mapper(key, value),
+            aboveColumn,
+            aboveKeep,
+            sink,
+          )
+      row += 1
+    }
+
+  private def valueThenKeyAbove(
+      keys: Array[Int],
+      values: Array[Int],
+      start: Int,
+      end: Int,
+      keepValue: Int => Boolean,
+      keepKey: Int => Boolean,
+      mapper: IntPairProject.IntPairMap,
+      aboveColumn: Int,
+      aboveKeep: Int => Boolean,
+      sink: IntPairProject.IntPairCountSink,
+  ): Unit =
+    var row = start
+    while (row < end) {
+      val value = values(row)
+      if (keepValue(value)) then
+        val key = keys(row)
+        if (keepKey(key)) then
+          IntPairProject.acceptCountFiltered(
+            mapper(key, value),
+            aboveColumn,
+            aboveKeep,
+            sink,
+          )
+      row += 1
+    }
+
+  private def keyOnlyAbove(
+      keys: Array[Int],
+      values: Array[Int],
+      start: Int,
+      end: Int,
+      keep: Int => Boolean,
+      mapper: IntPairProject.IntPairMap,
+      aboveColumn: Int,
+      aboveKeep: Int => Boolean,
+      sink: IntPairProject.IntPairCountSink,
+  ): Unit =
+    var row = start
+    while (row < end) {
+      val key = keys(row)
+      if (keep(key)) then
+        IntPairProject.acceptCountFiltered(
+          mapper(key, values(row)),
+          aboveColumn,
+          aboveKeep,
+          sink,
+        )
+      row += 1
+    }
+
+  private def valueOnlyAbove(
+      keys: Array[Int],
+      values: Array[Int],
+      start: Int,
+      end: Int,
+      keep: Int => Boolean,
+      mapper: IntPairProject.IntPairMap,
+      aboveColumn: Int,
+      aboveKeep: Int => Boolean,
+      sink: IntPairProject.IntPairCountSink,
+  ): Unit =
+    var row = start
+    while (row < end) {
+      val value = values(row)
+      if (keep(value)) then
+        IntPairProject.acceptCountFiltered(
+          mapper(keys(row), value),
+          aboveColumn,
+          aboveKeep,
+          sink,
+        )
+      row += 1
+    }
+
+  private def twoAbove(
+      keys: Array[Int],
+      values: Array[Int],
+      start: Int,
+      end: Int,
+      leftOrdinal: Int,
+      keepLeft: Int => Boolean,
+      rightOrdinal: Int,
+      keepRight: Int => Boolean,
+      mapper: IntPairProject.IntPairMap,
+      aboveColumn: Int,
+      aboveKeep: Int => Boolean,
+      sink: IntPairProject.IntPairCountSink,
+  ): Unit =
+    var row = start
+    while (row < end) {
+      val key = keys(row)
+      val value = values(row)
+      val left = if (leftOrdinal == 0) then key else value
+      val right = if (rightOrdinal == 0) then key else value
+      if (keepLeft(left) && keepRight(right)) then
+        IntPairProject.acceptCountFiltered(mapper(key, value), aboveColumn, aboveKeep, sink)
+      row += 1
+    }
+
+  private def slotsAbove(
+      keys: Array[Int],
+      values: Array[Int],
+      start: Int,
+      end: Int,
+      filters: Array[Slot],
+      mapper: IntPairProject.IntPairMap,
+      aboveColumn: Int,
+      aboveKeep: Int => Boolean,
+      sink: IntPairProject.IntPairCountSink,
+  ): Unit =
+    var row = start
+    while (row < end) {
+      val key = keys(row)
+      val value = values(row)
+      if (passes(filters, key, value)) then
+        IntPairProject.acceptCountFiltered(mapper(key, value), aboveColumn, aboveKeep, sink)
+      row += 1
     }
 
   private def apply(

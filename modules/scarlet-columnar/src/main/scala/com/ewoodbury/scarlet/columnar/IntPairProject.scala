@@ -470,6 +470,90 @@ object IntPairProject:
     }
 
   /**
+   * [[visitCountSums]] for one int slot above the project.
+   *
+   * The adapter calls match [[project]], including a null key and a null value. A null projected
+   * key is dropped, and a key predicate is not called. A null projected value is dropped when the
+   * slot reads the value, and that predicate is not called. A key slot that keeps a present key
+   * still counts a null value and does not add it. A value slot that keeps a present value still
+   * drops a null key. A result that is not a pair of ints throws [[ColumnarFallback]] and
+   * publishes nothing. This does not allocate an output column. `column` is `0` for the key and
+   * `1` for the value.
+   */
+  private[scarlet] def visitCountFiltered(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      mapper: IntPairMap,
+      column: Int,
+      keep: Int => Boolean,
+      sink: IntPairCountSink,
+  ): Unit =
+    require(column == 0 || column == 1, s"pair slot must be a key or a value, got $column")
+    require(
+      batch.columns.length == 2,
+      s"pair project expected 2 columns, got ${batch.columns.length}",
+    )
+    val keys = int32At(batch, 0)
+    val values = int32At(batch, 1)
+    require(keys.length == values.length, "key and value columns differ in length")
+    Ranges.check(start, length, keys.length)
+    if (length == 0) then ()
+    else if (
+        Validity.rangePresent(keys.validity, start, length) &&
+        Validity.rangePresent(values.validity, start, length)
+      )
+    then visitCountFilteredDense(keys, values, start, length, mapper, column, keep, sink)
+    else visitCountFilteredSparse(keys, values, start, length, mapper, column, keep, sink)
+
+  private def visitCountFilteredDense(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      mapper: IntPairMap,
+      column: Int,
+      keep: Int => Boolean,
+      sink: IntPairCountSink,
+  ): Unit =
+    val keyArr = keys.values
+    val valueArr = values.values
+    val end = start + length
+    var row = start
+    while (row < end) {
+      offerCountFiltered(mapper(keyArr(row), valueArr(row)), column, keep, sink)
+      row += 1
+    }
+
+  private def visitCountFilteredSparse(
+      keys: Int32Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      mapper: IntPairMap,
+      column: Int,
+      keep: Int => Boolean,
+      sink: IntPairCountSink,
+  ): Unit =
+    val keyArr = keys.values
+    val valueArr = values.values
+    val keyIn = keys.validity.words
+    val valueIn = values.validity.words
+    val end = start + length
+    var row = start
+    while (row < end) {
+      val keyOn = Validity.isSet(keyIn, row)
+      val valueOn = Validity.isSet(valueIn, row)
+      val projected =
+        if (keyOn && valueOn) then mapper(keyArr(row), valueArr(row))
+        else if (keyOn) then mapper.applyNullValue(keyArr(row))
+        else if (valueOn) then mapper.applyNullKey(valueArr(row))
+        else mapper.applyNulls()
+      offerCountFiltered(projected, column, keep, sink)
+      row += 1
+    }
+
+  /**
    * Keeps a present key and a present value. A null key is dropped. A null value is dropped and
    * does not create a group. A cell that is not an int declines, and the value is checked first.
    */
@@ -550,6 +634,20 @@ object IntPairProject:
     offerCountSum(projected, sink)
 
   /**
+   * [[acceptCountSum]] after one int slot on the projected pair. `column` is `0` for the key and
+   * `1` for the value. A null slot cell is dropped and `keep` is not called. A key slot that keeps
+   * a present key counts a null value and does not add it. A value slot that keeps a present value
+   * still drops a null key. Does not publish a column.
+   */
+  private[scarlet] def acceptCountFiltered(
+      projected: Any,
+      column: Int,
+      keep: Int => Boolean,
+      sink: IntPairCountSink,
+  ): Unit =
+    offerCountFiltered(projected, column, keep, sink)
+
+  /**
    * Keeps a present key. A null key is dropped. A null value is counted and not added. A cell that
    * is not an int declines, and the value is checked first.
    */
@@ -569,6 +667,60 @@ object IntPairProject:
               case _ => sink.countNull(key)
           case other => decline(foundName(other))
       case other => decline(foundName(other))
+
+  /**
+   * [[offerCountSum]] plus one int slot. The value cell is checked first, matching
+   * [[offerCountSum]]. A null slot cell is dropped and `keep` is not called. A kept null value is
+   * counted and not added. A kept null key is dropped.
+   */
+  private def offerCountFiltered(
+      projected: Any,
+      column: Int,
+      keep: Int => Boolean,
+      sink: IntPairCountSink,
+  ): Unit =
+    projected match
+      case null => decline("null")
+      case row: Product if row.productArity == 2 =>
+        val valueCell = row.productElement(1)
+        valueCell match
+          case null | _: Int => ()
+          case other => decline(foundName(other))
+        val keyCell = row.productElement(0)
+        keyCell match
+          case null | _: Int => ()
+          case other => decline(foundName(other))
+        if (column == 0) then keepCountKey(keyCell, valueCell, keep, sink)
+        else keepCountValue(keyCell, valueCell, keep, sink)
+      case other => decline(foundName(other))
+
+  private def keepCountKey(
+      keyCell: Any,
+      valueCell: Any,
+      keep: Int => Boolean,
+      sink: IntPairCountSink,
+  ): Unit =
+    keyCell match
+      case key: Int =>
+        if (keep(key)) then
+          valueCell match
+            case value: Int => sink.observe(key, value)
+            case _ => sink.countNull(key)
+      case _ => ()
+
+  private def keepCountValue(
+      keyCell: Any,
+      valueCell: Any,
+      keep: Int => Boolean,
+      sink: IntPairCountSink,
+  ): Unit =
+    valueCell match
+      case value: Int =>
+        if (keep(value)) then
+          keyCell match
+            case key: Int => sink.observe(key, value)
+            case _ => ()
+      case _ => ()
 
   /** Keeps a present key. A null key is dropped. The value is only a type check. */
   private def offer(projected: Any, add: Int => Unit): Unit =

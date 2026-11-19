@@ -12,19 +12,20 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
- * Same-session row and columnar times for a generic pair `map` then `countSumByKey`.
+ * Same-session row and columnar times for a pair `map`, one key slot, then `countSumByKey`.
  *
  * The generator is the one [[PairProjectReduceBench]] uses: keys are `row % 1024`, values are the
  * cross-engine LCG, two source partitions, then `key % 3 != 0` and `value >= 0`. The action is
- * `data.map { case (k, v) => (k % 100, v) }.countSumByKey`. The checksum is
- * [[CrossEngineShapes.tripleChecksum]], taken from the row path first.
+ * `data.map { case (k, v) => (k % 100, v) }.filterKeys(_ < 50).countSumByKey`. The checksum is
+ * [[CrossEngineShapes.tripleChecksum]], taken from the row path first. The bare project count-sum,
+ * without the slot above the map, stays at 1664031687805 and is not this action.
  *
  * Spill is on for this process only. Warmup 80, rounds 30, and four threads are the defaults.
  * Allocation is the middle of five process-wide thread byte deltas, in decimal megabytes, after
  * the timed rounds.
  *
- * The 1e7 two-filter checksum is the row-path triple checksum of this key change. `-Xmx2g` dies in
- * the pair project on the interpret arm, so the pair is taken at `-Xmx4g`.
+ * The 1e7 two-filter checksum is the row-path triple checksum of this slot above the project.
+ * `-Xmx2g` dies in the pair project on the interpret arm, so the pair is taken at `-Xmx4g`.
  *
  * {{{
  * CROSS_ROWS=10000000 CROSS_THREADS=4 CROSS_WARMUP=80 CROSS_ROUNDS=30 \
@@ -40,7 +41,9 @@ object ProjectedCountSumBench:
   private val batchSize = 8192
   private val sourcePartitions = 2
   private val allocRounds = 5
-  private val expectedAt1e7 = 1664031687805L
+
+  /** [[CrossEngineShapes.tripleChecksum]] at 1e7 rows and two source filters. */
+  private val expectedAt1e7 = 851217060490L
 
   private final case class Arm(
       name: String,
@@ -99,14 +102,20 @@ object ProjectedCountSumBench:
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)
 
-  /** Filtered int pairs, then `(k % 100, v)`, then `countSumByKey`. */
+  /**
+   * Filtered int pairs, then `(k % 100, v)`, then `filterKeys(_ < 50)`, then `countSumByKey`. The
+   * slot sits above the project.
+   */
   private def query(rows: Int, filters: Int): DistCollection[(Int, Int, Long)] =
     val keys = Array.tabulate(rows)(row => row % groups)
     val values = lcgValues(rows)
     val data = DistCollection.ofIntPairs(keys, values, sourcePartitions)
     val keyed = data.filterKeys((key: Int) => key % 3 != 0)
     val filtered = if (filters == 1) then keyed else keyed.filterValues((value: Int) => value >= 0)
-    filtered.map { case (key, value) => (key % 100, value) }.countSumByKey
+    filtered
+      .map { case (key, value) => (key % 100, value) }
+      .filterKeys((key: Int) => key < 50)
+      .countSumByKey
 
   private def time(
       name: String,
