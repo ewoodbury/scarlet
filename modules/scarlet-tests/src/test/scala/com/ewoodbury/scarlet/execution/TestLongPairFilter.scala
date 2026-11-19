@@ -242,13 +242,21 @@ class TestLongPairFilter extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     assertColumnar(filtered, "FilterKey(LongHashAggregate(Exchange(Scan)))")
   }
 
-  "filterKeys above a map, a long sort, or a long join" should "stay empty while an identity long map projects" in {
+  "filterKeys above a map, a long sort, or a long join" should "lower one slot above the map" in {
     val source = DistCollection.ofLongPairs(Array(1L, 2L), Array(10L, 20L), 1)
     val mapped = source.map((pair: (Long, Long)) => (pair._1, pair._2))
     val sorted = source.sortByLongKey
     val joined = source.join(source)
+    val keyed = mapped.filterKeys[Long, Long]((key: Long) => key > 0L)
+    val valued = mapped.filterValues[Long, Long]((value: Long) => value > 0L)
 
-    assertEmpty(mapped.filterKeys[Long, Long](_ > 0L))
+    columnar(keyed) shouldBe row(keyed.collect().toList)
+    columnar(valued) shouldBe row(valued.collect().toList)
+    assertColumnar(keyed, "FilterKey(Project(Scan))")
+    assertColumnar(valued, "FilterValue(Project(Scan))")
+    assertEmpty(keyed.filterValues[Long, Long]((value: Long) => value > 0L))
+    assertEmpty(mapped.filter((pair: (Long, Long)) => pair._1 > 0L))
+    assertEmpty(mapped.map((pair: (Long, Long)) => (pair._1, pair._2)).filterKeys[Long, Long](_ > 0L))
     assertEmpty(sorted.filterKeys[Long, Long](_ > 0L))
     assertEmpty(joined.filterKeys[Long, (Long, Long)]((key: Long) => key > 0L))
     ColumnarPlanner.lower(sorted.plan).map(_.shape) shouldBe Some("SortByLongKey(Scan)")

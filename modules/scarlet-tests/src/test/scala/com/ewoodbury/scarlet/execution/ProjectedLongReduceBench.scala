@@ -17,17 +17,19 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
- * Same-session row and columnar times for one long-pair project then `reduceByKey`.
+ * Same-session row and columnar times for one long slot above a long-pair project, then
+ * `reduceByKey`.
  *
  * The generator is [[LongPairMapBench]]: keys are `row % 1024`, values are that LCG stored as
- * longs. The action is `map { case (k, v) => (k % 100, v) }.reduceByKey(_ + _)`.
+ * longs. The action is `map { case (k, v) => (k % 100, v) }.filterKeys(_ < 50).reduceByKey(_ + _)`.
  * `CROSS_FILTERS=2` is `k % 3 != 0` then `v >= 0` before that map. The row arm runs first and
- * its checksum is the one the columnar arm must match.
+ * its checksum is the one the columnar arm must match. [[LongHashReduce.byKey]] does not see the
+ * filtered project, and the pair batch is not published.
  *
  * Spill is on for this process only. Warmup 80, rounds 30, and four threads are the defaults.
  *
  * {{{
- * CROSS_ROWS=10000000 CROSS_THREADS=4 CROSS_WARMUP=80 CROSS_ROUNDS=30 CROSS_FILTERS=0 \
+ * CROSS_ROWS=10000000 CROSS_THREADS=4 CROSS_WARMUP=80 CROSS_ROUNDS=30 CROSS_FILTERS=2 \
  *   sbt -J-Xmx768m \
  *   'set LocalProject("scarlet-tests") / Test / fork := true' \
  *   'set LocalProject("scarlet-tests") / Test / javaOptions := Seq("-Xmx4g", "-XX:+UseG1GC")' \
@@ -73,38 +75,49 @@ object ProjectedLongReduceBench:
       )
       ScarletRuntime.set(savedRuntime.copy(scheduler = scheduler))
       val reduced = query(rows, filters)
-      val lowered = ColumnarPlanner.lower(reduced.plan)
-      val shape = lowered.map(_.shape).getOrElse("row")
+      val shape = ColumnarPlanner
+        .lower(reduced.plan)
+        .map(_.shape)
+        .getOrElse(refuse("filtered long project reduce did not lower"))
+      val slot =
+        shape.contains("LongHashAggregate") && shape.contains("FilterKey") && shape.contains("Project")
+      if (!slot) then refuse(s"shape is not a slot above a long project: $shape")
       println(s"arm $shape")
       println(s"maxMemory=${Runtime.getRuntime.maxMemory}")
-      // One row collect is the checksum. Timing that arm for 110 rounds of 1e7 boxed pairs
-      // exhausts this heap before the columnar arm is measured. CROSS_SKIP_ROW=1 reuses a
-      // checksum already taken in this session.
-      val rowChecksum =
-        if (sys.env.get("CROSS_SKIP_ROW").contains("1")) then readLong("CROSS_CHECKSUM", 0L)
-        else
-          ScarletConf.set(ScarletConf.get.copy(columnarExecution = false))
-          ScarletRuntime.get.shuffle.clear()
-          val found = checksum(DistCollection(reduced.plan).collect())
-          System.gc()
-          found
-      println(s"row checksum=$rowChecksum")
-      if (lowered.isEmpty) then ()
-      else
-        val columnar = time("columnar", reduced.plan, warmup, rounds, columnar = true)
-        if (rowChecksum != columnar.checksum) then
-          refuse(s"checksums differ row=$rowChecksum columnar=${columnar.checksum}")
-        if (columnar.batches == 0L && columnar.fused == 0L) then
-          refuse("columnar published no column batch and folded nothing")
-        println(render(columnar))
-        probePublished(reduced.plan, rowChecksum)
+      val row = time("row", reduced.plan, warmup, rounds, columnar = false)
+      println(render(row))
+      Console.out.flush()
+      // The row shuffle is still live after the last sample. Drop it before the columnar arm
+      // allocates, or the 1e7 boxed run fills a 4g heap.
+      ScarletRuntime.get.shuffle.clear()
+      System.gc()
+      LongPairProject.resetPublishedForTest()
+      LongHashReduce.resetByKeyForTest()
+      val columnar = time("columnar", reduced.plan, warmup, rounds, columnar = true)
+      val byKeyCalls = LongHashReduce.byKeyCallsForTest
+      val published = LongPairProject.publishedForTest
+      println(render(columnar))
+      println(s"columnar byKeyCalls=$byKeyCalls projectPublished=$published")
+      val ratio = if (columnar.p50Ms == 0.0) then 0.0 else row.p50Ms / columnar.p50Ms
+      println(s"ratio row/columnar=$ratio")
+      Console.out.flush()
+      if (row.checksum != columnar.checksum) then
+        refuse(s"checksums differ row=${row.checksum} columnar=${columnar.checksum}")
+      if (row.batches != 0L || row.fused != 0L) then
+        refuse(s"row published batches=${row.batches} fused=${row.fused}")
+      if (columnar.fused == 0L) then refuse("columnar folded nothing")
+      if (byKeyCalls != 0) then refuse(s"LongHashReduce.byKey ran $byKeyCalls times")
+      if (published != 0) then refuse(s"LongPairProject published $published batches")
     finally
       try scheduler.shutdown().unsafeRunSync()
       finally
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)
 
-  /** Long pairs, optional key and value filters, then `(k % 100, v)`, then `reduceByKey`. */
+  /**
+   * Filtered long pairs, then `(k % 100, v)`, then `filterKeys(_ < 50)`, then `reduceByKey`.
+   * The slot sits above the project. `filters` is the stack under the project.
+   */
   private def query(rows: Int, filters: Int): DistCollection[(Long, Long)] =
     val keys = Array.tabulate(rows)(row => (row % groups).toLong)
     val values = lcgValues(rows)
@@ -116,7 +129,10 @@ object ProjectedLongReduceBench:
         data
           .filterKeys((key: Long) => key % 3L != 0L)
           .filterValues((value: Long) => value >= 0L)
-    filtered.map { case (key, value) => (key % 100L, value) }.reduceByKey[Long, Long](_ + _)
+    filtered
+      .map { case (key, value) => (key % 100L, value) }
+      .filterKeys((key: Long) => key < 50L)
+      .reduceByKey[Long, Long](_ + _)
 
   private def time(
       name: String,
@@ -151,20 +167,6 @@ object ProjectedLongReduceBench:
       round += 1
     java.util.Arrays.sort(samples)
     Arm(name, samples(samples.length / 2), checksumValue, sampleAlloc(action), batches, fused)
-
-  /** One collect outside the timer. The project publish counter is the pair-batch signal. */
-  private def probePublished(plan: Plan[(Long, Long)], rowChecksum: Long): Unit =
-    ScarletConf.set(ScarletConf.get.copy(columnarExecution = true))
-    ScarletRuntime.get.shuffle.clear()
-    LongPairProject.resetPublishedForTest()
-    LongHashReduce.resetByKeyForTest()
-    val found = checksum(DistCollection(plan).collect())
-    if (found != rowChecksum) then
-      refuse(s"probe checksum=$found row=$rowChecksum")
-    println(
-      s"probe checksum=$found published=${LongPairProject.publishedForTest} " +
-        s"byKey=${LongHashReduce.byKeyCallsForTest}",
-    )
 
   /** Order-independent. The same fold as [[LongPairMapBench]], on a long value. */
   private def checksum(rows: Iterable[(Long, Long)]): Long =
@@ -214,14 +216,6 @@ object ProjectedLongReduceBench:
   private def render(arm: Arm): String =
     s"${arm.name} p50_ms=${arm.p50Ms} checksum=${arm.checksum} alloc_mb=${arm.allocMb} " +
       s"batches=${arm.batches} fused=${arm.fused}"
-
-  private def readLong(name: String, default: Long): Long =
-    sys.env.get(name) match
-      case None => default
-      case Some(text) =>
-        text.toLongOption match
-          case Some(value) => value
-          case None => refuse(s"$name must be an integer, found $text")
 
   private def readInt(name: String, default: Int): Int =
     sys.env.get(name) match

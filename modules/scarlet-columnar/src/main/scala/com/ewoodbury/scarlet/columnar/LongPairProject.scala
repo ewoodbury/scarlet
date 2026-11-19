@@ -308,6 +308,89 @@ object LongPairProject:
     }
 
   /**
+   * [[visitPairs]] for one long slot above the project.
+   *
+   * The adapter calls match [[project]], including a null key and a null value. A null projected
+   * key is dropped, and a key predicate is not called. A null projected value is
+   * [[LongPairSink.addMissing]] when the slot reads the key and keeps it, and a value predicate is
+   * not called. A value slot that keeps a present value still drops a null key. A result that is
+   * not a pair of longs throws [[ColumnarFallback]] and publishes nothing. This does not allocate
+   * an output column. `column` is `0` for the key and `1` for the value.
+   */
+  private[scarlet] def visitFiltered(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      mapper: LongPairMap,
+      column: Int,
+      keep: Long => Boolean,
+      sink: LongPairSink,
+  ): Unit =
+    require(column == 0 || column == 1, s"pair slot must be a key or a value, got $column")
+    require(
+      batch.columns.length == 2,
+      s"pair project expected 2 columns, got ${batch.columns.length}",
+    )
+    val keys = int64At(batch, 0)
+    val values = int64At(batch, 1)
+    require(keys.length == values.length, "key and value columns differ in length")
+    Ranges.check(start, length, keys.length)
+    if (length == 0) then ()
+    else if (
+        Validity.rangePresent(keys.validity, start, length) &&
+        Validity.rangePresent(values.validity, start, length)
+      )
+    then visitFilteredDense(keys, values, start, length, mapper, column, keep, sink)
+    else visitFilteredSparse(keys, values, start, length, mapper, column, keep, sink)
+
+  private def visitFilteredDense(
+      keys: Int64Column,
+      values: Int64Column,
+      start: Int,
+      length: Int,
+      mapper: LongPairMap,
+      column: Int,
+      keep: Long => Boolean,
+      sink: LongPairSink,
+  ): Unit =
+    val keyArr = keys.values
+    val valueArr = values.values
+    val end = start + length
+    var row = start
+    while (row < end) {
+      offerFiltered(mapper(keyArr(row), valueArr(row)), column, keep, sink)
+      row += 1
+    }
+
+  private def visitFilteredSparse(
+      keys: Int64Column,
+      values: Int64Column,
+      start: Int,
+      length: Int,
+      mapper: LongPairMap,
+      column: Int,
+      keep: Long => Boolean,
+      sink: LongPairSink,
+  ): Unit =
+    val keyArr = keys.values
+    val valueArr = values.values
+    val keyIn = keys.validity.words
+    val valueIn = values.validity.words
+    val end = start + length
+    var row = start
+    while (row < end) {
+      val keyOn = Validity.isSet(keyIn, row)
+      val valueOn = Validity.isSet(valueIn, row)
+      val projected =
+        if (keyOn && valueOn) then mapper(keyArr(row), valueArr(row))
+        else if (keyOn) then mapper.applyNullValue(keyArr(row))
+        else if (valueOn) then mapper.applyNullKey(valueArr(row))
+        else mapper.applyNulls()
+      offerFiltered(projected, column, keep, sink)
+      row += 1
+    }
+
+  /**
    * Keeps a present key. A null key is dropped. A null value is a null group. A cell that is not a
    * long declines, and the value is checked first.
    */
@@ -327,6 +410,58 @@ object LongPairProject:
               case _ => sink.addMissing(key)
           case other => decline(foundName(other))
       case other => decline(foundName(other))
+
+  /**
+   * [[offerPair]] plus one long slot. The value cell is checked first, matching [[offerPair]]. A
+   * null slot cell is dropped and `keep` is not called. A key slot that keeps a present key still
+   * records a null value. A value slot that keeps a present value still drops a null key.
+   */
+  private def offerFiltered(
+      projected: Any,
+      column: Int,
+      keep: Long => Boolean,
+      sink: LongPairSink,
+  ): Unit =
+    projected match
+      case null => decline("null")
+      case row: Product if row.productArity == 2 =>
+        val valueCell = row.productElement(1)
+        valueCell match
+          case null | _: Long => ()
+          case other => decline(foundName(other))
+        val keyCell = row.productElement(0)
+        keyCell match
+          case null | _: Long => ()
+          case other => decline(foundName(other))
+        if (column == 0) then keepKey(keyCell, valueCell, keep, sink)
+        else keepValue(keyCell, valueCell, keep, sink)
+      case other => decline(foundName(other))
+
+  private def keepKey(
+      keyCell: Any,
+      valueCell: Any,
+      keep: Long => Boolean,
+      sink: LongPairSink,
+  ): Unit =
+    keyCell match
+      case key: Long if keep(key) =>
+        valueCell match
+          case value: Long => sink.add(key, value)
+          case _ => sink.addMissing(key)
+      case _ => ()
+
+  private def keepValue(
+      keyCell: Any,
+      valueCell: Any,
+      keep: Long => Boolean,
+      sink: LongPairSink,
+  ): Unit =
+    valueCell match
+      case value: Long if keep(value) =>
+        keyCell match
+          case key: Long => sink.add(key, value)
+          case _ => ()
+      case _ => ()
 
   /** Keeps a present key. A null key is dropped. The value is only a type check. */
   private def offer(projected: Any, add: Long => Unit): Unit =

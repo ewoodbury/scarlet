@@ -30,9 +30,10 @@ object ColumnarPlanner:
    * function declares `apply(Tuple2): Tuple2` is accepted and stays [[PhysicalOp.Kind.Pairs]]. A
    * `(Long, Long)` map with that witness is a project and stays [[PhysicalOp.Kind.LongPairs]]. A
    * `(String, Int)` map with that witness is a project and stays [[PhysicalOp.Kind.StringPairs]].
-   * The child kind selects the cell. One key or value filter above one such project, on a scan or
-   * a string-pair filter stack, lowers. A second slot, a whole-row filter, and a second map stay
-   * `None`. Erasure also accepts `(Long, Int)`; the int-pair kernel declines that cell, a
+   * The child kind selects the cell. One key or value filter above one string-pair project, on a
+   * scan or a string-pair filter stack, lowers. The same slot above one long-pair project, on a
+   * scan or a long-pair filter stack, lowers. A second slot, a whole-row filter, and a second map
+   * stay `None`. Erasure also accepts `(Long, Int)`; the int-pair kernel declines that cell, a
    * long-pair project declines a cell that is not a long, and a string-pair project declines a
    * cell that is not a string or an int.
    */
@@ -923,6 +924,9 @@ object ColumnarPlanner:
     if (MapIntKey.inTree(child)) then None
     else
       step match
+        // A whole-row filter above a long-pair project stays on the row path. A filter over a
+        // scan, or over a long-pair filter stack that has no project, still lowers.
+        case ElementStep.Filter(_) if LongPairSlot.containsProject(child) => None
         case ElementStep.Filter(predicate) =>
           child.kind match
             case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs =>
@@ -1072,14 +1076,17 @@ object ColumnarPlanner:
 
   private def columnFilter(source: Plan[_], slot: PhysicalOp.Slot): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
-      // One key or value slot above one int key map, or above one string-pair project on a scan
-      // or a string-pair filter stack. The predicate is not read. A second slot, a long-pair
-      // project, and a second string-pair project stay empty.
-      if (MapIntKey.slotAbove(child, slot) || StringPairSlot.oneProject(child)) then
-        Some(PhysicalOp.Filter(child, slot))
+      // One key or value slot above one int key map, one string-pair project, or one long-pair
+      // project. The project sits on a scan or a filter stack of that kind. The predicate is not
+      // read. A second slot and a second project stay empty.
+      if (
+          MapIntKey.slotAbove(child, slot) || StringPairSlot.oneProject(child) ||
+          LongPairSlot.oneProject(child)
+        )
+      then Some(PhysicalOp.Filter(child, slot))
       else if (
-          MapIntKey
-            .inTree(child) || longPairProject(child) || StringPairSlot.containsProject(child)
+          MapIntKey.inTree(child) || LongPairSlot.containsProject(child) ||
+          StringPairSlot.containsProject(child)
         )
       then None
       else
@@ -1088,14 +1095,6 @@ object ColumnarPlanner:
             Some(PhysicalOp.Filter(child, slot))
           case _ => None
     }
-
-  /** A long-pair [[PhysicalOp.Project]]. Slot filters above that project stay on the row path. */
-  private def longPairProject(op: PhysicalOp): Boolean = op match
-    case PhysicalOp.Project(child) =>
-      child.kind match
-        case PhysicalOp.Kind.LongPairs => true
-        case _ => false
-    case _ => false
 
   private[execution] def infoOf(op: PhysicalOp): PartitioningInfo = op match
     case PhysicalOp.Filter(child, _) => infoOf(child)
