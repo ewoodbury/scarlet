@@ -15,14 +15,14 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * `mapIntKey` is the typed witness for an int key change.
  *
  * A null key stays null and the function is not called. `countByKey` then drops that key. A
- * generic `(Int, Int)` pair `map` lowers as `Project` and calls the function on a null key. A
- * One `filterKeys` or `filterValues` above this key map lowers. The key predicate sees the mapped
- * key and is not called on a null. `keys` directly above the map lowers as `Key(MapKey(...))`.
- * `values` directly above the map lowers as `Value(MapKey(...))`. The value column is the
- * original value. A null input key stays null, the function is not called, and the value cell
- * stays. A null value stays a clear bit. `keys` of a slot above the map, `mapValues`, a second
- * map above that filter, and a whole-row filter stay empty.
- * `partitionBy` then this map drops the hash, so `countByKey` is one global row per new key.
+ * generic `(Int, Int)` pair `map` lowers as `Project` and calls the function on a null key. A One
+ * `filterKeys` or `filterValues` above this key map lowers. The key predicate sees the mapped key
+ * and is not called on a null. `keys` and `values` of the map, and of that one slot, lower. The
+ * key column is the mapped key. The value column is the original value. A null input key stays
+ * null, is not passed to the function or a key predicate, and does not drop the value cell. A
+ * value predicate still sees that row. A null value stays a clear bit. A second slot, `mapValues`,
+ * a second map above that filter, and a whole-row filter stay empty. `partitionBy` then this map
+ * drops the hash, so `countByKey` is one global row per new key.
  */
 class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -155,22 +155,132 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val mapped = nullable.mapIntKey(key => key + 1)
     ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).plan).map(_.shape) shouldBe
       Some("FilterKey(MapKey(Scan))")
-    ColumnarPlanner.lower(mapped.filterValues((value: Int) => value >= 0).plan).map(_.shape) shouldBe
+    ColumnarPlanner
+      .lower(mapped.filterValues((value: Int) => value >= 0).plan)
+      .map(_.shape) shouldBe
       Some("FilterValue(MapKey(Scan))")
     ColumnarPlanner.lower(mapped.keys.plan).map(_.shape) shouldBe Some("Key(MapKey(Scan))")
     ColumnarPlanner.lower(mapped.values.plan).map(_.shape) shouldBe Some("Value(MapKey(Scan))")
-    ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).keys.plan) shouldBe None
-    ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).values.plan) shouldBe None
-    ColumnarPlanner.lower(mapped.filterValues((value: Int) => value >= 0).values.plan) shouldBe
-      None
+    ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).keys.plan).map(_.shape) shouldBe
+      Some("Key(FilterKey(MapKey(Scan)))")
+    ColumnarPlanner
+      .lower(mapped.filterKeys((key: Int) => key > 0).values.plan)
+      .map(_.shape) shouldBe
+      Some("Value(FilterKey(MapKey(Scan)))")
+    ColumnarPlanner
+      .lower(mapped.filterValues((value: Int) => value >= 0).keys.plan)
+      .map(_.shape) shouldBe
+      Some("Key(FilterValue(MapKey(Scan)))")
+    ColumnarPlanner
+      .lower(mapped.filterValues((value: Int) => value >= 0).values.plan)
+      .map(_.shape) shouldBe
+      Some("Value(FilterValue(MapKey(Scan)))")
     ColumnarPlanner.lower(mapped.mapValues((value: Int) => value + 1).plan) shouldBe None
     ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).mapIntKey(_ + 1).plan) shouldBe
       None
     ColumnarPlanner.lower(mapped.filter { case (key, _) => key > 0 }.plan) shouldBe None
+    ColumnarPlanner.lower(mapped.filter { case (key, _) => key > 0 }.keys.plan) shouldBe None
     ColumnarPlanner.lower(
       mapped.filterKeys((key: Int) => key > 0).filterValues((value: Int) => value > 0).plan,
     ) shouldBe None
-    ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).union(mapped).plan) shouldBe None
+    ColumnarPlanner.lower(
+      mapped.filterKeys((key: Int) => key > 0).filterValues((value: Int) => value > 0).keys.plan,
+    ) shouldBe None
+    ColumnarPlanner.lower(mapped.mapValues((value: Int) => value + 1).keys.plan) shouldBe None
+    ColumnarPlanner.lower(
+      mapped.filterKeys((key: Int) => key > 0).union(mapped).plan,
+    ) shouldBe None
+  }
+
+  it should "collect keys and values of one slot above the map" in {
+    val pairs = DistCollection.ofIntPairs(Array(1, 2, 1, 3), Array(10, 20, 30, 40), 2)
+    val filtered = pairs.mapIntKey(_ + 1).filterKeys((key: Int) => key > 2)
+    val keyed = filtered.keys
+    val valued = filtered.values
+    ColumnarPlanner.lower(keyed.plan).map(_.shape) shouldBe Some("Key(FilterKey(MapKey(Scan)))")
+    ColumnarPlanner.lower(valued.plan).map(_.shape) shouldBe Some(
+      "Value(FilterKey(MapKey(Scan)))",
+    )
+    ColumnarPlanner.tryCount(keyed.plan) shouldBe Some(2L)
+    ColumnarPlanner.tryCount(valued.plan) shouldBe Some(2L)
+    val at = (size: Int, column: DistCollection[Int]) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size, columnarExecution = true))
+      ScarletRuntime.get.shuffle.clear()
+      column.collect().toList
+    }
+    val wideKeys = at(8192, keyed)
+    wideKeys shouldBe List(3, 4)
+    at(1, keyed) shouldBe wideKeys
+    val wideValues = at(8192, valued)
+    wideValues shouldBe List(20, 40)
+    at(1, valued) shouldBe wideValues
+
+    val mapCalls = new AtomicInteger
+    val keyCalls = new AtomicInteger
+    val valueCalls = new AtomicInteger
+    val mapped = nullable.mapIntKey { key =>
+      mapCalls.incrementAndGet()
+      key + 1
+    }
+    val byKey = mapped.filterKeys { (key: Int) =>
+      keyCalls.incrementAndGet()
+      key > 0
+    }
+    val byValue = mapped.filterValues { (value: Int) =>
+      valueCalls.incrementAndGet()
+      value >= 0
+    }
+    def projected(columnar: Boolean, column: DistCollection[Int]): Seq[String] =
+      keyText(run(columnar = columnar)(column.collect()))
+
+    mapCalls.set(0)
+    keyCalls.set(0)
+    val keyKeys = projected(true, byKey.keys)
+    mapCalls.get() shouldBe 4
+    keyCalls.get() shouldBe 4
+    mapCalls.set(0)
+    keyKeys shouldBe projected(false, byKey.keys)
+    mapCalls.get() shouldBe 4
+    keyKeys shouldBe Seq("2", "2", "3", "3")
+
+    mapCalls.set(0)
+    keyCalls.set(0)
+    val keyValues = projected(true, byKey.values)
+    mapCalls.get() shouldBe 4
+    keyCalls.get() shouldBe 4
+    mapCalls.set(0)
+    keyValues shouldBe projected(false, byKey.values)
+    mapCalls.get() shouldBe 4
+    keyValues shouldBe Seq("4", "5", "-1", "6")
+
+    mapCalls.set(0)
+    valueCalls.set(0)
+    val valueKeys = projected(true, byValue.keys)
+    mapCalls.get() shouldBe 4
+    valueCalls.get() shouldBe 6
+    mapCalls.set(0)
+    valueKeys shouldBe projected(false, byValue.keys)
+    mapCalls.get() shouldBe 4
+    valueKeys shouldBe Seq("2", "null", "2", "3", "null")
+
+    mapCalls.set(0)
+    valueCalls.set(0)
+    val valueValues = projected(true, byValue.values)
+    mapCalls.get() shouldBe 4
+    valueCalls.get() shouldBe 6
+    mapCalls.set(0)
+    valueValues shouldBe projected(false, byValue.values)
+    mapCalls.get() shouldBe 4
+    valueValues shouldBe Seq("4", "9", "5", "6", "8")
+    ColumnarPlanner.tryCount(byValue.keys.plan) shouldBe Some(5L)
+    run(columnar = false)(byValue.keys.count()) shouldBe 5L
+
+    // A present pair witnesses the scan. The null value is the next cell, so it stays a clear bit.
+    val nulls = nullThenValue.mapIntKey(_ * 2).filterKeys((key: Int) => key > 0).values
+    ColumnarPlanner.lower(nulls.plan).map(_.shape) shouldBe Some("Value(FilterKey(MapKey(Scan)))")
+    val nullText = keyText(run(columnar = true)(nulls.collect()))
+    nullText shouldBe keyText(run(columnar = false)(nulls.collect()))
+    nullText shouldBe Seq("4", "null")
   }
 
   it should "collect mapped keys in partition order and keep a null key" in {
@@ -309,13 +419,15 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     columnar shouldBe fingerprint(run(columnar = false)(filtered.collect()))
 
     val valueCalls = new AtomicInteger
-    val byValue = nullable.mapIntKey { key =>
-      mapCalls.incrementAndGet()
-      key + 1
-    }.filterValues { (value: Int) =>
-      valueCalls.incrementAndGet()
-      value >= 0
-    }
+    val byValue = nullable
+      .mapIntKey { key =>
+        mapCalls.incrementAndGet()
+        key + 1
+      }
+      .filterValues { (value: Int) =>
+        valueCalls.incrementAndGet()
+        value >= 0
+      }
     mapCalls.set(0)
     valueCalls.set(0)
     val kept = fingerprint(run(columnar = true)(byValue.collect()))
@@ -324,13 +436,16 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     kept shouldBe fingerprint(run(columnar = false)(byValue.collect()))
     kept shouldBe Seq("2:4", "2:5", "3:6", "null:8", "null:9")
 
-    val counted = nullable.mapIntKey { key =>
-      mapCalls.incrementAndGet()
-      key + 1
-    }.filterKeys { (key: Int) =>
-      keyCalls.incrementAndGet()
-      key > 0
-    }.countByKey
+    val counted = nullable
+      .mapIntKey { key =>
+        mapCalls.incrementAndGet()
+        key + 1
+      }
+      .filterKeys { (key: Int) =>
+        keyCalls.incrementAndGet()
+        key > 0
+      }
+      .countByKey
     mapCalls.set(0)
     keyCalls.set(0)
     MapIntKey.resetPublishedForTest()
@@ -596,10 +711,13 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   /** `productElement` does not unbox a null int, and tuple equality would. */
   @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.AsInstanceOf"))
   private def fingerprint(rows: Iterable[Any]): Seq[String] =
-    rows.map { row =>
-      val product = row.asInstanceOf[Product]
-      String.valueOf(product.productElement(0)) + ":" + String.valueOf(product.productElement(1))
-    }.toSeq.sorted
+    rows
+      .map { row =>
+        val product = row.asInstanceOf[Product]
+        String.valueOf(product.productElement(0)) + ":" + String.valueOf(product.productElement(1))
+      }
+      .toSeq
+      .sorted
 
   @SuppressWarnings(
     Array(

@@ -199,8 +199,9 @@ private[execution] object ColumnarInterpreter:
    * function. A long column projected from a long pair keeps a clear bit via
    * [[BatchCodec.decodeLongsPreservingAbsence]]. An element long scan still uses
    * [[BatchCodec.decodeLongs]], which rejects a clear bit. `keys` and `values` of one
-   * [[PhysicalOp.MapKey]] keep a clear bit via [[BatchCodec.decodeIntsPreservingAbsence]]. Every
-   * other int column uses [[BatchCodec.decodeInts]], which rejects a clear bit. Int triples use
+   * [[PhysicalOp.MapKey]], or of one key or value filter on it, keep a clear bit via
+   * [[BatchCodec.decodeIntsPreservingAbsence]]. Every other int column uses
+   * [[BatchCodec.decodeInts]], which rejects a clear bit. Int triples use
    * [[BatchCodec.decodeIntTriplesPreservingAbsence]] for a triple [[PhysicalOp.Project]] and for
    * an int inner join: [[PhysicalOp.HashJoin]], [[PhysicalOp.BroadcastJoin]], or
    * [[PhysicalOp.SortMergeJoin]]. A map or that join may keep a null component. An int-pair

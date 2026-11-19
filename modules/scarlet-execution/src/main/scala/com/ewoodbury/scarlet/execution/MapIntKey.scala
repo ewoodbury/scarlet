@@ -24,10 +24,10 @@ private[execution] object MapIntKey:
 
   /**
    * True when `op` still carries a key map. A parent that would publish that null key as a pair
-   * declines. `keys` projects column 0 and `values` projects column 1. Neither is this decline.
-   * [[JoinProbeAggregate]] does not decline either: the exchange drops the key and the sum does
-   * not publish it. One key or value filter immediately above the map is [[slotAbove]], not a
-   * decline.
+   * declines. `keys` projects column 0 and `values` projects column 1, including one slot above
+   * the map. Neither projection is this decline. [[JoinProbeAggregate]] does not decline either:
+   * the exchange drops the key and the sum does not publish it. One key or value filter
+   * immediately above the map is [[slotAbove]], not a decline.
    */
   def inTree(op: PhysicalOp): Boolean = op match
     case _: PhysicalOp.MapKey => true
@@ -40,6 +40,17 @@ private[execution] object MapIntKey:
   def slotAbove(child: PhysicalOp, slot: PhysicalOp.Slot): Boolean = (child, slot) match
     case (_: PhysicalOp.MapKey, PhysicalOp.Slot.Key) => true
     case (_: PhysicalOp.MapKey, PhysicalOp.Slot.Value) => true
+    case _ => false
+
+  /**
+   * One [[PhysicalOp.MapKey]], or one key or value filter whose child is that map. `keys` and
+   * `values` of this shape keep a null. A second slot is false. The function and the predicate are
+   * not read.
+   */
+  def admitsColumn(op: PhysicalOp): Boolean = op match
+    case _: PhysicalOp.MapKey => true
+    case PhysicalOp.Filter(_: PhysicalOp.MapKey, PhysicalOp.Slot.Key) => true
+    case PhysicalOp.Filter(_: PhysicalOp.MapKey, PhysicalOp.Slot.Value) => true
     case _ => false
 
   /**
@@ -64,12 +75,14 @@ private[execution] object MapIntKey:
     val fn = mapper.asInstanceOf[Int => Int]
     val projected = ColumnarInterpreter.Columns.Pairs(
       ColumnarInterpreter.onEachMorsel(ColumnarInterpreter.pairsOf(input)) { morsel =>
+        // The other column is sized to this window, not to the shared parent batch.
         ColumnKernel.projectInt32(
           morsel.batch,
           0,
           morsel.start,
           morsel.length,
           key => fn(key),
+          morsel.length,
         )
       },
     )

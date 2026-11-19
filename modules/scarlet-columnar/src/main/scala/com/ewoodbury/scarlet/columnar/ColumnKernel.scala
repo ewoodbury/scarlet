@@ -73,6 +73,21 @@ object ColumnKernel:
       length: Int,
       predicate: Int32Predicate,
   ): ColumnBatch =
+    filterInt32(batch, ordinal, start, length, predicate, batch.length)
+
+  /**
+   * Same scan as the range overload. `capacity` is the other columns' array length and must cover
+   * the survivors. A morsel passes the window length: the shared parent would otherwise allocate
+   * one partition-sized column per piece.
+   */
+  private[scarlet] def filterInt32(
+      batch: ColumnBatch,
+      ordinal: Int,
+      start: Int,
+      length: Int,
+      predicate: Int32Predicate,
+      capacity: Int,
+  ): ColumnBatch =
     val column = asInt32(columnAt(batch, ordinal), ordinal)
     Ranges.check(start, length, column.length)
     if (batch.columns.length == 1) then
@@ -83,7 +98,7 @@ object ColumnKernel:
       val selection = new Array[Int](length)
       val scanned =
         scanInt32(column, start, length, predicate, record = true, selection = selection)
-      assemble(batch, ordinal, scanned.column, selection, scanned.count)
+      assemble(batch, ordinal, scanned.column, selection, scanned.count, capacity)
 
   def filterInt64(batch: ColumnBatch, ordinal: Int, predicate: Int64Predicate): ColumnBatch =
     filterInt64(batch, ordinal, 0, batch.length, predicate)
@@ -106,7 +121,7 @@ object ColumnKernel:
       val selection = new Array[Int](length)
       val scanned =
         scanInt64(column, start, length, predicate, record = true, selection = selection)
-      assemble(batch, ordinal, scanned.column, selection, scanned.count)
+      assemble(batch, ordinal, scanned.column, selection, scanned.count, batch.length)
 
   def filterFloat64(
       batch: ColumnBatch,
@@ -133,7 +148,7 @@ object ColumnKernel:
       val selection = new Array[Int](length)
       val scanned =
         scanFloat64(column, start, length, predicate, record = true, selection = selection)
-      assemble(batch, ordinal, scanned.column, selection, scanned.count)
+      assemble(batch, ordinal, scanned.column, selection, scanned.count, batch.length)
 
   def filterUtf8(batch: ColumnBatch, ordinal: Int, predicate: Utf8Predicate): ColumnBatch =
     filterUtf8(batch, ordinal, 0, batch.length, predicate)
@@ -156,7 +171,7 @@ object ColumnKernel:
       val selection = new Array[Int](length)
       val scanned =
         scanUtf8(column, start, length, predicate, record = true, selection = selection)
-      assemble(batch, ordinal, scanned.column, selection, scanned.count)
+      assemble(batch, ordinal, scanned.column, selection, scanned.count, batch.length)
 
   /**
    * Resolves literals against this batch dictionary once, then filters codes with an unboxed mask.
@@ -195,7 +210,14 @@ object ColumnKernel:
       val selection = new Array[Int](length)
       val scanned =
         scanInt32(codeColumn, start, length, keep, record = true, selection = selection)
-      assemble(batch, ordinal, filteredUtf8(column, scanned, ordinal), selection, scanned.count)
+      assemble(
+        batch,
+        ordinal,
+        filteredUtf8(column, scanned, ordinal),
+        selection,
+        scanned.count,
+        batch.length,
+      )
 
   /**
    * Counts rows whose code is selected by `values`. The mask matches [[filterUtf8ByValues]]. A
@@ -331,7 +353,7 @@ object ColumnKernel:
       val selection = new Array[Int](length)
       val scanned =
         scanBool(column, start, length, predicate, record = true, selection = selection)
-      assemble(batch, ordinal, scanned.column, selection, scanned.count)
+      assemble(batch, ordinal, scanned.column, selection, scanned.count, batch.length)
 
   def projectInt32(batch: ColumnBatch, ordinal: Int, mapper: Int32Map): ColumnBatch =
     projectInt32(batch, ordinal, 0, batch.length, mapper)
@@ -348,6 +370,20 @@ object ColumnKernel:
       length: Int,
       mapper: Int32Map,
   ): ColumnBatch =
+    projectInt32(batch, ordinal, start, length, mapper, batch.length)
+
+  /**
+   * Same map as the range overload. `capacity` sizes the columns that are not mapped. A morsel
+   * passes the window length so the shared parent is not allocated once per piece.
+   */
+  private[scarlet] def projectInt32(
+      batch: ColumnBatch,
+      ordinal: Int,
+      start: Int,
+      length: Int,
+      mapper: Int32Map,
+      capacity: Int,
+  ): ColumnBatch =
     val column = asInt32(columnAt(batch, ordinal), ordinal)
     Ranges.check(start, length, column.length)
     val wholeColumn = start == 0 && length == column.length
@@ -358,7 +394,7 @@ object ColumnKernel:
     else if (wholeColumn) then replace(batch, ordinal, mapped)
     else
       val selection = Array.tabulate(length)(offset => start + offset)
-      assemble(batch, ordinal, mapped, selection, length)
+      assemble(batch, ordinal, mapped, selection, length, capacity)
 
   def projectInt64(batch: ColumnBatch, ordinal: Int, mapper: Int64Map): ColumnBatch =
     projectInt64(batch, ordinal, 0, batch.length, mapper)
@@ -384,7 +420,7 @@ object ColumnKernel:
     else if (start == 0 && length == column.length) then replace(batch, ordinal, mapped)
     else
       val selection = Array.tabulate(length)(offset => start + offset)
-      assemble(batch, ordinal, mapped, selection, length)
+      assemble(batch, ordinal, mapped, selection, length, batch.length)
 
   def projectFloat64(batch: ColumnBatch, ordinal: Int, mapper: Float64Map): ColumnBatch =
     projectFloat64(batch, ordinal, 0, batch.length, mapper)
@@ -411,7 +447,7 @@ object ColumnKernel:
     else if (start == 0 && length == column.length) then replace(batch, ordinal, mapped)
     else
       val selection = Array.tabulate(length)(offset => start + offset)
-      assemble(batch, ordinal, mapped, selection, length)
+      assemble(batch, ordinal, mapped, selection, length, batch.length)
 
   def projectBool(batch: ColumnBatch, ordinal: Int, mapper: BoolMap): ColumnBatch =
     replace(batch, ordinal, mapBool(asBool(columnAt(batch, ordinal), ordinal), mapper))
@@ -441,7 +477,7 @@ object ColumnKernel:
     else if (start == 0 && length == column.length) then replace(batch, ordinal, mapped)
     else
       val selection = Array.tabulate(length)(offset => start + offset)
-      assemble(batch, ordinal, mapped, selection, length)
+      assemble(batch, ordinal, mapped, selection, length, batch.length)
 
   private val noSelection: Array[Int] = Array.emptyIntArray
 
@@ -753,9 +789,10 @@ object ColumnKernel:
       predicateColumn: Column,
       selection: Array[Int],
       count: Int,
+      capacity: Int,
   ): ColumnBatch =
     require(selection.length >= count, s"selection ${selection.length} shorter than $count rows")
-    val capacity = batch.length
+    require(capacity >= count, s"capacity $capacity shorter than $count rows")
     val columns = Vector.tabulate(batch.columns.length) { index =>
       if (index == ordinal) then predicateColumn
       else compact(columnAt(batch, index), selection, count, capacity)
