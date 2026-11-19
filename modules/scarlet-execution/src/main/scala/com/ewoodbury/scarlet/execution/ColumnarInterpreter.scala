@@ -831,11 +831,10 @@ private[execution] object ColumnarInterpreter:
     case (Plan.SortByStringKeyOp(source), PhysicalOp.SortByStringKey(child)) =>
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
-      // String-pair encode keeps a null key. preserveAbsence matches the other sorts. A null key
-      // orders as "" and stays null. A key, value, or row filter sorts survivor ids and does not
-      // gather first. The `None` path is the scan. StringRankSplitRuns chooses the in-memory split
-      // or a spill of the
-      // survivor index. Take decodes the prefix.
+      // String-pair encode keeps a null key. A null key orders as "" and stays null. A filter
+      // sorts survivor ids. The `None` path is a scan or one string-pair project, which writes
+      // both columns. StringRankSplit sorts those batches and does not call visitKeys.
+      // StringRankSplitRuns spills the survivor index when the budget says so. Take decodes.
       val width = ColumnarPlanner.shuffleWidth
       val workers = ColumnarPlanner.parallelism
       val sorted = FilterChain.selected(

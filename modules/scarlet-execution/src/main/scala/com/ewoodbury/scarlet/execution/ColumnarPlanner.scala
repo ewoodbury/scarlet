@@ -73,12 +73,13 @@ object ColumnarPlanner:
    * right, or full, stays a clear validity bit and [[tryRun]] keeps the row. A null value on a
    * long or string outer join makes [[tryRun]] return `None`. [[SortLowering]] accepts an int,
    * long, or string key sort of a scan, or of filters over that scan. One int-pair project on that
-   * scan or filter stack lowers under [[Plan.SortByIntKeyOp]] only. The function is not read.
-   * `mapValues`, a second map, a long or string project, a map under a value sort, and every other
-   * map, aggregate, or join under a sort stay on the row path. One filter above an int, long, or
-   * string key sort lowers to [[PhysicalOp.Filter]] on [[PhysicalOp.Slot.Row]] around that sort,
-   * and only for a fully present key column. The pair-row filter drops a null key while the row
-   * path keeps it. The sort is [[SortLowering.lowerInt]], [[SortLowering.lowerLong]], or
+   * scan or filter stack lowers under [[Plan.SortByIntKeyOp]]. One string-pair project on that
+   * scan or filter stack lowers under [[Plan.SortByStringKeyOp]]. The function is not read.
+   * `mapValues`, a second map, a filter above that project, a map under a value sort, and every
+   * other map, aggregate, or join under a sort stay on the row path. One filter above an int,
+   * long, or string key sort lowers to [[PhysicalOp.Filter]] on [[PhysicalOp.Slot.Row]] around
+   * that sort, and only for a fully present key column. The pair-row filter drops a null key while
+   * the row path keeps it. The sort is [[SortLowering.lowerInt]], [[SortLowering.lowerLong]], or
    * [[SortLowering.lowerString]], not [[lowerChild]]. [[SortLowering.acceptsAsChild]] stays false,
    * so a null key, a second filter, a key or value filter above the sort, and every other parent
    * stay on the row path. A slot filter sorts the survivor index. Over the budget, with spill on,
@@ -906,7 +907,7 @@ object ColumnarPlanner:
   /**
    * A whole-row string filter, or one `(String, Int) => (String, Int)` project. A whole-row filter
    * above a string-pair project stays on the row path. A project above a slot filter on that
-   * project stays there too. A map under [[SortLowering.lowerString]] never reaches this method.
+   * project stays there too. [[SortLowering.lowerString]] admits one such project under the sort.
    */
   private def lowerStringRow(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
     step match
