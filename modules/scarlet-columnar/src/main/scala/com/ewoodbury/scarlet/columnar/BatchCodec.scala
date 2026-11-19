@@ -285,8 +285,8 @@ object BatchCodec:
 
   /**
    * Reads one `Int32` column and keeps a clear bit as a null `Int`. A fully present column still
-   * decodes to the stored ints. [[decodeInts]] rejects a clear bit. `keys` of `mapIntKey` is the
-   * caller that keeps those nulls.
+   * decodes to the stored ints. [[decodeInts]] rejects a clear bit. `keys` and `values` of
+   * `mapIntKey` are the callers that keep those nulls.
    *
    * Named erasure boundary. The cells are `java.lang.Integer` references in an `Array[AnyRef]`. A
    * `scala.Int` cell would unbox a null to `0`.

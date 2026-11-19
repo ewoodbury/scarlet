@@ -1008,9 +1008,9 @@ object ColumnarPlanner:
 
   private def pairColumn(source: Plan[_], ordinal: Int): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
-      // `values` unboxes. A null key under a key map stays on the row path there.
-      // `keys` directly above one int MapKey reads the mapped column. A null input
-      // key stays a clear bit and is not passed to the function.
+      // `keys` and `values` directly above one int MapKey. A null input key stays a
+      // clear bit, is not passed to the function, and does not drop the value cell.
+      // The value column is the original value. Any wider parent still declines.
       if (mappedIntKey(child, ordinal)) then Some(PhysicalOp.Column(child, ordinal))
       else if (MapIntKey.inTree(child)) then None
       else
@@ -1020,9 +1020,9 @@ object ColumnarPlanner:
           case _ => None
     }
 
-  /** Ordinal 0 of one [[PhysicalOp.MapKey]]. The function is not read. */
+  /** Ordinal 0 or 1 of one [[PhysicalOp.MapKey]]. The function is not read. */
   private def mappedIntKey(child: PhysicalOp, ordinal: Int): Boolean =
-    ordinal == 0 && (child match
+    (ordinal == 0 || ordinal == 1) && (child match
       case _: PhysicalOp.MapKey => true
       case _ => false)
 
