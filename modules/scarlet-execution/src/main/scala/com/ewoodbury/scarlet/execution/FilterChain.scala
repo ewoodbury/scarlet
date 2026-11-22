@@ -99,8 +99,9 @@ private[execution] object FilterChain:
     // zero and stays null. A slot above that project is not [[SortLowering.pairProjectOnScan]].
     // One [[PhysicalOp.MapKey]] on a scan or filter stack, and one key or value filter
     // immediately above that map, decline here through [[MapIntKey.inTree]]. Interpret publishes
-    // those pairs and the same top-N orders them. A null input key stays null and is not passed
-    // to the function. A second slot is not that one filter.
+    // those pairs. [[com.ewoodbury.scarlet.columnar.IntTopN]] orders a value sort.
+    // [[com.ewoodbury.scarlet.columnar.RankSplit]] orders a key sort. A null input key stays null
+    // and is not passed to the function. A second slot is not that one filter.
     if (
         MapIntKey.inTree(op) || StringPairSlot.filterCoversProject(op) ||
         SortLowering.pairProjectOnScan(op)
