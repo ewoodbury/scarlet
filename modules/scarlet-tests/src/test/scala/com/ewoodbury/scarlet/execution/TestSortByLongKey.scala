@@ -186,7 +186,11 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     collect(twice) shouldBe rowCollect(twice)
     ColumnarPlanner.lower(byValue.plan) shouldBe None
     collect(byValue) shouldBe rowCollect(byValue)
-    ColumnarPlanner.partitioning(mapped.plan) shouldBe Option.empty[PartitioningInfo]
+    ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some(
+      "SortByLongKey(Project(Scan))",
+    )
+    collect(mapped) shouldBe collect(source.sortByLongKey)
+    collect(mapped) shouldBe rowCollect(mapped)
     ColumnarPlanner.partitioning(rewritten.plan) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.partitioning(source.sortByLongKey.keys.plan) shouldBe
       Option.empty[PartitioningInfo]
@@ -197,6 +201,104 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.partitioning(source.sortByLongKey.join(source).plan) shouldBe
       Option.empty[PartitioningInfo]
+  }
+
+  it should "sort one long-pair project through RankSplitLong and leave other maps empty" in {
+    val source = DistCollection.ofLongPairs(Array(3L, 1L, 2L), Array(30L, 10L, 20L), 2)
+    val shifted = source.map((pair: (Long, Long)) => (pair._1 + 1L, pair._2)).sortByLongKey
+    val identity = (pair: (Long, Long)) => (pair._1, pair._2)
+    val mapped = source.map(identity).sortByLongKey
+    val plain = source.sortByLongKey
+    val under = source
+      .filterKeys[Long, Long]((key: Long) => key > 0L)
+      .map((pair: (Long, Long)) => (pair._1 + 1L, pair._2))
+      .sortByLongKey
+    val twice = source.map(identity).map(identity)
+    val byKey = source.map(identity).filterKeys[Long, Long]((key: Long) => key > 0L).sortByLongKey
+    val byValue =
+      source.map(identity).filterValues[Long, Long]((value: Long) => value > 0L).sortByLongKey
+    val above = source
+      .map(identity)
+      .filter((pair: (Long, Long)) => pair._2 > 0L)
+      .sortByLongKey
+    val values = source.mapValues((value: Long) => value + 1L).sortByLongKey
+    val ints = DistCollection.ofIntPairs(Array(3, 1, 2), Array(30, 10, 20), 1)
+    val keyed = ints.mapIntKey((key: Int) => key + 1)
+    val byDesc = ints.map((pair: (Int, Int)) => (pair._1, pair._2)).sortByIntValueDesc
+    val bad = source.map(stringKey).sortByLongKey
+
+    ColumnarPlanner.lower(shifted.plan).map(_.shape) shouldBe Some("SortByLongKey(Project(Scan))")
+    collect(shifted) shouldBe Seq(2L -> 10L, 3L -> 20L, 4L -> 30L)
+    collect(shifted) shouldBe rowCollect(shifted)
+    collectAt(shifted, 1) shouldBe collectAt(shifted, 8192)
+    ColumnarPlanner.lower(under.plan).map(_.shape) shouldBe Some(
+      "SortByLongKey(Project(FilterKey(Scan)))",
+    )
+    collect(under) shouldBe rowCollect(under)
+    collect(mapped) shouldBe collect(plain)
+    LongPairProject.resetPublishedForTest()
+    RankSplitLongRuns.resetForTest()
+    val again = collect(mapped)
+    again shouldBe collect(plain)
+    LongPairProject.publishedForTest should be > 0
+    RankSplitLongRuns.filesWrittenForTest shouldBe 0L
+    val projected = source.map(identity)
+    val project =
+      ColumnarPlanner.lower(projected.plan).getOrElse(fail("expected a long-pair project"))
+    val batches = ColumnarInterpreter.longPairsOf(
+      ColumnarInterpreter.interpret(projected.plan, project),
+    )
+    val direct = RankSplitLong.sortAndSplit(
+      batches,
+      ColumnarPlanner.shuffleWidth,
+      ColumnarPlanner.parallelism,
+    )
+    direct.flatMap(batch => BatchCodec.decodeLongPairs(batch)) shouldBe again
+    ColumnarPlanner.lower(twice.plan).map(_.shape) shouldBe Some("Project(Project(Scan))")
+    ColumnarPlanner.lower(twice.sortByLongKey.plan) shouldBe None
+    ColumnarPlanner.lower(byKey.plan) shouldBe None
+    ColumnarPlanner.lower(byValue.plan) shouldBe None
+    ColumnarPlanner.lower(above.plan) shouldBe None
+    ColumnarPlanner.lower(values.plan) shouldBe None
+    ColumnarPlanner.lower(keyed.plan).map(_.shape) shouldBe Some("MapKey(Scan)")
+    ColumnarPlanner.lower(keyed.sortByIntKey.plan) shouldBe None
+    ColumnarPlanner.lower(byDesc.plan) shouldBe None
+    collect(twice.sortByLongKey) shouldBe rowCollect(twice.sortByLongKey)
+    collect(byKey) shouldBe rowCollect(byKey)
+    collect(byValue) shouldBe rowCollect(byValue)
+    collect(values) shouldBe rowCollect(values)
+    collect(above) shouldBe rowCollect(above)
+    collect(byDesc) shouldBe rowCollect(byDesc)
+    collect(keyed.sortByIntKey) shouldBe rowCollect(keyed.sortByIntKey)
+    ColumnarPlanner.lower(bad.plan).map(_.shape) shouldBe Some("SortByLongKey(Project(Scan))")
+    val lowered = ColumnarPlanner.lower(bad.plan).getOrElse(fail("expected a project sort"))
+    val thrown = the[ColumnarFallback] thrownBy {
+      val _ = ColumnarInterpreter.interpret(bad.plan, lowered)
+    }
+    thrown.getMessage should startWith("pair map did not stay (Long, Long)")
+    ColumnarPlanner.tryRun(bad.plan) shouldBe None
+  }
+
+  it should "order a null key from a long-pair project as zero and keep the null" in {
+    val rows = Seq(
+      longPair(boxedLong(1L), boxedLong(10L)),
+      longPair(noLong, boxedLong(99L)),
+      longPair(boxedLong(-5L), boxedLong(3L)),
+      longPair(boxedLong(0L), boxedLong(7L)),
+      longPair(noLong, noLong),
+    )
+    val source = DistCollection(rows, 2)
+    val mapped = source.map(copyPair).sortByLongKey
+    val plain = source.sortByLongKey
+
+    ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some("SortByLongKey(Project(Scan))")
+    val found = collect(mapped)
+    shown(found) shouldBe shown(collect(plain))
+    shown(found) shouldBe shown(rowCollect(mapped))
+    shown(collectAt(mapped, 1)) shouldBe shown(collectAt(mapped, 8192))
+    effectiveKeys(found) shouldBe effectiveKeys(found).sorted
+    found.exists(pair => !present(pair, 0)) shouldBe true
+    found.exists(pair => !present(pair, 1)) shouldBe true
   }
 
   it should "keep a null key on the row path and not lower one filter above the sort" in {
@@ -517,6 +619,15 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       case key: java.lang.Long => key.longValue()
       case other => fail(s"expected a long component, found $other")
 
+  private def collectAt[A](collection: DistCollection[A], batch: Int): Seq[A] =
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(saved.copy(columnarBatchSize = batch))
+      collect(collection)
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
+
   private def collect[A](collection: DistCollection[A]): Seq[A] =
     ScarletRuntime.get.shuffle.clear()
     collection.collect().toSeq
@@ -545,3 +656,37 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
   private def noLong: java.lang.Long = null
 
   private def boxedLong(value: Long): java.lang.Long = java.lang.Long.valueOf(value)
+
+  /** Copies both cells, including a null. `productElement` does not unbox. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def copyPair(pair: (Long, Long)): (Long, Long) =
+    val product = pair.asInstanceOf[Product]
+    erased(product.productElement(0), product.productElement(1))
+
+  /** A string key in a long-pair slot. The pair project declines the cell. */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+  private def stringKey(pair: (Long, Long)): (Long, Long) =
+    Tuple2(pair._1.toString, java.lang.Long.valueOf(pair._2)).asInstanceOf[(Long, Long)]
+
+  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.AsInstanceOf"))
+  private def shown(rows: Seq[(Long, Long)]): Seq[String] =
+    rows.map { row =>
+      val product = row.asInstanceOf[Product]
+      String.valueOf(product.productElement(0)) + ":" + String.valueOf(product.productElement(1))
+    }
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def erased(key: Any, value: Any): (Long, Long) =
+    Tuple2(key, value).asInstanceOf[(Long, Long)]

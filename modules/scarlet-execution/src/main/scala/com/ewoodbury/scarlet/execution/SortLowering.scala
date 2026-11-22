@@ -9,22 +9,25 @@ import com.ewoodbury.scarlet.core.Plan
  * one int-pair [[PhysicalOp.Project]] on that scan or filter stack, to
  * [[PhysicalOp.SortByIntKey]]. The project function stays on the plan and is not read.
  * [[Plan.SortByIntValueDescOp]] lowers for a scan or filters only, to
- * [[PhysicalOp.SortByIntValueDesc]]. [[Plan.SortByLongKeyOp]] lowers for that same scan-or-filter
- * shape on long pairs, to [[PhysicalOp.SortByLongKey]]. [[Plan.SortByStringKeyOp]] lowers for a
- * scan of string pairs, filters over that scan, one string-pair [[PhysicalOp.Project]] on that
- * scan or filter stack, or one key or value filter immediately above that project, to
- * [[PhysicalOp.SortByStringKey]]. Neither function is read. The sort reads the published batches
- * through [[com.ewoodbury.scarlet.columnar.StringRankSplit]] and does not call `visitKeys`.
- * `mapValues`, a second map, a second slot, a whole-row filter above that project, a long project,
- * a map under a value sort, and any other map, aggregate, or join under a sort stay on the row
- * path. A filter above a second project, a map, or a join does not lower. [[acceptsAsChild]]
- * refuses every sort, so a join, aggregate, or projection above a sort stays on the row path. One
- * row filter above an int, long, or string key sort is admitted only for a fully present key
- * column. A slot filter, including a long-pair row filter and a whole-row string filter, sorts the
- * survivor index. Over the budget, with spill on, that index is spilled. A long sort spills
- * through the same budget as an int sort. The physical op stays [[PhysicalOp.SortByLongKey]]. A
- * string sort spills through that same budget. The physical op stays
- * [[PhysicalOp.SortByStringKey]].
+ * [[PhysicalOp.SortByIntValueDesc]]. [[Plan.SortByLongKeyOp]] lowers for a scan of long pairs,
+ * filters over that scan, or one long-pair [[PhysicalOp.Project]] on that scan or filter stack, to
+ * [[PhysicalOp.SortByLongKey]]. [[LongPairSlot.oneProject]] names that child. The function is not
+ * read. The sort reads the projected batches through
+ * [[com.ewoodbury.scarlet.columnar.RankSplitLong]] and does not call `visitKeys`.
+ * [[Plan.SortByStringKeyOp]] lowers for a scan of string pairs, filters over that scan, one
+ * string-pair [[PhysicalOp.Project]] on that scan or filter stack, or one key or value filter
+ * immediately above that project, to [[PhysicalOp.SortByStringKey]]. Neither function is read. The
+ * sort reads the published batches through [[com.ewoodbury.scarlet.columnar.StringRankSplit]] and
+ * does not call `visitKeys`. `mapValues`, a second map, a slot or whole-row filter above the long
+ * project, [[PhysicalOp.MapKey]], a second slot, a whole-row filter above the string project, a
+ * map under a value sort, and any other map, aggregate, or join under a sort stay on the row path.
+ * A filter above a second project, a map, or a join does not lower. [[acceptsAsChild]] refuses
+ * every sort, so a join, aggregate, or projection above a sort stays on the row path. One row
+ * filter above an int, long, or string key sort is admitted only for a fully present key column. A
+ * slot filter, including a long-pair row filter and a whole-row string filter, sorts the survivor
+ * index. Over the budget, with spill on, that index is spilled. A long sort spills through the
+ * same budget as an int sort. The physical op stays [[PhysicalOp.SortByLongKey]]. A string sort
+ * spills through that same budget. The physical op stays [[PhysicalOp.SortByStringKey]].
  *
  * The sorts share one ordering tag: range distribution on the row key, ascending by effective key.
  * A null int or long key orders as zero and stays null. A null string key orders as `""` and stays
@@ -73,7 +76,7 @@ private[execution] object SortLowering:
       lowerPlan: Plan[_] => Option[PhysicalOp],
   ): Option[PhysicalOp] =
     lowerPlan(source) match
-      case Some(child) if acceptsScanOrFilters(child, PhysicalOp.Kind.LongPairs) =>
+      case Some(child) if acceptsLongKeyChild(child) =>
         Some(PhysicalOp.SortByLongKey(child))
       case Some(child) =>
         LoweringTrace.note("SortByLongKeyOp", child.kind, "SortLowering")
@@ -113,6 +116,15 @@ private[execution] object SortLowering:
     case _ => false
 
   /**
+   * A scan of long pairs, filters over that scan, or one long-pair project on that scan or filter
+   * stack. [[LongPairSlot.oneProject]] names the project. The function is not read. A second
+   * project is not a scan or a filter. `mapValues` is not a project. A slot or whole-row filter
+   * above the project, and [[PhysicalOp.MapKey]], are not this shape.
+   */
+  private def acceptsLongKeyChild(op: PhysicalOp): Boolean =
+    acceptsScanOrFilters(op, PhysicalOp.Kind.LongPairs) || LongPairSlot.oneProject(op)
+
+  /**
    * A scan of string pairs, filters over that scan, one string-pair project on that scan or filter
    * stack, or one key or value filter immediately above that project. Neither function is read. A
    * second project is not a scan or a filter. `mapValues` is not a project. A second slot, a
@@ -132,8 +144,8 @@ private[execution] object SortLowering:
 
   /**
    * A scan of `kind`, or filters over that scan. A map, aggregate, or join is not a sort child.
-   * [[acceptsIntKeyChild]] and [[acceptsStringKeyChild]] are the sorts that also admit one pair
-   * project.
+   * [[acceptsIntKeyChild]], [[acceptsLongKeyChild]], and [[acceptsStringKeyChild]] are the sorts
+   * that also admit one pair project.
    */
   private def acceptsScanOrFilters(op: PhysicalOp, kind: PhysicalOp.Kind): Boolean = op match
     case PhysicalOp.Scan(scanned, _) if scanned eq kind => true

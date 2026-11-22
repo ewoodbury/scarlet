@@ -11,16 +11,18 @@ import PredicatePlan.{Atom, Compiled}
  *
  * [[PredicatePlan.compile]] casts every predicate before a kernel runs, and stops at a map. The
  * child is interpreted first, so a later mistyped predicate still does not run the earlier ones.
- * [[run]] chains [[PredicatePlan.applyAtom]], one kernel per filter. A pair or triple stack of two
- * or more slot atoms is the exception: it compacts through [[PredicatePlan.selectionSteps]] in one
- * pass. An int, long, float, string, or boolean stack always chains, including a lone filter. The
- * survivor index is four bytes per row, which costs more than the intermediate column a chained
- * kernel writes for the next filter to read. A boolean column is one bit per row. [[run]] still
- * chains a long-pair row filter, one [[LongPairKernel]] per filter. [[selected]] keeps that
- * filter's survivor index, including a stack of one. A whole-row triple filter chains too: it is
- * not a slot atom, so it does not compact through [[Selection]]. A string key or value stays in
- * [[StringPairWalk]]. A whole-row string stack is one selection pass there. Long triples and outer
- * batches still refuse. A map or a pipeline is not a filter and stops the peel.
+ * [[run]] chains [[PredicatePlan.applyAtom]], one kernel per filter. A pair, triple, or long-pair
+ * stack of two or more atoms is the exception: it compacts through
+ * [[PredicatePlan.selectionSteps]] in one pass. [[ColumnKernel.filterInt64]] sizes the other long
+ * column to the parent batch, and a morsel shares that batch, so two chained long-pair kernels
+ * would allocate a full partition per morsel. [[Selection]] sizes the gather to the morsel width.
+ * An int, long, float, string, or boolean stack always chains, including a lone filter. A lone
+ * long-pair filter, including one [[LongPairKernel]] row filter, still chains. [[selected]] keeps
+ * that filter's survivor index, including a stack of one, and does not compact. A whole-row triple
+ * filter chains too: it is not a slot atom, so it does not compact through [[Selection]]. A string
+ * key or value stays in [[StringPairWalk]]. A whole-row string stack is one selection pass there.
+ * Long triples and outer batches still refuse. A map or a pipeline is not a filter and stops the
+ * peel.
  *
  * [[PredicatePlan.applyAtom]] does not take the compiled stack. Encoders, including the
  * absence-preserving copy under an outer join, do not run the predicate.
@@ -147,6 +149,15 @@ private[execution] object FilterChain:
         PredicatePlan.selectionSteps(compiled) match
           case Some(_) =>
             Columns.Triples(compact(ColumnarInterpreter.triplesOf(columns), compiled, ordinals))
+          case None =>
+            chain(columns, compiled.atoms)
+      case Columns.LongPairs(_) if compiled.atoms.length > 1 =>
+        // Key, value, and row atoms are selection steps. A non-long atom chains.
+        PredicatePlan.selectionSteps(compiled) match
+          case Some(_) =>
+            Columns.LongPairs(
+              compact(ColumnarInterpreter.longPairsOf(columns), compiled, ordinals),
+            )
           case None =>
             chain(columns, compiled.atoms)
       case _ =>
