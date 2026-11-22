@@ -338,6 +338,10 @@ private[execution] object PredicatePlan:
       case (PhysicalOp.Kind.Triples, PhysicalOp.Slot.TripleRightValue) =>
         triple(2, layer.predicate)
       case (PhysicalOp.Kind.Triples, PhysicalOp.Slot.TripleRow) => tripleRow(layer.predicate)
+      case (PhysicalOp.Kind.Triples, PhysicalOp.Slot.Key | PhysicalOp.Slot.Value) =>
+        throw new ColumnarFallback(
+          "a key or value filter above a triple project is counted from the probe",
+        )
       case (PhysicalOp.Kind.LongTriples, slot) => unsupported(slot)
       case (_, PhysicalOp.Slot.Element) =>
         throw new IllegalStateException(elementMessage)

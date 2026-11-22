@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -652,6 +654,137 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     boxedCounts shouldBe boxedRow
   }
 
+  "a slot above a hinted triple project" should "count from the probe" in {
+    val left = DistCollection.ofIntPairs(
+      Array(1, 2, 3, 4, 5),
+      Array(10, 20, 5, -1, 7),
+      partitions,
+    )
+    val right = DistCollection.ofIntPairs(
+      Array(1, 1, 2, 3, 4, 5),
+      Array(10, 20, 10, 5, 0, 60),
+      partitions,
+    )
+    val filteredLeft = left
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+    val filteredRight = right
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value < 50)
+    val sortJoined = filteredLeft.sortMergeJoin(filteredRight)
+    val projected = sortJoined.map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+    val keyed = projected.filterKeys((key: Int) => key == 1).countByKey
+    val keyedOp = ColumnarPlanner.lower(keyed.plan).get
+    keyedOp.shape should include("CountByKey(Exchange(FilterKey(Project(HashJoin")
+    keyedOp.shape should not include "SortMergeJoin"
+    keyedOp match
+      case PhysicalOp.CountByKey(PhysicalOp.Exchange(child)) =>
+        child.schema shouldBe PhysicalSchema.IntLong
+      case _ => fail(keyedOp.shape)
+    ColumnarPlanner.tryRun(keyed.plan).isDefined shouldBe true
+    Task.resetSortMergeJoinRunsForTest()
+    JoinWriteRuns.resetRunsForTest()
+    HashCount.resetByKeyForTest()
+    val counts = keyed.collect().toMap
+    Task.sortMergeJoinRunsForTest shouldBe 0
+    JoinWriteRuns.runsForTest shouldBe 0L
+    HashCount.byKeyCallsForTest shouldBe 0
+    counts shouldBe Map(1 -> 2)
+    ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 1))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      JoinWriteRuns.resetRunsForTest()
+      HashCount.resetByKeyForTest()
+      keyed.collect().toMap shouldBe counts
+      JoinWriteRuns.runsForTest shouldBe 0L
+      HashCount.byKeyCallsForTest shouldBe 0
+    finally ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 8192))
+    val savedRow = ScarletConf.get
+    ScarletConf.set(savedRow.copy(columnarExecution = false))
+    val rowCounts = keyed.collect().toMap
+    ScarletConf.set(savedRow)
+    counts shouldBe rowCounts
+    val valued = projected.filterValues((value: Long) => value > 10L).countByKey
+    val valuedOp = ColumnarPlanner.lower(valued.plan).get
+    valuedOp.shape should include("CountByKey(Exchange(FilterValue(Project(HashJoin")
+    valuedOp.shape should not include "SortMergeJoin"
+    JoinWriteRuns.resetRunsForTest()
+    HashCount.resetByKeyForTest()
+    val valueCounts = valued.collect().toMap
+    JoinWriteRuns.runsForTest shouldBe 0L
+    HashCount.byKeyCallsForTest shouldBe 0
+    valueCounts shouldBe Map(2 -> 1)
+    ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 1))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      valued.collect().toMap shouldBe valueCounts
+    finally ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 8192))
+    ScarletConf.set(savedRow.copy(columnarExecution = false))
+    val rowValues = valued.collect().toMap
+    ScarletConf.set(savedRow)
+    valueCounts shouldBe rowValues
+    val broadcast = filteredLeft.broadcastJoin(filteredRight)
+    val broadcastKeyed = broadcast
+      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+      .filterKeys((key: Int) => key == 1)
+      .countByKey
+    val broadcastShape = ColumnarPlanner.lower(broadcastKeyed.plan).map(_.shape).get
+    broadcastShape should include("CountByKey(Exchange(FilterKey(Project(HashJoin")
+    broadcastShape should not include "BroadcastJoin"
+    broadcastShape should not include "SortMergeJoin"
+    JoinWriteRuns.resetRunsForTest()
+    broadcastKeyed.collect().toMap shouldBe Map(1 -> 2)
+    JoinWriteRuns.runsForTest shouldBe 0L
+    val reduced = projected
+      .filterKeys((key: Int) => key == 1)
+      .reduceByKey((left: Long, right: Long) => left + right)
+    ColumnarPlanner.lower(reduced.plan).isEmpty shouldBe true
+    reduced.collect().toMap shouldBe Map(1 -> 20L)
+    val twice = projected
+      .filterKeys((key: Int) => key == 1)
+      .filterValues((value: Long) => value > 0L)
+      .countByKey
+    ColumnarPlanner.lower(twice.plan).isEmpty shouldBe true
+    val bare = sortJoined.filterKeys((key: Int) => key == 1).countByKey
+    ColumnarPlanner.lower(bare.plan).isEmpty shouldBe true
+    val scan = PhysicalOp.Scan(PhysicalOp.Kind.Pairs, Seq.empty)
+    val hashed = PhysicalOp.HashJoin(PhysicalOp.Exchange(scan), PhysicalOp.Exchange(scan))
+    val slotted = PhysicalOp.Filter(PhysicalOp.Project(hashed), PhysicalOp.Slot.Key)
+    CountByKeyLowering.apply(slotted).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(FilterKey(Project(HashJoin(Exchange(Scan), Exchange(Scan))))))",
+    )
+    ReduceByKeyLowering.apply(slotted).isEmpty shouldBe true
+    val second = PhysicalOp.Filter(slotted, PhysicalOp.Slot.Value)
+    CountByKeyLowering.apply(second).isEmpty shouldBe true
+    val oneSide = PhysicalOp.Filter(
+      PhysicalOp.Project(PhysicalOp.SortMergeJoin(PhysicalOp.Exchange(scan), scan)),
+      PhysicalOp.Slot.Key,
+    )
+    CountByKeyLowering.apply(oneSide).isEmpty shouldBe true
+    val calls = new AtomicInteger
+    val preds = new AtomicInteger
+    val dropped = sortJoined
+      .map(dropProjectedKey(calls))
+      .filterKeys { (key: Int) =>
+        val _ = preds.incrementAndGet()
+        key == 2
+      }
+      .countByKey
+    calls.set(0)
+    preds.set(0)
+    JoinWriteRuns.resetRunsForTest()
+    dropped.collect().toMap shouldBe Map(2 -> 1)
+    calls.get shouldBe 3
+    preds.get shouldBe 1
+    JoinWriteRuns.runsForTest shouldBe 0L
+    calls.set(0)
+    preds.set(0)
+    ScarletConf.set(savedRow.copy(columnarExecution = false))
+    val rowDropped = dropped.collect().toMap
+    ScarletConf.set(savedRow)
+    rowDropped shouldBe Map(2 -> 1)
+  }
+
   "a generic value sort" should "decline tryRun and stay off the columnar arm" in {
     val data = filtered(topKeys, topValues)
     val plan = data
@@ -739,6 +872,23 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
       .ofIntPairs(keys, values, partitions)
       .filterKeys((key: Int) => key % 3 != 0)
       .filterValues((value: Int) => value >= 0)
+
+  /** Key `1` becomes null. The value stays the left int as a long. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Equals",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def dropProjectedKey(
+      calls: AtomicInteger,
+  ): ((Int, (Int, Int))) => (Int, Long) = { case (key, (leftValue, _)) =>
+    val _ = calls.incrementAndGet()
+    val projected: Any = if (key == 1) null else Int.box(key)
+    Tuple2(projected, Long.box(leftValue.toLong)).asInstanceOf[(Int, Long)]
+  }
 
   @SuppressWarnings(
     Array(

@@ -88,6 +88,8 @@ private[execution] object ReduceByKeyLowering:
    * exchanges.
    */
   private def intLongProject(child: PhysicalOp): Boolean = child match
+    // [[IntLongReduce]] accepts only a bare project. A filter here would lower into that throw.
+    case PhysicalOp.Filter(_, _) => false
     case PhysicalOp.Project(under) if hintedJoin(under) => false
     case _ =>
       child.kind match

@@ -12,19 +12,20 @@ package com.ewoodbury.scarlet.execution
  * broadcast under that project is rewritten to a hash join of two exchanges. Those nodes are not
  * emitted under the count. Collect of the join itself is unchanged. One filter of the triple row,
  * the triple key, or either triple value, between the project and that join, stays in place and
- * the join under it is rewritten the same way. A second filter, and a sort-merge whose children
- * are not both exchanges, stay on the row path. The count is an `Int` and wraps. The long estimate
- * charges 8-byte keys. The string estimate charges dictionary bytes. [[PhysicalOp.Kind.Pairs]],
- * [[PhysicalOp.Kind.LongPairs]], and [[PhysicalOp.Kind.StringPairs]] lower. An int inner
- * [[PhysicalOp.HashJoin]] of two exchanges is [[PhysicalOp.CountByKey]] of that join: no extra
- * exchange and no inserted project. A hinted sort-merge or broadcast is rewritten to that hash
- * join first. A filter above the join, an outer join, and a non-int join stay on the row path, as
- * does every other kind, including [[PhysicalOp.Kind.LongCounts]]. With spill off, an input that
- * does not fit the budget throws [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] and the
- * action fails instead of rerunning on rows. With spill on, an over-budget post-exchange bucket
- * spills. A count table that still does not fit throws
- * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]]. The function body is not read.
- * [[JoinProbeAggregate]] is a different plan and is not built here.
+ * the join under it is rewritten the same way. One key or value filter immediately above the
+ * project is kept, and a hinted join under that project is rewritten the same way. A second
+ * filter, a second slot, and a sort-merge whose children are not both exchanges, stay on the row
+ * path. The count is an `Int` and wraps. The long estimate charges 8-byte keys. The string
+ * estimate charges dictionary bytes. [[PhysicalOp.Kind.Pairs]], [[PhysicalOp.Kind.LongPairs]], and
+ * [[PhysicalOp.Kind.StringPairs]] lower. An int inner [[PhysicalOp.HashJoin]] of two exchanges is
+ * [[PhysicalOp.CountByKey]] of that join: no extra exchange and no inserted project. A hinted
+ * sort-merge or broadcast is rewritten to that hash join first. A filter above the join, an outer
+ * join, and a non-int join stay on the row path, as does every other kind, including
+ * [[PhysicalOp.Kind.LongCounts]]. With spill off, an input that does not fit the budget throws
+ * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] and the action fails instead of rerunning
+ * on rows. With spill on, an over-budget post-exchange bucket spills. A count table that still
+ * does not fit throws [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]]. The function body is
+ * not read. [[JoinProbeAggregate]] is a different plan and is not built here.
  */
 private[execution] object CountByKeyLowering:
 
@@ -66,12 +67,18 @@ private[execution] object CountByKeyLowering:
    *
    * Both sides are hash exchanges, then [[PhysicalOp.HashJoin]], and the project stays above that
    * join. One triple-slot filter between the project and the join is kept above the hash join. A
-   * second filter is refused. A sort-merge whose children are not both exchanges is refused. The
-   * function body is not read. [[JoinProbeAggregate]] is a different plan and is not built here.
+   * second filter is refused. One key or value filter above the project stays above the rewritten
+   * join, and a filter between that project and the join is refused. A sort-merge whose children
+   * are not both exchanges is refused. The function body is not read. [[JoinProbeAggregate]] is a
+   * different plan and is not built here.
    */
   private def hashPartitionedProject(child: PhysicalOp): Option[PhysicalOp] = child match
     case PhysicalOp.Project(under) =>
       hashedUnder(under).map(joined => PhysicalOp.Project(joined))
+    case PhysicalOp.Filter(PhysicalOp.Project(under), slot) if keyOrValue(slot) =>
+      hashedInner(under).map { joined =>
+        PhysicalOp.Filter(PhysicalOp.Project(joined), slot)
+      }
     case _ => None
 
   /** At most one triple filter, then the hinted join. The filter predicate is not read. */
@@ -105,14 +112,23 @@ private[execution] object CountByKeyLowering:
    *
    * A hinted join that [[hashPartitionedProject]] did not rewrite stays out. That is a second
    * filter, a filter that is not a triple slot, or a sort-merge whose children are not both
-   * exchanges.
+   * exchanges. One key or value slot above a project that is already a hash join is kept. A second
+   * slot, a whole-row filter, and any other filter stay out.
    */
   private def intLongProject(child: PhysicalOp): Boolean = child match
     case PhysicalOp.Project(under) if hintedJoin(under) => false
+    case PhysicalOp.Filter(PhysicalOp.Project(under), slot)
+        if keyOrValue(slot) && !hintedJoin(under) =>
+      true
+    case PhysicalOp.Filter(_, _) => false
     case _ =>
       child.kind match
         case PhysicalOp.Kind.Triples => PhysicalSchema.isIntLong(child.schema)
         case _ => false
+
+  private def keyOrValue(slot: PhysicalOp.Slot): Boolean = slot match
+    case PhysicalOp.Slot.Key | PhysicalOp.Slot.Value => true
+    case _ => false
 
   private def hintedJoin(op: PhysicalOp): Boolean = op match
     case PhysicalOp.SortMergeJoin(_, _) | PhysicalOp.BroadcastJoin(_, _, _) => true

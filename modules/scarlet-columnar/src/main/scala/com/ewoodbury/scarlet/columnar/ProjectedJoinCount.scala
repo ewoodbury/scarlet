@@ -7,7 +7,8 @@ import com.ewoodbury.scarlet.core.ScarletConf
  *
  * Both sides are exchanged the way [[ColumnPipeline.innerJoin]] exchanges them. Each probe bucket
  * offers its projected keys through [[TripleProbeSum.count]]. A triple predicate uses
- * [[TripleProbeSum.countKept]] and still does not write the match columns. Those partials are
+ * [[TripleProbeSum.countKept]] and still does not write the match columns. A key or value slot
+ * keeps the projected cell and still does not write the match columns. Those partials are
  * exchanged again by [[HashCount.exchange]], because the map may replace the join key.
  * [[JoinWrite]] is not called, and [[HashCount.byKey]] is not called. A build bucket over the
  * spill budget declines before a table is allocated, and the row path runs the plan.
@@ -18,7 +19,8 @@ private[scarlet] object ProjectedJoinCount:
   /**
    * [[keep]] is `None` for the unfiltered probe. A present [[keep]] drops hits that fail it.
    * [[dropNull]] is the whole-row filter: a null component is skipped and [[keep]] is not called.
-   * A slot filter passes `dropNull = false` and declines on that null.
+   * A slot filter passes `dropNull = false` and declines on that null. [[slot]] keeps a projected
+   * key or value when [[keep]] is empty. The two filters are not applied together.
    */
   def count(
       build: ColumnPipeline.JoinInput,
@@ -30,6 +32,7 @@ private[scarlet] object ProjectedJoinCount:
       mapper: TripleToIntLong.TripleMap,
       keep: Option[PairKernel.IntTriplePredicate],
       dropNull: Boolean,
+      slot: Option[TripleToIntLong.IntLongSlot],
   ): Vector[ColumnBatch] =
     try
       val (buildBuckets, probeBuckets) =
@@ -37,10 +40,15 @@ private[scarlet] object ProjectedJoinCount:
       val partials = MorselScheduler.map(probeBuckets, parallelism) { (part, probeBatch) =>
         val buildSide = side(buildBuckets, part)
         val probeSide = side(probeBatch)
-        keep match
-          case None => TripleProbeSum.count(buildSide, probeSide, mapper)
-          case Some(predicate) =>
+        (keep, slot) match
+          case (Some(_), Some(_)) =>
+            throw new ColumnarFallback(
+              "a projected join count applies one filter",
+            )
+          case (Some(predicate), None) =>
             TripleProbeSum.countKept(buildSide, probeSide, mapper, predicate, dropNull)
+          case (None, present) =>
+            TripleProbeSum.count(buildSide, probeSide, mapper, present)
       }
       HashCount.exchange(partials, numPartitions, parallelism, batchSize)
     finally HashCount.releaseWorkers()

@@ -14,13 +14,22 @@ import ColumnarInterpreter.{Columns, interpretAt}
  * called. Partials are finished by [[HashCount.exchange]], the same exchange [[HashCount.byKey]]
  * uses after its partial combine. The map may replace the join key, so that second exchange stays.
  * One triple filter between the map and a hinted join is applied on those hits, and the match
- * columns are still not written. The function bodies are not inspected. Any other project still
+ * columns are still not written. One key or value filter above that project applies the slot on
+ * the probe and still does not write the match columns. A null projected key is dropped and the
+ * key predicate is not called. The function bodies are not inspected. Any other project still
  * interprets the child, projects each morsel with [[TripleToIntLong.project]], then
- * [[HashCount.byKey]] counts ordinal 0. A join on that path still writes its match columns. A
- * result that is not `(Int, Long)` throws [[ColumnarFallback]] from the offer or the project,
+ * [[HashCount.byKey]] counts ordinal 0. A join on that path still writes its match columns. A key
+ * or value slot without that hashed join throws [[ColumnarFallback]] before a count is published.
+ * A result that is not `(Int, Long)` throws [[ColumnarFallback]] from the offer or the project,
  * before a count is published. [[com.ewoodbury.scarlet.execution.JoinProbeAggregate]] is a
  * different plan and is not built here.
  */
+@SuppressWarnings(
+  Array(
+    "org.wartremover.warts.Any",
+    "org.wartremover.warts.AsInstanceOf",
+  ),
+)
 private[execution] object IntLongCount:
 
   def columns(
@@ -31,19 +40,25 @@ private[execution] object IntLongCount:
       ordinals: Set[Int],
   ): Columns =
     require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
-    (source, child) match
-      case (Plan.MapOp(input, mapper), PhysicalOp.Project(inputOp)) =>
-        val absence = preserveAbsence || child.requestsTripleAbsence
-        val adapted = TripleToIntLong.adapt(mapper)
-        probedJoin(input, inputOp) match
+    matched(source, child) match
+      case Some(found) =>
+        val absence = preserveAbsence || found.project.requestsTripleAbsence
+        val adapted = TripleToIntLong.adapt(found.mapper)
+        probedJoin(found.input, found.inputOp) match
           case Some(hit) =>
-            Columns.Pairs(counted(hit, absence, ordinals, adapted))
-          case None =>
+            Columns.Pairs(counted(hit, absence, ordinals, adapted, found.slot))
+          case None if found.slot.isEmpty =>
             Columns.Pairs(
               HashCount.byKey(
                 project(
                   tripleBatches(
-                    interpretAt(input, inputOp, selectedPartition, absence, ordinals),
+                    interpretAt(
+                      found.input,
+                      found.inputOp,
+                      selectedPartition,
+                      absence,
+                      ordinals,
+                    ),
                   ),
                   adapted,
                 ),
@@ -52,8 +67,49 @@ private[execution] object IntLongCount:
                 ColumnarPlanner.batchSize,
               ),
             )
-      case _ =>
+          case None =>
+            throw new ColumnarFallback("int-long countByKey expected a hashed join under the slot")
+      case None =>
         throw new ColumnarFallback("int-long countByKey expected a triple project")
+
+  private final case class Counted(
+      input: Plan[_],
+      inputOp: PhysicalOp,
+      mapper: Any,
+      project: PhysicalOp.Project,
+      slot: Option[TripleToIntLong.IntLongSlot],
+  )
+
+  private def matched(source: Plan[_], child: PhysicalOp): Option[Counted] = (source, child) match
+    case (Plan.MapOp(input, mapper), project @ PhysicalOp.Project(inputOp)) =>
+      Some(Counted(input, inputOp, mapper, project, None))
+    case (
+          Plan.FilterKeysOp(Plan.MapOp(input, mapper), predicate),
+          PhysicalOp.Filter(project @ PhysicalOp.Project(inputOp), PhysicalOp.Slot.Key),
+        ) =>
+      Some(
+        Counted(
+          input,
+          inputOp,
+          mapper,
+          project,
+          Some(TripleToIntLong.IntLongSlot.Key(predicate.asInstanceOf[Int => Boolean])),
+        ),
+      )
+    case (
+          Plan.FilterValuesOp(Plan.MapOp(input, mapper), predicate),
+          PhysicalOp.Filter(project @ PhysicalOp.Project(inputOp), PhysicalOp.Slot.Value),
+        ) =>
+      Some(
+        Counted(
+          input,
+          inputOp,
+          mapper,
+          project,
+          Some(TripleToIntLong.IntLongSlot.Value(predicate.asInstanceOf[Long => Boolean])),
+        ),
+      )
+    case _ => None
 
   /** Int inner hash join of two exchanges. Sort-merge and broadcast are already rewritten. */
   private def counted(
@@ -61,8 +117,11 @@ private[execution] object IntLongCount:
       absence: Boolean,
       ordinals: Set[Int],
       adapted: TripleToIntLong.TripleMap,
+      slot: Option[TripleToIntLong.IntLongSlot],
   ): Vector[ColumnBatch] =
     hit.keep match
+      case Some(_) if slot.nonEmpty =>
+        throw new ColumnarFallback("int-long countByKey applies one filter")
       case Some(predicate) =>
         JoinArms.projectCount(
           hit.left,
@@ -84,6 +143,7 @@ private[execution] object IntLongCount:
           absence,
           ordinals,
           adapted,
+          slot,
         )
 
   /**
