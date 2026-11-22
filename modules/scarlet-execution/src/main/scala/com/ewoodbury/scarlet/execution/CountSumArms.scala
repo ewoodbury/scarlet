@@ -13,20 +13,24 @@ import ColumnarInterpreter.{Columns, interpretAt, pairsOf}
  * copied, and no survivor index is built. One [[Plan.MapIntKeyOp]] over that source is summed the
  * same way: the function runs once on each present survivor and is not inspected, and the pair
  * batch is not published. A null key is not passed in. Encoded morsels under that one map,
- * including a null value, observe into the same table. One pair [[Plan.MapOp]] whose filters are
- * int slots, or absent, is summed from that project's input morsels. The interpreter's adapter
- * runs on every row, including a null key and a null value, and is not inspected. A null projected
- * key is dropped. A null projected value is counted and not added. The pair batch is not
- * published, and [[CountSum.byKey]] is not called. One [[Plan.FilterKeysOp]] or
- * [[Plan.FilterValuesOp]] directly above that project applies the slot to the projected pair and
- * still does not publish. A key predicate is not called on a null projected key. A value predicate
- * is not called on a null projected value. A key slot that keeps a present key counts a null value
- * and does not add it. A second slot, a whole-row filter, a second map, and a long or string slot
- * stay on the published path. A whole-row step, a non-int slot, a boxed row the encoder throws on,
- * and any other pair child are interpreted, then aggregated. That path partial-aggregates survivor
- * ids, including a stack of one, and [[CountSum.byKey]] sees the published pairs. A null key is
- * dropped. A null value is counted and not added. The exchange sees dense partials of
- * `(key, count, sum)`.
+ * including a null value, observe into the same table. One [[Plan.FilterKeysOp]] or
+ * [[Plan.FilterValuesOp]] directly above that map applies the slot after the key function and
+ * still does not publish. A null input key is not passed to the function or to a key predicate. A
+ * value predicate still sees that row. A null mapped key is dropped. A null value that the slot
+ * keeps is counted and not added. A second map under the key map stays on the published path. One
+ * pair [[Plan.MapOp]] whose filters are int slots, or absent, is summed from that project's input
+ * morsels. The interpreter's adapter runs on every row, including a null key and a null value, and
+ * is not inspected. A null projected key is dropped. A null projected value is counted and not
+ * added. The pair batch is not published, and [[CountSum.byKey]] is not called. One
+ * [[Plan.FilterKeysOp]] or [[Plan.FilterValuesOp]] directly above that project applies the slot to
+ * the projected pair and still does not publish. A key predicate is not called on a null projected
+ * key. A value predicate is not called on a null projected value. A key slot that keeps a present
+ * key counts a null value and does not add it. A second slot, a whole-row filter, a second map,
+ * and a long or string slot stay on the published path. A whole-row step, a non-int slot, a boxed
+ * row the encoder throws on, and any other pair child are interpreted, then aggregated. That path
+ * partial-aggregates survivor ids, including a stack of one, and [[CountSum.byKey]] sees the
+ * published pairs. A null key is dropped. A null value is counted and not added. The exchange sees
+ * dense partials of `(key, count, sum)`.
  */
 private[execution] object CountSumArms:
 
@@ -54,6 +58,17 @@ private[execution] object CountSumArms:
           batchSize,
         ).orElse(
           foldedAbove(
+            source,
+            child,
+            selectedPartition,
+            preserveAbsence,
+            ordinals,
+            width,
+            workers,
+            batchSize,
+          ),
+        ).orElse(
+          foldedMappedAbove(
             source,
             child,
             selectedPartition,
@@ -247,6 +262,73 @@ private[execution] object CountSumArms:
         case Some(Vector(step @ Selection.Step.Int32(column, _))) if column == 0 || column == 1 =>
           Some(step)
         case _ => None
+    }
+
+  /**
+   * One key or value slot directly above one [[Plan.MapIntKeyOp]]. The map's input is summed, then
+   * the slot sees the mapped key or the original value. `None` when a second map sits under the
+   * key map, when the step is not one int key or value, or when a filter under the map is not an
+   * int slot. A null input key is not passed to the witness or to a key predicate. A value
+   * predicate still sees that row. A null mapped key is dropped. A null value that the slot keeps
+   * is counted and not added. [[CountSum.byKey]] is not called. [[MapIntKey.columns]] is not
+   * called.
+   */
+  private def foldedMappedAbove(
+      source: Plan[_],
+      child: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    val matched = (source, child) match
+      case (
+            Plan.FilterKeysOp(Plan.MapIntKeyOp(inner, fn), _),
+            PhysicalOp.Filter(PhysicalOp.MapKey(mapped), PhysicalOp.Slot.Key),
+          ) if intPairs(child) =>
+        Some((inner, mapped, fn))
+      case (
+            Plan.FilterValuesOp(Plan.MapIntKeyOp(inner, fn), _),
+            PhysicalOp.Filter(PhysicalOp.MapKey(mapped), PhysicalOp.Slot.Value),
+          ) if intPairs(child) =>
+        Some((inner, mapped, fn))
+      case _ => None
+    matched.flatMap { (inner, mapped, fn) =>
+      val (underPlan, underOp) = PredicatePlan.childOf(inner, mapped)
+      if (pastMap(underPlan)) then None
+      else
+        oneIntSlot(source, child).flatMap { step =>
+          slotSteps(inner, mapped, ordinals).flatMap { steps =>
+            ownedPairs(underPlan, underOp) match
+              case Some(parts) =>
+                Some(
+                  CountSum.byKeyOwnedMappedAbove(
+                    parts,
+                    steps,
+                    fn,
+                    step,
+                    width,
+                    workers,
+                    batchSize,
+                  ),
+                )
+              case None =>
+                encoded(underPlan, underOp, selectedPartition, preserveAbsence, ordinals).map {
+                  batches =>
+                    CountSum.byKeyMappedAbove(
+                      batches,
+                      steps,
+                      fn,
+                      step,
+                      width,
+                      workers,
+                      batchSize,
+                    )
+                }
+          }
+        }
     }
 
   /**
