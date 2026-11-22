@@ -294,10 +294,13 @@ object Plan {
    * int pairs, or a filter chain over one, lowers to a columnar rank split. A filter, including a
    * stack of one, sorts the survivor index and does not gather first. Over the budget, with spill
    * on, that index is spilled and dropped rows are not written. At or under the budget, and
-   * whenever spill is off, the in-memory split runs and writes nothing. A map or any other child
-   * stays on the row path. A null `Int` key orders as zero and the row is retained. This matches
-   * `sortBy(_._1)` and is not a null-safe ordering. A key or value filter drops a null in that
-   * column before the sort, while the row path unboxes the null to `0`.
+   * whenever spill is off, the in-memory split runs and writes nothing. One int-pair project, or
+   * one key map, on that scan or filter stack lowers too. Neither function is read. A null input
+   * key stays null, is not passed to the key function, and orders as zero. A slot or whole-row
+   * filter above that map, a second map, `mapValues`, and any other child stay on the row path. A
+   * null `Int` key orders as zero and the row is retained. This matches `sortBy(_._1)` and is not
+   * a null-safe ordering. A key or value filter drops a null in that column before the sort, while
+   * the row path unboxes the null to `0`.
    *
    * @param source
    *   The preceding plan node.
@@ -313,9 +316,9 @@ object Plan {
    * project on that scan or filter stack lowers too. One key map on that scan or filter stack
    * lowers too. Neither function is read. A null input key stays null, is not passed to the key
    * function, and orders as zero. `mapValues`, a second map, a slot above that project or map, a
-   * key map under a key sort, an aggregate, or a join under the sort stays on the row path. A
-   * filter, join, aggregate, or projection above it stays on the row path. A null value or key
-   * orders as zero and stays null. Ties keep input order.
+   * slot or whole-row filter above a key map under a key sort, an aggregate, or a join under the
+   * sort stays on the row path. A filter, join, aggregate, or projection above it stays on the row
+   * path. A null value or key orders as zero and stays null. Ties keep input order.
    *
    * @param source
    *   The preceding plan node.

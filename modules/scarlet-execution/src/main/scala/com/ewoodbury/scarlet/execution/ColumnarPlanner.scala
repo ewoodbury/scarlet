@@ -73,13 +73,15 @@ object ColumnarPlanner:
    * the probe. A null value on an int shuffle-hash, broadcast, or sort-merge outer join, left,
    * right, or full, stays a clear validity bit and [[tryRun]] keeps the row. A null value on a
    * long or string outer join makes [[tryRun]] return `None`. [[SortLowering]] accepts an int,
-   * long, or string key sort of a scan, or of filters over that scan. One int-pair project on that
-   * scan or filter stack lowers under [[Plan.SortByIntKeyOp]]. One long-pair project lowers under
-   * [[Plan.SortByLongKeyOp]]. One string-pair project lowers under [[Plan.SortByStringKeyOp]]. One
-   * key or value filter immediately above that int or string project lowers too. The function is
-   * not read. `mapValues`, a second map, a slot or whole-row filter above the long project,
-   * [[PhysicalOp.MapKey]] under a key sort, a second slot, a whole-row filter above the string
-   * project, and every other map, aggregate, or join under a sort stay on the row path. One
+   * long, or string key sort of a scan, or of filters over that scan. One int-pair project, or one
+   * [[PhysicalOp.MapKey]], on that scan or filter stack lowers under [[Plan.SortByIntKeyOp]]. The
+   * function is not read. A null input key stays null, is not passed to the key function, and
+   * orders as zero. [[com.ewoodbury.scarlet.columnar.RankSplit]] sorts the published pairs. One
+   * long-pair project lowers under [[Plan.SortByLongKeyOp]]. One string-pair project lowers under
+   * [[Plan.SortByStringKeyOp]]. One key or value filter immediately above that int or string
+   * project lowers too. A slot or whole-row filter above the key map, `mapValues`, a second map, a
+   * slot or whole-row filter above the long project, a second slot, a whole-row filter above the
+   * string project, and every other map, aggregate, or join under a sort stay on the row path. One
    * [[PhysicalOp.MapKey]] on a scan or an int-pair filter stack, or one key or value filter
    * immediately above that map, lowers under [[Plan.SortByIntValueDescOp]]. A second slot, a
    * whole-row filter, and that slot under a key sort stay on the row path. One filter above an

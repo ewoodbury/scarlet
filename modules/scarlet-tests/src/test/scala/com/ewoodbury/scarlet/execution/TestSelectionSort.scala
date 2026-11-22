@@ -616,7 +616,8 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ).mapIntKey { (key: Int) =>
       val _ = calls.incrementAndGet()
       key + 1
-    }.filterValues((value: Int) => value > 0).sortByIntValueDesc
+    }.filterValues((value: Int) => value > 0)
+      .sortByIntValueDesc
     shape(nulls) shouldBe "SortByIntValueDesc(FilterValue(MapKey(Scan)))"
     calls.set(0)
     val nullFound = collect(nulls)
@@ -638,7 +639,8 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ).mapIntKey { (key: Int) =>
       val _ = valueCalls.incrementAndGet()
       key + 1
-    }.filterKeys((key: Int) => key > 0).sortByIntValueDesc
+    }.filterKeys((key: Int) => key > 0)
+      .sortByIntValueDesc
     shape(nullValues) shouldBe "SortByIntValueDesc(FilterKey(MapKey(Scan)))"
     valueCalls.set(0)
     val valueFound = collect(nullValues)
@@ -669,6 +671,14 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val mappedKey = source
       .mapIntKey((key: Int) => key + 1)
       .filterKeys((key: Int) => key > 0)
+      .sortByIntKey
+    val secondKey = source
+      .mapIntKey((key: Int) => key + 1)
+      .mapIntKey((key: Int) => key + 1)
+      .sortByIntKey
+    val rowAboveKey = source
+      .mapIntKey((key: Int) => key + 1)
+      .filter((pair: (Int, Int)) => pair._2 > 0)
       .sortByIntKey
     val secondSlot = source
       .mapIntKey((key: Int) => key + 1)
@@ -711,6 +721,8 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.lower(twiceDesc.plan) shouldBe None
     ColumnarPlanner.lower(second.plan) shouldBe None
     ColumnarPlanner.lower(mappedKey.plan) shouldBe None
+    ColumnarPlanner.lower(secondKey.plan) shouldBe None
+    ColumnarPlanner.lower(rowAboveKey.plan) shouldBe None
     ColumnarPlanner.lower(secondSlot.plan) shouldBe None
     ColumnarPlanner.lower(rowAboveMap.plan) shouldBe None
     ColumnarPlanner.lower(slotAboveSecond.plan) shouldBe None

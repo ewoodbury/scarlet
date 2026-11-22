@@ -80,7 +80,7 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val columnar = collect(sorted)
 
     columnar shouldBe rowCollect(sorted)
-    columnar should contain theSameElementsAs(rows)
+    columnar should contain theSameElementsAs (rows)
     assertBatchValidity(sortedParts(sorted.plan), rows.sortBy(effectiveKey))
   }
 
@@ -261,7 +261,32 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.lower(above.plan) shouldBe None
     ColumnarPlanner.lower(values.plan) shouldBe None
     ColumnarPlanner.lower(keyed.plan).map(_.shape) shouldBe Some("MapKey(Scan)")
-    ColumnarPlanner.lower(keyed.sortByIntKey.plan) shouldBe None
+    val keyedSort = keyed.sortByIntKey
+    ColumnarPlanner.lower(keyedSort.plan).map(_.shape) shouldBe Some(
+      "SortByIntKey(MapKey(Scan))",
+    )
+    collect(keyedSort) shouldBe Seq(2 -> 10, 3 -> 20, 4 -> 30)
+    collect(keyedSort) shouldBe rowCollect(keyedSort)
+    collectAt(keyedSort, 1) shouldBe collectAt(keyedSort, 8192)
+    val sortPlan = keyedSort.plan match
+      case Plan.SortByIntKeyOp(sourcePlan) => sourcePlan
+      case _ => fail("expected SortByIntKeyOp")
+    val mappedChild =
+      ColumnarPlanner.lower(keyedSort.plan).getOrElse(fail("expected a key sort")) match
+        case PhysicalOp.SortByIntKey(child) => child
+        case _ => fail("expected SortByIntKey")
+    FilterChain.selected(
+      sortPlan,
+      mappedChild,
+      selectedPartition = None,
+      preserveAbsence = true,
+      ColumnUse.ordinals(sortPlan, mappedChild),
+    ) shouldBe None
+    MapIntKey.resetPublishedForTest()
+    RankSplit.resetForTest()
+    collect(keyedSort) shouldBe Seq(2 -> 10, 3 -> 20, 4 -> 30)
+    MapIntKey.publishedForTest should be > 0
+    RankSplit.mergePassesForTest should be > 0
     ColumnarPlanner.lower(byDesc.plan).map(_.shape) shouldBe Some(
       "SortByIntValueDesc(Project(Scan))",
     )
@@ -271,7 +296,7 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     collect(values) shouldBe rowCollect(values)
     collect(above) shouldBe rowCollect(above)
     collect(byDesc) shouldBe rowCollect(byDesc)
-    collect(keyed.sortByIntKey) shouldBe rowCollect(keyed.sortByIntKey)
+    collect(keyedSort) shouldBe rowCollect(keyedSort)
     ColumnarPlanner.lower(bad.plan).map(_.shape) shouldBe Some("SortByLongKey(Project(Scan))")
     val lowered = ColumnarPlanner.lower(bad.plan).getOrElse(fail("expected a project sort"))
     val thrown = the[ColumnarFallback] thrownBy {
@@ -359,7 +384,8 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
   }
 
   it should "spill when the budget is exhausted, match the row path, and write nothing on the int path" in {
-    // Pins spillMaxFiles and spillMaxBytes to the store defaults, so ambient config cannot leak in.
+    /* Pins spillMaxFiles and spillMaxBytes to the store defaults, so ambient config cannot leak
+     * in. */
     new TestRankSplitLongRuns().withConf(0L, batchSize = 2, fanIn = 8) { dir =>
       val source = DistCollection.ofLongPairs(Array(3L, 1L, 2L, 2L), Array(30L, 10L, 20L, 21L), 2)
       val sorted = source.sortByLongKey

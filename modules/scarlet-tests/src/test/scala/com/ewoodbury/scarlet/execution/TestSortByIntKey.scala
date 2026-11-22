@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -62,10 +64,44 @@ class TestSortByIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val row = rowCollect(sorted)
 
     columnar shouldBe row
-    columnar should contain theSameElementsAs(row)
+    columnar should contain theSameElementsAs (row)
     columnar shouldBe rows.sortBy(effectiveKey)
     effectiveKeys(columnar) shouldBe effectiveKeys(columnar).sorted
     assertBatchValidity(sortedParts(sorted.plan), rows.sortBy(effectiveKey))
+  }
+
+  it should "sort one mapIntKey, skip a null key, and order that null as zero" in {
+    val calls = new AtomicInteger
+    val rows = Seq(
+      intPair(boxedInt(3), boxedInt(30)),
+      intPair(noInt, boxedInt(99)),
+      intPair(boxedInt(1), boxedInt(10)),
+      intPair(boxedInt(2), noInt),
+    )
+    val sorted = DistCollection(rows, 2).mapIntKey { (key: Int) =>
+      val _ = calls.incrementAndGet()
+      key + 1
+    }.sortByIntKey
+    val onStack = DistCollection
+      .ofIntPairs(Array(3, 1, 2, 0), Array(30, 10, 20, -1), 2)
+      .filterKeys((key: Int) => key > 0)
+      .filterValues((value: Int) => value > 15)
+      .mapIntKey((key: Int) => key + 1)
+      .sortByIntKey
+
+    ColumnarPlanner.lower(sorted.plan).map(_.shape) shouldBe Some("SortByIntKey(MapKey(Scan))")
+    calls.set(0)
+    val found = collect(sorted)
+    calls.get() shouldBe 3
+    found shouldBe rowCollect(sorted)
+    effectiveKeys(found) shouldBe effectiveKeys(found).sorted
+    found.exists(pair => !present(pair, 0)) shouldBe true
+    found.exists(pair => !present(pair, 1)) shouldBe true
+    ColumnarPlanner.lower(onStack.plan).map(_.shape) shouldBe Some(
+      "SortByIntKey(MapKey(FilterValue(FilterKey(Scan))))",
+    )
+    collect(onStack) shouldBe Seq(3 -> 20, 4 -> 30)
+    collect(onStack) shouldBe rowCollect(onStack)
   }
 
   it should "retain a null value beside a present key" in {
@@ -80,7 +116,7 @@ class TestSortByIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val columnar = collect(sorted)
 
     columnar shouldBe rowCollect(sorted)
-    columnar should contain theSameElementsAs(rows)
+    columnar should contain theSameElementsAs (rows)
     assertBatchValidity(sortedParts(sorted.plan), rows.sortBy(effectiveKey))
   }
 
@@ -427,7 +463,7 @@ class TestSortByIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val row = rowCollect(sorted)
 
     columnar shouldBe row
-    columnar should contain theSameElementsAs(row)
+    columnar should contain theSameElementsAs (row)
     effectiveKeys(columnar) shouldBe effectiveKeys(columnar).sorted
     assertBoundaries(sortedParts(sorted.plan))
 
