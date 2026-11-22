@@ -137,6 +137,47 @@ private[execution] object JoinArms:
       ordinals: Set[Int],
       mapper: TripleToIntLong.TripleMap,
   ): Vector[ColumnBatch] =
+    projectCounted(left, right, leftOp, rightOp, preserveAbsence, ordinals, mapper, None, false)
+
+  /**
+   * [[projectCount]] after one triple predicate. A hit that fails [[keep]] is not offered. A
+   * whole-row filter drops a null component and does not call [[keep]]. A slot filter declines on
+   * that null. Match columns are not written.
+   */
+  def projectCount(
+      left: Plan[_],
+      right: Plan[_],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      mapper: TripleToIntLong.TripleMap,
+      keep: PairKernel.IntTriplePredicate,
+      dropNull: Boolean,
+  ): Vector[ColumnBatch] =
+    projectCounted(
+      left,
+      right,
+      leftOp,
+      rightOp,
+      preserveAbsence,
+      ordinals,
+      mapper,
+      Some(keep),
+      dropNull,
+    )
+
+  private def projectCounted(
+      left: Plan[_],
+      right: Plan[_],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      mapper: TripleToIntLong.TripleMap,
+      keep: Option[PairKernel.IntTriplePredicate],
+      dropNull: Boolean,
+  ): Vector[ColumnBatch] =
     val (build, probe, slice) = sides(left, right, leftOp, rightOp, preserveAbsence, ordinals)
     ProjectedJoinCount.count(
       build,
@@ -146,6 +187,8 @@ private[execution] object JoinArms:
       ColumnarPlanner.batchSize,
       slice,
       mapper,
+      keep,
+      dropNull,
     )
 
   /** Hits [[projectSum]] would add. Nothing is published. */

@@ -452,16 +452,138 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
       PhysicalOp.SortMergeJoin(PhysicalOp.Exchange(scan), scan),
     )
     ReduceByKeyLowering.apply(oneSide).isEmpty shouldBe true
-    val between = PhysicalOp.Project(
+    val joined = PhysicalOp.SortMergeJoin(
+      PhysicalOp.Exchange(scan),
+      PhysicalOp.Exchange(scan),
+    )
+    val slots = Seq(
+      PhysicalOp.Slot.TripleRow,
+      PhysicalOp.Slot.TripleKey,
+      PhysicalOp.Slot.TripleLeftValue,
+      PhysicalOp.Slot.TripleRightValue,
+    )
+    slots.foreach { slot =>
+      val between = PhysicalOp.Project(PhysicalOp.Filter(joined, slot))
+      val counted = CountByKeyLowering.apply(between).get.shape
+      counted should include(s"CountByKey(Exchange(Project(${slot.label}(HashJoin")
+      counted should not include "SortMergeJoin"
+      val reduced = ReduceByKeyLowering.apply(between).get.shape
+      reduced should include(s"HashAggregate(Exchange(Project(${slot.label}(HashJoin")
+      reduced should not include "SortMergeJoin"
+    }
+    val broadcast = PhysicalOp.Project(
       PhysicalOp.Filter(
-        PhysicalOp.SortMergeJoin(PhysicalOp.Exchange(scan), PhysicalOp.Exchange(scan)),
+        PhysicalOp.BroadcastJoin(scan, scan, PhysicalOp.BuildSide.Right),
         PhysicalOp.Slot.TripleRow,
       ),
     )
-    ReduceByKeyLowering.apply(between).isEmpty shouldBe true
+    val broadcastCounted = CountByKeyLowering.apply(broadcast).get.shape
+    broadcastCounted should include("FilterTripleRow(HashJoin")
+    broadcastCounted should not include "BroadcastJoin"
+    broadcastCounted should not include "SortMergeJoin"
+    val stacked = PhysicalOp.Project(
+      PhysicalOp.Filter(
+        PhysicalOp.Filter(joined, PhysicalOp.Slot.TripleLeftValue),
+        PhysicalOp.Slot.TripleRow,
+      ),
+    )
+    val element = PhysicalOp.Project(PhysicalOp.Filter(joined, PhysicalOp.Slot.Row))
+    ReduceByKeyLowering.apply(stacked).isEmpty shouldBe true
+    ReduceByKeyLowering.apply(element).isEmpty shouldBe true
     CountByKeyLowering.apply(bare).isEmpty shouldBe true
     CountByKeyLowering.apply(oneSide).isEmpty shouldBe true
-    CountByKeyLowering.apply(between).isEmpty shouldBe true
+    CountByKeyLowering.apply(stacked).isEmpty shouldBe true
+    CountByKeyLowering.apply(element).isEmpty shouldBe true
+  }
+
+  "a filtered hinted count" should "hash the survivors from the probe" in {
+    val left = DistCollection.ofIntPairs(
+      Array(1, 2, 3, 4, 5),
+      Array(10, 20, 5, -1, 7),
+      partitions,
+    )
+    val right = DistCollection.ofIntPairs(
+      Array(1, 1, 2, 3, 4, 5),
+      Array(10, 20, 10, 5, 0, 60),
+      partitions,
+    )
+    val filteredLeft = left
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+    val filteredRight = right
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value < 50)
+    val sortCounted = filteredLeft
+      .sortMergeJoin(filteredRight)
+      .filter { case (_, (leftValue, _)) => leftValue > 10 }
+      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+      .countByKey
+    // Key 1's left value is 10, so both of its matches drop. Key 2's left value is 20.
+    assertProbedCount(sortCounted, Map(2 -> 1))
+    CrossEngineShapes.pairChecksum(sortCounted.collect()) shouldBe 63L
+    val broadcastCounted = filteredLeft
+      .broadcastJoin(filteredRight)
+      .filter { case (_, (leftValue, _)) => leftValue > 10 }
+      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+      .countByKey
+    assertProbedCount(broadcastCounted, Map(2 -> 1))
+    val mixedLeft = DistCollection.ofIntPairs(Array(1, 1, 2), Array(10, 30, 20), partitions)
+    val mixedRight = DistCollection.ofIntPairs(Array(1, 1, 2), Array(7, 8, 9), partitions)
+    val mixed = mixedLeft
+      .sortMergeJoin(mixedRight)
+      .filter { case (_, (leftValue, _)) => leftValue > 10 }
+      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+      .countByKey
+    // Key 1 keeps the two matches whose left value is 30 and drops the two whose left value is 10.
+    assertProbedCount(mixed, Map(1 -> 2, 2 -> 1))
+    val byLeft = mixedLeft
+      .sortMergeJoin(mixedRight)
+      .filterJoinLeft(_ > 10)
+      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+      .countByKey
+    assertProbedCount(byLeft, Map(1 -> 2, 2 -> 1))
+    val byKey = mixedLeft
+      .sortMergeJoin(mixedRight)
+      .filterJoinKey(_ == 1)
+      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+      .countByKey
+    assertProbedCount(byKey, Map(1 -> 4))
+    val byRight = mixedLeft
+      .sortMergeJoin(mixedRight)
+      .filterJoinRight(_ == 7)
+      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+      .countByKey
+    assertProbedCount(byRight, Map(1 -> 2))
+    val twice = mixedLeft
+      .sortMergeJoin(mixedRight)
+      .filter { case (_, (leftValue, _)) => leftValue > 10 }
+      .filter { case (key, _) => key > 0 }
+      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+      .countByKey
+    ColumnarPlanner.lower(twice.plan).isEmpty shouldBe true
+    val saved = ScarletConf.get
+    ScarletConf.set(saved.copy(columnarExecution = false))
+    val rowTwice = twice.collect().toMap
+    ScarletConf.set(saved)
+    twice.collect().toMap shouldBe rowTwice
+    val reduced = mixedLeft
+      .sortMergeJoin(mixedRight)
+      .filter { case (_, (leftValue, _)) => leftValue > 10 }
+      .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
+      .reduceByKey((left: Long, right: Long) => left + right)
+    val reduceShape = ColumnarPlanner.lower(reduced.plan).get.shape
+    reduceShape should include("HashAggregate(Exchange(Project(Filter")
+    reduceShape should include("HashJoin")
+    reduceShape should not include "SortMergeJoin"
+    ColumnarPlanner.tryRun(reduced.plan).isDefined shouldBe true
+    Task.resetSortMergeJoinRunsForTest()
+    val sums = reduced.collect().toMap
+    Task.sortMergeJoinRunsForTest shouldBe 0
+    sums shouldBe Map(1 -> 60L, 2 -> 20L)
+    ScarletConf.set(saved.copy(columnarExecution = false))
+    val rowSums = reduced.collect().toMap
+    ScarletConf.set(saved)
+    sums shouldBe rowSums
   }
 
   "a generic value sort" should "decline tryRun and stay off the columnar arm" in {
@@ -475,6 +597,42 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     ColumnarPlanner.partitioning(plan).isEmpty shouldBe true
     ColumnarPlanner.tryRun(plan).isEmpty shouldBe true
   }
+
+  private def assertProbedCount(
+      counted: DistCollection[(Int, Int)],
+      expected: Map[Int, Int],
+  ): Unit =
+    val shape = ColumnarPlanner.lower(counted.plan).get.shape
+    shape should include("CountByKey(Exchange(Project(Filter")
+    shape should include("HashJoin")
+    shape should not include "SortMergeJoin"
+    shape should not include "BroadcastJoin"
+    shape should not include "JoinProbeSum"
+    ColumnarPlanner.tryRun(counted.plan).isDefined shouldBe true
+    Task.resetSortMergeJoinRunsForTest()
+    JoinWriteRuns.resetRunsForTest()
+    HashCount.resetByKeyForTest()
+    val counts = counted.collect().toMap
+    Task.sortMergeJoinRunsForTest shouldBe 0
+    JoinWriteRuns.runsForTest shouldBe 0L
+    HashCount.byKeyCallsForTest shouldBe 0
+    counts shouldBe expected
+    val saved = ScarletConf.get
+    ScarletConf.set(saved.copy(columnarExecution = false))
+    val rowCounts = counted.collect().toMap
+    ScarletConf.set(saved)
+    counts shouldBe rowCounts
+    ScarletConf.set(saved.copy(columnarBatchSize = 1))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      JoinWriteRuns.resetRunsForTest()
+      HashCount.resetByKeyForTest()
+      Task.resetSortMergeJoinRunsForTest()
+      counted.collect().toMap shouldBe counts
+      JoinWriteRuns.runsForTest shouldBe 0L
+      HashCount.byKeyCallsForTest shouldBe 0
+      Task.sortMergeJoinRunsForTest shouldBe 0
+    finally ScarletConf.set(saved)
 
   private def filtered(keys: Array[Int], values: Array[Int]): DistCollection[(Int, Int)] =
     DistCollection
