@@ -20,11 +20,11 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * and a second map stay empty. One project under
  * `sortByStringKey` lowers. One key or value filter immediately above that project lowers too.
  * `mapValues`, a second map, a second slot, and a whole-row filter above the project stay empty.
- * One int-pair project under `sortByIntValueDesc` lowers. One `MapKey` on a scan or an int-pair
- * filter stack under that sort lowers too. One key or value filter immediately above that map
- * lowers. One int `mapValues` on a scan or an int-pair filter stack lowers under that sort. A
- * second map, a slot above that project or that `mapValues`, and a project under the map stay
- * empty.
+ * One int-pair project under `sortByIntValueDesc` lowers. One key or value filter immediately
+ * above that project lowers too. One `MapKey` on a scan or an int-pair filter stack under that
+ * sort lowers too. One key or value filter immediately above that map lowers. One int `mapValues`
+ * on a scan or an int-pair filter stack lowers under that sort. A second map, a slot above that
+ * `mapValues`, and a project under the map stay empty.
  */
 class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 

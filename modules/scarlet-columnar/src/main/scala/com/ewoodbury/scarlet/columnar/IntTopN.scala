@@ -26,7 +26,10 @@ private[scarlet] object IntTopN:
 
   private val batchCalls = new AtomicInteger
 
-  /** [[sortBatches]] and [[takeBatches]] calls since the last [[resetBatchesForTest]]. */
+  /**
+   * [[sortSelected]] and [[takeSelected]] calls since the last [[resetBatchesForTest]].
+   * [[sortBatches]] and [[takeBatches]] count through those entries.
+   */
   private[scarlet] def batchCallsForTest: Int = batchCalls.get
 
   /** Clears [[batchCallsForTest]]. */
@@ -34,6 +37,7 @@ private[scarlet] object IntTopN:
     batchCalls.set(0)
 
   def takeSelected(selected: Vector[Selected], limit: Int): ColumnBatch =
+    val _ = batchCalls.incrementAndGet()
     require(limit >= 0, s"top-N limit must be non-negative, got $limit")
     if (limit == 0) then ColumnBatches.emptyIntPairs
     else
@@ -43,7 +47,6 @@ private[scarlet] object IntTopN:
       else heapSelect(selected, limit)
 
   def takeBatches(batches: Vector[ColumnBatch], limit: Int): ColumnBatch =
-    val _ = batchCalls.incrementAndGet()
     takeSelected(denseSelected(batches), limit)
 
   /**
@@ -76,10 +79,10 @@ private[scarlet] object IntTopN:
         merge(heaps, cap)
 
   def sortSelected(selected: Vector[Selected]): Vector[ColumnBatch] =
+    val _ = batchCalls.incrementAndGet()
     Vector(sortLive(selected))
 
   def sortBatches(batches: Vector[ColumnBatch]): Vector[ColumnBatch] =
-    val _ = batchCalls.incrementAndGet()
     sortSelected(denseSelected(batches))
 
   private def denseSelected(batches: Vector[ColumnBatch]): Vector[Selected] =
