@@ -69,8 +69,10 @@ private[execution] object SelectedSort:
 
   /**
    * Long `sortByLongKey`. Same handoff as [[intKey]]. A null key orders as zero and stays null.
-   * `preserveAbsence` is passed for symmetry with the int sort. It does not change the long
-   * encode.
+   * The `None` path interprets the child. One long-pair project writes both columns there, and
+   * [[RankSplitLong]] sorts those batches. This does not call `visitKeys`. A project child has no
+   * survivor index, so that path does not spill the index. `preserveAbsence` is passed for
+   * symmetry with the int sort. It does not change the long encode.
    */
   def longKey(
       source: Plan[(Long, Long)],

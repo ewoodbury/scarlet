@@ -383,9 +383,9 @@ private[execution] object ColumnarInterpreter:
             s"physical tree does not match ${plan.getClass.getSimpleName}",
           )
     // A string-pair filter is not [[FilterChain.accepts]]. A key or value stack stays in
-    // [[StringPairWalk]]. A whole-row string stack is one selection pass there. A long-pair row
-    // filter still chains one kernel per filter on this path. Collect reads
-    // [[FilterChain.selected]].
+    // [[StringPairWalk]]. A whole-row string stack is one selection pass there. A long-pair stack
+    // of two or more atoms is one selection pass in [[FilterChain.run]]. A lone long-pair filter
+    // still chains. A sort reads [[FilterChain.selected]], which does not compact.
     // `accepts` walks the logical plan, so it runs only for a filter node.
     case (logical, physical @ PhysicalOp.Filter(child, _))
         if child.kind eq PhysicalOp.Kind.StringPairs =>
@@ -827,7 +827,8 @@ private[execution] object ColumnarInterpreter:
     case (Plan.SortByLongKeyOp(source), PhysicalOp.SortByLongKey(child)) =>
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
-      // Same handoff as the int sort: copy the prefix, drop the source batches, then radix-sort.
+      // The `None` path is a scan or one long-pair project, which writes both columns.
+      // RankSplitLong sorts those batches and does not call visitKeys.
       SelectedSort.longKey(source, child, ordinals)
     case (Plan.SortByStringKeyOp(source), PhysicalOp.SortByStringKey(child)) =>
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
