@@ -22,7 +22,7 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * key. A value predicate is not called on a null projected value. A present partner on the other
  * column is still tested, and a null partner does not create a group. A second slot, a whole-row
  * filter, and a second map stay on the published selection path. A long slot above a long project
- * has its own arm. A string slot-above is not this arm. An int [[PhysicalOp.MapKey]] is reduced
+ * has its own arm. A string slot-above is [[stringByKey]]. An int [[PhysicalOp.MapKey]] is reduced
  * from that map's source morsels. Each present key is passed to the `Int => Int` witness. A null
  * key is not passed and is not inserted. A null value is dropped and does not create a group. That
  * pair batch is not published, and [[HashReduce.byKey]] is not called. One [[Plan.FilterKeysOp]]
@@ -616,6 +616,102 @@ private[execution] object ReduceArms:
         .filter(FoldedLongReduce.admits)
     }
 
+  /**
+   * One key or value slot directly above one string-pair project. The project's input is
+   * interpreted, then each morsel is reduced through [[StringPairProject.visitReduced]]. `None`
+   * when a second map sits under the project, when the step is not one string key or int value, or
+   * when the project is not on a scan or a string-pair filter stack. A null key and a null value
+   * are passed to the adapter. A null projected key is dropped and the key predicate is not
+   * called. A null projected value throws [[ColumnarFallback]]. [[StringHashReduce.byKey]] is not
+   * called. A second slot, a whole-row filter, a second map, and a bare project are `None`.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def reduceAboveProjectedString(
+      source: Plan[_],
+      child: PhysicalOp,
+      op: (Int, Int) => Int,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    val matched = (source, child) match
+      case (
+            Plan.FilterKeysOp(Plan.MapOp(inner, fn), _),
+            PhysicalOp.Filter(project @ PhysicalOp.Project(under), PhysicalOp.Slot.Key),
+          ) if StringPairSlot.oneProject(project) =>
+        Some((inner, under, fn))
+      case (
+            Plan.FilterValuesOp(Plan.MapOp(inner, fn), _),
+            PhysicalOp.Filter(project @ PhysicalOp.Project(under), PhysicalOp.Slot.Value),
+          ) if StringPairSlot.oneProject(project) =>
+        Some((inner, under, fn))
+      case _ => None
+    matched.flatMap { (inner, under, fn) =>
+      if (deeperMap(inner, under)) then None
+      else
+        oneStringSlot(source, child).map { step =>
+          val adapted = StringPairProject.adapt(fn)
+          val columns =
+            try interpretAt(inner, under, selectedPartition, preserveAbsence, ordinals)
+            catch
+              case _: NullPointerException =>
+                throw new ColumnarFallback("reduceByKey source has a null pair component")
+          columns match
+            case Columns.StringPairs(batches) =>
+              ProjectedStringAboveReduce.reduce(
+                batches,
+                adapted,
+                step,
+                width,
+                workers,
+                batchSize,
+                op,
+              )
+            case _ =>
+              throw new IllegalStateException("pair project reduce expected string pairs")
+        }
+    }
+
+  /**
+   * One string key or int value on the projected pair. A row step and a second slot are `None`.
+   */
+  private def oneStringSlot(source: Plan[_], child: PhysicalOp): Option[Selection.Step] =
+    PredicatePlan.compile(source, child).flatMap { compiled =>
+      PredicatePlan.selectionSteps(compiled) match
+        case Some(Vector(step @ Selection.Step.Utf8(0, _))) => Some(step)
+        case Some(Vector(step @ Selection.Step.Int32(1, _))) => Some(step)
+        case _ => None
+    }
+
+  /**
+   * Forces the published filter interpret for one body. The bench times that path in the same run
+   * as the slot arm. Workers do not read the flag: [[stringByKey]] checks it before dispatch.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private[execution] def withPublishedFilter[A](body: => A): A =
+    forcePublished.set(java.lang.Boolean.TRUE)
+    try body
+    finally forcePublished.remove()
+
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def forcePublishedFilter: Boolean =
+    val flag = forcePublished.get()
+    flag != null && flag.booleanValue()
+
+  private val forcePublished = new ThreadLocal[java.lang.Boolean]
+
+  /**
+   * String `reduceByKey`. One key or value slot directly above one string-pair project reduces
+   * from that project's input and does not publish the pair batch. A null input key is passed to
+   * the adapter. A null projected key is dropped and the key predicate is not called. A present
+   * projected key and int value are inserted into [[StringHashReduce]]. A null projected value
+   * throws [[ColumnarFallback]]. `""` is present. `"é"` and `"e\u0301"` stay distinct. A second
+   * slot, a whole-row filter, a second map, and a bare project stay on the published interpret
+   * path, which calls [[StringHashReduce.byKey]].
+   */
   def stringByKey[V](
       source: Plan[_],
       child: PhysicalOp,
@@ -632,25 +728,44 @@ private[execution] object ReduceArms:
     val width = ColumnarPlanner.shuffleWidth
     val workers = ColumnarPlanner.parallelism
     val batchSize = ColumnarPlanner.batchSize
-    FilterChain.selected(
-      source,
-      child,
-      selectedPartition,
-      preserveAbsence,
-      ordinals,
-    ) match
-      case Some(parts) =>
-        StringPairWalk.refuseSelectedNullValues(parts)
-        Columns.StringPairs(StringHashReduce.byKeySelected(parts, width, workers, batchSize, op))
-      case None =>
-        val batches = StringPairWalk.batches(
-          interpretAt(
-            source,
-            child,
-            selectedPartition,
-            preserveAbsence,
-            ordinals,
-          ),
+    val reduced =
+      if (forcePublishedFilter) then None
+      else
+        reduceAboveProjectedString(
+          source,
+          child,
+          op,
+          selectedPartition,
+          preserveAbsence,
+          ordinals,
+          width,
+          workers,
+          batchSize,
         )
-        StringPairWalk.refuseNullValues(batches)
-        Columns.StringPairs(StringHashReduce.byKey(batches, width, workers, batchSize, op))
+    reduced match
+      case Some(batches) => Columns.StringPairs(batches)
+      case None =>
+        FilterChain.selected(
+          source,
+          child,
+          selectedPartition,
+          preserveAbsence,
+          ordinals,
+        ) match
+          case Some(parts) =>
+            StringPairWalk.refuseSelectedNullValues(parts)
+            Columns.StringPairs(
+              StringHashReduce.byKeySelected(parts, width, workers, batchSize, op),
+            )
+          case None =>
+            val batches = StringPairWalk.batches(
+              interpretAt(
+                source,
+                child,
+                selectedPartition,
+                preserveAbsence,
+                ordinals,
+              ),
+            )
+            StringPairWalk.refuseNullValues(batches)
+            Columns.StringPairs(StringHashReduce.byKey(batches, width, workers, batchSize, op))
