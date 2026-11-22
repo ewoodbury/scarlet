@@ -75,8 +75,9 @@ object ColumnarPlanner:
    * long or string outer join makes [[tryRun]] return `None`. [[SortLowering]] accepts an int,
    * long, or string key sort of a scan, or of filters over that scan. One int-pair project on that
    * scan or filter stack lowers under [[Plan.SortByIntKeyOp]]. One string-pair project on that
-   * scan or filter stack lowers under [[Plan.SortByStringKeyOp]]. The function is not read.
-   * `mapValues`, a second map, a filter above that project, a map under a value sort, and every
+   * scan or filter stack lowers under [[Plan.SortByStringKeyOp]]. One key or value filter
+   * immediately above that project lowers too. Neither function is read. `mapValues`, a second
+   * map, a second slot, a whole-row filter above the project, a map under a value sort, and every
    * other map, aggregate, or join under a sort stay on the row path. One filter above an int,
    * long, or string key sort lowers to [[PhysicalOp.Filter]] on [[PhysicalOp.Slot.Row]] around
    * that sort, and only for a fully present key column. The pair-row filter drops a null key while

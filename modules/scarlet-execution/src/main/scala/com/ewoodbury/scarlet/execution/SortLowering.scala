@@ -11,12 +11,13 @@ import com.ewoodbury.scarlet.core.Plan
  * [[Plan.SortByIntValueDescOp]] lowers for a scan or filters only, to
  * [[PhysicalOp.SortByIntValueDesc]]. [[Plan.SortByLongKeyOp]] lowers for that same scan-or-filter
  * shape on long pairs, to [[PhysicalOp.SortByLongKey]]. [[Plan.SortByStringKeyOp]] lowers for a
- * scan of string pairs, filters over that scan, or one string-pair [[PhysicalOp.Project]] on that
- * scan or filter stack, to [[PhysicalOp.SortByStringKey]]. The project function is not read. The
- * sort reads those batches through [[com.ewoodbury.scarlet.columnar.StringRankSplit]] and does not
- * call `visitKeys`. `mapValues`, a second map, a slot or whole-row filter above that project, a
- * long project, a map under a value sort, and any other map, aggregate, or join under a sort stay
- * on the row path. A filter whose child is not that scan does not lower. [[acceptsAsChild]]
+ * scan of string pairs, filters over that scan, one string-pair [[PhysicalOp.Project]] on that
+ * scan or filter stack, or one key or value filter immediately above that project, to
+ * [[PhysicalOp.SortByStringKey]]. Neither function is read. The sort reads the published batches
+ * through [[com.ewoodbury.scarlet.columnar.StringRankSplit]] and does not call `visitKeys`.
+ * `mapValues`, a second map, a second slot, a whole-row filter above that project, a long project,
+ * a map under a value sort, and any other map, aggregate, or join under a sort stay on the row
+ * path. A filter above a second project, a map, or a join does not lower. [[acceptsAsChild]]
  * refuses every sort, so a join, aggregate, or projection above a sort stays on the row path. One
  * row filter above an int, long, or string key sort is admitted only for a fully present key
  * column. A slot filter, including a long-pair row filter and a whole-row string filter, sorts the
@@ -112,12 +113,22 @@ private[execution] object SortLowering:
     case _ => false
 
   /**
-   * A scan of string pairs, filters over that scan, or one string-pair project on that scan or
-   * filter stack. The project function is not read. A second project is not a scan or a filter.
-   * `mapValues` is not a project. A slot or whole-row filter above the project is not this shape.
+   * A scan of string pairs, filters over that scan, one string-pair project on that scan or filter
+   * stack, or one key or value filter immediately above that project. Neither function is read. A
+   * second project is not a scan or a filter. `mapValues` is not a project. A second slot, a
+   * whole-row filter above the project, and a filter above anything else are not this shape.
    */
   private def acceptsStringKeyChild(op: PhysicalOp): Boolean =
-    acceptsScanOrFilters(op, PhysicalOp.Kind.StringPairs) || StringPairSlot.oneProject(op)
+    acceptsScanOrFilters(op, PhysicalOp.Kind.StringPairs) || StringPairSlot.oneProject(op) ||
+      slotFilterAboveProject(op)
+
+  /**
+   * One key or value slot whose child is [[StringPairSlot.oneProject]]. The predicate is not read.
+   */
+  private def slotFilterAboveProject(op: PhysicalOp): Boolean = op match
+    case PhysicalOp.Filter(child, PhysicalOp.Slot.Key | PhysicalOp.Slot.Value) =>
+      StringPairSlot.oneProject(child)
+    case _ => false
 
   /**
    * A scan of `kind`, or filters over that scan. A map, aggregate, or join is not a sort child.
