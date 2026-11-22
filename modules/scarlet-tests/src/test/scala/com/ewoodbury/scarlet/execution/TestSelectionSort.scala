@@ -415,6 +415,68 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .isDefined shouldBe true
   }
 
+  "sortByIntValueDesc" should "sort one int-pair project through IntTopN" in {
+    val shifted = DistCollection
+      .ofIntPairs(Array(1, 2, 3), Array(10, 30, 20), 2)
+      .map((pair: (Int, Int)) => (pair._1, pair._2 + 1))
+      .sortByIntValueDesc
+    shape(shifted) shouldBe "SortByIntValueDesc(Project(Scan))"
+    collect(shifted) shouldBe Seq(2 -> 31, 3 -> 21, 1 -> 11)
+    collect(shifted) shouldBe row(shifted.collect().toSeq)
+    shifted.take(2) shouldBe List(2 -> 31, 3 -> 21)
+    shifted.take(2) shouldBe row(shifted.take(2))
+    collectAt(shifted, 1) shouldBe collectAt(shifted, 8192)
+
+    val under = DistCollection
+      .ofIntPairs(Array(1, 2, 3), Array(10, 30, 20), 2)
+      .filterKeys((key: Int) => key > 1)
+      .filterValues((value: Int) => value > 15)
+      .map((pair: (Int, Int)) => (pair._1, pair._2 + 1))
+      .sortByIntValueDesc
+    shape(under) shouldBe "SortByIntValueDesc(Project(FilterValue(FilterKey(Scan))))"
+    collect(under) shouldBe Seq(2 -> 31, 3 -> 21)
+    collect(under) shouldBe row(under.collect().toSeq)
+    under.take(1) shouldBe List(2 -> 31)
+
+    val sortPlan = shifted.plan match
+      case Plan.SortByIntValueDescOp(sourcePlan) => sourcePlan
+      case _ => fail("expected SortByIntValueDescOp")
+    val project =
+      ColumnarPlanner.lower(shifted.plan).getOrElse(fail("expected a value sort")) match
+        case PhysicalOp.SortByIntValueDesc(child) => child
+        case _ => fail("expected SortByIntValueDesc")
+    FilterChain
+      .selected(
+        sortPlan,
+        project,
+        selectedPartition = None,
+        preserveAbsence = true,
+        ColumnUse.ordinals(sortPlan, project),
+      ) shouldBe None
+    IntPairProject.resetPublishedForTest()
+    IntTopN.resetBatchesForTest()
+    collect(shifted) shouldBe Seq(2 -> 31, 3 -> 21, 1 -> 11)
+    IntPairProject.publishedForTest should be > 0
+    IntTopN.batchCallsForTest should be > 0
+
+    val nulls = DistCollection(
+      Seq(
+        intPair(boxedInt(1), boxedInt(5)),
+        intPair(boxedInt(2), noInt),
+        intPair(boxedInt(3), boxedInt(0)),
+        intPair(boxedInt(4), boxedInt(-1)),
+      ),
+      2,
+    ).map((pair: (Int, Int)) => copyPair(pair)).sortByIntValueDesc
+    shape(nulls) shouldBe "SortByIntValueDesc(Project(Scan))"
+    val nullFound = collect(nulls)
+    shown(nullFound) shouldBe Seq("1:5", "2:null", "3:0", "4:-1")
+    shown(nullFound) shouldBe shown(row(nulls.collect().toSeq))
+    shown(nulls.take(2)) shouldBe Seq("1:5", "2:null")
+    shown(collectAt(nulls, 1)) shouldBe shown(collectAt(nulls, 8192))
+    nullFound.exists(pair => !present(pair, 1)) shouldBe true
+  }
+
   "other maps" should "stay off sortByIntKey" in {
     val source = pairs
     val values = source.mapValues((value: Int) => value + 1).sortByIntKey
@@ -425,7 +487,8 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .map((pair: (Int, Int)) => (pair._1 + 1, pair._2))
       .filter((pair: (Int, Int)) => pair._2 > 0)
       .sortByIntKey
-    val byValue = source.map((pair: (Int, Int)) => (pair._1, pair._2)).sortByIntValueDesc
+    val valuesDesc = source.mapValues((value: Int) => value + 1).sortByIntValueDesc
+    val twiceDesc = twice.sortByIntValueDesc
     val second = source
       .map((pair: (Int, Int)) => (pair._1 + 1, pair._2))
       .filterKeys((key: Int) => key > 2)
@@ -435,6 +498,7 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .mapIntKey((key: Int) => key + 1)
       .filterKeys((key: Int) => key > 0)
       .sortByIntKey
+    val keyedDesc = source.mapIntKey((key: Int) => key + 1).sortByIntValueDesc
     val valueSlot = source
       .map((pair: (Int, Int)) => (pair._1, pair._2))
       .filterKeys((key: Int) => key > 0)
@@ -450,14 +514,18 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.lower(twice.plan).map(_.shape) shouldBe Some("Project(Project(Scan))")
     ColumnarPlanner.lower(twice.sortByIntKey.plan) shouldBe None
     ColumnarPlanner.lower(above.plan) shouldBe None
-    ColumnarPlanner.lower(byValue.plan) shouldBe None
+    ColumnarPlanner.lower(valuesDesc.plan) shouldBe None
+    ColumnarPlanner.lower(twiceDesc.plan) shouldBe None
     ColumnarPlanner.lower(second.plan) shouldBe None
     ColumnarPlanner.lower(mappedKey.plan) shouldBe None
+    ColumnarPlanner.lower(keyedDesc.plan) shouldBe None
     ColumnarPlanner.lower(valueSlot.plan) shouldBe None
     ColumnarPlanner.lower(longs.plan).map(_.shape) shouldBe Some("Project(Scan)")
     ColumnarPlanner.lower(longs.sortByIntKey.plan) shouldBe None
+    ColumnarPlanner.lower(longs.sortByIntValueDesc.plan) shouldBe None
     ColumnarPlanner.lower(strings.plan).map(_.shape) shouldBe Some("Project(Scan)")
     ColumnarPlanner.lower(strings.sortByIntKey.plan) shouldBe None
+    ColumnarPlanner.lower(strings.sortByIntValueDesc.plan) shouldBe None
     shape(bad) shouldBe "SortByIntKey(Project(Scan))"
     val lowered = ColumnarPlanner.lower(bad.plan).getOrElse(fail("expected a project sort"))
     a[ColumnarFallback] should be thrownBy {

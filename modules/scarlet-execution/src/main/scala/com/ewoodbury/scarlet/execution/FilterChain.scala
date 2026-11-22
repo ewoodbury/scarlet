@@ -93,8 +93,15 @@ private[execution] object FilterChain:
     // above a string-pair project publishes both columns when the caller interprets it.
     // `countByKey` of one such slot is handled before this decline. The index would hash the
     // project output instead of those batches, so a count that reaches here uses
-    // [[StringHashCount.byKey]].
-    if (MapIntKey.inTree(op) || StringPairSlot.filterCoversProject(op)) then None
+    // [[StringHashCount.byKey]]. An int-pair project under a value sort is the same decline:
+    // the index would name scan rows under the project. Interpret publishes the projected pairs,
+    // and [[com.ewoodbury.scarlet.columnar.IntTopN]] orders those batches. A null value orders as
+    // zero and stays null. A slot above that project is not [[SortLowering.pairProjectOnScan]].
+    if (
+        MapIntKey.inTree(op) || StringPairSlot.filterCoversProject(op) ||
+        SortLowering.pairProjectOnScan(op)
+      )
+    then None
     else selectIndexed(plan, op, selectedPartition, preserveAbsence, ordinals)
 
   private def selectIndexed(

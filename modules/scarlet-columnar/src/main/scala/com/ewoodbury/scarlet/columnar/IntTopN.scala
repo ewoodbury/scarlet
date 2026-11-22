@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import scala.annotation.tailrec
 
 /**
@@ -22,6 +24,15 @@ import scala.annotation.tailrec
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[scarlet] object IntTopN:
 
+  private val batchCalls = new AtomicInteger
+
+  /** [[sortBatches]] and [[takeBatches]] calls since the last [[resetBatchesForTest]]. */
+  private[scarlet] def batchCallsForTest: Int = batchCalls.get
+
+  /** Clears [[batchCallsForTest]]. */
+  private[scarlet] def resetBatchesForTest(): Unit =
+    batchCalls.set(0)
+
   def takeSelected(selected: Vector[Selected], limit: Int): ColumnBatch =
     require(limit >= 0, s"top-N limit must be non-negative, got $limit")
     if (limit == 0) then ColumnBatches.emptyIntPairs
@@ -32,6 +43,7 @@ private[scarlet] object IntTopN:
       else heapSelect(selected, limit)
 
   def takeBatches(batches: Vector[ColumnBatch], limit: Int): ColumnBatch =
+    val _ = batchCalls.incrementAndGet()
     takeSelected(denseSelected(batches), limit)
 
   /**
@@ -67,6 +79,7 @@ private[scarlet] object IntTopN:
     Vector(sortLive(selected))
 
   def sortBatches(batches: Vector[ColumnBatch]): Vector[ColumnBatch] =
+    val _ = batchCalls.incrementAndGet()
     sortSelected(denseSelected(batches))
 
   private def denseSelected(batches: Vector[ColumnBatch]): Vector[Selected] =
