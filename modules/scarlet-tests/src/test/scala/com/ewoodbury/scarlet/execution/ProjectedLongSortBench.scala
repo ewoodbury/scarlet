@@ -11,13 +11,13 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  *
  * The generator is [[LongPairMapBench]]: keys are `row % 1024`, values are that LCG stored as
  * longs, two source partitions. `CROSS_FILTERS=2` is `k % 3 != 0` then `v >= 0` before the map.
- * The action is `data.map { case (k, v) => (k % 100, v) }.sortByLongKey`. The checksum is ordered:
- * `hash * 31 + key` then `hash * 31 + value`, taken from the row path first. `countByKey` on this
- * generator is [[LongPairMapBench]] and is not this action.
+ * The action is `data.map { case (k, v) => (k % 100, v) }.filterKeys(_ < 50).sortByLongKey`. The
+ * checksum is ordered: `hash * 31 + key` then `hash * 31 + value`, taken from the row path first.
+ * `countByKey` on this generator is [[LongPairMapBench]] and is not this action.
  *
- * Spill is on for this process only. Warmup 80, rounds 30, and four threads are the defaults.
- * The row arm runs first. A plan that does not lower prints `arm row` and does not time a second
- * arm. `$CP` is the `scarlet-tests` test fullClasspath.
+ * Spill is on for this process only. Warmup 80, rounds 30, and four threads are the defaults. The
+ * row arm runs first. A plan that does not lower prints `arm row` and does not time a second arm.
+ * `$CP` is the `scarlet-tests` test fullClasspath.
  *
  * {{{
  * CROSS_ROWS=10000000 CROSS_THREADS=4 CROSS_WARMUP=80 CROSS_ROUNDS=30 CROSS_FILTERS=2 \
@@ -75,7 +75,7 @@ object ProjectedLongSortBench:
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)
 
-  /** Filtered long pairs, then `(k % 100, v)`, then `sortByLongKey`. */
+  /** Filtered long pairs, then `(k % 100, v)`, then `filterKeys(_ < 50)`, then `sortByLongKey`. */
   private def query(rows: Int, filters: Int): DistCollection[(Long, Long)] =
     val keys = Array.tabulate(rows)(row => (row % groups).toLong)
     val values = lcgValues(rows)
@@ -83,7 +83,10 @@ object ProjectedLongSortBench:
     val keyed = data.filterKeys((key: Long) => key % 3L != 0L)
     val filtered =
       if (filters == 1) then keyed else keyed.filterValues((value: Long) => value >= 0L)
-    filtered.map { case (key, value) => (key % 100L, value) }.sortByLongKey
+    filtered
+      .map { case (key, value) => (key % 100L, value) }
+      .filterKeys((key: Long) => key < 50L)
+      .sortByLongKey
 
   private def time(
       name: String,

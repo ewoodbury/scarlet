@@ -841,8 +841,10 @@ private[execution] object ColumnarInterpreter:
     case (Plan.SortByLongKeyOp(source), PhysicalOp.SortByLongKey(child)) =>
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
-      // The `None` path is a scan or one long-pair project, which writes both columns.
-      // RankSplitLong sorts those batches and does not call visitKeys.
+      // The `None` path is a scan or one long-pair project. Those write both columns. One key or
+      // value filter above that project keeps a survivor index of the projected batches. The slot
+      // is not applied to the scan under the project. RankSplitLong sorts that index and does not
+      // call visitKeys.
       SelectedSort.longKey(source, child, ordinals)
     case (Plan.SortByStringKeyOp(source), PhysicalOp.SortByStringKey(child)) =>
       // Boundary guard: take runs the whole sort, so a selector never reaches this arm.

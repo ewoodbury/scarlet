@@ -78,23 +78,23 @@ object ColumnarPlanner:
    * function is not read. A null input key stays null, is not passed to the key function, and
    * orders as zero. [[com.ewoodbury.scarlet.columnar.RankSplit]] sorts the published pairs. One
    * long-pair project lowers under [[Plan.SortByLongKeyOp]]. One string-pair project lowers under
-   * [[Plan.SortByStringKeyOp]]. One key or value filter immediately above that int or string
-   * project lowers too. A slot or whole-row filter above the key map, `mapValues`, a second map, a
-   * slot or whole-row filter above the long project, a second slot, a whole-row filter above the
-   * string project, and every other map, aggregate, or join under a sort stay on the row path. One
-   * [[PhysicalOp.MapKey]] on a scan or an int-pair filter stack, or one key or value filter
-   * immediately above that map, lowers under [[Plan.SortByIntValueDescOp]]. A second slot, a
-   * whole-row filter, and that slot under a key sort stay on the row path. One filter above an
-   * int, long, or string key sort lowers to [[PhysicalOp.Filter]] on [[PhysicalOp.Slot.Row]]
-   * around that sort, and only for a fully present key column. The pair-row filter drops a null
-   * key while the row path keeps it. The sort is [[SortLowering.lowerInt]],
-   * [[SortLowering.lowerLong]], or [[SortLowering.lowerString]], not [[lowerChild]].
-   * [[SortLowering.acceptsAsChild]] stays false, so a null key, a second filter, a key or value
-   * filter above the sort, and every other parent stay on the row path. A slot filter sorts the
-   * survivor index. Over the budget, with spill on, that index is spilled. A long-pair row filter
-   * and a whole-row string filter sort that index too. A long sort spills when `spillEnabled` is
-   * on and the retained estimate exceeds `spillBudgetBytes`. The physical op stays
-   * `SortByLongKey`. A string sort spills on that same budget. The physical op stays
+   * [[Plan.SortByStringKeyOp]]. One key or value filter immediately above that int, long, or
+   * string project lowers too. Neither function is read. A slot or whole-row filter above the key
+   * map, `mapValues`, a second map, a second slot or a whole-row filter above the long project, a
+   * second slot, a whole-row filter above the string project, and every other map, aggregate, or
+   * join under a sort stay on the row path. One [[PhysicalOp.MapKey]] on a scan or an int-pair
+   * filter stack, or one key or value filter immediately above that map, lowers under
+   * [[Plan.SortByIntValueDescOp]]. A second slot, a whole-row filter, and that slot under a key
+   * sort stay on the row path. One filter above an int, long, or string key sort lowers to
+   * [[PhysicalOp.Filter]] on [[PhysicalOp.Slot.Row]] around that sort, and only for a fully
+   * present key column. The pair-row filter drops a null key while the row path keeps it. The sort
+   * is [[SortLowering.lowerInt]], [[SortLowering.lowerLong]], or [[SortLowering.lowerString]], not
+   * [[lowerChild]]. [[SortLowering.acceptsAsChild]] stays false, so a null key, a second filter, a
+   * key or value filter above the sort, and every other parent stay on the row path. A slot filter
+   * sorts the survivor index. Over the budget, with spill on, that index is spilled. A long-pair
+   * row filter and a whole-row string filter sort that index too. A long sort spills when
+   * `spillEnabled` is on and the retained estimate exceeds `spillBudgetBytes`. The physical op
+   * stays `SortByLongKey`. A string sort spills on that same budget. The physical op stays
    * `SortByStringKey`. At or under the budget, and whenever spill is off, the split stays in
    * memory and writes nothing. One map directly above an int, string, or long `groupByKey` lowers
    * to [[PhysicalOp.GroupedDecode]]. The group runs once. [[ColumnarInterpreter.decodeFor]] yields
