@@ -90,7 +90,7 @@ object HashCount:
         if (refuseBeforeCombine) then refuse(rows)
         val keysOnly = batches.map(batch => ColumnBatches.takeColumn(batch, 0))
         val combined = PartialCombine.perBatch(keysOnly, batchSize, parallelism, int32, addCounts)
-        finish(combined, numPartitions, parallelism, batchSize)
+        exchange(combined, numPartitions, parallelism, batchSize)
       finally releaseWorkers()
 
   /**
@@ -119,7 +119,7 @@ object HashCount:
           (one, from, until) => int32Selected(one, from, until),
           addCounts,
         )
-        finish(combined, numPartitions, parallelism, batchSize)
+        exchange(combined, numPartitions, parallelism, batchSize)
       finally releaseWorkers()
 
   /**
@@ -127,8 +127,9 @@ object HashCount:
    *
    * `rows` is the estimate [[int32]] charges for one morsel. A non-positive estimate publishes an
    * empty pair batch and does not call `supply`. `supply` receives `add` and calls it once per
-   * present key. A null key is the caller's to skip. This is not [[byKey]]: nothing here is a
-   * published pair project.
+   * present key. A null key is the caller's to skip. A new key that does not fit doubles the
+   * table; the scan kernels still refuse a full table. This is not [[byKey]]: nothing here is a
+   * published pair project, and [[byKeyCallsForTest]] does not move.
    */
   private[scarlet] def partialKeys(rows: Int)(supply: (Int => Unit) => Unit): ColumnBatch =
     require(rows >= 0, s"row estimate must be >= 0, got $rows")
@@ -161,7 +162,14 @@ object HashCount:
       val slots = ColumnHash.tableSize(capped).toLong
       rows * (4L + 1L) + slots * (4L + 4L + 1L + 4L)
 
-  private def finish(
+  /**
+   * Exchange `(key, count)` partials and add each bucket.
+   *
+   * [[byKey]] finishes here. An empty vector is `numPartitions` empty pair batches. A non-empty
+   * vector is [[HashExchange.partitionAll]] then [[addCounts]], or [[HashCountSpill]] when a
+   * bucket is over the budget. This does not increment [[byKeyCallsForTest]].
+   */
+  private[scarlet] def exchange(
       combined: Vector[ColumnBatch],
       numPartitions: Int,
       parallelism: Int,
@@ -293,14 +301,16 @@ object HashCount:
         notePeak(need)
         created
 
-  private final class Table(capacity: Int):
-    private val mask: Int = capacity - 1
-    private val limit: Int = capacity >>> 1
-    private val keys: Array[Int] = new Array[Int](capacity)
-    private val counts: Array[Int] = new Array[Int](capacity)
-    private val state: Array[Byte] = new Array[Byte](capacity)
-    private val slots: Array[Int] = new Array[Int](capacity)
+  private final class Table(initial: Int):
+    private var capacity: Int = initial
+    private var mask: Int = capacity - 1
+    private var limit: Int = capacity >>> 1
+    private var keys: Array[Int] = new Array[Int](capacity)
+    private var counts: Array[Int] = new Array[Int](capacity)
+    private var state: Array[Byte] = new Array[Byte](capacity)
+    private var slots: Array[Int] = new Array[Int](capacity)
     private var occupied: Int = 0
+    private var allowGrow: Boolean = false
 
     def accepts(need: Int): Boolean = keys.length >= need
 
@@ -406,21 +416,54 @@ object HashCount:
         rows,
       )
 
-    /** Hands `add` to `supply`. The lambda stays inside [[Table]] so `add` stays private. */
+    /**
+     * Hands `add` to `supply`. The lambda stays inside [[Table]] so `add` stays private. A new key
+     * past the load limit doubles the arrays. Scan inserts leave [[allowGrow]] false and still
+     * throw.
+     */
     def supplyKeys(supply: (Int => Unit) => Unit): Unit =
-      supply(key => add(key, 1))
+      allowGrow = true
+      try supply(key => add(key, 1))
+      finally allowGrow = false
 
     private def add(key: Int, weight: Int): Unit =
       val slot = locate(key)
       if (state(slot) == 0) then
         if (occupied >= limit) then
-          throw new IllegalStateException(s"hash count table is full at $occupied groups")
-        state(slot) = 1
-        keys(slot) = key
-        counts(slot) = weight
-        slots(occupied) = slot
-        occupied += 1
+          if (allowGrow) then
+            grow()
+            add(key, weight)
+          else throw new IllegalStateException(s"hash count table is full at $occupied groups")
+        else
+          state(slot) = 1
+          keys(slot) = key
+          counts(slot) = weight
+          slots(occupied) = slot
+          occupied += 1
       else counts(slot) = counts(slot) + weight
+
+    /** Doubles capacity and reinserts every live key. The new load limit holds the old keys. */
+    private def grow(): Unit =
+      val previousKeys = keys
+      val previousCounts = counts
+      val previousSlots = slots
+      val previous = occupied
+      val next = ColumnHash.doubled(capacity)
+      capacity = next
+      mask = next - 1
+      limit = next >>> 1
+      keys = new Array[Int](next)
+      counts = new Array[Int](next)
+      state = new Array[Byte](next)
+      slots = new Array[Int](next)
+      occupied = 0
+      notePeak(next)
+      var cursor = 0
+      while (cursor < previous) {
+        val oldSlot = previousSlots(cursor)
+        add(previousKeys(oldSlot), previousCounts(oldSlot))
+        cursor += 1
+      }
 
     private def locate(key: Int): Int =
       var slot = ColumnHash.mix(key) & mask

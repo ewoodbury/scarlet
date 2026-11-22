@@ -21,8 +21,9 @@ import ColumnPipeline.JoinInput
  * two owned int-pair sides multiplies per-key counts and does not copy values. Any other count
  * uses that same exchange and sums chain lengths. [[sumValuePair]] uses that same exchange and
  * adds `build * 31 + probe` per present match. It does not write the match columns. [[projectSum]]
- * uses that same exchange, projects each hit, and sums under the projected key. [[inner]] still
- * writes the match columns.
+ * uses that same exchange, projects each hit, and sums under the projected key. [[projectCount]]
+ * uses that same exchange, offers each projected key, and counts. [[inner]] still writes the match
+ * columns.
  */
 private[execution] object JoinArms:
 
@@ -112,6 +113,32 @@ private[execution] object JoinArms:
   ): Vector[ColumnBatch] =
     val (build, probe, slice) = sides(left, right, leftOp, rightOp, preserveAbsence, ordinals)
     ProjectedJoinSum.reduce(
+      build,
+      probe,
+      ColumnarPlanner.shuffleWidth,
+      ColumnarPlanner.parallelism,
+      ColumnarPlanner.batchSize,
+      slice,
+      mapper,
+    )
+
+  /**
+   * Grouped count of a triple project over the exchange [[inner]] uses. Match columns are not
+   * written. Each probe hit offers its projected key into [[HashCount.partialKeys]]. Those
+   * partials are exchanged the way [[HashCount.byKey]] exchanges them. An over-budget build bucket
+   * declines inside [[ProjectedJoinCount.count]].
+   */
+  def projectCount(
+      left: Plan[_],
+      right: Plan[_],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      mapper: TripleToIntLong.TripleMap,
+  ): Vector[ColumnBatch] =
+    val (build, probe, slice) = sides(left, right, leftOp, rightOp, preserveAbsence, ordinals)
+    ProjectedJoinCount.count(
       build,
       probe,
       ColumnarPlanner.shuffleWidth,
