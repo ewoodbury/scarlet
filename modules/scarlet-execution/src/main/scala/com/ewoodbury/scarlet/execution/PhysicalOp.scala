@@ -434,20 +434,22 @@ enum PhysicalOp:
   case GroupedDecode(child: PhysicalOp)
 
   /**
-   * `countByKey`. The child is an [[PhysicalOp.Exchange]]. The kernel shuffles. A null key is
-   * dropped. The value column is not read, so a null value still counts. One `(key, count)` row is
-   * published per distinct key, including an empty bucket. Output kind is
-   * [[PhysicalOp.Kind.Pairs]] for a [[PhysicalOp.Kind.Pairs]] child and for a triple
-   * [[PhysicalOp.Project]] whose schema is `[Int32, Int64]`. That project keeps kind
-   * [[PhysicalOp.Kind.Triples]]; the count still publishes int pairs and reads only the projected
-   * key. A [[PhysicalOp.Kind.LongPairs]] child publishes [[PhysicalOp.Kind.LongCounts]], and a
-   * [[PhysicalOp.Kind.StringPairs]] child publishes [[PhysicalOp.Kind.StringPairs]]. Any other
-   * child is a planner bug. The count is an `Int` and wraps. A long count is `[Int64, Int32]`. The
-   * long estimate charges 8-byte keys. The string estimate charges dictionary bytes. With spill
-   * off, an input that does not fit the budget throws
-   * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] before the table is allocated, and the
-   * action fails instead of rerunning on rows. With spill on, an over-budget post-exchange bucket
-   * spills. A count table that still does not fit throws
+   * `countByKey`. The child is an [[PhysicalOp.Exchange]], or an int inner [[HashJoin]] of two
+   * exchanges. The exchange child is shuffled by the kernel. The hash-join child is not wrapped in
+   * another exchange and has no inserted project: the join key is unchanged, and the count is the
+   * per-key product of the two sides. A null key is dropped. The value column is not read, so a
+   * null value still counts. One `(key, count)` row is published per distinct key, including an
+   * empty bucket. Output kind is [[PhysicalOp.Kind.Pairs]] for a [[PhysicalOp.Kind.Pairs]] child,
+   * for that hash join, and for a triple [[PhysicalOp.Project]] whose schema is `[Int32, Int64]`.
+   * That project keeps kind [[PhysicalOp.Kind.Triples]]; the count still publishes int pairs and
+   * reads only the projected key. A [[PhysicalOp.Kind.LongPairs]] child publishes
+   * [[PhysicalOp.Kind.LongCounts]], and a [[PhysicalOp.Kind.StringPairs]] child publishes
+   * [[PhysicalOp.Kind.StringPairs]]. Any other child is a planner bug. The count is an `Int` and
+   * wraps. A long count is `[Int64, Int32]`. The long estimate charges 8-byte keys. The string
+   * estimate charges dictionary bytes. With spill off, an input that does not fit the budget
+   * throws [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] before the table is allocated,
+   * and the action fails instead of rerunning on rows. With spill on, an over-budget post-exchange
+   * bucket spills. A count table that still does not fit throws
    * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]]. The running partial is `O(distinct
    * keys)`.
    */
@@ -567,6 +569,7 @@ enum PhysicalOp:
             s"groupByKey column is $other, expected int, long, or string pairs",
           )
     case GroupedDecode(child) => child.kind
+    case CountByKey(PhysicalOp.HashJoin(_, _)) => PhysicalOp.Kind.Pairs
     case CountByKey(child) =>
       if (PhysicalSchema.isIntLong(child.schema)) then PhysicalOp.Kind.Pairs
       else

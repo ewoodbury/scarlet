@@ -86,3 +86,41 @@ class TestJoinKeyCount extends AnyFlatSpec with Matchers:
     other.addOne(5000)
     batched.product(other) shouldBe 6L
   }
+
+  it should "publish each key product and skip a miss" in {
+    val build = JoinKeyCount.fresh()
+    build.addOne(1)
+    build.addOne(1)
+    build.addOne(-4)
+    build.addOne(9)
+    val probe = JoinKeyCount.fresh()
+    probe.addOne(1)
+    probe.add(1, 1L)
+    probe.addOne(-4)
+    probe.addOne(3)
+
+    val (keys, counts) = JoinKeyCount.productPairs(build, probe)
+    keys.zip(counts).toMap shouldBe Map(1 -> 4, -4 -> 1)
+    keys.length shouldBe 2
+  }
+
+  it should "wrap a per-key product to 32 bits" in {
+    val build = JoinKeyCount.fresh()
+    build.add(7, Int.MaxValue.toLong)
+    val probe = JoinKeyCount.fresh()
+    probe.add(7, 2L)
+
+    val (keys, counts) = JoinKeyCount.productPairs(build, probe)
+    keys.zip(counts).toMap shouldBe Map(7 -> -2)
+  }
+
+  it should "publish nothing when the sides do not overlap" in {
+    val build = JoinKeyCount.fresh()
+    build.addOne(4)
+    val probe = JoinKeyCount.fresh()
+    probe.addOne(8)
+
+    val (keys, counts) = JoinKeyCount.productPairs(build, probe)
+    keys.length shouldBe 0
+    counts.length shouldBe 0
+  }

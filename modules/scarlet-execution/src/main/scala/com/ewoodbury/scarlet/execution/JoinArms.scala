@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import scala.annotation.unused
+
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 
@@ -123,6 +125,31 @@ private[execution] object JoinArms:
     )
 
   /**
+   * Grouped count of the join key. There is no user map. Each probe hit offers that key into
+   * [[HashCount.partialKeys]]. Match columns are not written. An over-budget build bucket declines
+   * inside [[ProjectedJoinCount.count]].
+   */
+  def projectCount(
+      left: Plan[_],
+      right: Plan[_],
+      leftOp: PhysicalOp,
+      rightOp: PhysicalOp,
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): Vector[ColumnBatch] =
+    projectCounted(
+      left,
+      right,
+      leftOp,
+      rightOp,
+      preserveAbsence,
+      ordinals,
+      ProbeKey,
+      None,
+      false,
+    )
+
+  /**
    * Grouped count of a triple project over the exchange [[inner]] uses. Match columns are not
    * written. Each probe hit offers its projected key into [[HashCount.partialKeys]]. Those
    * partials are exchanged the way [[HashCount.byKey]] exchanges them. An over-budget build bucket
@@ -166,6 +193,13 @@ private[execution] object JoinArms:
       Some(keep),
       dropNull,
     )
+
+  /**
+   * The join key, as `(Int, Long)`, so [[TripleToIntLong.offer]] can drop the long. Not a user
+   * function. The value cells are unused because the count does not read them.
+   */
+  private object ProbeKey extends TripleToIntLong.TripleMap:
+    def apply(key: Int, @unused left: Int, @unused right: Int): Any = (key, 0L)
 
   private def projectCounted(
       left: Plan[_],
