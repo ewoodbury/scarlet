@@ -348,6 +348,73 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     found.exists(pair => !present(pair, 1)) shouldBe true
   }
 
+  it should "sort one slot above an int pair project through rank split" in {
+    val shifted = DistCollection
+      .ofIntPairs(Array(3, 1, 2), Array(30, 10, 20), 2)
+      .map((pair: (Int, Int)) => (pair._1 + 1, pair._2))
+    val keyed = shifted.filterKeys((key: Int) => key > 2).sortByIntKey
+    shape(keyed) shouldBe "SortByIntKey(FilterKey(Project(Scan)))"
+    collect(keyed) shouldBe Seq(3 -> 20, 4 -> 30)
+    collect(keyed) shouldBe row(keyed.collect().toSeq)
+    collectAt(keyed, 1) shouldBe collectAt(keyed, 8192)
+
+    // Value 10 fails `> 10`, so the mapped `(2, 10)` is dropped.
+    val valued = shifted.filterValues((value: Int) => value > 10).sortByIntKey
+    shape(valued) shouldBe "SortByIntKey(FilterValue(Project(Scan)))"
+    collect(valued) shouldBe Seq(3 -> 20, 4 -> 30)
+    collect(valued) shouldBe row(valued.collect().toSeq)
+    collectAt(valued, 1) shouldBe collectAt(valued, 8192)
+
+    val onStack = pairs
+      .filterKeys((key: Int) => key > 0)
+      .map((pair: (Int, Int)) => (pair._1 + 1, pair._2))
+      .filterKeys((key: Int) => key > 2)
+      .sortByIntKey
+    shape(onStack) shouldBe "SortByIntKey(FilterKey(Project(FilterKey(Scan))))"
+    collect(onStack) shouldBe row(onStack.collect().toSeq)
+
+    val nulls = DistCollection(
+      Seq(
+        intPair(boxedInt(1), boxedInt(10)),
+        intPair(noInt, boxedInt(99)),
+        intPair(boxedInt(-5), boxedInt(3)),
+        intPair(boxedInt(0), boxedInt(7)),
+        intPair(noInt, noInt),
+      ),
+      2,
+    ).map((pair: (Int, Int)) => copyPair(pair))
+      .filterValues((value: Int) => value > 0)
+      .sortByIntKey
+    shape(nulls) shouldBe "SortByIntKey(FilterValue(Project(Scan)))"
+    val nullFound = collect(nulls)
+    shown(nullFound) shouldBe shown(row(nulls.collect().toSeq))
+    shown(collectAt(nulls, 1)) shouldBe shown(collectAt(nulls, 8192))
+    effectiveKeys(nullFound) shouldBe effectiveKeys(nullFound).sorted
+    nullFound.exists(pair => !present(pair, 0)) shouldBe true
+
+    RankSplit.resetForTest()
+    IntPairProject.resetPublishedForTest()
+    val again = collect(keyed)
+    again shouldBe Seq(3 -> 20, 4 -> 30)
+    IntPairProject.publishedForTest should be > 0
+    RankSplit.mergePassesForTest should be > 0
+    val filteredPlan = keyed.plan match
+      case Plan.SortByIntKeyOp(sourcePlan) => sourcePlan
+      case _ => fail("expected SortByIntKeyOp")
+    val filterOp = ColumnarPlanner.lower(keyed.plan).getOrElse(fail("expected a slot sort")) match
+      case PhysicalOp.SortByIntKey(inner) => inner
+      case _ => fail("expected SortByIntKey")
+    FilterChain
+      .selected(
+        filteredPlan,
+        filterOp,
+        selectedPartition = None,
+        preserveAbsence = true,
+        ColumnUse.ordinals(filteredPlan, filterOp),
+      )
+      .isDefined shouldBe true
+  }
+
   "other maps" should "stay off sortByIntKey" in {
     val source = pairs
     val values = source.mapValues((value: Int) => value + 1).sortByIntKey
@@ -359,12 +426,24 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .filter((pair: (Int, Int)) => pair._2 > 0)
       .sortByIntKey
     val byValue = source.map((pair: (Int, Int)) => (pair._1, pair._2)).sortByIntValueDesc
+    val second = source
+      .map((pair: (Int, Int)) => (pair._1 + 1, pair._2))
+      .filterKeys((key: Int) => key > 2)
+      .filterValues((value: Int) => value > 0)
+      .sortByIntKey
+    val mappedKey = source
+      .mapIntKey((key: Int) => key + 1)
+      .filterKeys((key: Int) => key > 0)
+      .sortByIntKey
+    val valueSlot = source
+      .map((pair: (Int, Int)) => (pair._1, pair._2))
+      .filterKeys((key: Int) => key > 0)
+      .sortByIntValueDesc
     val longs = DistCollection
       .ofLongPairs(Array(3L, 1L), Array(30L, 10L), 1)
       .map((pair: (Long, Long)) => (pair._1.toInt, pair._2.toInt))
-    val strings = DistCollection(Seq("b" -> 2, "a" -> 1), 1).map((pair: (String, Int)) =>
-      (pair._2, pair._2),
-    )
+    val strings =
+      DistCollection(Seq("b" -> 2, "a" -> 1), 1).map((pair: (String, Int)) => (pair._2, pair._2))
     val bad = source.map((pair: (Int, Int)) => stringKey(pair)).sortByIntKey
 
     ColumnarPlanner.lower(values.plan) shouldBe None
@@ -372,6 +451,9 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.lower(twice.sortByIntKey.plan) shouldBe None
     ColumnarPlanner.lower(above.plan) shouldBe None
     ColumnarPlanner.lower(byValue.plan) shouldBe None
+    ColumnarPlanner.lower(second.plan) shouldBe None
+    ColumnarPlanner.lower(mappedKey.plan) shouldBe None
+    ColumnarPlanner.lower(valueSlot.plan) shouldBe None
     ColumnarPlanner.lower(longs.plan).map(_.shape) shouldBe Some("Project(Scan)")
     ColumnarPlanner.lower(longs.sortByIntKey.plan) shouldBe None
     ColumnarPlanner.lower(strings.plan).map(_.shape) shouldBe Some("Project(Scan)")

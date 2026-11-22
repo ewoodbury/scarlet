@@ -76,8 +76,8 @@ object ColumnarPlanner:
    * long, or string key sort of a scan, or of filters over that scan. One int-pair project on that
    * scan or filter stack lowers under [[Plan.SortByIntKeyOp]]. One long-pair project lowers under
    * [[Plan.SortByLongKeyOp]]. One string-pair project lowers under [[Plan.SortByStringKeyOp]]. One
-   * key or value filter immediately above that string project lowers too. The function is not
-   * read. `mapValues`, a second map, a slot or whole-row filter above the long project,
+   * key or value filter immediately above that int or string project lowers too. The function is
+   * not read. `mapValues`, a second map, a slot or whole-row filter above the long project,
    * [[PhysicalOp.MapKey]], a second slot, a whole-row filter above the string project, a map under
    * a value sort, and every other map, aggregate, or join under a sort stay on the row path. One
    * filter above an int, long, or string key sort lowers to [[PhysicalOp.Filter]] on
