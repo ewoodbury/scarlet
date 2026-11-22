@@ -17,8 +17,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * The function runs on every row the row path would, including a null key. `""` stays a present
  * key. `"é"` and `"e\u0301"` stay distinct. One key or value filter above that project lowers. A
  * whole-row filter, a second slot, and a second map stay empty. One project under
- * `sortByStringKey` lowers. `mapValues`, a second map, and a slot or whole-row filter above that
- * project stay empty.
+ * `sortByStringKey` lowers. One key or value filter immediately above that project lowers too.
+ * `mapValues`, a second map, a second slot, a whole-row filter above the project, and a map under
+ * `sortByIntValueDesc` stay empty.
  */
 class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -202,9 +203,84 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     )
     shown(rowUnder.collect()) shouldBe shown(row(rowUnder.collect()))
 
-    ColumnarPlanner.lower(
-      mapped.filterKeys((key: String) => key.nonEmpty).sortByStringKey.plan,
+    val keyed = mapped.filterKeys((key: String) => key.nonEmpty).sortByStringKey
+    ColumnarPlanner.lower(keyed.plan).map(_.shape) shouldBe Some(
+      "SortByStringKey(FilterKey(Project(Scan)))",
+    )
+    // "" maps to "!". "!" is non-empty, so the slot keeps it and the empty key stays present.
+    shown(keyed.collect()) shouldBe Seq("!:3", "a!:1", "b!:2")
+    shown(keyed.collect()) shouldBe shown(row(keyed.collect()))
+    shownAt(keyed, 1) shouldBe shownAt(keyed, 8192)
+    val valued = mapped.filterValues((value: Int) => value > 1).sortByStringKey
+    ColumnarPlanner.lower(valued.plan).map(_.shape) shouldBe Some(
+      "SortByStringKey(FilterValue(Project(Scan)))",
+    )
+    shown(valued.collect()) shouldBe Seq("!:3", "b!:2")
+    shown(valued.collect()) shouldBe shown(row(valued.collect()))
+    shownAt(valued, 1) shouldBe shownAt(valued, 8192)
+    val keptNull = nullEmptySource()
+      .map((pair: (String, Int)) => (pair._1, pair._2))
+      .filterKeys((_: String) => true)
+      .sortByStringKey
+    ColumnarPlanner.lower(keptNull.plan).map(_.shape) shouldBe Some(
+      "SortByStringKey(FilterKey(Project(Scan)))",
+    )
+    shown(keptNull.collect()) shouldBe Seq("null:1", ":3", "null:4", "b:2")
+    shown(keptNull.collect()) shouldBe shown(row(keptNull.collect()))
+    val filteredAccents = DistCollection(Seq(composed -> 1, "a" -> 2, decomposed -> 3), 1)
+      .map((pair: (String, Int)) => (pair._1, pair._2))
+      .filterValues((value: Int) => value > 0)
+      .sortByStringKey
+    shown(filteredAccents.collect()) shouldBe Seq("a:2", s"$decomposed:3", s"$composed:1")
+    composed should not be decomposed
+    shown(filteredAccents.collect()) shouldBe shown(row(filteredAccents.collect()))
+    val onStack = source
+      .filterKeys((key: String) => key != "b")
+      .map((pair: (String, Int)) => (pair._1 + "!", pair._2))
+      .filterKeys((key: String) => key.nonEmpty)
+      .sortByStringKey
+    ColumnarPlanner.lower(onStack.plan).map(_.shape) shouldBe Some(
+      "SortByStringKey(FilterKey(Project(FilterKey(Scan))))",
+    )
+    shown(onStack.collect()) shouldBe Seq("!:3", "a!:1")
+    shown(onStack.collect()) shouldBe shown(row(onStack.collect()))
+    val filteredPlan = keyed.plan match
+      case Plan.SortByStringKeyOp(sourcePlan) => sourcePlan
+      case _ => fail("expected SortByStringKeyOp")
+    val filterOp = ColumnarPlanner.lower(keyed.plan).getOrElse(fail("expected a slot sort")) match
+      case PhysicalOp.SortByStringKey(inner) => inner
+      case _ => fail("expected SortByStringKey")
+    FilterChain.selected(
+      filteredPlan,
+      filterOp,
+      selectedPartition = None,
+      preserveAbsence = true,
+      ColumnUse.ordinals(filteredPlan, filterOp),
     ) shouldBe None
+    val published =
+      StringPairWalk.batches(ColumnarInterpreter.interpret(filteredPlan, filterOp))
+    val ranked = StringRankSplit.sortAndSplit(
+      published,
+      ColumnarPlanner.shuffleWidth,
+      ColumnarPlanner.parallelism,
+    )
+    shown(ranked.flatMap(batch => BatchCodec.decodeStringPairs(batch))) shouldBe shown(
+      keyed.collect(),
+    )
+    StringPairProject.resetPublishedForTest()
+    StringRankSplitRuns.resetForTest()
+    val _ = keyed.collect()
+    StringPairProject.publishedForTest should be > 0
+    StringRankSplitRuns.filesWrittenForTest shouldBe 0L
+    val secondSlot = mapped
+      .filterKeys((key: String) => key.nonEmpty)
+      .filterValues((value: Int) => value > 0)
+      .sortByStringKey
+    ColumnarPlanner.lower(secondSlot.plan) shouldBe None
+    val byIntValue = DistCollection(Seq(1 -> 2, 3 -> 4), 1)
+      .map((pair: (Int, Int)) => (pair._1, pair._2))
+      .sortByIntValueDesc
+    ColumnarPlanner.lower(byIntValue.plan) shouldBe None
     ColumnarPlanner.lower(
       mapped.filter((pair: (String, Int)) => pair._2 > 0).sortByStringKey.plan,
     ) shouldBe None
