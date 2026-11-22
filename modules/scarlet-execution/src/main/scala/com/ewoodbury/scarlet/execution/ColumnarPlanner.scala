@@ -78,26 +78,28 @@ object ColumnarPlanner:
    * [[Plan.SortByLongKeyOp]]. One string-pair project lowers under [[Plan.SortByStringKeyOp]]. One
    * key or value filter immediately above that int or string project lowers too. The function is
    * not read. `mapValues`, a second map, a slot or whole-row filter above the long project,
-   * [[PhysicalOp.MapKey]], a second slot, a whole-row filter above the string project, a map under
-   * a value sort, and every other map, aggregate, or join under a sort stay on the row path. One
-   * filter above an int, long, or string key sort lowers to [[PhysicalOp.Filter]] on
-   * [[PhysicalOp.Slot.Row]] around that sort, and only for a fully present key column. The
-   * pair-row filter drops a null key while the row path keeps it. The sort is
-   * [[SortLowering.lowerInt]], [[SortLowering.lowerLong]], or [[SortLowering.lowerString]], not
-   * [[lowerChild]]. [[SortLowering.acceptsAsChild]] stays false, so a null key, a second filter, a
-   * key or value filter above the sort, and every other parent stay on the row path. A slot filter
-   * sorts the survivor index. Over the budget, with spill on, that index is spilled. A long-pair
-   * row filter and a whole-row string filter sort that index too. A long sort spills when
-   * `spillEnabled` is on and the retained estimate exceeds `spillBudgetBytes`. The physical op
-   * stays `SortByLongKey`. A string sort spills on that same budget. The physical op stays
-   * `SortByStringKey`. At or under the budget, and whenever spill is off, the split stays in
-   * memory and writes nothing. One map directly above an int, string, or long `groupByKey` lowers
-   * to [[PhysicalOp.GroupedDecode]]. The group runs once. [[ColumnarInterpreter.decodeFor]] yields
-   * `(K, Iterable[V])` and the logical function runs on those rows. The function is not inspected.
-   * `values`, `take`, a second map, and a filter above that map stay on the row path. Int, long,
-   * and string `keys` stay a distinct-key scan. [[partitioning]] and [[tryRun]] follow a refusal.
-   * They also drop a lowered tree whose layout is invalid. `ScarletConf.traceLowering` prints one
-   * line when this returns `None`. The flag is off by default, and the line is not built then.
+   * [[PhysicalOp.MapKey]] under a key sort, a second slot, a whole-row filter above the string
+   * project, a slot above a value-sort key map, and every other map, aggregate, or join under a
+   * sort stay on the row path. One [[PhysicalOp.MapKey]] on a scan or an int-pair filter stack
+   * lowers under [[Plan.SortByIntValueDescOp]]. One filter above an int, long, or string key sort
+   * lowers to [[PhysicalOp.Filter]] on [[PhysicalOp.Slot.Row]] around that sort, and only for a
+   * fully present key column. The pair-row filter drops a null key while the row path keeps it.
+   * The sort is [[SortLowering.lowerInt]], [[SortLowering.lowerLong]], or
+   * [[SortLowering.lowerString]], not [[lowerChild]]. [[SortLowering.acceptsAsChild]] stays false,
+   * so a null key, a second filter, a key or value filter above the sort, and every other parent
+   * stay on the row path. A slot filter sorts the survivor index. Over the budget, with spill on,
+   * that index is spilled. A long-pair row filter and a whole-row string filter sort that index
+   * too. A long sort spills when `spillEnabled` is on and the retained estimate exceeds
+   * `spillBudgetBytes`. The physical op stays `SortByLongKey`. A string sort spills on that same
+   * budget. The physical op stays `SortByStringKey`. At or under the budget, and whenever spill is
+   * off, the split stays in memory and writes nothing. One map directly above an int, string, or
+   * long `groupByKey` lowers to [[PhysicalOp.GroupedDecode]]. The group runs once.
+   * [[ColumnarInterpreter.decodeFor]] yields `(K, Iterable[V])` and the logical function runs on
+   * those rows. The function is not inspected. `values`, `take`, a second map, and a filter above
+   * that map stay on the row path. Int, long, and string `keys` stay a distinct-key scan.
+   * [[partitioning]] and [[tryRun]] follow a refusal. They also drop a lowered tree whose layout
+   * is invalid. `ScarletConf.traceLowering` prints one line when this returns `None`. The flag is
+   * off by default, and the line is not built then.
    */
   def lower(plan: Plan[_]): Option[PhysicalOp] =
     val conf = ScarletConf.get

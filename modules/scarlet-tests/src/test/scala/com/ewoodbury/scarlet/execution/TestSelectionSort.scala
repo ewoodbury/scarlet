@@ -477,6 +477,77 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     nullFound.exists(pair => !present(pair, 1)) shouldBe true
   }
 
+  "sortByIntValueDesc" should "sort one MapKey through IntTopN" in {
+    val keyedDesc = DistCollection
+      .ofIntPairs(Array(1, 2, 3), Array(10, 30, 20), 2)
+      .mapIntKey((key: Int) => key + 1)
+      .sortByIntValueDesc
+    shape(keyedDesc) shouldBe "SortByIntValueDesc(MapKey(Scan))"
+    collect(keyedDesc) shouldBe Seq(3 -> 30, 4 -> 20, 2 -> 10)
+    collect(keyedDesc) shouldBe row(keyedDesc.collect().toSeq)
+    keyedDesc.take(2) shouldBe List(3 -> 30, 4 -> 20)
+    keyedDesc.take(2) shouldBe row(keyedDesc.take(2))
+    collectAt(keyedDesc, 1) shouldBe collectAt(keyedDesc, 8192)
+
+    val under = DistCollection
+      .ofIntPairs(Array(1, 2, 3), Array(10, 30, 20), 2)
+      .filterKeys((key: Int) => key > 1)
+      .filterValues((value: Int) => value > 15)
+      .mapIntKey((key: Int) => key + 1)
+      .sortByIntValueDesc
+    shape(under) shouldBe "SortByIntValueDesc(MapKey(FilterValue(FilterKey(Scan))))"
+    collect(under) shouldBe Seq(3 -> 30, 4 -> 20)
+    collect(under) shouldBe row(under.collect().toSeq)
+    under.take(1) shouldBe List(3 -> 30)
+
+    val sortPlan = keyedDesc.plan match
+      case Plan.SortByIntValueDescOp(sourcePlan) => sourcePlan
+      case _ => fail("expected SortByIntValueDescOp")
+    val mapped =
+      ColumnarPlanner.lower(keyedDesc.plan).getOrElse(fail("expected a value sort")) match
+        case PhysicalOp.SortByIntValueDesc(child) => child
+        case _ => fail("expected SortByIntValueDesc")
+    FilterChain
+      .selected(
+        sortPlan,
+        mapped,
+        selectedPartition = None,
+        preserveAbsence = true,
+        ColumnUse.ordinals(sortPlan, mapped),
+      ) shouldBe None
+    MapIntKey.resetPublishedForTest()
+    IntTopN.resetBatchesForTest()
+    collect(keyedDesc) shouldBe Seq(3 -> 30, 4 -> 20, 2 -> 10)
+    MapIntKey.publishedForTest should be > 0
+    IntTopN.batchCallsForTest should be > 0
+
+    val calls = new AtomicInteger
+    val nulls = DistCollection(
+      Seq(
+        intPair(boxedInt(1), boxedInt(5)),
+        intPair(noInt, boxedInt(9)),
+        intPair(boxedInt(2), noInt),
+        intPair(boxedInt(3), boxedInt(0)),
+      ),
+      2,
+    ).mapIntKey { (key: Int) =>
+      val _ = calls.incrementAndGet()
+      key + 1
+    }.sortByIntValueDesc
+    shape(nulls) shouldBe "SortByIntValueDesc(MapKey(Scan))"
+    calls.set(0)
+    val nullFound = collect(nulls)
+    calls.get() shouldBe 3
+    shown(nullFound) shouldBe Seq("null:9", "2:5", "3:null", "4:0")
+    calls.set(0)
+    shown(nullFound) shouldBe shown(row(nulls.collect().toSeq))
+    calls.get() shouldBe 3
+    shown(nulls.take(2)) shouldBe Seq("null:9", "2:5")
+    shown(collectAt(nulls, 1)) shouldBe shown(collectAt(nulls, 8192))
+    nullFound.exists(pair => !present(pair, 0)) shouldBe true
+    nullFound.exists(pair => !present(pair, 1)) shouldBe true
+  }
+
   "other maps" should "stay off sortByIntKey" in {
     val source = pairs
     val values = source.mapValues((value: Int) => value + 1).sortByIntKey
@@ -498,7 +569,18 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .mapIntKey((key: Int) => key + 1)
       .filterKeys((key: Int) => key > 0)
       .sortByIntKey
-    val keyedDesc = source.mapIntKey((key: Int) => key + 1).sortByIntValueDesc
+    val slotAboveMap = source
+      .mapIntKey((key: Int) => key + 1)
+      .filterKeys((key: Int) => key > 0)
+      .sortByIntValueDesc
+    val secondMap = source
+      .mapIntKey((key: Int) => key + 1)
+      .mapIntKey((key: Int) => key + 1)
+      .sortByIntValueDesc
+    val projectUnderMap = source
+      .map((pair: (Int, Int)) => (pair._1, pair._2))
+      .mapIntKey((key: Int) => key + 1)
+      .sortByIntValueDesc
     val valueSlot = source
       .map((pair: (Int, Int)) => (pair._1, pair._2))
       .filterKeys((key: Int) => key > 0)
@@ -518,7 +600,9 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.lower(twiceDesc.plan) shouldBe None
     ColumnarPlanner.lower(second.plan) shouldBe None
     ColumnarPlanner.lower(mappedKey.plan) shouldBe None
-    ColumnarPlanner.lower(keyedDesc.plan) shouldBe None
+    ColumnarPlanner.lower(slotAboveMap.plan) shouldBe None
+    ColumnarPlanner.lower(secondMap.plan) shouldBe None
+    ColumnarPlanner.lower(projectUnderMap.plan) shouldBe None
     ColumnarPlanner.lower(valueSlot.plan) shouldBe None
     ColumnarPlanner.lower(longs.plan).map(_.shape) shouldBe Some("Project(Scan)")
     ColumnarPlanner.lower(longs.sortByIntKey.plan) shouldBe None
