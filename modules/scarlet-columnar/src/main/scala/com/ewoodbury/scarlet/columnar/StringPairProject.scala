@@ -55,6 +55,14 @@ object StringPairProject:
     def add(sourceCode: Int, key: String): Unit
 
   /**
+   * One key or value slot on the projected pair. The predicate is the one the planner stored. A
+   * key slot sees the projected string. A value slot sees the projected int.
+   */
+  private[scarlet] enum Slot:
+    case Key(keep: ColumnKernel.Utf8Predicate)
+    case Value(keep: ColumnKernel.Int32Predicate)
+
+  /**
    * Adapts a `Tuple2 => Tuple2`. The cast is not a call. A hidden lambda and an anonymous
    * `Function1` both land here after the declared `apply` check. Each absent apply builds the pair
    * the row path would pass, so a null stays null instead of unboxing to `0`.
@@ -249,6 +257,98 @@ object StringPairProject:
       row += 1
     }
 
+  /**
+   * [[visitKeys]] for one string key or int value slot above the project.
+   *
+   * The adapter calls match [[project]], including a null key and a null value. An empty range
+   * does not call `mapper`. A null projected key is dropped, and a key predicate is not called. A
+   * null projected value still counts when the slot reads the key and keeps it, and a value
+   * predicate is not called. A value slot that keeps a present value still drops a null key. `""`
+   * is a present key. `"é"` and `"e\u0301"` stay distinct because the key is the string the
+   * function returned. A result that is not a pair of a string and an int throws
+   * [[ColumnarFallback]] and publishes nothing. This does not allocate an output column. The
+   * function body is not inspected. `add` receives the input dictionary code, or `-1` when the
+   * input key is null.
+   */
+  private[scarlet] def visitFiltered(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      mapper: StringPairMap,
+      above: Slot,
+      add: PresentKey,
+  ): Unit =
+    require(
+      batch.columns.length == 2,
+      s"pair project expected 2 columns, got ${batch.columns.length}",
+    )
+    val keys = utf8At(batch, 0)
+    val values = int32At(batch, 1)
+    require(keys.length == values.length, "key and value columns differ in length")
+    Ranges.check(start, length, keys.length)
+    if (length == 0) then ()
+    else if (
+        Validity.rangePresent(keys.validity, start, length) &&
+        Validity.rangePresent(values.validity, start, length)
+      )
+    then visitFilteredDense(keys, values, start, length, mapper, above, add)
+    else visitFilteredSparse(keys, values, start, length, mapper, above, add)
+
+  /** Both columns are present in the range. The loop does not read validity. */
+  private def visitFilteredDense(
+      keys: DictUtf8Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      mapper: StringPairMap,
+      above: Slot,
+      add: PresentKey,
+  ): Unit =
+    val dictionary = keys.dictionary
+    val keyCodes = keys.codes
+    val valueArr = values.values
+    val end = start + length
+    var row = start
+    while (row < end) {
+      offerFiltered(
+        mapper(dictionary(keyCodes(row)), valueArr(row)),
+        keyCodes(row),
+        above,
+        add,
+      )
+      row += 1
+    }
+
+  /** Every row is one call, including a null key, a null value, or both. */
+  private def visitFilteredSparse(
+      keys: DictUtf8Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      mapper: StringPairMap,
+      above: Slot,
+      add: PresentKey,
+  ): Unit =
+    val dictionary = keys.dictionary
+    val keyCodes = keys.codes
+    val valueArr = values.values
+    val keyIn = keys.validity.words
+    val valueIn = values.validity.words
+    val end = start + length
+    var row = start
+    while (row < end) {
+      val keyOn = Validity.isSet(keyIn, row)
+      val valueOn = Validity.isSet(valueIn, row)
+      val projected =
+        if (keyOn && valueOn) then mapper(dictionary(keyCodes(row)), valueArr(row))
+        else if (keyOn) then mapper.applyNullValue(dictionary(keyCodes(row)))
+        else if (valueOn) then mapper.applyNullKey(valueArr(row))
+        else mapper.applyNulls()
+      val sourceCode = if (keyOn) then keyCodes(row) else -1
+      offerFiltered(projected, sourceCode, above, add)
+      row += 1
+    }
+
   /** Keeps a present key. A null key is dropped. The value is only a type check. */
   private def offer(projected: Any, sourceCode: Int, add: PresentKey): Unit =
     projected match
@@ -272,6 +372,69 @@ object StringPairProject:
       case null => ()
       case present: String => add.add(sourceCode, present)
       case other => decline(foundName(other))
+
+  /**
+   * [[offer]] plus one slot. The value cell is checked first, matching [[offer]]. A null slot cell
+   * is dropped and the predicate is not called. A key slot that keeps a present key still records
+   * a null value. A value slot that keeps a present value still drops a null key.
+   */
+  private def offerFiltered(
+      projected: Any,
+      sourceCode: Int,
+      above: Slot,
+      add: PresentKey,
+  ): Unit =
+    projected match
+      case row: Tuple2[_, _] =>
+        offerFilteredCells(row._1, row._2, sourceCode, above, add)
+      case null => decline("null")
+      case row: Product if row.productArity == 2 =>
+        offerFilteredCells(row.productElement(0), row.productElement(1), sourceCode, above, add)
+      case other => decline(foundName(other))
+
+  /** Value is checked first, matching the order [[offerCells]] declines in. */
+  private def offerFilteredCells(
+      keyCell: Any,
+      valueCell: Any,
+      sourceCode: Int,
+      above: Slot,
+      add: PresentKey,
+  ): Unit =
+    valueCell match
+      case null | _: Int => ()
+      case other => decline(foundName(other))
+    keyCell match
+      case null | _: String => ()
+      case other => decline(foundName(other))
+    above match
+      case Slot.Key(keep) => keepKey(keyCell, keep, sourceCode, add)
+      case Slot.Value(keep) => keepValue(keyCell, valueCell, keep, sourceCode, add)
+
+  /** A null key is dropped. `keep` is not called. A null value still counts. */
+  private def keepKey(
+      keyCell: Any,
+      keep: ColumnKernel.Utf8Predicate,
+      sourceCode: Int,
+      add: PresentKey,
+  ): Unit =
+    keyCell match
+      case key: String if keep(key) => add.add(sourceCode, key)
+      case _ => ()
+
+  /** A null value is dropped. `keep` is not called. A null key is dropped after a kept value. */
+  private def keepValue(
+      keyCell: Any,
+      valueCell: Any,
+      keep: ColumnKernel.Int32Predicate,
+      sourceCode: Int,
+      add: PresentKey,
+  ): Unit =
+    valueCell match
+      case value: Int if keep(value) =>
+        keyCell match
+          case key: String => add.add(sourceCode, key)
+          case _ => ()
+      case _ => ()
 
   /** Bit 0 is a present key. Bit 1 is a present value. Any other shape declines. */
   private def write(

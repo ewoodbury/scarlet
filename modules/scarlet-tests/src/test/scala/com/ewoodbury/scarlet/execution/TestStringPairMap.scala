@@ -15,8 +15,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * A `(String, Int) => (String, Int)` map lowers to a project and feeds `countByKey`.
  *
  * The function runs on every row the row path would, including a null key. `""` stays a present
- * key. `"é"` and `"e\u0301"` stay distinct. One key or value filter above that project lowers. A
- * whole-row filter, a second slot, and a second map stay empty. One project under
+ * key. `"é"` and `"e\u0301"` stay distinct. One key or value filter above that project lowers, and
+ * `countByKey` of that slot does not publish the pair batch. A whole-row filter, a second slot,
+ * and a second map stay empty. One project under
  * `sortByStringKey` lowers. One key or value filter immediately above that project lowers too.
  * `mapValues`, a second map, a second slot, a whole-row filter above the project, and a map under
  * `sortByIntValueDesc` stay empty.
@@ -138,6 +139,8 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       mapped.filter((pair: (String, Int)) => pair._2 > 0).countByKey.plan,
     ) shouldBe None
     ColumnarPlanner.lower(byKey.filterKeys((key: String) => key != "x").plan) shouldBe None
+    ColumnarPlanner.lower(byKey.filterKeys((key: String) => key != "x").countByKey.plan) shouldBe
+      None
     ColumnarPlanner.lower(byValue.filterKeys((key: String) => key.nonEmpty).plan) shouldBe None
     ColumnarPlanner.lower(
       byKey.map((pair: (String, Int)) => (pair._1 + "?", pair._2)).plan,
@@ -151,9 +154,15 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.lower(stacked.plan).map(_.shape) shouldBe Some(
       "FilterKey(Project(FilterKey(Scan)))",
     )
-    ColumnarPlanner.lower(stacked.countByKey.plan).map(_.shape) shouldBe Some(
+    val stackedCount = stacked.countByKey
+    ColumnarPlanner.lower(stackedCount.plan).map(_.shape) shouldBe Some(
       "CountByKey(Exchange(FilterKey(Project(FilterKey(Scan)))))",
     )
+    StringPairProject.resetPublishedForTest()
+    val stackedExpected = Map("a!" -> 1)
+    countsOf(stackedCount.collect()) shouldBe stackedExpected
+    StringPairProject.publishedForTest shouldBe 0
+    countsOf(row(stackedCount.collect())) shouldBe stackedExpected
   }
 
   it should "sort a remapped string key through StringRankSplit" in {
@@ -298,7 +307,7 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.tryRun(bad.plan) shouldBe None
   }
 
-  it should "count a remapped key after filterKeys and match batch size 1 and 8192" in {
+  it should "count a remapped key after one slot without publishing the pair batch" in {
     val source = DistCollection(Seq("a" -> 1, "a" -> 2, "b" -> 3, "" -> 4), 1)
     val counted = source
       .map((pair: (String, Int)) => (pair._1 + "!", pair._2))
@@ -316,32 +325,62 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     shown(filtered.collect()) shouldBe Seq("a!:1", "a!:2", "b!:3")
     StringPairProject.resetPublishedForTest()
     countsOf(counted.collect()) shouldBe expected
+    StringPairProject.publishedForTest shouldBe 0
+    StringPairProject.resetPublishedForTest()
+    val _ = filtered.collect()
     StringPairProject.publishedForTest should be > 0
     countsAt(counted, 1) shouldBe countsAt(counted, 8192)
+    val byValue = source
+      .map((pair: (String, Int)) => (pair._1 + "!", pair._2))
+      .filterValues((value: Int) => value > 1)
+      .countByKey
+    ColumnarPlanner.lower(byValue.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(FilterValue(Project(Scan))))",
+    )
+    val valueExpected = Map("a!" -> 1, "b!" -> 1, "!" -> 1)
+    StringPairProject.resetPublishedForTest()
+    countsOf(byValue.collect()) shouldBe valueExpected
+    StringPairProject.publishedForTest shouldBe 0
+    countsOf(row(byValue.collect())) shouldBe valueExpected
   }
 
   it should "match the row path for a null input key, an empty key, and a null projected key" in {
     val (rowCounts, rowCalls) = countKept(nullKeySource(), columnar = false)
+    StringPairProject.resetPublishedForTest()
     val (columnarCounts, columnarCalls) = countKept(nullKeySource(), columnar = true)
     rowCounts shouldBe Map("a!" -> 2, "n" -> 2)
     columnarCounts shouldBe rowCounts
     columnarCalls shouldBe rowCalls
     columnarCalls shouldBe 5
+    StringPairProject.publishedForTest shouldBe 0
     val keptEmpty = DistCollection(Seq("" -> 1, "a" -> 2), 1)
       .map((pair: (String, Int)) => (pair._1, pair._2))
       .filterKeys((key: String) => key != "a")
       .countByKey
+    StringPairProject.resetPublishedForTest()
     countsOf(keptEmpty.collect()) shouldBe Map("" -> 1)
+    StringPairProject.publishedForTest shouldBe 0
     countsOf(row(keptEmpty.collect())) shouldBe Map("" -> 1)
     val calls = new AtomicInteger
+    val keyPreds = new AtomicInteger
     val dropped = DistCollection(Seq("drop" -> 1, "b" -> 2, "" -> 3), 1)
       .map(projectNull(calls))
-      .filterKeys((key: String) => key != "!")
+      .filterKeys { (key: String) =>
+        val _ = keyPreds.incrementAndGet()
+        key != "!"
+      }
       .countByKey
     calls.set(0)
+    keyPreds.set(0)
+    StringPairProject.resetPublishedForTest()
     countsOf(dropped.collect()) shouldBe Map("b!" -> 1)
     calls.get() shouldBe 3
+    // "drop" projects a null key. The key predicate is not called. "b!" and "!" are.
+    keyPreds.get() shouldBe 2
+    StringPairProject.publishedForTest shouldBe 0
+    calls.set(0)
     countsOf(row(dropped.collect())) shouldBe Map("b!" -> 1)
+    calls.get() shouldBe 3
     val composed = "é"
     val decomposed = "e\u0301"
     val accents = DistCollection(Seq(composed -> 3, decomposed -> 4, composed -> 5), 1)
@@ -349,7 +388,9 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .filterKeys((key: String) => key != "!")
       .countByKey
     val accentCounts = Map(composed + "!" -> 2, decomposed + "!" -> 1)
+    StringPairProject.resetPublishedForTest()
     countsOf(accents.collect()) shouldBe accentCounts
+    StringPairProject.publishedForTest shouldBe 0
     countsOf(row(accents.collect())) shouldBe accentCounts
     (composed + "!") should not be (decomposed + "!")
   }
@@ -364,7 +405,9 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       "CountByKey(Exchange(FilterValue(Project(Scan))))",
     )
     val expected = Map("a!" -> 1, "b!" -> 1, "!" -> 1)
+    StringPairProject.resetPublishedForTest()
     countsOf(counted.collect()) shouldBe expected
+    StringPairProject.publishedForTest shouldBe 0
     countsOf(row(counted.collect())) shouldBe expected
   }
 

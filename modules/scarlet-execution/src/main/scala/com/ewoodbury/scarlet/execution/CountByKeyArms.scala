@@ -31,14 +31,17 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * that project's input. The adapter runs on every row, including a null key, and only a present
  * projected key is stored. Each partial owns its dictionary. The pair batch is not published, and
  * [[StringHashCount.byKey]] is not called. The function is not inspected. A null projected value
- * still counts. A filter above that project publishes both columns, and [[StringHashCount.byKey]]
- * hashes those batches. A second map stays on that published path. A second slot does not lower.
- * No filters, a whole-row or string step, a non-int slot, and a null component the encoder throws
- * on stay on the old path. That path partial-counts survivor ids, including one row, key, or value
- * filter. A scan and a non-pair child stay on the dense count. The value column is not read on
- * that path, so a null value still counts. A long count publishes [[Columns.LongCounts]]. A string
- * count publishes [[Columns.StringPairs]]. The stored count is an `Int`. A null string key is
- * dropped and `""` is kept.
+ * still counts. One key or value slot above that project is counted from the project's input. The
+ * adapter runs on every row, including a null key. The slot is applied to the projected pair. A
+ * null projected key is dropped and the key predicate is not called. A null projected value still
+ * counts when the slot keeps the key, and a value predicate is not called on it. The pair batch is
+ * not published, and [[StringHashCount.byKey]] is not called. A second map stays on the published
+ * path. A second slot does not lower. No filters, a whole-row or string step, a non-int slot, and
+ * a null component the encoder throws on stay on the old path. That path partial-counts survivor
+ * ids, including one row, key, or value filter. A scan and a non-pair child stay on the dense
+ * count. The value column is not read on that path, so a null value still counts. A long count
+ * publishes [[Columns.LongCounts]]. A string count publishes [[Columns.StringPairs]]. The stored
+ * count is an `Int`. A null string key is dropped and `""` is kept.
  */
 private[execution] object CountByKeyArms:
 
@@ -131,10 +134,10 @@ private[execution] object CountByKeyArms:
                     LongHashCount.byKey(batches, width, workers, batchSize)
         Columns.LongCounts(counted)
       case PhysicalOp.Kind.StringPairs =>
-        // One project on a scan or a filter stack is counted without a pair batch. A filter
-        // above the project, a second map, and every other child still publish, and byKey hashes
-        // those dictionaries. A null int is not a fallback.
-        val counted = countProjectedString(
+        // One project on a scan or a filter stack is counted without a pair batch. One key or
+        // value slot above that project is counted the same way. A second map still publishes,
+        // and byKey hashes those dictionaries. A null int is not a fallback.
+        val counted = countAboveProjectedString(
           source,
           child,
           selectedPartition,
@@ -144,21 +147,34 @@ private[execution] object CountByKeyArms:
           workers,
           batchSize,
         ) match
-          case Some(projected) => projected
+          case Some(above) => above
           case None =>
-            FilterChain.selected(
+            countProjectedString(
               source,
               child,
               selectedPartition,
               preserveAbsence,
               ordinals,
+              width,
+              workers,
+              batchSize,
             ) match
-              case Some(parts) => StringHashCount.byKeySelected(parts, width, workers, batchSize)
+              case Some(projected) => projected
               case None =>
-                val batches = StringPairWalk.batches(
-                  interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),
-                )
-                StringHashCount.byKey(batches, width, workers, batchSize)
+                FilterChain.selected(
+                  source,
+                  child,
+                  selectedPartition,
+                  preserveAbsence,
+                  ordinals,
+                ) match
+                  case Some(parts) =>
+                    StringHashCount.byKeySelected(parts, width, workers, batchSize)
+                  case None =>
+                    val batches = StringPairWalk.batches(
+                      interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),
+                    )
+                    StringHashCount.byKey(batches, width, workers, batchSize)
         Columns.StringPairs(counted)
       case other =>
         throw new IllegalStateException(
@@ -515,10 +531,81 @@ private[execution] object CountByKeyArms:
     case _ => false
 
   /**
+   * One key or value slot directly above one string-pair project. The project's input is counted
+   * through [[StringPairProject.visitFiltered]]. Filters under the project are interpreted with
+   * that input: each source morsel is projected, the slot is applied, and a present projected key
+   * the slot keeps is inserted. `None` when a second map sits under the project, when the step is
+   * not one string key or int value, or when the project is not on a scan or a string-pair filter
+   * stack. A null key and a null value are passed to the adapter. A null projected key is dropped
+   * and the key predicate is not called. A null projected value still counts when the slot keeps
+   * the key, and a value predicate is not called on it. [[StringHashCount.byKey]] is not called. A
+   * second slot and a second map are `None`.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  private def countAboveProjectedString(
+      source: Plan[_],
+      child: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    val matched = (source, child) match
+      case (
+            Plan.FilterKeysOp(Plan.MapOp(inner, fn), _),
+            PhysicalOp.Filter(project @ PhysicalOp.Project(under), PhysicalOp.Slot.Key),
+          ) if StringPairSlot.oneProject(project) =>
+        Some((inner, under, fn))
+      case (
+            Plan.FilterValuesOp(Plan.MapOp(inner, fn), _),
+            PhysicalOp.Filter(project @ PhysicalOp.Project(under), PhysicalOp.Slot.Value),
+          ) if StringPairSlot.oneProject(project) =>
+        Some((inner, under, fn))
+      case _ => None
+    matched.flatMap { (inner, under, fn) =>
+      if (deeperMap(inner, under)) then None
+      else
+        oneStringSlot(source, child).map { step =>
+          val adapted = StringPairProject.adapt(fn)
+          val columns =
+            try interpretAt(inner, under, selectedPartition, preserveAbsence, ordinals)
+            catch
+              case _: NullPointerException =>
+                throw new ColumnarFallback("countByKey source has a null pair component")
+          columns match
+            case Columns.StringPairs(batches) =>
+              ProjectedStringPairCount.countFiltered(
+                batches,
+                adapted,
+                step,
+                width,
+                workers,
+                batchSize,
+              )
+            case _ =>
+              throw new IllegalStateException("pair project count expected string pairs")
+        }
+    }
+
+  /**
+   * One string key or int value on the projected pair. A row step and a second slot are `None`.
+   */
+  private def oneStringSlot(source: Plan[_], child: PhysicalOp): Option[Selection.Step] =
+    PredicatePlan.compile(source, child).flatMap { compiled =>
+      PredicatePlan.selectionSteps(compiled) match
+        case Some(Vector(step @ Selection.Step.Utf8(0, _))) => Some(step)
+        case Some(Vector(step @ Selection.Step.Int32(1, _))) => Some(step)
+        case _ => None
+    }
+
+  /**
    * One string-pair [[Plan.MapOp]] on a scan or a string-pair filter stack. The input of the
    * project is interpreted, then each morsel is counted through [[StringPairProject.visitKeys]].
-   * `None` when a filter sits above the project or a second map sits under it: those stay on
-   * [[StringHashCount.byKey]]. A null key is passed to the adapter. The value cell is not stored.
+   * `None` when this child is not that project. A filter above it has its own arm. A second map
+   * under it stays on [[StringHashCount.byKey]]. A null key is passed to the adapter. The value
+   * cell is not stored.
    */
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
   private def countProjectedString(

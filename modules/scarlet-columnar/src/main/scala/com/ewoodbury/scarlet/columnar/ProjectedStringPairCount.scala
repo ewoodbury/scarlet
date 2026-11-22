@@ -22,6 +22,10 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * the first projected string. The open-addressed table is filled from those codes at the end. A
  * null input key has no code. A projected key that changes for the same code is hashed from that
  * row on. The function is still called on every row, and its body is not inspected.
+ *
+ * [[countFiltered]] is one string key or int value slot above that project. The slot sees the
+ * projected pair. A null projected key is dropped and the key predicate is not called. A null
+ * projected value still counts when the slot keeps the key. Only a kept present key is inserted.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 private[scarlet] object ProjectedStringPairCount:
@@ -57,6 +61,60 @@ private[scarlet] object ProjectedStringPairCount:
       )
       finish(combined, numPartitions, parallelism, batchSize)
 
+  /**
+   * One string key or int value slot above the project. `batches` are the project's input, already
+   * filtered when the caller interpreted that stack. Each morsel is projected and slotted, and
+   * only a present projected key that the slot keeps is inserted. A null projected value still
+   * counts when the slot keeps the key.
+   */
+  def countFiltered(
+      batches: Vector[ColumnBatch],
+      mapper: StringPairProject.StringPairMap,
+      above: Selection.Step,
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+  ): Vector[ColumnBatch] =
+    require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    val slot = stringSlot(above)
+    if (batches.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyStringPairs)
+    else
+      batches.foreach(StringHashCount.requireKey)
+      val rows = batches.iterator.map(_.length.toLong).sum
+      if (StringHashCount.refuseBeforeCombine) then
+        val entries =
+          batches.iterator.map(batch => StringHashCount.dictionaryEntries(batch).toLong).sum
+        val text = batches.iterator.map(batch => StringHashCount.dictionaryBytes(batch)).sum
+        StringHashCount.refuse(rows, entries, text)
+      val groups = batches.map(batch => Morsels.of(batch, batchSize))
+      val partials = MorselScheduler.map(groups.flatten, parallelism) { (_, morsel) =>
+        partialFiltered(morsel, mapper, slot)
+      }
+      val combined = PartialCombine.mergeMorsels(
+        groups.map(_.length),
+        partials,
+        parallelism,
+        StringHashCount.addCounts,
+      )
+      finish(combined, numPartitions, parallelism, batchSize)
+
+  /** The predicate is the function the planner stored, not a second wrapper. */
+  private def stringSlot(step: Selection.Step): StringPairProject.Slot = step match
+    case Selection.Step.Utf8(0, predicate) => StringPairProject.Slot.Key(predicate)
+    case Selection.Step.Int32(1, predicate) => StringPairProject.Slot.Value(predicate)
+    case Selection.Step.Utf8(column, _) =>
+      throw new IllegalStateException(s"pair slot must be a key or a value, got $column")
+    case Selection.Step.Int32(column, _) =>
+      throw new IllegalStateException(s"pair slot must be a key or a value, got $column")
+    case Selection.Step.Int64(_, _) | Selection.Step.Float64(_, _) | Selection.Step.Bool(_, _) |
+        Selection.Step.IntPair(_) | Selection.Step.LongPair(_) | Selection.Step.StringPair(_) |
+        Selection.Step.IntTriple(_, _) =>
+      throw new IllegalStateException(
+        "slot above a string pair project is a string key or an int value",
+      )
+
   private def partial(
       morsel: Morsel,
       mapper: StringPairProject.StringPairMap,
@@ -73,6 +131,26 @@ private[scarlet] object ProjectedStringPairCount:
         ColumnKernel.asUtf8(ColumnKernel.columnAt(morsel.batch, 0), 0).dictionary.length
       val table = new Table(rows, dictionaryLength)
       StringPairProject.visitKeys(morsel.batch, morsel.start, rows, mapper, table)
+      ColumnMetrics.fused()
+      table.publish()
+
+  private def partialFiltered(
+      morsel: Morsel,
+      mapper: StringPairProject.StringPairMap,
+      above: StringPairProject.Slot,
+  ): ColumnBatch =
+    val rows = morsel.length
+    if (rows == 0) then ColumnBatches.emptyStringPairs
+    else
+      StringHashCount.refuse(
+        rows.toLong,
+        StringHashCount.dictionaryEntries(morsel.batch).toLong,
+        StringHashCount.dictionaryBytes(morsel.batch),
+      )
+      val dictionaryLength =
+        ColumnKernel.asUtf8(ColumnKernel.columnAt(morsel.batch, 0), 0).dictionary.length
+      val table = new Table(rows, dictionaryLength)
+      StringPairProject.visitFiltered(morsel.batch, morsel.start, rows, mapper, above, table)
       ColumnMetrics.fused()
       table.publish()
 
