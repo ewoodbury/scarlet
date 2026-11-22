@@ -4,7 +4,9 @@ package com.ewoodbury.scarlet.execution
  * One key or value slot above one long-pair project.
  *
  * The project sits on a scan or a long-pair filter stack. Neither function is read. A second
- * project, a second slot, and a whole-row filter are not this shape.
+ * project, a second slot, and a whole-row filter are not this shape. [[FilterChain.selected]]
+ * stops at the project, so the slot indexes those projected batches and
+ * [[com.ewoodbury.scarlet.columnar.RankSplitLong]] sorts that index.
  */
 private[execution] object LongPairSlot:
 

@@ -214,9 +214,20 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .map((pair: (Long, Long)) => (pair._1 + 1L, pair._2))
       .sortByLongKey
     val twice = source.map(identity).map(identity)
-    val byKey = source.map(identity).filterKeys[Long, Long]((key: Long) => key > 0L).sortByLongKey
+    val shift = (pair: (Long, Long)) => (pair._1 + 1L, pair._2)
+    val byKey = source.map(shift).filterKeys[Long, Long]((key: Long) => key > 2L).sortByLongKey
     val byValue =
-      source.map(identity).filterValues[Long, Long]((value: Long) => value > 0L).sortByLongKey
+      source.map(shift).filterValues[Long, Long]((value: Long) => value > 10L).sortByLongKey
+    val onStack = source
+      .filterKeys[Long, Long]((key: Long) => key > 0L)
+      .map(shift)
+      .filterKeys[Long, Long]((key: Long) => key > 2L)
+      .sortByLongKey
+    val second = source
+      .map(shift)
+      .filterKeys[Long, Long]((key: Long) => key > 2L)
+      .filterValues[Long, Long]((value: Long) => value > 10L)
+      .sortByLongKey
     val above = source
       .map(identity)
       .filter((pair: (Long, Long)) => pair._2 > 0L)
@@ -256,8 +267,46 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     direct.flatMap(batch => BatchCodec.decodeLongPairs(batch)) shouldBe again
     ColumnarPlanner.lower(twice.plan).map(_.shape) shouldBe Some("Project(Project(Scan))")
     ColumnarPlanner.lower(twice.sortByLongKey.plan) shouldBe None
-    ColumnarPlanner.lower(byKey.plan) shouldBe None
-    ColumnarPlanner.lower(byValue.plan) shouldBe None
+    ColumnarPlanner.lower(byKey.plan).map(_.shape) shouldBe Some(
+      "SortByLongKey(FilterKey(Project(Scan)))",
+    )
+    collect(byKey) shouldBe Seq(3L -> 20L, 4L -> 30L)
+    collect(byKey) shouldBe rowCollect(byKey)
+    collectAt(byKey, 1) shouldBe collectAt(byKey, 8192)
+    ColumnarPlanner.lower(byValue.plan).map(_.shape) shouldBe Some(
+      "SortByLongKey(FilterValue(Project(Scan)))",
+    )
+    // Value 10 is not greater than 10, so the mapped (2, 10) drops.
+    collect(byValue) shouldBe Seq(3L -> 20L, 4L -> 30L)
+    collect(byValue) shouldBe rowCollect(byValue)
+    collectAt(byValue, 1) shouldBe collectAt(byValue, 8192)
+    ColumnarPlanner.lower(onStack.plan).map(_.shape) shouldBe Some(
+      "SortByLongKey(FilterKey(Project(FilterKey(Scan))))",
+    )
+    collect(onStack) shouldBe rowCollect(onStack)
+    collect(onStack) shouldBe Seq(3L -> 20L, 4L -> 30L)
+    ColumnarPlanner.lower(second.plan) shouldBe None
+    val filteredPlan = byKey.plan match
+      case Plan.SortByLongKeyOp(child) => child
+      case _ => fail("expected SortByLongKeyOp")
+    val filterOp =
+      ColumnarPlanner.lower(byKey.plan).getOrElse(fail("expected a slot sort")) match
+        case PhysicalOp.SortByLongKey(inner) => inner
+        case _ => fail("expected SortByLongKey")
+    // childOf stops at the project, so the index is the projected pairs, not the pre-project scan.
+    FilterChain.selected(
+      filteredPlan,
+      filterOp,
+      selectedPartition = None,
+      preserveAbsence = true,
+      ColumnUse.ordinals(filteredPlan, filterOp),
+    ) shouldBe defined
+    LongPairProject.resetPublishedForTest()
+    RankSplitLongRuns.resetForTest()
+    val publishedSort = collect(byKey)
+    publishedSort shouldBe Seq(3L -> 20L, 4L -> 30L)
+    LongPairProject.publishedForTest should be > 0
+    RankSplitLongRuns.filesWrittenForTest shouldBe 0L
     ColumnarPlanner.lower(above.plan) shouldBe None
     ColumnarPlanner.lower(values.plan) shouldBe None
     ColumnarPlanner.lower(keyed.plan).map(_.shape) shouldBe Some("MapKey(Scan)")
@@ -326,6 +375,18 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     effectiveKeys(found) shouldBe effectiveKeys(found).sorted
     found.exists(pair => !present(pair, 0)) shouldBe true
     found.exists(pair => !present(pair, 1)) shouldBe true
+    val kept = source
+      .map(copyPair)
+      .filterValues[Long, Long]((value: Long) => value > 0L)
+      .sortByLongKey
+    ColumnarPlanner.lower(kept.plan).map(_.shape) shouldBe Some(
+      "SortByLongKey(FilterValue(Project(Scan)))",
+    )
+    val keptRows = collect(kept)
+    shown(keptRows) shouldBe shown(rowCollect(kept))
+    shown(collectAt(kept, 1)) shouldBe shown(collectAt(kept, 8192))
+    effectiveKeys(keptRows) shouldBe effectiveKeys(keptRows).sorted
+    keptRows.exists(pair => !present(pair, 0)) shouldBe true
   }
 
   it should "keep a null key on the row path and not lower one filter above the sort" in {
