@@ -2,7 +2,6 @@ package com.ewoodbury.scarlet.runtime
 
 import scala.concurrent.duration.*
 
-import cats.effect.IO
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -12,17 +11,17 @@ import com.ewoodbury.scarlet.runtime.api.{RunnableTask, TaskScheduler}
 class TestTaskSchedulerInterface extends AnyFlatSpec with Matchers {
 
   // Mock implementation for testing interface contract
-  class MockTaskScheduler extends TaskScheduler[IO] {
-    override def submit[A, B](tasks: Seq[RunnableTask[A, B]]): IO[Seq[Partition[B]]] =
-      IO.pure(Seq.empty[Partition[B]])
+  class MockTaskScheduler extends TaskScheduler {
+    override def submit[A, B](tasks: Seq[RunnableTask[A, B]]): Seq[Partition[B]] =
+      Seq.empty[Partition[B]]
 
     override def submitWithRetry[A, B](
       tasks: Seq[RunnableTask[A, B]],
       retryPolicy: RetryPolicy
-    ): IO[Seq[Partition[B]]] =
+    ): Seq[Partition[B]] =
       submit(tasks) // Simple implementation for testing
 
-    override def shutdown(): IO[Unit] = IO.unit
+    override def shutdown(): Unit = ()
   }
 
   "TaskScheduler interface" should "support both submit methods" in {
@@ -35,12 +34,10 @@ class TestTaskSchedulerInterface extends AnyFlatSpec with Matchers {
     // These should compile and not throw exceptions
     val result1 = scheduler.submit(tasks)
     val result2 = scheduler.submitWithRetry(tasks, retryPolicy)
-    val shutdownResult = scheduler.shutdown()
+    scheduler.shutdown()
 
-    // Verify they return the expected types
-    result1 shouldBe a[IO[_]]
-    result2 shouldBe a[IO[_]]
-    shutdownResult shouldBe a[IO[_]]
+    result1 shouldBe Seq.empty[Partition[String]]
+    result2 shouldBe Seq.empty[Partition[String]]
   }
 
   it should "accept various retry policies" in {
@@ -57,7 +54,7 @@ class TestTaskSchedulerInterface extends AnyFlatSpec with Matchers {
     // All should compile and work
     policies.foreach { policy =>
       val result = scheduler.submitWithRetry(tasks, policy)
-      result shouldBe a[IO[_]]
+      result shouldBe Seq.empty[Partition[String]]
     }
   }
 
@@ -72,20 +69,19 @@ class TestTaskSchedulerInterface extends AnyFlatSpec with Matchers {
     val policy = RetryPolicy.default
 
     // All should compile with correct types
-    val intResult: IO[Seq[Partition[Int]]] = scheduler.submit(intTasks)
-    val stringResult: IO[Seq[Partition[String]]] = scheduler.submit(stringTasks)
-    val kvResult: IO[Seq[Partition[(String, Int)]]] = scheduler.submit(kvTasks)
+    val intResult: Seq[Partition[Int]] = scheduler.submit(intTasks)
+    val stringResult: Seq[Partition[String]] = scheduler.submit(stringTasks)
+    val kvResult: Seq[Partition[(String, Int)]] = scheduler.submit(kvTasks)
 
-    val intRetryResult: IO[Seq[Partition[Int]]] = scheduler.submitWithRetry(intTasks, policy)
-    val stringRetryResult: IO[Seq[Partition[String]]] = scheduler.submitWithRetry(stringTasks, policy)
-    val kvRetryResult: IO[Seq[Partition[(String, Int)]]] = scheduler.submitWithRetry(kvTasks, policy)
+    val intRetryResult: Seq[Partition[Int]] = scheduler.submitWithRetry(intTasks, policy)
+    val stringRetryResult: Seq[Partition[String]] = scheduler.submitWithRetry(stringTasks, policy)
+    val kvRetryResult: Seq[Partition[(String, Int)]] = scheduler.submitWithRetry(kvTasks, policy)
 
-    // Verify types are preserved
-    intResult shouldBe a[IO[_]]
-    stringResult shouldBe a[IO[_]]
-    kvResult shouldBe a[IO[_]]
-    intRetryResult shouldBe a[IO[_]]
-    stringRetryResult shouldBe a[IO[_]]
-    kvRetryResult shouldBe a[IO[_]]
+    intResult shouldBe Seq.empty[Partition[Int]]
+    stringResult shouldBe Seq.empty[Partition[String]]
+    kvResult shouldBe Seq.empty[Partition[(String, Int)]]
+    intRetryResult shouldBe Seq.empty[Partition[Int]]
+    stringRetryResult shouldBe Seq.empty[Partition[String]]
+    kvRetryResult shouldBe Seq.empty[Partition[(String, Int)]]
   }
 }

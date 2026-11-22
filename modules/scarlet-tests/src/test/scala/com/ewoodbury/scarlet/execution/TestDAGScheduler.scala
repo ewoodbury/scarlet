@@ -1,7 +1,5 @@
 package com.ewoodbury.scarlet.execution
 
-import cats.effect.IO
-import cats.effect.unsafe.implicits.global
 import com.typesafe.scalalogging.StrictLogging
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -182,24 +180,24 @@ class TestDAGScheduler extends AnyFlatSpec with Matchers with StrictLogging {
   it should "execute source-only, narrow, and wide plans through the same scheduler path" in {
     ScarletRuntime.get.shuffle.clear()
     val rt = ScarletRuntime.get
-    val scheduler = new DAGScheduler[IO](rt.shuffle, rt.scheduler, rt.partitioner)
+    val scheduler = new DAGScheduler(rt.shuffle, rt.scheduler, rt.partitioner)
 
     // Source-only plan
     val sourcePlan = Plan.Source(Seq(Partition(Seq(1, 2)), Partition(Seq(3))))
-    scheduler.executePartitions(sourcePlan).unsafeRunSync().flatMap(_.data).toSeq shouldBe Seq(1, 2, 3)
+    scheduler.executePartitions(sourcePlan).flatMap(_.data) shouldBe Seq(1, 2, 3)
 
     // Narrow plan: one-stage graph
     val narrowPlan = Plan.MapOp(
       Plan.FilterOp(sourcePlan, (x: Int) => x > 1),
       (x: Int) => x * 10,
     )
-    scheduler.execute(narrowPlan).unsafeRunSync().toSeq shouldBe Seq(20, 30)
+    scheduler.execute(narrowPlan).toSeq shouldBe Seq(20, 30)
 
     // Wide plan: multi-stage graph
     val widePlan = Plan.GroupByKeyOp[Int, String](
       Plan.Source(Seq(Partition(Seq(1 -> "x")), Partition(Seq(1 -> "y")))),
     )
-    val wideResult = scheduler.execute(widePlan).unsafeRunSync().toMap
+    val wideResult = scheduler.execute(widePlan).toMap
     wideResult(1) should contain theSameElementsAs Seq("x", "y")
   }
 }

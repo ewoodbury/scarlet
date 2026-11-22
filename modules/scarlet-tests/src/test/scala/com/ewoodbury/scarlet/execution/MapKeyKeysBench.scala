@@ -1,6 +1,5 @@
 package com.ewoodbury.scarlet.execution
 
-import cats.effect.unsafe.implicits.global
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
@@ -85,7 +84,7 @@ object MapKeyKeysBench:
       if (row.batches != 0L || row.fused != 0L) then
         refuse(s"row published batches=${row.batches} fused=${row.fused}")
     finally
-      try scheduler.shutdown().unsafeRunSync()
+      try scheduler.shutdown()
       finally
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)

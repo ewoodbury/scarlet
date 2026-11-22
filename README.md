@@ -7,7 +7,7 @@ A data processing engine inspired by Spark, in pure functional Scala 3.
 I'm aiming to build a distributed data processing engine modeled after Apache Spark, with the following differences:
 - Scala 3
 - Type safety
-- Functional purity (with Cats Effect)
+- Direct-style execution
 - Clean architecture and software design from first principles
 
 As the project matures, I plan to shift focus to optimizing performance. My stretch goal is to be twice as fast as Spark for small, simple jobs, and to match Spark's performance on large jobs.
@@ -42,8 +42,8 @@ As the project matures, I plan to shift focus to optimizing performance. My stre
 ### Architecture
 - [x] Clean Modularization
   - Separate modules for core abstractions, execution engine, and distributed system features
-- [x] Effect System
-  - Use Cats Effect for all side effects, making the code pure and testable
+- [x] Direct-style execution
+  - The scheduler and stage runner are synchronous. Actions return their values directly
 - [x] Type Safety
   - Use type-safe transformations and eliminate unsafe casts as much as possible
 - [x] Service Provider Interface (SPI)

@@ -3,7 +3,6 @@ package com.ewoodbury.scarlet.execution
 import java.lang.management.ManagementFactory
 import java.util.Locale
 
-import cats.effect.unsafe.implicits.global
 import com.sun.management.ThreadMXBean
 
 import com.ewoodbury.scarlet.columnar.*
@@ -114,7 +113,7 @@ object QueryBench:
       val allocOn = allocate(queries)
       report(allocOn, queries)
     finally
-      try schedulers.values.foreach(_.shutdown().unsafeRunSync())
+      try schedulers.values.foreach(_.shutdown())
       finally
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)

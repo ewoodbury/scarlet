@@ -159,5 +159,5 @@ Do not merge these. The bodies differ by primitive type, and each type has its o
   `test`, and PerfCheck, then `make test-spill`, on Temurin 21
   (`.github/workflows/test-sbt.yaml`).
 - `CrossEngineBench` defaults are warmup 80 and rounds 30.
-- Cats Effect is still on the row scheduler path.
+- The row scheduler and execution path are direct style. There is no effect type on that path.
 - A tight columnar `while` is allowed (`AGENTS.md`, `build.sbt` excludes `Wart.While`).

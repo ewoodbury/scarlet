@@ -2,7 +2,6 @@ package com.ewoodbury.scarlet.execution
 
 import java.lang.management.ManagementFactory
 
-import cats.effect.unsafe.implicits.global
 import com.sun.management.ThreadMXBean
 
 import com.ewoodbury.scarlet.api.DistCollection
@@ -101,7 +100,7 @@ object PairProjectReduceBench:
       if (byKeyCalls != 0) then refuse(s"HashReduce.byKey ran $byKeyCalls times")
       if (published != 0) then refuse(s"IntPairProject published $published batches")
     finally
-      try scheduler.shutdown().unsafeRunSync()
+      try scheduler.shutdown()
       finally
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)

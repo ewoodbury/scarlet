@@ -1,7 +1,5 @@
 package com.ewoodbury.scarlet.execution
 
-import cats.effect.kernel.Sync
-import cats.syntax.all.*
 import com.typesafe.scalalogging.StrictLogging
 
 import com.ewoodbury.scarlet.core.{Partition, PartitionId, Plan, ScarletConf, ShuffleId}
@@ -16,9 +14,9 @@ import com.ewoodbury.scarlet.runtime.api.{RunnableTask, ShuffleService, TaskSche
  * graph expects. Safe because every task in a submission produces the same record type as the
  * stage it belongs to.
  */
-final class JoinExecutor[F[_]: Sync](
+final class JoinExecutor(
     shuffle: ShuffleService,
-    scheduler: TaskScheduler[F],
+    scheduler: TaskScheduler,
 ) extends StrictLogging:
 
   /**
@@ -67,7 +65,7 @@ final class JoinExecutor[F[_]: Sync](
       leftShuffleId: ShuffleId,
       rightShuffleId: ShuffleId,
       numPartitions: Int,
-  ): F[Seq[Partition[_]]] = {
+  ): Seq[Partition[_]] = {
     val leftSize = estimateShuffleSize(leftShuffleId)
     val rightSize = estimateShuffleSize(rightShuffleId)
 
@@ -89,7 +87,7 @@ final class JoinExecutor[F[_]: Sync](
         )
       }
       // Erasure boundary: every task in the submission produces the stage's record type
-      scheduler.submit(tasks).map(_.asInstanceOf[Seq[Partition[_]]])
+      scheduler.submit(tasks).asInstanceOf[Seq[Partition[_]]]
     } else {
       // Broadcast right side, iterate over left side
       val rightData = (0 until numPartitions).flatMap { partitionId =>
@@ -108,7 +106,7 @@ final class JoinExecutor[F[_]: Sync](
         )
       }
       // Erasure boundary: every task in the submission produces the stage's record type
-      scheduler.submit(tasks).map(_.asInstanceOf[Seq[Partition[_]]])
+      scheduler.submit(tasks).asInstanceOf[Seq[Partition[_]]]
     }
   }
 
@@ -122,7 +120,7 @@ final class JoinExecutor[F[_]: Sync](
       leftShuffleId: ShuffleId,
       rightShuffleId: ShuffleId,
       numPartitions: Int,
-  ): F[Seq[Partition[_]]] = {
+  ): Seq[Partition[_]] = {
     // For sort-merge join, we need to ensure data is sorted by key within each partition
     val tasks = (0 until numPartitions).map { partitionId =>
       val leftData: Seq[(Any, Any)] =
@@ -135,7 +133,7 @@ final class JoinExecutor[F[_]: Sync](
       given Ordering[Any] = Ordering.fromLessThan((a, b) => a.hashCode() < b.hashCode())
       Task.SortMergeJoinTask[Any, Any, Any](leftData, rightData)
     }
-    scheduler.submit(tasks).map(_.asInstanceOf[Seq[Partition[_]]])
+    scheduler.submit(tasks).asInstanceOf[Seq[Partition[_]]]
   }
 
   /**
@@ -148,7 +146,7 @@ final class JoinExecutor[F[_]: Sync](
       leftShuffleId: ShuffleId,
       rightShuffleId: ShuffleId,
       numPartitions: Int,
-  ): F[Seq[Partition[_]]] = {
+  ): Seq[Partition[_]] = {
     val tasks = (0 until numPartitions).map { partitionId =>
       val l: Seq[(Any, Any)] =
         shuffle.readPartition[Any, Any](leftShuffleId, PartitionId(partitionId)).data.toSeq
@@ -156,7 +154,7 @@ final class JoinExecutor[F[_]: Sync](
         shuffle.readPartition[Any, Any](rightShuffleId, PartitionId(partitionId)).data.toSeq
       Task.ShuffleHashJoinTask[Any, Any, Any](l, r)
     }
-    scheduler.submit(tasks).map(_.asInstanceOf[Seq[Partition[_]]])
+    scheduler.submit(tasks).asInstanceOf[Seq[Partition[_]]]
   }
 
   /**
@@ -167,7 +165,7 @@ final class JoinExecutor[F[_]: Sync](
       leftShuffleId: ShuffleId,
       rightShuffleId: ShuffleId,
       numPartitions: Int,
-  ): F[Seq[Partition[_]]] =
+  ): Seq[Partition[_]] =
     executeShuffleHashOuterJoin(
       leftShuffleId,
       rightShuffleId,
@@ -183,7 +181,7 @@ final class JoinExecutor[F[_]: Sync](
       leftShuffleId: ShuffleId,
       rightShuffleId: ShuffleId,
       numPartitions: Int,
-  ): F[Seq[Partition[_]]] =
+  ): Seq[Partition[_]] =
     executeShuffleHashOuterJoin(
       leftShuffleId,
       rightShuffleId,
@@ -199,7 +197,7 @@ final class JoinExecutor[F[_]: Sync](
       leftShuffleId: ShuffleId,
       rightShuffleId: ShuffleId,
       numPartitions: Int,
-  ): F[Seq[Partition[_]]] =
+  ): Seq[Partition[_]] =
     executeShuffleHashOuterJoin(
       leftShuffleId,
       rightShuffleId,
@@ -220,7 +218,7 @@ final class JoinExecutor[F[_]: Sync](
       rightShuffleId: ShuffleId,
       numPartitions: Int,
       makeTask: (Seq[(Any, Any)], Seq[(Any, Any)]) => RunnableTask[Any, B],
-  ): F[Seq[Partition[_]]] = {
+  ): Seq[Partition[_]] = {
     val tasks = (0 until numPartitions).map { partitionId =>
       val leftRows: Seq[(Any, Any)] =
         shuffle.readPartition[Any, Any](leftShuffleId, PartitionId(partitionId)).data.toSeq
@@ -228,7 +226,7 @@ final class JoinExecutor[F[_]: Sync](
         shuffle.readPartition[Any, Any](rightShuffleId, PartitionId(partitionId)).data.toSeq
       makeTask(leftRows, rightRows)
     }
-    scheduler.submit(tasks).map(_.asInstanceOf[Seq[Partition[_]]])
+    scheduler.submit(tasks).asInstanceOf[Seq[Partition[_]]]
   }
 
   /** Groups broadcast rows by key. A null key is dropped and is not a probe match. */

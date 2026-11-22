@@ -4,7 +4,6 @@ import java.io.{ByteArrayOutputStream, PrintStream}
 
 import scala.collection.mutable.ListBuffer
 
-import cats.effect.IO
 import com.typesafe.scalalogging.StrictLogging
 import org.scalatest.BeforeAndAfter
 import org.scalatest.flatspec.AnyFlatSpec
@@ -43,7 +42,7 @@ class TestJoinStrategies extends AnyFlatSpec with Matchers with BeforeAndAfter w
   private val strategySelections = ListBuffer[Plan.JoinStrategy]()
   
   // Mock DAGScheduler for direct method testing
-  private var testDAGScheduler: DAGScheduler[IO] = _
+  private var testDAGScheduler: DAGScheduler = _
 
   before {
     originalConf = ScarletConf.get
@@ -52,7 +51,7 @@ class TestJoinStrategies extends AnyFlatSpec with Matchers with BeforeAndAfter w
     strategySelections.clear()
     
     // Create test DAGScheduler
-    testDAGScheduler = new DAGScheduler[IO](
+    testDAGScheduler = new DAGScheduler(
       ScarletRuntime.get.shuffle,
       ScarletRuntime.get.scheduler,
       ScarletRuntime.get.partitioner

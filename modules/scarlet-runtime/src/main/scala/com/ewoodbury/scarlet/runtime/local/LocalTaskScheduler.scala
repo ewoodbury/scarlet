@@ -1,8 +1,8 @@
 package com.ewoodbury.scarlet.runtime.local
 
-import cats.effect.IO
-import cats.effect.std.Semaphore
-import cats.syntax.all.*
+import java.util.concurrent.*
+import java.util.concurrent.atomic.AtomicInteger
+
 import com.typesafe.scalalogging.StrictLogging
 
 import com.ewoodbury.scarlet.core.{Partition, RetryPolicy, ScarletConf}
@@ -12,28 +12,34 @@ import com.ewoodbury.scarlet.runtime.api.{RunnableTask, TaskScheduler}
 /**
  * Local implementation of the task scheduler.
  *
- * Tasks are executed with a parallelism bound; each task body is run on the blocking pool using
- * IO.blocking to avoid compute pool starvation. Normal submission reads the retry policy from
+ * Tasks run on a fixed pool of `parallelism` threads. Each submission collects `Future`s in input
+ * order and waits on them in that order. Normal submission reads the retry policy from
  * [[ScarletConf]] at submission time, so configuration changes apply to subsequent submissions; an
  * explicit policy override is available through `submitWithRetry`.
  */
 final class LocalTaskScheduler(
     parallelism: Int,
-) extends TaskScheduler[IO]
+) extends TaskScheduler
     with StrictLogging:
+
+  // Daemon workers: this scheduler is process-lifetime on ScarletRuntime, and a non-daemon
+  // pool would keep the JVM alive after the last non-daemon thread finishes.
+  private val pool: ExecutorService =
+    Executors.newFixedThreadPool(parallelism, LocalTaskScheduler.threads)
 
   /**
    * Submits tasks and evaluates them in parallel, respecting the configured parallelism. Failed
    * tasks are retried according to the retry policy derived from the active [[ScarletConf]].
    */
-  def submit[A, B](tasks: Seq[RunnableTask[A, B]]): IO[Seq[Partition[B]]] = {
+  def submit[A, B](tasks: Seq[RunnableTask[A, B]]): Seq[Partition[B]] = {
     val retryPolicy = ScarletConf.get.retryPolicy
     logger.debug(
       s"LocalTaskScheduler: submitting ${tasks.length} tasks with parallelism=$parallelism " +
         s"and maxRetries=${retryPolicy.maxRetries}",
     )
-    executeWithWrapper(tasks, TaskExecutionWrapper.withRetryPolicy[IO](retryPolicy))
-      .guarantee(IO(logger.debug("LocalTaskScheduler: all tasks completed")))
+    // Logged on success and on failure.
+    try executeWithWrapper(tasks, TaskExecutionWrapper.withRetryPolicy(retryPolicy))
+    finally logger.debug("LocalTaskScheduler: all tasks completed")
   }
 
   /**
@@ -42,11 +48,11 @@ final class LocalTaskScheduler(
   def submitWithRetry[A, B](
       tasks: Seq[RunnableTask[A, B]],
       policy: RetryPolicy,
-  ): IO[Seq[Partition[B]]] = {
+  ): Seq[Partition[B]] = {
     logger.debug(
       s"LocalTaskScheduler: submitting ${tasks.length} tasks with explicit retry policy (maxRetries=${policy.maxRetries})",
     )
-    executeWithWrapper(tasks, TaskExecutionWrapper.withRetryPolicy[IO](policy))
+    executeWithWrapper(tasks, TaskExecutionWrapper.withRetryPolicy(policy))
   }
 
   /**
@@ -55,17 +61,34 @@ final class LocalTaskScheduler(
    */
   private def executeWithWrapper[A, B](
       tasks: Seq[RunnableTask[A, B]],
-      wrapper: TaskExecutionWrapper[IO],
-  ): IO[Seq[Partition[B]]] =
-    Semaphore[IO](parallelism.toLong).flatMap { semaphore =>
-      tasks.toList.parTraverse { task =>
-        semaphore.permit.use { _ =>
-          wrapper.executeWithRetry(task)
-        }
-      }
+      wrapper: TaskExecutionWrapper,
+  ): Seq[Partition[B]] = {
+    val futures: Seq[Future[Partition[B]]] = tasks.toVector.map { task =>
+      pool.submit(new Callable[Partition[B]] {
+        def call(): Partition[B] = wrapper.executeWithRetry(task)
+      })
     }
+    futures.map(future => LocalTaskScheduler.await(future))
+  }
 
-  /**
-   * No-op for local scheduler; resources are managed by the runtime.
-   */
-  def shutdown(): IO[Unit] = IO.unit
+  /** Stops accepting tasks. Work already submitted is left to finish. */
+  def shutdown(): Unit = pool.shutdown()
+
+object LocalTaskScheduler:
+  private val threadIds = new AtomicInteger(0)
+
+  private val threads: ThreadFactory = (runnable: Runnable) => {
+    val thread = new Thread(runnable, s"scarlet-task-${threadIds.incrementAndGet()}")
+    thread.setDaemon(true)
+    thread
+  }
+
+  private def await[B](future: Future[Partition[B]]): Partition[B] =
+    try future.get()
+    catch {
+      case execution: ExecutionException =>
+        throw Option(execution.getCause).getOrElse(execution)
+      case interrupted: InterruptedException =>
+        Thread.currentThread().interrupt()
+        throw interrupted
+    }

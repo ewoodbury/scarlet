@@ -6,8 +6,6 @@ import java.util.Locale
 
 import scala.util.control.NonFatal
 
-import cats.effect.unsafe.implicits.global
-
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, SortMergeRuns, SumSpill}
 import com.ewoodbury.scarlet.core.ScarletConf
@@ -167,7 +165,7 @@ object SpillBench:
     finally
       val wall = System.nanoTime() - started
       System.err.println(s"wall_s=${seconds(wall)}")
-      try schedulers.values.foreach(_.shutdown().unsafeRunSync())
+      try schedulers.values.foreach(_.shutdown())
       finally
         try
           ScarletConf.set(savedConf)

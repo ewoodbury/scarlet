@@ -1,8 +1,5 @@
 package com.ewoodbury.scarlet.execution
 
-import cats.effect.IO
-import cats.effect.unsafe.implicits.global
-
 import com.ewoodbury.scarlet.columnar.PairStep
 import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
@@ -120,8 +117,8 @@ class DefaultExecutionService extends ExecutionService {
 
   private def runRow[A](plan: Plan[A]): Seq[Partition[A]] = {
     val runtime = ScarletRuntime.get
-    val scheduler = new DAGScheduler[IO](runtime.shuffle, runtime.scheduler, runtime.partitioner)
-    scheduler.executePartitions(plan).unsafeRunSync()
+    val scheduler = new DAGScheduler(runtime.shuffle, runtime.scheduler, runtime.partitioner)
+    scheduler.executePartitions(plan)
   }
 
   def take[A](plan: Plan[A], n: Int): Seq[A] =

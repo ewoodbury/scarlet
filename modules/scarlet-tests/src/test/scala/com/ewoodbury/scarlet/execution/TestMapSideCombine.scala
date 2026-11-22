@@ -1,7 +1,5 @@
 package com.ewoodbury.scarlet.execution
 
-import cats.effect.IO
-import cats.effect.unsafe.implicits.global
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -40,7 +38,7 @@ class TestMapSideCombine extends AnyFlatSpec with Matchers with BeforeAndAfterEa
 
   "handleCombinedKeyedOutput" should "shuffle one partial per key per mapper partition" in {
     val shuffle = new LocalShuffleService
-    val handler = new ShuffleHandler[IO](shuffle, new HashPartitioner)
+    val handler = new ShuffleHandler(shuffle, new HashPartitioner)
     val mapperPartitions = Seq(
       Partition(Seq("a" -> 1, "a" -> 2, "b" -> 3)),
       Partition(Seq("a" -> 4)),
@@ -49,7 +47,7 @@ class TestMapSideCombine extends AnyFlatSpec with Matchers with BeforeAndAfterEa
 
     val shuffleId = handler
       .handleCombinedKeyedOutput(stageInfo, mapperPartitions, numPartitions = 4, add)
-      .unsafeRunSync()
+      
 
     val shuffled = recordsIn(shuffle, shuffleId, 4)
     shuffled.size shouldBe 3
@@ -57,27 +55,27 @@ class TestMapSideCombine extends AnyFlatSpec with Matchers with BeforeAndAfterEa
 
     val uncombinedId = handler
       .handleKeyedOutput(stageInfo, mapperPartitions, numPartitions = 4)
-      .unsafeRunSync()
+      
     recordsIn(shuffle, uncombinedId, 4).size shouldBe 4
   }
 
   it should "not mutate the mapper partitions" in {
     val shuffle = new LocalShuffleService
-    val handler = new ShuffleHandler[IO](shuffle, new HashPartitioner)
+    val handler = new ShuffleHandler(shuffle, new HashPartitioner)
     val original = Seq("a" -> 1, "a" -> 2, "a" -> 3)
     val mapperPartitions = Seq(Partition(original))
     val add = (a: Any, b: Any) => a.asInstanceOf[Int] + b.asInstanceOf[Int]
 
     handler
       .handleCombinedKeyedOutput(stageInfo, mapperPartitions, numPartitions = 4, add)
-      .unsafeRunSync()
+      
 
     mapperPartitions.flatMap(_.data).toList shouldBe original
   }
 
   it should "leave singleton keys and empty partitions unchanged" in {
     val shuffle = new LocalShuffleService
-    val handler = new ShuffleHandler[IO](shuffle, new HashPartitioner)
+    val handler = new ShuffleHandler(shuffle, new HashPartitioner)
     val mapperPartitions = Seq(
       Partition(Seq("solo" -> 9)),
       Partition(Seq.empty[(String, Int)]),
@@ -86,7 +84,7 @@ class TestMapSideCombine extends AnyFlatSpec with Matchers with BeforeAndAfterEa
 
     val shuffleId = handler
       .handleCombinedKeyedOutput(stageInfo, mapperPartitions, numPartitions = 4, add)
-      .unsafeRunSync()
+      
 
     recordsIn(shuffle, shuffleId, 4) should contain theSameElementsAs Seq("solo" -> 9)
   }

@@ -2,8 +2,6 @@ package com.ewoodbury.scarlet.runtime
 
 import scala.concurrent.duration.*
 
-import cats.effect.IO
-import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -34,9 +32,9 @@ class TestTaskExecutionWrapper extends AnyFlatSpec with Matchers {
       maxDelay = 100.millis
     )
 
-    val wrapper = TaskExecutionWrapper.withRetryPolicy[IO](retryPolicy)
+    val wrapper = TaskExecutionWrapper.withRetryPolicy(retryPolicy)
 
-    val result = wrapper.executeWithRetry(failingTask).unsafeRunSync()
+    val result = wrapper.executeWithRetry(failingTask)
 
     // Should have succeeded after retries
     result.data should contain ("Success on attempt 3")
@@ -51,11 +49,11 @@ class TestTaskExecutionWrapper extends AnyFlatSpec with Matchers {
       maxDelay = 10.millis
     )
 
-    val wrapper = TaskExecutionWrapper.withRetryPolicy[IO](retryPolicy)
+    val wrapper = TaskExecutionWrapper.withRetryPolicy(retryPolicy)
 
     // Should throw exception after retries exhausted
     val exception = intercept[RuntimeException] {
-      wrapper.executeWithRetry(failingTask).unsafeRunSync()
+      wrapper.executeWithRetry(failingTask)
     }
 
     exception.getMessage should include ("Failed on attempt 3")
@@ -64,10 +62,10 @@ class TestTaskExecutionWrapper extends AnyFlatSpec with Matchers {
 
   it should "respect no-retry policy" in {
     val failingTask = new FailingTask(succeedAfter = 2)
-    val wrapper = TaskExecutionWrapper.noRetries[IO]
+    val wrapper = TaskExecutionWrapper.noRetries
 
     val exception = intercept[RuntimeException] {
-      wrapper.executeWithRetry(failingTask).unsafeRunSync()
+      wrapper.executeWithRetry(failingTask)
     }
 
     exception.getMessage should include ("Failed on attempt 1")
@@ -78,8 +76,8 @@ class TestTaskExecutionWrapper extends AnyFlatSpec with Matchers {
     val successfulTask = new RunnableTask[String, String]:
       override def run(): Partition[String] = Partition(Seq("Immediate success"))
 
-    val wrapper = TaskExecutionWrapper.default[IO]
-    val result = wrapper.executeWithRetry(successfulTask).unsafeRunSync()
+    val wrapper = TaskExecutionWrapper.default
+    val result = wrapper.executeWithRetry(successfulTask)
 
     result.data should contain ("Immediate success")
   }

@@ -74,8 +74,6 @@ lazy val commonSettings = Seq(
   Test / compile := (Test / compile).dependsOn(checkFileLength).value,
 )
 
-lazy val catsCore = "org.typelevel" %% "cats-core" % "2.10.0"
-lazy val catsEffect = "org.typelevel" %% "cats-effect" % "3.5.3"
 lazy val scalaLogging = "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5"
 lazy val log4jApi = "org.apache.logging.log4j" % "log4j-api" % "2.23.1"
 lazy val log4jCore = "org.apache.logging.log4j" % "log4j-core" % "2.23.1"
@@ -83,7 +81,6 @@ lazy val log4jSlf4j = "org.apache.logging.log4j" % "log4j-slf4j2-impl" % "2.23.1
 lazy val disruptor = "com.lmax" % "disruptor" % "3.4.4" // required for Log4j2 async
 
 lazy val scalatest = "org.scalatest" %% "scalatest" % "3.2.17"
-lazy val ceTesting = "org.typelevel" %% "cats-effect-testing-scalatest" % "1.5.0"
 
 // User-facing API (clean interface)
 lazy val `scarlet-api` = (project in file("modules/scarlet-api"))
@@ -99,7 +96,7 @@ lazy val `scarlet-core` = (project in file("modules/scarlet-core"))
   .settings(
     name := "scarlet-core",
     commonSettings,
-    libraryDependencies ++= Seq(catsCore, catsEffect, scalaLogging, log4jApi, log4jCore, log4jSlf4j, disruptor)
+    libraryDependencies ++= Seq(scalaLogging, log4jApi, log4jCore, log4jSlf4j, disruptor)
   )
 
 // Runtime SPI (RunnableTask, TaskScheduler, ExecutorBackend, Partitioner, ShuffleService)
@@ -116,7 +113,7 @@ lazy val `scarlet-execution` = (project in file("modules/scarlet-execution"))
   .settings(
     name := "scarlet-execution",
     commonSettings,
-    libraryDependencies ++= Seq(catsCore, catsEffect, scalaLogging, log4jApi, log4jCore, log4jSlf4j, disruptor)
+    libraryDependencies ++= Seq(scalaLogging, log4jApi, log4jCore, log4jSlf4j, disruptor)
   )
   .dependsOn(`scarlet-api`, `scarlet-core`, `scarlet-runtime`, `scarlet-columnar`)
 
@@ -134,7 +131,7 @@ lazy val `scarlet-tests` = (project in file("modules/scarlet-tests"))
   .settings(
     name := "scarlet-tests",
     commonSettings,
-    libraryDependencies ++= Seq(scalatest % Test, ceTesting % Test)
+    libraryDependencies ++= Seq(scalatest % Test)
   )
   .dependsOn(`scarlet-api`, `scarlet-execution`, `scarlet-runtime`, `scarlet-columnar`)
 
