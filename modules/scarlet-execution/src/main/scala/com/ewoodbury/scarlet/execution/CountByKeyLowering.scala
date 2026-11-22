@@ -15,13 +15,16 @@ package com.ewoodbury.scarlet.execution
  * the join under it is rewritten the same way. A second filter, and a sort-merge whose children
  * are not both exchanges, stay on the row path. The count is an `Int` and wraps. The long estimate
  * charges 8-byte keys. The string estimate charges dictionary bytes. [[PhysicalOp.Kind.Pairs]],
- * [[PhysicalOp.Kind.LongPairs]], and [[PhysicalOp.Kind.StringPairs]] lower. A raw triple,
- * including a join that was not projected, stays on the row path, as does every other kind,
- * including [[PhysicalOp.Kind.LongCounts]]. With spill off, an input that does not fit the budget
- * throws [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] and the action fails instead of
- * rerunning on rows. With spill on, an over-budget post-exchange bucket spills. A count table that
- * still does not fit throws [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]]. The function
- * body is not read. [[JoinProbeAggregate]] is a different plan and is not built here.
+ * [[PhysicalOp.Kind.LongPairs]], and [[PhysicalOp.Kind.StringPairs]] lower. An int inner
+ * [[PhysicalOp.HashJoin]] of two exchanges is [[PhysicalOp.CountByKey]] of that join: no extra
+ * exchange and no inserted project. A hinted sort-merge or broadcast is rewritten to that hash
+ * join first. A filter above the join, an outer join, and a non-int join stay on the row path, as
+ * does every other kind, including [[PhysicalOp.Kind.LongCounts]]. With spill off, an input that
+ * does not fit the budget throws [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] and the
+ * action fails instead of rerunning on rows. With spill on, an over-budget post-exchange bucket
+ * spills. A count table that still does not fit throws
+ * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]]. The function body is not read.
+ * [[JoinProbeAggregate]] is a different plan and is not built here.
  */
 private[execution] object CountByKeyLowering:
 
@@ -30,18 +33,30 @@ private[execution] object CountByKeyLowering:
       case Some(projected) => Some(counted(projected))
       case None if intLongProject(child) => Some(counted(child))
       case None =>
-        child.kind match
-          case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs =>
-            Some(counted(child))
-          case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
-              PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.Strings |
-              PhysicalOp.Kind.Bools | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.LongCounts |
-              PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
-              PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
-              PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
-              PhysicalOp.Kind.IntLongSums =>
-            LoweringTrace.note("CountByKeyOp", child.kind, "CountByKeyLowering")
-            None
+        bareInner(child) match
+          case Some(joined) => Some(PhysicalOp.CountByKey(joined))
+          case None => countedKind(child)
+
+  /**
+   * An int inner hash join of two exchanges, or a hinted sort-merge or broadcast rewritten to one.
+   * A filter above the join, a project, and a non-int join do not match.
+   */
+  private def bareInner(op: PhysicalOp): Option[PhysicalOp] = op match
+    case PhysicalOp.HashJoin(PhysicalOp.Exchange(_), PhysicalOp.Exchange(_)) => Some(op)
+    case other => hashedInner(other)
+
+  private def countedKind(child: PhysicalOp): Option[PhysicalOp] =
+    child.kind match
+      case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs =>
+        Some(counted(child))
+      case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
+          PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.Strings |
+          PhysicalOp.Kind.Bools | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.LongCounts |
+          PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
+          PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter |
+          PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums =>
+        LoweringTrace.note("CountByKeyOp", child.kind, "CountByKeyLowering")
+        None
 
   private def counted(child: PhysicalOp): PhysicalOp =
     PhysicalOp.CountByKey(PhysicalOp.Exchange(child))

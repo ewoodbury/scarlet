@@ -28,6 +28,29 @@ private[scarlet] object JoinKeyCount:
     ColumnMetrics.fused()
     build.product(probe)
 
+  /**
+   * `(key, build.stored(key) * probe.stored(key))` for keys stored on both sides. A miss is
+   * omitted. The count is the low 32 bits, the same wrap an `Int` count uses. This does not sum
+   * the products and does not insert into either table.
+   */
+  def productPairs(build: Table, probe: Table): (Array[Int], Array[Int]) =
+    val buildKeys = build.storedKeyCount
+    val probeKeys = probe.storedKeyCount
+    val cap = math.min(buildKeys, probeKeys)
+    if (cap == 0) then (Array.empty[Int], Array.empty[Int])
+    else
+      val outKeys = new Array[Int](cap)
+      val outCounts = new Array[Int](cap)
+      val written =
+        if (probeKeys < buildKeys) then probe.writeProducts(build, outKeys, outCounts)
+        else build.writeProducts(probe, outKeys, outCounts)
+      if (written == cap) then (outKeys, outCounts)
+      else
+        (
+          java.util.Arrays.copyOf(outKeys, written),
+          java.util.Arrays.copyOf(outCounts, written),
+        )
+
   /** Fold `parts` into the first table. An empty vector is an empty table. */
   def merge(parts: Vector[Table]): Table =
     val pending = parts.iterator
@@ -146,6 +169,36 @@ private[scarlet] object JoinKeyCount:
         hashAdd(other.keys(slot), other.counts(slot))
         index += 1
       }
+
+    /** Keys in the slots, after the window is folded. */
+    private[JoinKeyCount] def storedKeyCount: Int =
+      foldWindow()
+      occupied
+
+    /**
+     * Write `(key, this * probe)` for keys present on both sides. `intoKeys` and `intoCounts` hold
+     * at least [[storedKeyCount]] slots. Returns how many pairs were written. Does not sum and
+     * does not insert.
+     */
+    private[JoinKeyCount] def writeProducts(
+        probe: Table,
+        intoKeys: Array[Int],
+        intoCounts: Array[Int],
+    ): Int =
+      foldWindow()
+      var index = 0
+      var written = 0
+      val rows = occupied
+      while (index < rows) {
+        val slot = occupiedSlots(index)
+        val hits = probe.stored(keys(slot))
+        if (hits != 0L) then
+          intoKeys(written) = keys(slot)
+          intoCounts(written) = (hits * counts(slot)).toInt
+          written += 1
+        index += 1
+      }
+      written
 
     /**
      * Sum of `build * probe` over keys present on both sides. A key stored on only one side adds

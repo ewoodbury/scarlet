@@ -586,6 +586,72 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     sums shouldBe rowSums
   }
 
+  "an unmapped filtered join" should "count keys from the probe tables" in {
+    val left = DistCollection.ofIntPairs(
+      Array(1, 2, 3, 4, 5),
+      Array(10, 20, 5, -1, 7),
+      partitions,
+    )
+    val right = DistCollection.ofIntPairs(
+      Array(1, 1, 2, 3, 4, 5),
+      Array(10, 20, 10, 5, 0, 60),
+      partitions,
+    )
+    val filteredLeft = left
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+    val filteredRight = right
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value < 50)
+    // Key 3 drops on the key filter. Key 4 stays on the right only. Key 5 stays on the left only.
+    assertUnmappedCount(filteredLeft.join(filteredRight).countByKey)
+    assertUnmappedCount(filteredLeft.sortMergeJoin(filteredRight).countByKey)
+    assertUnmappedCount(filteredLeft.broadcastJoin(filteredRight).countByKey)
+    val above = filteredLeft
+      .join(filteredRight)
+      .filter { case (key, _) => key > 0 }
+      .countByKey
+    ColumnarPlanner.lower(above.plan).isEmpty shouldBe true
+    val longLeft = DistCollection.ofLongPairs(Array(1L, 2L), Array(10L, 20L), partitions)
+    val longRight = DistCollection.ofLongPairs(Array(1L), Array(3L), partitions)
+    ColumnarPlanner.lower(longLeft.join(longRight).countByKey.plan).isEmpty shouldBe true
+    ColumnarPlanner
+      .lower(filteredLeft.leftOuterJoin(filteredRight).countByKey.plan)
+      .isEmpty shouldBe true
+    val scan = PhysicalOp.Scan(PhysicalOp.Kind.Pairs, Seq.empty)
+    val hashed = PhysicalOp.HashJoin(PhysicalOp.Exchange(scan), PhysicalOp.Exchange(scan))
+    CountByKeyLowering.apply(hashed).get.shape shouldBe
+      "CountByKey(HashJoin(Exchange(Scan), Exchange(Scan)))"
+    CountByKeyLowering
+      .apply(PhysicalOp.Filter(hashed, PhysicalOp.Slot.TripleRow))
+      .isEmpty shouldBe true
+    val oneSide = PhysicalOp.SortMergeJoin(PhysicalOp.Exchange(scan), scan)
+    CountByKeyLowering.apply(oneSide).isEmpty shouldBe true
+    val longScan = PhysicalOp.Scan(PhysicalOp.Kind.LongPairs, Seq.empty)
+    val longJoin = PhysicalOp.LongHashJoin(
+      PhysicalOp.Exchange(longScan),
+      PhysicalOp.Exchange(longScan),
+    )
+    CountByKeyLowering.apply(longJoin).isEmpty shouldBe true
+    val boxed = DistCollection(Seq(1 -> 10, 2 -> 20, 4 -> 1), partitions)
+      .join(DistCollection(Seq(1 -> 1, 1 -> 2, 3 -> 9), partitions))
+      .countByKey
+    val boxedShape = ColumnarPlanner.lower(boxed.plan).get.shape
+    boxedShape should include("CountByKey(HashJoin(")
+    boxedShape should not include "Project"
+    JoinWriteRuns.resetRunsForTest()
+    HashCount.resetByKeyForTest()
+    val boxedCounts = boxed.collect().toMap
+    JoinWriteRuns.runsForTest shouldBe 0L
+    HashCount.byKeyCallsForTest shouldBe 0
+    boxedCounts shouldBe Map(1 -> 2)
+    val boxedSaved = ScarletConf.get
+    ScarletConf.set(boxedSaved.copy(columnarExecution = false))
+    val boxedRow = boxed.collect().toMap
+    ScarletConf.set(boxedSaved)
+    boxedCounts shouldBe boxedRow
+  }
+
   "a generic value sort" should "decline tryRun and stay off the columnar arm" in {
     val data = filtered(topKeys, topValues)
     val plan = data
@@ -597,6 +663,40 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     ColumnarPlanner.partitioning(plan).isEmpty shouldBe true
     ColumnarPlanner.tryRun(plan).isEmpty shouldBe true
   }
+
+  private def assertUnmappedCount(counted: DistCollection[(Int, Int)]): Unit =
+    val shape = ColumnarPlanner.lower(counted.plan).get.shape
+    shape should include("CountByKey(HashJoin(")
+    shape should not include "Project"
+    shape should not include "SortMergeJoin"
+    shape should not include "BroadcastJoin"
+    shape should not include "Exchange(HashJoin"
+    ColumnarPlanner.tryRun(counted.plan).isDefined shouldBe true
+    Task.resetSortMergeJoinRunsForTest()
+    JoinWriteRuns.resetRunsForTest()
+    HashCount.resetByKeyForTest()
+    val counts = counted.collect().toMap
+    Task.sortMergeJoinRunsForTest shouldBe 0
+    JoinWriteRuns.runsForTest shouldBe 0L
+    HashCount.byKeyCallsForTest shouldBe 0
+    counts shouldBe Map(1 -> 2, 2 -> 1)
+    CrossEngineShapes.pairChecksum(counts) shouldBe 96L
+    val saved = ScarletConf.get
+    ScarletConf.set(saved.copy(columnarExecution = false))
+    val rowCounts = counted.collect().toMap
+    ScarletConf.set(saved)
+    counts shouldBe rowCounts
+    ScarletConf.set(saved.copy(columnarBatchSize = 1))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      JoinWriteRuns.resetRunsForTest()
+      HashCount.resetByKeyForTest()
+      Task.resetSortMergeJoinRunsForTest()
+      counted.collect().toMap shouldBe counts
+      JoinWriteRuns.runsForTest shouldBe 0L
+      HashCount.byKeyCallsForTest shouldBe 0
+      Task.sortMergeJoinRunsForTest shouldBe 0
+    finally ScarletConf.set(saved)
 
   private def assertProbedCount(
       counted: DistCollection[(Int, Int)],

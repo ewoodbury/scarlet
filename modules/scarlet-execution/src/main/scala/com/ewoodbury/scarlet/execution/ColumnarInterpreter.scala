@@ -496,6 +496,20 @@ private[execution] object ColumnarInterpreter:
       require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
       GroupByArms.columns(source, child, selectedPartition, preserveAbsence, ordinals)
     case (
+          Plan.CountByKeyOp(Plan.JoinOp(left, right, strategy)),
+          PhysicalOp.CountByKey(
+            PhysicalOp.HashJoin(
+              PhysicalOp.Exchange(leftOp),
+              PhysicalOp.Exchange(rightOp),
+            ),
+          ),
+        )
+        if JoinLowering.acceptsShuffleHash(strategy) ||
+          JoinLowering.hintedInnerHashed(strategy) =>
+      // The sides are already exchanged. There is no user project, so the count is the join key.
+      require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
+      JoinCountByKey.columns(left, right, leftOp, rightOp, preserveAbsence, ordinals)
+    case (
           Plan.CountByKeyOp(source),
           PhysicalOp.CountByKey(PhysicalOp.Exchange(child)),
         ) if PhysicalSchema.isIntLong(child.schema) =>

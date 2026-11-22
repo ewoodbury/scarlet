@@ -39,6 +39,7 @@ private[execution] object IntPairFilterEncode:
    * Inner-join cardinality of two owned int-pair sides. A slot filter is applied while the keys
    * are counted. Values are read only by the predicate and are not copied. `None` when either side
    * is boxed, null, or not an int slot stack on an owned scan: the caller keeps the exchange.
+   * [[tryTables]] is those tables before [[JoinKeyCount.multiply]] sums them.
    */
   def tryCount(
       leftPlan: Plan[_],
@@ -47,11 +48,25 @@ private[execution] object IntPairFilterEncode:
       rightOp: PhysicalOp,
       ordinals: Set[Int],
   ): Option[Long] =
+    tryTables(leftPlan, leftOp, rightPlan, rightOp, ordinals).map { (built, probed) =>
+      JoinCountTrace.time("product")(JoinKeyCount.multiply(built, probed))
+    }
+
+  /**
+   * Per-key multiplicities [[tryCount]] multiplies. `None` for the same sides [[tryCount]]
+   * refuses. The tables are not summed.
+   */
+  def tryTables(
+      leftPlan: Plan[_],
+      leftOp: PhysicalOp,
+      rightPlan: Plan[_],
+      rightOp: PhysicalOp,
+      ordinals: Set[Int],
+  ): Option[(JoinKeyCount.Table, JoinKeyCount.Table)] =
     val build = JoinCountTrace.labeled("build")(countSide(leftPlan, leftOp, ordinals))
     val probe = JoinCountTrace.labeled("probe")(countSide(rightPlan, rightOp, ordinals))
     (build, probe) match
-      case (Some(built), Some(probed)) =>
-        Some(JoinCountTrace.time("product")(JoinKeyCount.multiply(built, probed)))
+      case (Some(built), Some(probed)) => Some((built, probed))
       case _ => None
 
   private def countSide(
