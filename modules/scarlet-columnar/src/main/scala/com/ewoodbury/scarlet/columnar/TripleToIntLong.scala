@@ -30,6 +30,14 @@ object TripleToIntLong:
   private[scarlet] trait LongSink:
     def add(key: Int, value: Long): Unit
 
+  /**
+   * One key or value test on a projected `(Int, Long)`. The function is not read. A null key is
+   * not passed to [[IntLongSlot.Key]]. A null value is not passed to [[IntLongSlot.Value]].
+   */
+  private[scarlet] enum IntLongSlot:
+    case Key(keep: Int => Boolean)
+    case Value(keep: Long => Boolean)
+
   def adapt(mapper: Any): TripleMap =
     val fn = mapper.asInstanceOf[((Int, (Int, Int))) => Any]
     new TripleMap:
@@ -80,6 +88,47 @@ object TripleToIntLong:
       case row: Product if row.productArity == 2 =>
         sink.add(readKey(row.productElement(0)), readValue(row.productElement(1)))
       case other => decline(foundName(other))
+
+  /**
+   * [[offer]] after one key or value slot. A null pair still declines. A null projected key is
+   * dropped and a key test is not called. A null projected value is dropped from a value test and
+   * is not passed to it. A key test that keeps a present key still counts a null value: the count
+   * sink ignores that cell. A value test that keeps a present value still drops a null key. A cell
+   * that is not `(Int, Long)` declines with the same name as [[offer]].
+   */
+  private[scarlet] def offerSlot(projected: Any, slot: IntLongSlot, sink: LongSink): Unit =
+    projected match
+      case null => decline("null")
+      case row: Product if row.productArity == 2 =>
+        val valueCell = row.productElement(1)
+        valueCell match
+          case null | _: Long => ()
+          case other => decline(foundName(other))
+        val keyCell = row.productElement(0)
+        keyCell match
+          case null | _: Int => ()
+          case other => decline(foundName(other))
+        keepSlot(keyCell, valueCell, slot, sink)
+      case other => decline(foundName(other))
+
+  private def keepSlot(keyCell: Any, valueCell: Any, slot: IntLongSlot, sink: LongSink): Unit =
+    slot match
+      case IntLongSlot.Key(keep) =>
+        keyCell match
+          case key: Int if keep(key) => sink.add(key, valueOrZero(valueCell))
+          case _ => ()
+      case IntLongSlot.Value(keep) =>
+        valueCell match
+          case value: Long if keep(value) =>
+            keyCell match
+              case key: Int => sink.add(key, value)
+              case _ => ()
+          case _ => ()
+
+  /** The count sink drops this cell. A null value still counts when the key slot keeps the key. */
+  private def valueOrZero(cell: Any): Long = cell match
+    case value: Long => value
+    case _ => 0L
 
   /** A matched null component. [[project]] declines the same way before it calls the function. */
   private[scarlet] def rejectNull(): Nothing =

@@ -146,14 +146,16 @@ private[execution] object JoinArms:
       ordinals,
       ProbeKey,
       None,
+      None,
       false,
     )
 
   /**
    * Grouped count of a triple project over the exchange [[inner]] uses. Match columns are not
    * written. Each probe hit offers its projected key into [[HashCount.partialKeys]]. Those
-   * partials are exchanged the way [[HashCount.byKey]] exchanges them. An over-budget build bucket
-   * declines inside [[ProjectedJoinCount.count]].
+   * partials are exchanged the way [[HashCount.byKey]] exchanges them. One key or value slot above
+   * the project is applied on the probe. An over-budget build bucket declines inside
+   * [[ProjectedJoinCount.count]].
    */
   def projectCount(
       left: Plan[_],
@@ -163,8 +165,20 @@ private[execution] object JoinArms:
       preserveAbsence: Boolean,
       ordinals: Set[Int],
       mapper: TripleToIntLong.TripleMap,
+      slot: Option[TripleToIntLong.IntLongSlot] = None,
   ): Vector[ColumnBatch] =
-    projectCounted(left, right, leftOp, rightOp, preserveAbsence, ordinals, mapper, None, false)
+    projectCounted(
+      left,
+      right,
+      leftOp,
+      rightOp,
+      preserveAbsence,
+      ordinals,
+      mapper,
+      slot,
+      None,
+      false,
+    )
 
   /**
    * [[projectCount]] after one triple predicate. A hit that fails [[keep]] is not offered. A
@@ -190,6 +204,7 @@ private[execution] object JoinArms:
       preserveAbsence,
       ordinals,
       mapper,
+      None,
       Some(keep),
       dropNull,
     )
@@ -209,6 +224,7 @@ private[execution] object JoinArms:
       preserveAbsence: Boolean,
       ordinals: Set[Int],
       mapper: TripleToIntLong.TripleMap,
+      slot: Option[TripleToIntLong.IntLongSlot],
       keep: Option[PairKernel.IntTriplePredicate],
       dropNull: Boolean,
   ): Vector[ColumnBatch] =
@@ -223,6 +239,7 @@ private[execution] object JoinArms:
       mapper,
       keep,
       dropNull,
+      slot,
     )
 
   /** Hits [[projectSum]] would add. Nothing is published. */

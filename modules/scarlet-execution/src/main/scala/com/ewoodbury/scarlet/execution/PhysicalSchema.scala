@@ -6,9 +6,10 @@ import com.ewoodbury.scarlet.columnar.LogicalType
  * Output schema of a [[PhysicalOp]]. [[PhysicalOp.Kind]] stays the admission enum.
  *
  * A project whose child kind is [[PhysicalOp.Kind.Triples]] reports `[Int32, Int64]`. The cells
- * are whatever the function returns; the schema is not read off the lambda. Every other operator
- * reports the schema of its kind. An exchange reports its child, so a project under an exchange
- * keeps the two-column schema. A hash aggregate of that schema reports the same two columns.
+ * are whatever the function returns; the schema is not read off the lambda. A filter reports its
+ * child, so one slot above that project keeps the two-column schema. Every other operator reports
+ * the schema of its kind. An exchange reports its child, so a project under an exchange keeps the
+ * two-column schema. A hash aggregate of that schema reports the same two columns.
  */
 private[execution] object PhysicalSchema:
 
@@ -19,9 +20,16 @@ private[execution] object PhysicalSchema:
     types.hasNext && isInt32(types.next()) && types.hasNext && isInt64(types.next()) &&
     !types.hasNext
 
+  /** A triple [[PhysicalOp.Project]]. Its schema is [[IntLong]]. A filter of one is not. */
+  def isIntLongProject(op: PhysicalOp): Boolean = op match
+    case PhysicalOp.Project(_) if isIntLong(of(op)) => true
+    case _ => false
+
   def of(op: PhysicalOp): IndexedSeq[LogicalType] = op match
     case PhysicalOp.Project(child) if isTriples(child) =>
       IntLong
+    case PhysicalOp.Filter(child, _) =>
+      of(child)
     case PhysicalOp.Exchange(child) =>
       of(child)
     case PhysicalOp.HashAggregate(child) if isIntLong(of(child)) =>

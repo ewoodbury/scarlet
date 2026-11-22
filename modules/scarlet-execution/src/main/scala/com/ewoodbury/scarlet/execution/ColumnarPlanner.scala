@@ -1081,9 +1081,9 @@ object ColumnarPlanner:
 
   private def columnFilter(source: Plan[_], slot: PhysicalOp.Slot): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
-      // One key or value slot above one int key map, one string-pair project, or one long-pair
-      // project. The project sits on a scan or a filter stack of that kind. The predicate is not
-      // read. A second slot and a second project stay empty.
+      // One key or value slot above one int key map, one string-pair project, one long-pair
+      // project, or one triple project whose schema is `[Int32, Int64]`. The predicate is not
+      // read. A second slot above that triple project, and an unprojected join, stay empty.
       if (
           MapIntKey.slotAbove(child, slot) || StringPairSlot.oneProject(child) ||
           LongPairSlot.oneProject(child)
@@ -1097,6 +1097,8 @@ object ColumnarPlanner:
       else
         child.kind match
           case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.LongPairs =>
+            Some(PhysicalOp.Filter(child, slot))
+          case PhysicalOp.Kind.Triples if PhysicalSchema.isIntLongProject(child) =>
             Some(PhysicalOp.Filter(child, slot))
           case _ => None
     }

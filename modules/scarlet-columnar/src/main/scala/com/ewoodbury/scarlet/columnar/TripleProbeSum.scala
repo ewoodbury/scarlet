@@ -20,7 +20,9 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * [[visit]] runs the same hits and discards the pairs, so a reducer that is not addition can still
  * name a bad cell. It does not publish a sum. [[count]] offers each projected key into
  * [[HashCount.partialKeys]] and does not write the match columns. [[countKept]] drops a hit that
- * fails one triple predicate before the map runs. The predicate body is not read.
+ * fails one triple predicate before the map runs. The predicate body is not read. A key or value
+ * slot keeps the projected cell after the offer. A null projected key is dropped and the key test
+ * is not called.
  */
 @SuppressWarnings(
   Array(
@@ -52,15 +54,20 @@ private[scarlet] object TripleProbeSum:
   /**
    * One `(key, count)` partial for this probe. Each hit offers the projected key. The long cell is
    * checked and dropped. An empty side, or a probe that misses, does not call the function. A
-   * match table that does not fit the spill budget declines before any key is inserted.
+   * match table that does not fit the spill budget declines before any key is inserted. `slot`
+   * keeps a projected key or value after the offer. A null projected key is dropped and the key
+   * test is not called. [[JoinWrite]] is not called.
    */
   def count(
       build: HashJoin.JoinSide,
       probe: HashJoin.JoinSide,
       mapper: TripleToIntLong.TripleMap,
+      slot: Option[TripleToIntLong.IntLongSlot],
   ): ColumnBatch =
     partial(build, probe) { (slots, columns, sink) =>
-      walk(slots, columns, mapper, sink)
+      slot match
+        case None => walk(slots, columns, mapper, sink)
+        case Some(keep) => walkSlot(slots, columns, mapper, keep, sink)
     }
 
   /**
@@ -324,6 +331,82 @@ private[scarlet] object TripleProbeSum:
               if (!probeOk || !buildOk) then TripleToIntLong.rejectNull()
               if (keep(key, left(buildRow), right(row))) then
                 TripleToIntLong.offer(mapper(key, left(buildRow), right(row)), sink)
+            buildRow = slots.nextRow(buildRow)
+          }
+      row += 1
+    }
+
+  /** [[walk]] plus one slot on the projected pair. The input null check is unchanged. */
+  private def walkSlot(
+      slots: JoinSlots,
+      columns: Sides,
+      mapper: TripleToIntLong.TripleMap,
+      slot: TripleToIntLong.IntLongSlot,
+      sink: TripleToIntLong.LongSink,
+  ): Unit =
+    val probeRows = columns.probeKeys.length
+    val present =
+      Validity.livePresent(columns.probeKeys.validity, probeRows) &&
+        Validity.livePresent(columns.probeValues.validity, probeRows) &&
+        Validity.livePresent(columns.buildValues.validity, columns.buildValues.length)
+    if (present) then walkSlotPresent(slots, columns, probeRows, mapper, slot, sink)
+    else walkSlotSparse(slots, columns, probeRows, mapper, slot, sink)
+
+  private def walkSlotPresent(
+      slots: JoinSlots,
+      columns: Sides,
+      probeRows: Int,
+      mapper: TripleToIntLong.TripleMap,
+      slot: TripleToIntLong.IntLongSlot,
+      sink: TripleToIntLong.LongSink,
+  ): Unit =
+    val left = columns.buildValues.values
+    val probeKeys = columns.probeKeys.values
+    val right = columns.probeValues.values
+    var row = 0
+    while (row < probeRows) {
+      val key = probeKeys(row)
+      val located = slots.locate(key)
+      if (located >= 0) then
+        val probe = right(row)
+        var buildRow = slots.headRow(located)
+        while (buildRow >= 0) {
+          TripleToIntLong.offerSlot(mapper(key, left(buildRow), probe), slot, sink)
+          buildRow = slots.nextRow(buildRow)
+        }
+      row += 1
+    }
+
+  private def walkSlotSparse(
+      slots: JoinSlots,
+      columns: Sides,
+      probeRows: Int,
+      mapper: TripleToIntLong.TripleMap,
+      slot: TripleToIntLong.IntLongSlot,
+      sink: TripleToIntLong.LongSink,
+  ): Unit =
+    val probeKeys = columns.probeKeys.values
+    val probeKeyWords = columns.probeKeys.validity.words
+    val left = columns.buildValues.values
+    val leftWords = columns.buildValues.validity.words
+    val right = columns.probeValues.values
+    val rightWords = columns.probeValues.validity.words
+    val probeKeysDense = Validity.livePresent(columns.probeKeys.validity, probeRows)
+    val leftDense = Validity.livePresent(columns.buildValues.validity, columns.buildValues.length)
+    val rightDense = Validity.livePresent(columns.probeValues.validity, probeRows)
+    var row = 0
+    while (row < probeRows) {
+      val keyOk = probeKeysDense || Validity.isSet(probeKeyWords, row)
+      if (keyOk) then
+        val key = probeKeys(row)
+        val located = slots.locate(key)
+        if (located >= 0) then
+          val probeOk = rightDense || Validity.isSet(rightWords, row)
+          var buildRow = slots.headRow(located)
+          while (buildRow >= 0) {
+            val buildOk = leftDense || Validity.isSet(leftWords, buildRow)
+            if (!probeOk || !buildOk) then TripleToIntLong.rejectNull()
+            TripleToIntLong.offerSlot(mapper(key, left(buildRow), right(row)), slot, sink)
             buildRow = slots.nextRow(buildRow)
           }
       row += 1
