@@ -97,6 +97,10 @@ private[execution] object FilterChain:
     // the index would name scan rows under the project. Interpret publishes the projected pairs,
     // and [[com.ewoodbury.scarlet.columnar.IntTopN]] orders those batches. A null value orders as
     // zero and stays null. A slot above that project is not [[SortLowering.pairProjectOnScan]].
+    // One [[PhysicalOp.MapKey]] on a scan or filter stack declines here through
+    // [[MapIntKey.inTree]]. Interpret publishes the mapped pairs and the same top-N orders them.
+    // A null input key stays null and is not passed to the function. A slot above that map is
+    // not [[SortLowering.pairMapKeyOnScan]].
     if (
         MapIntKey.inTree(op) || StringPairSlot.filterCoversProject(op) ||
         SortLowering.pairProjectOnScan(op)
