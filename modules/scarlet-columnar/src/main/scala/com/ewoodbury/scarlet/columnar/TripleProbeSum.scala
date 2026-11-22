@@ -19,7 +19,8 @@ import com.ewoodbury.scarlet.core.ScarletConf
  *
  * [[visit]] runs the same hits and discards the pairs, so a reducer that is not addition can still
  * name a bad cell. It does not publish a sum. [[count]] offers each projected key into
- * [[HashCount.partialKeys]] and does not write the match columns.
+ * [[HashCount.partialKeys]] and does not write the match columns. [[countKept]] drops a hit that
+ * fails one triple predicate before the map runs. The predicate body is not read.
  */
 @SuppressWarnings(
   Array(
@@ -58,6 +59,30 @@ private[scarlet] object TripleProbeSum:
       probe: HashJoin.JoinSide,
       mapper: TripleToIntLong.TripleMap,
   ): ColumnBatch =
+    partial(build, probe) { (slots, columns, sink) =>
+      walk(slots, columns, mapper, sink)
+    }
+
+  /**
+   * [[count]] after one predicate. The match estimate still counts every key hit, including rows
+   * [[keep]] will drop. A null component is dropped when [[dropNull]] is set, and [[keep]] is not
+   * called. Otherwise a null hit declines before [[keep]] runs.
+   */
+  def countKept(
+      build: HashJoin.JoinSide,
+      probe: HashJoin.JoinSide,
+      mapper: TripleToIntLong.TripleMap,
+      keep: PairKernel.IntTriplePredicate,
+      dropNull: Boolean,
+  ): ColumnBatch =
+    partial(build, probe) { (slots, columns, sink) =>
+      walkKept(slots, columns, mapper, sink, keep, dropNull)
+    }
+
+  private def partial(
+      build: HashJoin.JoinSide,
+      probe: HashJoin.JoinSide,
+  )(offer: (JoinSlots, Sides, TripleToIntLong.LongSink) => Unit): ColumnBatch =
     val columns = sides(build, probe)
     if (columns.buildKeys.length == 0 || columns.probeKeys.length == 0) then
       ColumnBatches.emptyIntPairs
@@ -71,7 +96,7 @@ private[scarlet] object TripleProbeSum:
         HashCount.partialKeys(hint) { addKey =>
           val sink = new TripleToIntLong.LongSink:
             def add(key: Int, @unused value: Long): Unit = addKey(key)
-          walk(slots, columns, mapper, sink)
+          offer(slots, columns, sink)
           ColumnMetrics.fused()
         }
 
@@ -214,6 +239,91 @@ private[scarlet] object TripleProbeSum:
             val buildOk = leftDense || Validity.isSet(leftWords, buildRow)
             if (!probeOk || !buildOk) then TripleToIntLong.rejectNull()
             TripleToIntLong.offer(mapper(key, left(buildRow), right(row)), sink)
+            buildRow = slots.nextRow(buildRow)
+          }
+      row += 1
+    }
+
+  private def walkKept(
+      slots: JoinSlots,
+      columns: Sides,
+      mapper: TripleToIntLong.TripleMap,
+      sink: TripleToIntLong.LongSink,
+      keep: PairKernel.IntTriplePredicate,
+      dropNull: Boolean,
+  ): Unit =
+    val probeRows = columns.probeKeys.length
+    val present =
+      Validity.livePresent(columns.probeKeys.validity, probeRows) &&
+        Validity.livePresent(columns.probeValues.validity, probeRows) &&
+        Validity.livePresent(columns.buildValues.validity, columns.buildValues.length)
+    if (present) then walkKeptPresent(slots, columns, probeRows, mapper, sink, keep)
+    else walkKeptSparse(slots, columns, probeRows, mapper, sink, keep, dropNull)
+
+  /** Every live probe key, probe value, and build value is present. No bit test in the loop. */
+  private def walkKeptPresent(
+      slots: JoinSlots,
+      columns: Sides,
+      probeRows: Int,
+      mapper: TripleToIntLong.TripleMap,
+      sink: TripleToIntLong.LongSink,
+      keep: PairKernel.IntTriplePredicate,
+  ): Unit =
+    val left = columns.buildValues.values
+    val probeKeys = columns.probeKeys.values
+    val right = columns.probeValues.values
+    var row = 0
+    while (row < probeRows) {
+      val key = probeKeys(row)
+      val slot = slots.locate(key)
+      if (slot >= 0) then
+        val probe = right(row)
+        var buildRow = slots.headRow(slot)
+        while (buildRow >= 0) {
+          val build = left(buildRow)
+          if (keep(key, build, probe)) then TripleToIntLong.offer(mapper(key, build, probe), sink)
+          buildRow = slots.nextRow(buildRow)
+        }
+      row += 1
+    }
+
+  /** A null component is dropped, or declined, before [[keep]] and the map. */
+  private def walkKeptSparse(
+      slots: JoinSlots,
+      columns: Sides,
+      probeRows: Int,
+      mapper: TripleToIntLong.TripleMap,
+      sink: TripleToIntLong.LongSink,
+      keep: PairKernel.IntTriplePredicate,
+      dropNull: Boolean,
+  ): Unit =
+    val probeKeys = columns.probeKeys.values
+    val probeKeyWords = columns.probeKeys.validity.words
+    val left = columns.buildValues.values
+    val leftWords = columns.buildValues.validity.words
+    val right = columns.probeValues.values
+    val rightWords = columns.probeValues.validity.words
+    val probeKeysDense = Validity.livePresent(columns.probeKeys.validity, probeRows)
+    val leftDense = Validity.livePresent(columns.buildValues.validity, columns.buildValues.length)
+    val rightDense = Validity.livePresent(columns.probeValues.validity, probeRows)
+    var row = 0
+    while (row < probeRows) {
+      val keyOk = probeKeysDense || Validity.isSet(probeKeyWords, row)
+      if (keyOk) then
+        val key = probeKeys(row)
+        val slot = slots.locate(key)
+        if (slot >= 0) then
+          val probeOk = rightDense || Validity.isSet(rightWords, row)
+          var buildRow = slots.headRow(slot)
+          while (buildRow >= 0) {
+            val buildOk = leftDense || Validity.isSet(leftWords, buildRow)
+            if (dropNull) then
+              if (probeOk && buildOk && keep(key, left(buildRow), right(row))) then
+                TripleToIntLong.offer(mapper(key, left(buildRow), right(row)), sink)
+            else
+              if (!probeOk || !buildOk) then TripleToIntLong.rejectNull()
+              if (keep(key, left(buildRow), right(row))) then
+                TripleToIntLong.offer(mapper(key, left(buildRow), right(row)), sink)
             buildRow = slots.nextRow(buildRow)
           }
       row += 1
