@@ -101,10 +101,14 @@ private[execution] object FilterChain:
     // immediately above that map, decline here through [[MapIntKey.inTree]]. Interpret publishes
     // those pairs. [[com.ewoodbury.scarlet.columnar.IntTopN]] orders a value sort.
     // [[com.ewoodbury.scarlet.columnar.RankSplit]] orders a key sort. A null input key stays null
-    // and is not passed to the function. A second slot is not that one filter.
+    // and is not passed to the function. A second slot is not that one filter. One int
+    // `mapValues` on a scan or a filter stack is the same decline: the index would name scan rows
+    // under the map. Interpret publishes the mapped pairs. A null value stays null, is not passed
+    // to `mapValues`, and orders as zero. A slot above that project or that map is not
+    // [[SortLowering.pairProjectOnScan]] or [[SortLowering.pairMapValueOnScan]].
     if (
         MapIntKey.inTree(op) || StringPairSlot.filterCoversProject(op) ||
-        SortLowering.pairProjectOnScan(op)
+        SortLowering.pairProjectOnScan(op) || SortLowering.pairMapValueOnScan(op)
       )
     then None
     else selectIndexed(plan, op, selectedPartition, preserveAbsence, ordinals)

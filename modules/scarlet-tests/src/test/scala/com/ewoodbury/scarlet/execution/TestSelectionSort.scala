@@ -661,8 +661,19 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .map((pair: (Int, Int)) => (pair._1 + 1, pair._2))
       .filter((pair: (Int, Int)) => pair._2 > 0)
       .sortByIntKey
-    val valuesDesc = source.mapValues((value: Int) => value + 1).sortByIntValueDesc
     val twiceDesc = twice.sortByIntValueDesc
+    val aboveMap = source
+      .mapValues((value: Int) => value + 1)
+      .filterValues((value: Int) => value > 0)
+      .sortByIntValueDesc
+    val twiceMapped = source
+      .mapValues((value: Int) => value + 1)
+      .mapValues((value: Int) => value + 1)
+      .sortByIntValueDesc
+    val onProject = source
+      .map((pair: (Int, Int)) => (pair._1, pair._2))
+      .mapValues((value: Int) => value + 1)
+      .sortByIntValueDesc
     val second = source
       .map((pair: (Int, Int)) => (pair._1 + 1, pair._2))
       .filterKeys((key: Int) => key > 2)
@@ -717,8 +728,10 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.lower(twice.plan).map(_.shape) shouldBe Some("Project(Project(Scan))")
     ColumnarPlanner.lower(twice.sortByIntKey.plan) shouldBe None
     ColumnarPlanner.lower(above.plan) shouldBe None
-    ColumnarPlanner.lower(valuesDesc.plan) shouldBe None
     ColumnarPlanner.lower(twiceDesc.plan) shouldBe None
+    ColumnarPlanner.lower(aboveMap.plan) shouldBe None
+    ColumnarPlanner.lower(twiceMapped.plan) shouldBe None
+    ColumnarPlanner.lower(onProject.plan) shouldBe None
     ColumnarPlanner.lower(second.plan) shouldBe None
     ColumnarPlanner.lower(mappedKey.plan) shouldBe None
     ColumnarPlanner.lower(secondKey.plan) shouldBe None

@@ -8,12 +8,14 @@ import com.ewoodbury.scarlet.core.Plan
  *
  * [[sort]] is the full order for collect. [[take]] is a bounded heap of `n` rows. An owned
  * int-pair scan, with or without an int-slot filter stack, walks those arrays in
- * [[OwnedValueTake]] and does not encode them. One int-pair project, one [[PhysicalOp.MapKey]], or
- * one key or value filter immediately above that map, on a scan or a filter stack, has no survivor
- * index. [[FilterChain.selected]] returns `None`, interpret publishes those pairs, and [[IntTopN]]
- * orders the batches. A null input key stays null, is not passed to the key function, and orders
- * as zero. Any other child selects, then heaps, and uses the full sort when `n` covers every live
- * row. A null value or key orders as zero and stays null. Ties keep input order.
+ * [[OwnedValueTake]] and does not encode them. One int-pair project, one [[PhysicalOp.MapKey]],
+ * one key or value filter immediately above that map, or one int [[PhysicalOp.MapValue]], on a
+ * scan or a filter stack, has no survivor index. [[FilterChain.selected]] returns `None`,
+ * interpret publishes those pairs, and [[IntTopN]] orders the batches. A null input key stays
+ * null, is not passed to the key function, and orders as zero. A null value stays null, is not
+ * passed to `mapValues`, and orders as zero. Any other child selects, then heaps, and uses the
+ * full sort when `n` covers every live row. A null value or key orders as zero and stays null.
+ * Ties keep input order.
  */
 private[execution] object SortArms:
 
