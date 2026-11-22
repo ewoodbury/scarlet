@@ -477,13 +477,14 @@ enum PhysicalOp:
   case SortByIntKey(child: PhysicalOp)
 
   /**
-   * Global sort of an int-pair scan, of one int-pair project on that scan or filter stack, or of
-   * one key map on that scan or filter stack, by effective value descending, then effective key
-   * ascending. Neither function is read. The sort orders the published pairs. A null input key
-   * stays null, is not passed to the key function, and orders as zero. A null value orders as zero
-   * and stays null. Ties keep input order. `take(n)` is a bounded heap of `n` rows when `n` is
-   * below the live row count. When `n` covers every live row, take is the full sort rather than
-   * that heap. Collect is the same full order. Output kind is [[PhysicalOp.Kind.Pairs]].
+   * Global sort of an int-pair scan, of one int-pair project on that scan or filter stack, of one
+   * key map on that scan or filter stack, or of one key or value filter immediately above that
+   * map, by effective value descending, then effective key ascending. Neither function is read.
+   * The sort orders the published pairs. A null input key stays null, is not passed to the key
+   * function, and orders as zero. A null value orders as zero and stays null. Ties keep input
+   * order. `take(n)` is a bounded heap of `n` rows when `n` is below the live row count. When `n`
+   * covers every live row, take is the full sort rather than that heap. Collect is the same full
+   * order. Output kind is [[PhysicalOp.Kind.Pairs]].
    *
    * The ordering tag is [[OrderingTag.Sorted]] with `Seq(1, 0)` and `Seq(false, true)`.
    */
