@@ -353,6 +353,32 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     val rowSum = sortSum.collect().toMap
     ScarletConf.set(savedRow)
     summed shouldBe rowSum
+    val sortCount = sortJoined.map { case (key, (leftValue, _)) =>
+      (key, leftValue.toLong)
+    }.countByKey
+    val sortCountOp = ColumnarPlanner.lower(sortCount.plan).get
+    sortCountOp.shape should include("CountByKey(Exchange(Project(HashJoin")
+    sortCountOp.shape should not include "SortMergeJoin"
+    sortCountOp.shape should not include "JoinProbeSum"
+    ColumnarPlanner.tryRun(sortCount.plan).isDefined shouldBe true
+    Task.resetSortMergeJoinRunsForTest()
+    JoinWriteRuns.resetRunsForTest()
+    HashCount.resetByKeyForTest()
+    val counts = sortCount.collect().toMap
+    Task.sortMergeJoinRunsForTest shouldBe 0
+    JoinWriteRuns.runsForTest shouldBe 0L
+    HashCount.byKeyCallsForTest shouldBe 0
+    counts shouldBe Map(1 -> 2, 2 -> 1)
+    CrossEngineShapes.pairChecksum(counts) shouldBe 96L
+    ScarletConf.set(savedBatch.copy(columnarBatchSize = 1))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      JoinWriteRuns.resetRunsForTest()
+      HashCount.resetByKeyForTest()
+      sortCount.collect().toMap shouldBe counts
+      JoinWriteRuns.runsForTest shouldBe 0L
+      HashCount.byKeyCallsForTest shouldBe 0
+    finally ScarletConf.set(savedBatch)
     val changed = sortJoined
       .map { case (key, (leftValue, _)) => (leftValue, key.toLong) }
       .reduceByKey((left: Long, right: Long) => left + right)
@@ -373,6 +399,30 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     JoinWriteRuns.resetRunsForTest()
     broadcastSum.collect().toMap shouldBe summed
     JoinWriteRuns.runsForTest shouldBe 0L
+    val broadcastCount = broadcastJoined.map { case (key, (leftValue, _)) =>
+      (key, leftValue.toLong)
+    }.countByKey
+    val broadcastCountShape = ColumnarPlanner.lower(broadcastCount.plan).map(_.shape).get
+    broadcastCountShape should include("CountByKey(Exchange(Project(HashJoin")
+    broadcastCountShape should not include "BroadcastJoin"
+    broadcastCountShape should not include "SortMergeJoin"
+    ColumnarPlanner.tryRun(broadcastCount.plan).isDefined shouldBe true
+    JoinWriteRuns.resetRunsForTest()
+    HashCount.resetByKeyForTest()
+    val broadcastCounts = broadcastCount.collect().toMap
+    JoinWriteRuns.runsForTest shouldBe 0L
+    HashCount.byKeyCallsForTest shouldBe 0
+    broadcastCounts shouldBe Map(1 -> 2, 2 -> 1)
+    CrossEngineShapes.pairChecksum(broadcastCounts) shouldBe 96L
+    ScarletConf.set(savedBatch.copy(columnarBatchSize = 1))
+    try
+      ScarletRuntime.get.shuffle.clear()
+      JoinWriteRuns.resetRunsForTest()
+      HashCount.resetByKeyForTest()
+      broadcastCount.collect().toMap shouldBe broadcastCounts
+      JoinWriteRuns.runsForTest shouldBe 0L
+      HashCount.byKeyCallsForTest shouldBe 0
+    finally ScarletConf.set(savedBatch)
     val maximized = sortJoined
       .map { case (key, (leftValue, _)) => (key, leftValue.toLong) }
       .reduceByKey((left: Long, right: Long) => math.max(left, right))
@@ -409,6 +459,9 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
       ),
     )
     ReduceByKeyLowering.apply(between).isEmpty shouldBe true
+    CountByKeyLowering.apply(bare).isEmpty shouldBe true
+    CountByKeyLowering.apply(oneSide).isEmpty shouldBe true
+    CountByKeyLowering.apply(between).isEmpty shouldBe true
   }
 
   "a generic value sort" should "decline tryRun and stay off the columnar arm" in {

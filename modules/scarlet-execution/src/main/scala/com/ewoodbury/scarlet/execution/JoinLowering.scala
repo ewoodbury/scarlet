@@ -297,7 +297,8 @@ private[execution] object JoinLowering:
    *
    * Not [[acceptsShuffleHash]], and not its complement: no hint and shuffle-hash stay on that
    * predicate. Collect of these hints still lowers to [[PhysicalOp.SortMergeJoin]] and
-   * [[PhysicalOp.BroadcastJoin]]. [[ReduceByKeyLowering]] is what builds the hash-join node.
+   * [[PhysicalOp.BroadcastJoin]]. [[ReduceByKeyLowering]] and [[CountByKeyLowering]] build the
+   * hash-join node under a triple project.
    */
   private[execution] def hintedInnerHashed(strategy: Option[Plan.JoinStrategy]): Boolean =
     strategy match
