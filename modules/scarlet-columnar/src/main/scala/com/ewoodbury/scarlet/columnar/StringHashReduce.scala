@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import com.ewoodbury.scarlet.core.ScarletConf
 
 /**
@@ -48,6 +50,7 @@ object StringHashReduce:
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    val _ = byKeyCalls.incrementAndGet()
     if (batches.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyStringPairs)
     else
       val combined = PartialCombine.perBatch(
@@ -74,6 +77,7 @@ object StringHashReduce:
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    val _ = byKeyCalls.incrementAndGet()
     if (selected.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyStringPairs)
     else
       val combined = PartialCombine.perBatchSelected(
@@ -118,8 +122,30 @@ object StringHashReduce:
   private[scarlet] def reduce(batch: ColumnBatch, op: (Int, Int) => Int): ColumnBatch =
     reduceBatch(batch, op)
 
+  /** [[byKey]] and [[byKeySelected]] entries since the last [[resetByKeyForTest]]. */
+  private[scarlet] def byKeyCallsForTest: Int = byKeyCalls.get
+
+  /** Clears [[byKeyCallsForTest]]. */
+  private[scarlet] def resetByKeyForTest(): Unit =
+    byKeyCalls.set(0)
+
   /**
-   * Exchange combined partials and reduce each bucket. Shared by [[byKey]] and [[byKeySelected]].
+   * Exchange combined partials and reduce each bucket. [[byKey]] is not called. An empty input is
+   * `numPartitions` empty string-pair batches. Spill matches [[byKey]].
+   */
+  private[scarlet] def exchangeReduced(
+      combined: Vector[ColumnBatch],
+      numPartitions: Int,
+      parallelism: Int,
+      batchSize: Int,
+      op: (Int, Int) => Int,
+  ): Vector[ColumnBatch] =
+    if (combined.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyStringPairs)
+    else reduceExchanged(combined, numPartitions, parallelism, batchSize, op)
+
+  /**
+   * Exchange combined partials and reduce each bucket. Shared by [[byKey]], [[byKeySelected]], and
+   * [[exchangeReduced]].
    */
   private def reduceExchanged(
       combined: Vector[ColumnBatch],
@@ -156,6 +182,8 @@ object StringHashReduce:
     if (ColumnHash.fullyPresent(keys)) then table.scanDense(keys, values)
     else table.scanSparse(keys, values)
     table.compact(keys.dictionary)
+
+  private val byKeyCalls = new AtomicInteger
 
   private def utf8At(batch: ColumnBatch, ordinal: Int): DictUtf8Column =
     ColumnKernel.asUtf8(ColumnKernel.columnAt(batch, ordinal), ordinal)

@@ -55,6 +55,16 @@ object StringPairProject:
     def add(sourceCode: Int, key: String): Unit
 
   /**
+   * One present projected key and int value.
+   *
+   * `sourceCode` indexes the input dictionary. It is `-1` when that input key is null. A null
+   * projected key is not passed. A null projected value throws [[ColumnarFallback]] in the
+   * visitor, before `add`.
+   */
+  private[scarlet] trait StringPairSink:
+    def add(sourceCode: Int, key: String, value: Int): Unit
+
+  /**
    * One key or value slot on the projected pair. The predicate is the one the planner stored. A
    * key slot sees the projected string. A value slot sees the projected int.
    */
@@ -420,6 +430,162 @@ object StringPairProject:
     keyCell match
       case key: String if keep(key) => add.add(sourceCode, key)
       case _ => ()
+
+  /**
+   * [[visitFiltered]] for a reduce. The adapter calls match [[project]], including a null key and
+   * a null value. An empty range does not call `mapper`. A null projected key is dropped, and a
+   * key predicate is not called. A null projected value on a key the slot keeps, and any null
+   * projected value on a value slot, throws [[ColumnarFallback]]. A value predicate is not called
+   * on that null. `""` is a present key. `"é"` and `"e\u0301"` stay distinct because the key is
+   * the string the function returned. A result that is not a pair of a string and an int throws
+   * [[ColumnarFallback]] and publishes nothing. This does not allocate an output column. `add`
+   * receives the input dictionary code, or `-1` when the input key is null.
+   */
+  private[scarlet] def visitReduced(
+      batch: ColumnBatch,
+      start: Int,
+      length: Int,
+      mapper: StringPairMap,
+      above: Slot,
+      sink: StringPairSink,
+  ): Unit =
+    require(
+      batch.columns.length == 2,
+      s"pair project expected 2 columns, got ${batch.columns.length}",
+    )
+    val keys = utf8At(batch, 0)
+    val values = int32At(batch, 1)
+    require(keys.length == values.length, "key and value columns differ in length")
+    Ranges.check(start, length, keys.length)
+    if (length == 0) then ()
+    else if (
+        Validity.rangePresent(keys.validity, start, length) &&
+        Validity.rangePresent(values.validity, start, length)
+      )
+    then visitReducedDense(keys, values, start, length, mapper, above, sink)
+    else visitReducedSparse(keys, values, start, length, mapper, above, sink)
+
+  /** Both columns are present in the range. The loop does not read validity. */
+  private def visitReducedDense(
+      keys: DictUtf8Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      mapper: StringPairMap,
+      above: Slot,
+      sink: StringPairSink,
+  ): Unit =
+    val dictionary = keys.dictionary
+    val keyCodes = keys.codes
+    val valueArr = values.values
+    val end = start + length
+    var row = start
+    while (row < end) {
+      offerReduce(
+        mapper(dictionary(keyCodes(row)), valueArr(row)),
+        keyCodes(row),
+        above,
+        sink,
+      )
+      row += 1
+    }
+
+  /** Every row is one call, including a null key, a null value, or both. */
+  private def visitReducedSparse(
+      keys: DictUtf8Column,
+      values: Int32Column,
+      start: Int,
+      length: Int,
+      mapper: StringPairMap,
+      above: Slot,
+      sink: StringPairSink,
+  ): Unit =
+    val dictionary = keys.dictionary
+    val keyCodes = keys.codes
+    val valueArr = values.values
+    val keyIn = keys.validity.words
+    val valueIn = values.validity.words
+    val end = start + length
+    var row = start
+    while (row < end) {
+      val keyOn = Validity.isSet(keyIn, row)
+      val valueOn = Validity.isSet(valueIn, row)
+      val projected =
+        if (keyOn && valueOn) then mapper(dictionary(keyCodes(row)), valueArr(row))
+        else if (keyOn) then mapper.applyNullValue(dictionary(keyCodes(row)))
+        else if (valueOn) then mapper.applyNullKey(valueArr(row))
+        else mapper.applyNulls()
+      val sourceCode = if (keyOn) then keyCodes(row) else -1
+      offerReduce(projected, sourceCode, above, sink)
+      row += 1
+    }
+
+  /** [[offerFiltered]] for a reduce. A kept null value declines instead of being counted. */
+  private def offerReduce(
+      projected: Any,
+      sourceCode: Int,
+      above: Slot,
+      sink: StringPairSink,
+  ): Unit =
+    projected match
+      case row: Tuple2[_, _] =>
+        offerReduceCells(row._1, row._2, sourceCode, above, sink)
+      case null => decline("null")
+      case row: Product if row.productArity == 2 =>
+        offerReduceCells(row.productElement(0), row.productElement(1), sourceCode, above, sink)
+      case other => decline(foundName(other))
+
+  /** Value is checked first, matching the order [[offerFilteredCells]] declines in. */
+  private def offerReduceCells(
+      keyCell: Any,
+      valueCell: Any,
+      sourceCode: Int,
+      above: Slot,
+      sink: StringPairSink,
+  ): Unit =
+    valueCell match
+      case null | _: Int => ()
+      case other => decline(foundName(other))
+    keyCell match
+      case null | _: String => ()
+      case other => decline(foundName(other))
+    above match
+      case Slot.Key(keep) => reduceKey(keyCell, valueCell, keep, sourceCode, sink)
+      case Slot.Value(keep) => reduceValue(keyCell, valueCell, keep, sourceCode, sink)
+
+  /** A null key is dropped. `keep` is not called. A kept null value declines. */
+  private def reduceKey(
+      keyCell: Any,
+      valueCell: Any,
+      keep: ColumnKernel.Utf8Predicate,
+      sourceCode: Int,
+      sink: StringPairSink,
+  ): Unit =
+    keyCell match
+      case key: String if keep(key) =>
+        valueCell match
+          case value: Int => sink.add(sourceCode, key, value)
+          case _ => refuseNullValue()
+      case _ => ()
+
+  /** A null value declines. `keep` is not called. A null key is dropped after a present value. */
+  private def reduceValue(
+      keyCell: Any,
+      valueCell: Any,
+      keep: ColumnKernel.Int32Predicate,
+      sourceCode: Int,
+      sink: StringPairSink,
+  ): Unit =
+    valueCell match
+      case null => refuseNullValue()
+      case value: Int if keep(value) =>
+        keyCell match
+          case key: String => sink.add(sourceCode, key, value)
+          case _ => ()
+      case _ => ()
+
+  private def refuseNullValue(): Nothing =
+    throw new ColumnarFallback("string pair value is null")
 
   /** A null value is dropped. `keep` is not called. A null key is dropped after a kept value. */
   private def keepValue(
