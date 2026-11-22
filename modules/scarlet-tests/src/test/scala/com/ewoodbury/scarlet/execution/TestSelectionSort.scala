@@ -713,9 +713,14 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .map((pair: (Int, Int)) => (pair._1, pair._2))
       .mapIntKey((key: Int) => key + 1)
       .sortByIntValueDesc
-    val valueSlot = source
+    val rowAboveProject = source
+      .map((pair: (Int, Int)) => (pair._1, pair._2))
+      .filter((pair: (Int, Int)) => pair._2 > 0)
+      .sortByIntValueDesc
+    val secondAboveProject = source
       .map((pair: (Int, Int)) => (pair._1, pair._2))
       .filterKeys((key: Int) => key > 0)
+      .filterValues((value: Int) => value > 0)
       .sortByIntValueDesc
     val longs = DistCollection
       .ofLongPairs(Array(3L, 1L), Array(30L, 10L), 1)
@@ -741,7 +746,8 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.lower(slotAboveSecond.plan) shouldBe None
     ColumnarPlanner.lower(secondMap.plan) shouldBe None
     ColumnarPlanner.lower(projectUnderMap.plan) shouldBe None
-    ColumnarPlanner.lower(valueSlot.plan) shouldBe None
+    ColumnarPlanner.lower(rowAboveProject.plan) shouldBe None
+    ColumnarPlanner.lower(secondAboveProject.plan) shouldBe None
     ColumnarPlanner.lower(longs.plan).map(_.shape) shouldBe Some("Project(Scan)")
     ColumnarPlanner.lower(longs.sortByIntKey.plan) shouldBe None
     ColumnarPlanner.lower(longs.sortByIntValueDesc.plan) shouldBe None

@@ -96,7 +96,10 @@ private[execution] object FilterChain:
     // [[StringHashCount.byKey]]. An int-pair project under a value sort is the same decline:
     // the index would name scan rows under the project. Interpret publishes the projected pairs,
     // and [[com.ewoodbury.scarlet.columnar.IntTopN]] orders those batches. A null value orders as
-    // zero and stays null. A slot above that project is not [[SortLowering.pairProjectOnScan]].
+    // zero and stays null. One key or value filter immediately above that project is not this
+    // decline. The child under the slot is the project, so the index names those projected
+    // rows, and [[com.ewoodbury.scarlet.columnar.IntTopN]] orders them. A second slot is not
+    // that filter.
     // One [[PhysicalOp.MapKey]] on a scan or filter stack, and one key or value filter
     // immediately above that map, decline here through [[MapIntKey.inTree]]. Interpret publishes
     // those pairs. [[com.ewoodbury.scarlet.columnar.IntTopN]] orders a value sort.

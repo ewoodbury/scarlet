@@ -12,8 +12,10 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * The generator matches [[ProjectedSortBench]]: keys are `row % 1024`, values are the shared
  * LCG, two source partitions, then `key % 3 != 0` and `value >= 0` when two filters are
  * requested. The action is `data.map { case (k, v) => (k, v + 1) }.sortByIntValueDesc.take(100)`.
- * That bench's key-sort query is not this action. The checksum is
- * [[CrossEngineShapes.pairChecksum]] of `take(100)`, taken from the row path first.
+ * That bench's key-sort query is not this action. `CROSS_ABOVE_PROJECT=true` inserts
+ * `filterKeys(_ < 512)` between that project and the value sort. The unfiltered query stays the
+ * default. The checksum is [[CrossEngineShapes.pairChecksum]] of `take(100)`, taken from the row
+ * path first.
  *
  * Spill is on for this process only. Warmup 80, rounds 30, and four threads are the defaults.
  * The row arm runs first. `CROSS_ROW_ONLY=true` times only that arm.
@@ -41,6 +43,7 @@ object ProjectedValueSortBench:
     val warmup = readPositive("CROSS_WARMUP", 80)
     val rounds = readPositive("CROSS_ROUNDS", 30)
     val rowOnly = readFlag("CROSS_ROW_ONLY", false)
+    val aboveProject = readFlag("CROSS_ABOVE_PROJECT", false)
     val savedConf = ScarletConf.get
     val savedRuntime = ScarletRuntime.get
     val scheduler = new LocalTaskScheduler(threads)
@@ -55,15 +58,18 @@ object ProjectedValueSortBench:
         ),
       )
       ScarletRuntime.set(savedRuntime.copy(scheduler = scheduler))
-      val sorted = query(rows, filters)
+      val sorted = query(rows, filters, aboveProject)
       val shape = ColumnarPlanner.lower(sorted.plan).map(_.shape).getOrElse("row")
       println(s"arm $shape")
       if (!rowOnly) then
-        if (
-            !shape.contains("SortByIntValueDesc") || !shape.contains("Project") ||
-            shape.contains("row")
-          )
-        then refuse(s"arm $shape is not SortByIntValueDesc of a Project")
+        val admitted =
+          shape.contains("SortByIntValueDesc") && shape.contains("Project") &&
+            !shape.contains("row") && (!aboveProject || shape.contains("Filter"))
+        if (!admitted) then
+          val detail =
+            if (aboveProject) then "SortByIntValueDesc of a filtered Project"
+            else "SortByIntValueDesc of a Project"
+          refuse(s"arm $shape is not $detail")
       val row = time("row", sorted.plan, warmup, rounds, columnar = false)
       println(render(row))
       if (!rowOnly) then
@@ -89,16 +95,23 @@ object ProjectedValueSortBench:
         ScarletRuntime.set(savedRuntime)
 
   /**
-   * Filtered int pairs, then `(k, v + 1)`, then `sortByIntValueDesc`. `take(100)` is the timed
-   * action. The function is not read by lowering.
+   * Filtered int pairs, then `(k, v + 1)`, then `sortByIntValueDesc`. `aboveProject` inserts
+   * `filterKeys(_ < 512)` above that project. `take(100)` is the timed action. Neither function
+   * is read by lowering. The unfiltered chain is the default query.
    */
-  private def query(rows: Int, filters: Int): DistCollection[(Int, Int)] =
+  private def query(
+      rows: Int,
+      filters: Int,
+      aboveProject: Boolean,
+  ): DistCollection[(Int, Int)] =
     val keys = Array.tabulate(rows)(row => row % groups)
     val values = lcgValues(rows)
     val data = DistCollection.ofIntPairs(keys, values, sourcePartitions)
     val keyed = data.filterKeys((key: Int) => key % 3 != 0)
     val filtered = if (filters == 1) then keyed else keyed.filterValues((value: Int) => value >= 0)
-    filtered.map { case (key, value) => (key, value + 1) }.sortByIntValueDesc
+    val mapped = filtered.map { case (key, value) => (key, value + 1) }
+    if (aboveProject) then mapped.filterKeys((key: Int) => key < 512).sortByIntValueDesc
+    else mapped.sortByIntValueDesc
 
   private def time(
       name: String,
