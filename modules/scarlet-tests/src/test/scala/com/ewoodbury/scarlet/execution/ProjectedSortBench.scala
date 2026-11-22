@@ -1,8 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
-
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
+import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, IntPairProject, RankSplit}
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
@@ -11,13 +10,13 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * Same-session row and columnar times for a pair project under `sortByIntKey`.
  *
  * The generator is the cross-engine int table: keys are `row % 1024`, values are the shared LCG,
- * two source partitions, then `key % 3 != 0` and `value >= 0`. The action is
- * `data.map { case (k, v) => (k % 100, v) }.sortByIntKey`. The checksum is
- * [[FilterSortChecksum.collected]], taken from the row path first. `CROSS_QUERY=filter-sort` is
- * not this action.
+ * two source partitions, then `key % 3 != 0` and `value >= 0` when two filters are requested. The
+ * action is `data.map { case (k, v) => (k % 100, v) }.filterKeys(_ < 50).sortByIntKey`. The
+ * checksum is [[FilterSortChecksum.collected]], taken from the row path first.
+ * `CROSS_QUERY=filter-sort` is not this action.
  *
- * Spill is on for this process only. Warmup 80, rounds 30, and four threads are the defaults.
- * The row arm runs first. `CROSS_ROW_ONLY=true` times only that arm.
+ * Spill is on for this process only. Warmup 80, rounds 30, and four threads are the defaults. The
+ * row arm runs first. `CROSS_ROW_ONLY=true` times only that arm.
  *
  * {{{
  * CROSS_ROWS=10000000 CROSS_THREADS=4 CROSS_WARMUP=80 CROSS_ROUNDS=30 CROSS_FILTERS=2 \
@@ -58,29 +57,46 @@ object ProjectedSortBench:
       val sorted = query(rows, filters)
       val shape = ColumnarPlanner.lower(sorted.plan).map(_.shape).getOrElse("row")
       println(s"arm $shape")
+      if (
+          !shape.contains("SortByIntKey") || !shape.contains("Filter") ||
+          !shape.contains("Project") || shape.contains("row")
+        )
+      then refuse(s"arm $shape is not SortByIntKey of a Filter and a Project")
       val row = time("row", sorted.plan, warmup, rounds, columnar = false)
       println(render(row))
       if (!rowOnly) then
+        RankSplit.resetForTest()
+        IntPairProject.resetPublishedForTest()
         val columnar = time("columnar", sorted.plan, warmup, rounds, columnar = true)
         if (row.checksum != columnar.checksum) then
           refuse(s"checksums differ row=${row.checksum} columnar=${columnar.checksum}")
         val ratio = row.p50Ms / columnar.p50Ms
         println(render(columnar))
         println("ratio " + java.lang.Double.toString(ratio))
+        println(
+          s"rankSplitMerges ${RankSplit.mergePassesForTest} projectPublishes ${IntPairProject.publishedForTest}",
+        )
+        if (RankSplit.mergePassesForTest <= 0) then refuse("RankSplit did not merge")
+        if (IntPairProject.publishedForTest <= 0) then
+          refuse("IntPairProject published no pair batch")
+        if (ratio < 2.0) then refuse(s"ratio $ratio is under 2")
     finally
       try scheduler.shutdown()
       finally
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)
 
-  /** Filtered int pairs, then `(k % 100, v)`, then `sortByIntKey`. */
+  /** Filtered int pairs, then `(k % 100, v)`, then `filterKeys(_ < 50)`, then `sortByIntKey`. */
   private def query(rows: Int, filters: Int): DistCollection[(Int, Int)] =
     val keys = Array.tabulate(rows)(row => row % groups)
     val values = lcgValues(rows)
     val data = DistCollection.ofIntPairs(keys, values, sourcePartitions)
     val keyed = data.filterKeys((key: Int) => key % 3 != 0)
     val filtered = if (filters == 1) then keyed else keyed.filterValues((value: Int) => value >= 0)
-    filtered.map { case (key, value) => (key % 100, value) }.sortByIntKey
+    filtered
+      .map { case (key, value) => (key % 100, value) }
+      .filterKeys((key: Int) => key < 50)
+      .sortByIntKey
 
   private def time(
       name: String,
