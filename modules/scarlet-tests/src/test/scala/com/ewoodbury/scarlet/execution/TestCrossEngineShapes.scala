@@ -238,26 +238,38 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     countedOp.shape should not include "SortMergeJoin"
     countedOp.shape should not include "JoinProbeSum"
     ColumnarPlanner.tryRun(counted.plan).isDefined shouldBe true
+    JoinWriteRuns.resetRunsForTest()
+    HashCount.resetByKeyForTest()
     val counts = counted.collect().toMap
+    JoinWriteRuns.runsForTest shouldBe 0L
+    HashCount.byKeyCallsForTest shouldBe 0
     counts shouldBe Map(1 -> 2, 2 -> 1)
     CrossEngineShapes.pairChecksum(counts) shouldBe 96L
     ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 1))
     try
       ScarletRuntime.get.shuffle.clear()
+      JoinWriteRuns.resetRunsForTest()
+      HashCount.resetByKeyForTest()
       counted.collect().toMap shouldBe counts
+      JoinWriteRuns.runsForTest shouldBe 0L
+      HashCount.byKeyCallsForTest shouldBe 0
     finally ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 8192))
     val kept = ScarletConf.get
     ScarletConf.set(kept.copy(columnarExecution = false))
     val rowCounts = counted.collect().toMap
     ScarletConf.set(kept)
     counts shouldBe rowCounts
-    val countedChanged = joined
-      .map { case (key, (leftValue, _)) => (leftValue, key.toLong) }
-      .countByKey
+    val countedChanged = joined.map { case (key, (leftValue, _)) =>
+      (leftValue, key.toLong)
+    }.countByKey
     ColumnarPlanner.lower(countedChanged.plan).map(_.shape).get should include(
       "CountByKey(Exchange(Project(",
     )
+    JoinWriteRuns.resetRunsForTest()
+    HashCount.resetByKeyForTest()
     countedChanged.collect().toMap shouldBe Map(10 -> 2, 20 -> 1)
+    JoinWriteRuns.runsForTest shouldBe 0L
+    HashCount.byKeyCallsForTest shouldBe 0
     val changed = joined
       .map { case (key, (leftValue, _)) => (leftValue, key.toLong) }
       .reduceByKey((left: Long, right: Long) => left + right)

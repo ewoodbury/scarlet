@@ -2,6 +2,8 @@ package com.ewoodbury.scarlet.columnar
 
 import scala.annotation.unused
 
+import com.ewoodbury.scarlet.core.ScarletConf
+
 /**
  * Grouped sum of a triple project, updated from an int inner probe.
  *
@@ -16,7 +18,8 @@ import scala.annotation.unused
  * function.
  *
  * [[visit]] runs the same hits and discards the pairs, so a reducer that is not addition can still
- * name a bad cell. It does not publish a sum.
+ * name a bad cell. It does not publish a sum. [[count]] offers each projected key into
+ * [[HashCount.partialKeys]] and does not write the match columns.
  */
 @SuppressWarnings(
   Array(
@@ -44,6 +47,33 @@ private[scarlet] object TripleProbeSum:
         walk(slots, columns, mapper, sink)
         ColumnMetrics.fused()
       }
+
+  /**
+   * One `(key, count)` partial for this probe. Each hit offers the projected key. The long cell is
+   * checked and dropped. An empty side, or a probe that misses, does not call the function. A
+   * match table that does not fit the spill budget declines before any key is inserted.
+   */
+  def count(
+      build: HashJoin.JoinSide,
+      probe: HashJoin.JoinSide,
+      mapper: TripleToIntLong.TripleMap,
+  ): ColumnBatch =
+    val columns = sides(build, probe)
+    if (columns.buildKeys.length == 0 || columns.probeKeys.length == 0) then
+      ColumnBatches.emptyIntPairs
+    else
+      val slots = index(columns.buildKeys)
+      val matches = matchRows(slots, columns)
+      if (matches == 0) then ColumnBatches.emptyIntPairs
+      else if (overBudget(matches)) then declineBudget()
+      else
+        val hint = math.min(matches, columns.probeKeys.length)
+        HashCount.partialKeys(hint) { addKey =>
+          val sink = new TripleToIntLong.LongSink:
+            def add(key: Int, @unused value: Long): Unit = addKey(key)
+          walk(slots, columns, mapper, sink)
+          ColumnMetrics.fused()
+        }
 
   /** Every hit the sum would add. The pairs are checked and dropped. */
   def visit(
@@ -88,6 +118,32 @@ private[scarlet] object TripleProbeSum:
         row += 1
       }
     slots
+
+  /** Chain steps a present probe key would offer. A null probe key is not a hit. */
+  private def matchRows(slots: JoinSlots, columns: Sides): Int =
+    val probeRows = columns.probeKeys.length
+    val probeKeys = columns.probeKeys.values
+    val dense = Validity.livePresent(columns.probeKeys.validity, probeRows)
+    val words = columns.probeKeys.validity.words
+    var row = 0
+    var matches = 0L
+    while (row < probeRows) {
+      val keyOk = dense || Validity.isSet(words, row)
+      if (keyOk) then
+        val slot = slots.locate(probeKeys(row))
+        if (slot >= 0) then matches += slots.chainAt(slot).toLong
+      row += 1
+    }
+    if (matches > Int.MaxValue.toLong) then declineBudget()
+    matches.toInt
+
+  private def overBudget(matches: Int): Boolean =
+    HashCount.inputRowBytes(matches.toLong) > ScarletConf.get.spillBudgetBytes
+
+  private def declineBudget(): Nothing =
+    throw new ColumnarFallback(
+      "a projected join count over the spill budget stays on the row path",
+    )
 
   private def walk(
       slots: JoinSlots,

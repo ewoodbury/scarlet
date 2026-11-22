@@ -3,7 +3,7 @@ package com.ewoodbury.scarlet.execution
 import cats.effect.unsafe.implicits.global
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
+import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, JoinWriteRuns}
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
@@ -83,6 +83,7 @@ object GenericJoinCountBench:
         case "both" =>
           if (!admitted) then println("columnar declined")
           else
+            JoinWriteRuns.resetRunsForTest()
             val columnar = time("columnar", counted.plan, warmup, rounds, columnar = true)
             if (row.checksum != columnar.checksum) then
               refuse(s"checksums differ row=${row.checksum} columnar=${columnar.checksum}")
@@ -93,6 +94,8 @@ object GenericJoinCountBench:
             val ratio = row.p50Ms / columnar.p50Ms
             println(render(columnar))
             println(f"ratio_row_over_columnar $ratio%.3f")
+            val matches = if (JoinWriteRuns.runsForTest == 0L) "not_written" else "written"
+            println(s"match_columns $matches")
         case _ => ()
     finally
       try scheduler.shutdown().unsafeRunSync()
