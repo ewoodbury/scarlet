@@ -1,7 +1,5 @@
 package com.ewoodbury.scarlet.execution
 
-import cats.effect.kernel.Sync
-import cats.syntax.all.*
 import com.typesafe.scalalogging.StrictLogging
 
 import com.ewoodbury.scarlet.core.{Partition, ShuffleId, StageId}
@@ -113,9 +111,9 @@ object ShuffleWriteReason:
 /**
  * Planner for coordinating stage execution.
  */
-final class ExecutionPlanner[F[_]: Sync](
-    stageExecutor: StageExecutor[F],
-    shuffleHandler: ShuffleHandler[F],
+final class ExecutionPlanner(
+    stageExecutor: StageExecutor,
+    shuffleHandler: ShuffleHandler,
 ) extends StrictLogging:
 
   /**
@@ -125,24 +123,24 @@ final class ExecutionPlanner[F[_]: Sync](
   def runStages(
       stageGraph: StageBuilder.StageGraph,
       executionOrder: List[StageId],
-  ): F[Map[StageId, Seq[Partition[_]]]] =
-    executionOrder
-      .foldLeftM((Map.empty[StageId, Seq[Partition[_]]], Map.empty[StageId, ShuffleId])) {
-        case ((stageResults, shuffleMappings), stageId) =>
-          val stageInfo = stageGraph.stages(stageId)
-          for {
-            _ <- Sync[F].delay(logger.info(s"ExecutionPlanner: executing stage ${stageId.toInt}"))
-            inputPartitions <- Sync[F].delay(
-              stageExecutor.getInputPartitionsForStage(stageInfo, stageResults, shuffleMappings),
-            )
-            results <- stageExecutor.executeStage(stageInfo, inputPartitions, shuffleMappings)
-            updatedMappings <- writeShuffleIfNeeded(stageInfo, results, stageGraph).map {
-              case Some((shuffleId, _reason)) => shuffleMappings + (stageInfo.id -> shuffleId)
-              case None => shuffleMappings
-            }
-          } yield (stageResults + (stageId -> results), updatedMappings)
+  ): Map[StageId, Seq[Partition[_]]] = {
+    val (stageResults, _) =
+      executionOrder.foldLeft(
+        (Map.empty[StageId, Seq[Partition[_]]], Map.empty[StageId, ShuffleId]),
+      ) { case ((stageResults, shuffleMappings), stageId) =>
+        val stageInfo = stageGraph.stages(stageId)
+        logger.info(s"ExecutionPlanner: executing stage ${stageId.toInt}")
+        val inputPartitions =
+          stageExecutor.getInputPartitionsForStage(stageInfo, stageResults, shuffleMappings)
+        val results = stageExecutor.executeStage(stageInfo, inputPartitions, shuffleMappings)
+        val updatedMappings = writeShuffleIfNeeded(stageInfo, results, stageGraph) match {
+          case Some((shuffleId, _)) => shuffleMappings + (stageInfo.id -> shuffleId)
+          case None => shuffleMappings
+        }
+        (stageResults + (stageId -> results), updatedMappings)
       }
-      .map(_._1)
+    stageResults
+  }
 
   /**
    * Persists this stage's output to the shuffle service if any dependent stage is a shuffle stage.
@@ -154,7 +152,7 @@ final class ExecutionPlanner[F[_]: Sync](
       stageInfo: StageBuilder.StageInfo,
       results: Seq[Partition[_]],
       stageGraph: StageBuilder.StageGraph,
-  ): F[Option[(ShuffleId, ShuffleWriteReason)]] = {
+  ): Option[(ShuffleId, ShuffleWriteReason)] = {
     val dependentStages: Iterable[StageId] =
       stageGraph.dependencies.filter(_._2.contains(stageInfo.id)).keys
 
@@ -164,7 +162,7 @@ final class ExecutionPlanner[F[_]: Sync](
         .filter(_.isShuffleStage)
         .toSeq
 
-    if (shuffleDependents.isEmpty) Sync[F].pure(None)
+    if (shuffleDependents.isEmpty) None
     else {
       // A sortBy dependent is found first so the dispatch below is driven by the same value that
       // produced the reason: no reason/dispatch agreement to maintain by hand.
@@ -176,7 +174,8 @@ final class ExecutionPlanner[F[_]: Sync](
           ShuffleWriteReason.DownstreamSortBy,
         )
 
-      val writeF: F[ShuffleId] = sortByDependent match {
+      logger.debug(s"Shuffle write for stage ${stageInfo.id.toInt}: $reason")
+      val shuffleId: ShuffleId = sortByDependent match {
         case Some(dep) =>
           shuffleHandler.handleSortByRangePartitionedOutput(stageInfo, results, stageGraph, dep.id)
         case None =>
@@ -192,16 +191,12 @@ final class ExecutionPlanner[F[_]: Sync](
             case ShuffleWriteReason.DownstreamShuffle =>
               shuffleHandler.handleShuffleOutput(stageInfo, results)
             case ShuffleWriteReason.DownstreamSortBy =>
-              Sync[F].raiseError(
-                new IllegalStateException(
-                  "sortBy write reason selected without a sortBy dependent; this is unreachable " +
-                    "by construction of ShuffleWriteReason.forDependents",
-                ),
+              throw new IllegalStateException(
+                "sortBy write reason selected without a sortBy dependent; this is unreachable " +
+                  "by construction of ShuffleWriteReason.forDependents",
               )
           }
       }
-
-      logger.debug(s"Shuffle write for stage ${stageInfo.id.toInt}: $reason")
-      writeF.map(id => Some((id, reason)))
+      Some((shuffleId, reason))
     }
   }

@@ -2,7 +2,6 @@ package com.ewoodbury.scarlet.execution
 
 import java.lang.management.ManagementFactory
 
-import cats.effect.unsafe.implicits.global
 import com.sun.management.ThreadMXBean
 
 import com.ewoodbury.scarlet.api.DistCollection
@@ -86,7 +85,7 @@ object PairMapBench:
       println(render(row))
       println(render(columnar))
     finally
-      try scheduler.shutdown().unsafeRunSync()
+      try scheduler.shutdown()
       finally
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)

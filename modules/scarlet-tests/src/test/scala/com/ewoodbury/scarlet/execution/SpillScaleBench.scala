@@ -5,8 +5,6 @@ import java.util.Locale
 
 import scala.util.control.NonFatal
 
-import cats.effect.unsafe.implicits.global
-
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
@@ -104,7 +102,7 @@ object SpillScaleBench:
         thrown.printStackTrace(System.err)
         status = 1
     finally
-      try scheduler.shutdown().unsafeRunSync()
+      try scheduler.shutdown()
       finally
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)

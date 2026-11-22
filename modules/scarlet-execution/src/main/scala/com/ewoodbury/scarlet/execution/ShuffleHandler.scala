@@ -1,7 +1,5 @@
 package com.ewoodbury.scarlet.execution
 
-import cats.effect.kernel.Sync
-import cats.syntax.all.*
 import com.typesafe.scalalogging.StrictLogging
 
 import com.ewoodbury.scarlet.core.{Partition, ScarletConf, ShuffleId, StageId}
@@ -10,7 +8,7 @@ import com.ewoodbury.scarlet.runtime.api.{Partitioner, ShuffleService}
 /**
  * Handler for managing shuffle operations.
  */
-final class ShuffleHandler[F[_]: Sync](
+final class ShuffleHandler(
     shuffle: ShuffleService,
     partitioner: Partitioner,
 ) extends StrictLogging:
@@ -25,7 +23,7 @@ final class ShuffleHandler[F[_]: Sync](
   def handleShuffleOutput(
       stageInfo: StageBuilder.StageInfo,
       results: Seq[Partition[_]],
-  ): F[ShuffleId] =
+  ): ShuffleId =
     handleKeyedOutput(stageInfo, results, ScarletConf.get.defaultShufflePartitions)
 
   /**
@@ -39,7 +37,7 @@ final class ShuffleHandler[F[_]: Sync](
       stageInfo: StageBuilder.StageInfo,
       results: Seq[Partition[_]],
       numPartitions: Int,
-  ): F[ShuffleId] =
+  ): ShuffleId =
     writeKeyed(stageInfo, results.asInstanceOf[Seq[Partition[(Any, Any)]]], numPartitions)
 
   /**
@@ -58,7 +56,7 @@ final class ShuffleHandler[F[_]: Sync](
       results: Seq[Partition[_]],
       numPartitions: Int,
       reduceFunc: (Any, Any) => Any,
-  ): F[ShuffleId] = {
+  ): ShuffleId = {
     val keyed = results.asInstanceOf[Seq[Partition[(Any, Any)]]]
     val combined =
       keyed.map(partition => Stage.reduceByKeyLocal[Any, Any](reduceFunc).execute(partition))
@@ -76,19 +74,18 @@ final class ShuffleHandler[F[_]: Sync](
       stageInfo: StageBuilder.StageInfo,
       keyedResults: Seq[Partition[(Any, Any)]],
       numPartitions: Int,
-  ): F[ShuffleId] =
-    Sync[F].delay {
-      val shuffleData = shuffle.partitionByKey[Any, Any](
-        data = keyedResults,
-        numPartitions = numPartitions,
-        partitioner = partitioner,
-      )
-      val actualShuffleId = shuffle.write[Any, Any](shuffleData)
-      logger.debug(
-        s"Stored shuffle data for stage ${stageInfo.id.toInt} with shuffle ID ${actualShuffleId.toInt}",
-      )
-      actualShuffleId
-    }
+  ): ShuffleId = {
+    val shuffleData = shuffle.partitionByKey[Any, Any](
+      data = keyedResults,
+      numPartitions = numPartitions,
+      partitioner = partitioner,
+    )
+    val actualShuffleId = shuffle.write[Any, Any](shuffleData)
+    logger.debug(
+      s"Stored shuffle data for stage ${stageInfo.id.toInt} with shuffle ID ${actualShuffleId.toInt}",
+    )
+    actualShuffleId
+  }
 
   /**
    * Handles shuffle output for sortBy operations by mapping each data element of type T to a
@@ -100,21 +97,19 @@ final class ShuffleHandler[F[_]: Sync](
       results: Seq[Partition[_]],
       stageGraph: StageBuilder.StageGraph,
       dependentSortByStageId: StageId,
-  ): F[ShuffleId] =
-    Sync[F].delay {
-      stageGraph.stages(dependentSortByStageId).wideOp match {
-        case Some(op @ SortByWideOp(meta)) =>
-          handleSortByRangePartitionedOutputTyped(
-            stageInfo,
-            results,
-            meta.numPartitions,
-            op,
-          )
-        case _ =>
-          throw new IllegalStateException(
-            s"Stage ${dependentSortByStageId.toInt} is not a sortBy stage",
-          )
-      }
+  ): ShuffleId =
+    stageGraph.stages(dependentSortByStageId).wideOp match {
+      case Some(op @ SortByWideOp(meta)) =>
+        handleSortByRangePartitionedOutputTyped(
+          stageInfo,
+          results,
+          meta.numPartitions,
+          op,
+        )
+      case _ =>
+        throw new IllegalStateException(
+          s"Stage ${dependentSortByStageId.toInt} is not a sortBy stage",
+        )
     }
 
   @SuppressWarnings(
@@ -232,18 +227,17 @@ final class ShuffleHandler[F[_]: Sync](
       stageInfo: StageBuilder.StageInfo,
       results: Seq[Partition[_]],
       targetNumPartitions: Int,
-  ): F[ShuffleId] =
-    Sync[F].delay {
-      val allData: Seq[Any] = results.flatMap(_.data)
-      val keyedData: Seq[(Any, Unit)] = allData.map(element => (element, ()))
-      val shuffleData = shuffle.partitionByKey[Any, Unit](
-        data = Seq(Partition(keyedData)),
-        numPartitions = targetNumPartitions,
-        partitioner = partitioner,
-      )
-      val actualShuffleId = shuffle.write[Any, Unit](shuffleData)
-      logger.debug(
-        s"Stored repartition/coalesce shuffle data for stage ${stageInfo.id.toInt} with shuffle ID ${actualShuffleId.toInt}",
-      )
-      actualShuffleId
-    }
+  ): ShuffleId = {
+    val allData: Seq[Any] = results.flatMap(_.data)
+    val keyedData: Seq[(Any, Unit)] = allData.map(element => (element, ()))
+    val shuffleData = shuffle.partitionByKey[Any, Unit](
+      data = Seq(Partition(keyedData)),
+      numPartitions = targetNumPartitions,
+      partitioner = partitioner,
+    )
+    val actualShuffleId = shuffle.write[Any, Unit](shuffleData)
+    logger.debug(
+      s"Stored repartition/coalesce shuffle data for stage ${stageInfo.id.toInt} with shuffle ID ${actualShuffleId.toInt}",
+    )
+    actualShuffleId
+  }

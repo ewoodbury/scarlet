@@ -1,6 +1,5 @@
 package com.ewoodbury.scarlet.execution
 
-import cats.effect.unsafe.implicits.global
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, StringPairProject}
@@ -74,7 +73,7 @@ object StringProjectCountProbe:
         System.err.println(s"checksums columnar=${columnar.checksum} check=$check")
         sys.exit(1)
     finally
-      try scheduler.shutdown().unsafeRunSync()
+      try scheduler.shutdown()
       finally
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)

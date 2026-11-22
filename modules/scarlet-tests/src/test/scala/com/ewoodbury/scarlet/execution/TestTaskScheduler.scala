@@ -1,6 +1,5 @@
 package com.ewoodbury.scarlet.execution
 
-import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -26,7 +25,7 @@ class TestTaskScheduler extends AnyFlatSpec with Matchers {
       mapTask(Partition(Seq(7, 8, 9)), (x: Int) => x * 4),
     )
 
-    val results = ScarletRuntime.get.scheduler.submit(tasks).unsafeRunSync()
+    val results = ScarletRuntime.get.scheduler.submit(tasks)
 
     results should have length 3
     results(0).data shouldEqual Seq(2, 4, 6)
@@ -40,7 +39,7 @@ class TestTaskScheduler extends AnyFlatSpec with Matchers {
       filterTask(Partition(Seq(6, 7, 8, 9, 10)), (x: Int) => x > 7),
     )
 
-    val results = ScarletRuntime.get.scheduler.submit(tasks).unsafeRunSync()
+    val results = ScarletRuntime.get.scheduler.submit(tasks)
 
     results should have length 2
     results(0).data shouldEqual Seq(2, 4)
@@ -55,7 +54,7 @@ class TestTaskScheduler extends AnyFlatSpec with Matchers {
       flatMapTask(Partition(Seq("c", "d")), (s: String) => Seq(s * 2)),
     )
 
-    val results = ScarletRuntime.get.scheduler.submit(tasks).unsafeRunSync()
+    val results = ScarletRuntime.get.scheduler.submit(tasks)
 
     results should have length 2
     results(0).data shouldEqual Seq("a", "A", "b", "B")
@@ -64,7 +63,7 @@ class TestTaskScheduler extends AnyFlatSpec with Matchers {
 
   it should "handle empty partitions" in {
     val results =
-      ScarletRuntime.get.scheduler.submit(Seq(mapTask(Partition(Seq.empty[Int]), (x: Int) => x * 2))).unsafeRunSync()
+      ScarletRuntime.get.scheduler.submit(Seq(mapTask(Partition(Seq.empty[Int]), (x: Int) => x * 2)))
 
     results should have length 1
     results(0).data shouldEqual Seq.empty[Int]
@@ -72,7 +71,7 @@ class TestTaskScheduler extends AnyFlatSpec with Matchers {
 
   it should "handle single task submission" in {
     val results =
-      ScarletRuntime.get.scheduler.submit(Seq(mapTask(Partition(Seq(1, 2, 3)), (x: Int) => x.toString))).unsafeRunSync()
+      ScarletRuntime.get.scheduler.submit(Seq(mapTask(Partition(Seq(1, 2, 3)), (x: Int) => x.toString)))
 
     results should have length 1
     results(0).data shouldEqual Seq("1", "2", "3")
@@ -83,7 +82,7 @@ class TestTaskScheduler extends AnyFlatSpec with Matchers {
       mapTask(Partition(Seq(value)), (x: Int) => s"task$value" + "_" + x.toString)
     }
 
-    val results = ScarletRuntime.get.scheduler.submit(tasks).unsafeRunSync()
+    val results = ScarletRuntime.get.scheduler.submit(tasks)
 
     results should have length 3
     results(0).data shouldEqual Seq("task1_1")
@@ -94,7 +93,7 @@ class TestTaskScheduler extends AnyFlatSpec with Matchers {
   it should "handle large number of tasks" in {
     val tasks = (1 to 10).map(i => mapTask(Partition(Seq(i)), (x: Int) => x * 10))
 
-    val results = ScarletRuntime.get.scheduler.submit(tasks).unsafeRunSync()
+    val results = ScarletRuntime.get.scheduler.submit(tasks)
 
     results should have length 10
     results.zipWithIndex.foreach { case (result, index) =>
@@ -120,7 +119,7 @@ class TestTaskScheduler extends AnyFlatSpec with Matchers {
     })
 
     val startTime = System.currentTimeMillis()
-    val results = ScarletRuntime.get.scheduler.submit(Seq(fastTask, mediumTask, complexTask)).unsafeRunSync()
+    val results = ScarletRuntime.get.scheduler.submit(Seq(fastTask, mediumTask, complexTask))
     val endTime = System.currentTimeMillis()
 
     results should have length 3
@@ -143,7 +142,7 @@ class TestTaskScheduler extends AnyFlatSpec with Matchers {
       s"result_$filtered"
     })
 
-    val results = ScarletRuntime.get.scheduler.submit(Seq(complexTask)).unsafeRunSync()
+    val results = ScarletRuntime.get.scheduler.submit(Seq(complexTask))
 
     results should have length 1
     results(0).data shouldEqual Seq("result_0", "result_0", "result_6", "result_8", "result_10")

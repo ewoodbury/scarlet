@@ -5,7 +5,6 @@ import java.util.Locale
 
 import scala.util.control.NonFatal
 
-import cats.effect.unsafe.implicits.global
 import com.sun.management.ThreadMXBean
 
 import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
@@ -111,7 +110,7 @@ object JoinBench:
     finally
       val wall = System.nanoTime() - started
       System.err.println(s"wall_s=${seconds(wall)}")
-      try schedulers.values.foreach(_.shutdown().unsafeRunSync())
+      try schedulers.values.foreach(_.shutdown())
       finally
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)

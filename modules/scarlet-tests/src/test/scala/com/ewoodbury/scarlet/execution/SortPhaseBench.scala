@@ -3,7 +3,6 @@ package com.ewoodbury.scarlet.execution
 import java.lang.management.ManagementFactory
 import java.util.Locale
 
-import cats.effect.unsafe.implicits.global
 import com.sun.management.ThreadMXBean
 
 import com.ewoodbury.scarlet.api.DistCollection
@@ -81,7 +80,7 @@ object SortPhaseBench:
           status = 1
       }
     finally
-      try scheduler.shutdown().unsafeRunSync()
+      try scheduler.shutdown()
       finally
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)

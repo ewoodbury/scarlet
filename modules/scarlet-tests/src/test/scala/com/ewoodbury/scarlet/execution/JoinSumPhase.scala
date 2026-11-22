@@ -5,7 +5,6 @@ import java.util.Locale
 
 import scala.util.control.NonFatal
 
-import cats.effect.unsafe.implicits.global
 import com.sun.management.ThreadMXBean
 
 import com.ewoodbury.scarlet.api.DistCollection
@@ -157,7 +156,7 @@ object JoinSumPhase:
         thrown.printStackTrace(System.err)
         status = 1
     finally
-      try scheduler.shutdown().unsafeRunSync()
+      try scheduler.shutdown()
       finally
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)

@@ -392,7 +392,7 @@ The files below are that set. A new site needs the same suppression and comment.
 
 | SPI | Local impl | Role |
 |---|---|---|
-| `TaskScheduler[F]` | `LocalTaskScheduler` (thread pool, bounded parallelism) | Runs tasks; applies the `ScarletConf`-derived retry policy at submission time |
+| `TaskScheduler` | `LocalTaskScheduler` (fixed thread pool) | Runs tasks in input order; applies the `ScarletConf`-derived retry policy at submission time |
 | `ShuffleService` | `LocalShuffleService` (in-memory, concurrent map) | Shuffle write/read keyed by `ShuffleId` + `PartitionId` |
 | `Partitioner` | `HashPartitioner` (`floorMod` — safe for negative hashes) | Key -> partition assignment |
 | `BroadcastService` | `LocalBroadcastService` | Broadcast join support |

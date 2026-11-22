@@ -1,7 +1,5 @@
 package com.ewoodbury.scarlet.execution
 
-import cats.effect.kernel.Sync
-import cats.syntax.all.*
 import com.typesafe.scalalogging.StrictLogging
 
 import com.ewoodbury.scarlet.core.{Partition, PartitionId, Plan, ShuffleId, StageId}
@@ -21,10 +19,10 @@ import com.ewoodbury.scarlet.runtime.api.{ShuffleService, TaskScheduler}
     "org.wartremover.warts.Equals",
   ),
 )
-final class StageExecutor[F[_]: Sync](
+final class StageExecutor(
     shuffle: ShuffleService,
-    scheduler: TaskScheduler[F],
-    joinExecutor: JoinExecutor[F],
+    scheduler: TaskScheduler,
+    joinExecutor: JoinExecutor,
 ) extends StrictLogging:
 
   /**
@@ -66,11 +64,11 @@ final class StageExecutor[F[_]: Sync](
       stageInfo: StageBuilder.StageInfo,
       inputPartitions: Seq[Partition[_]],
       stageToShuffleId: Map[StageId, ShuffleId],
-  ): F[Seq[Partition[_]]] = {
-    if (inputPartitions.isEmpty) then
-      Sync[F].delay(logger.warn(s"Stage ${stageInfo.id.toInt} has no input partitions")) *> Sync[F]
-        .pure(Seq.empty)
-    else {
+  ): Seq[Partition[_]] = {
+    if (inputPartitions.isEmpty) then {
+      logger.warn(s"Stage ${stageInfo.id.toInt} has no input partitions")
+      Seq.empty[Partition[_]]
+    } else {
       stageInfo match {
         case info if info.isShuffleStage =>
           executeShuffleStageTyped(info, inputPartitions, stageToShuffleId)
@@ -89,7 +87,7 @@ final class StageExecutor[F[_]: Sync](
   private def executeNarrowStageTyped(
       stageInfo: StageBuilder.StageInfo,
       inputPartitions: Seq[Partition[_]],
-  ): F[Seq[Partition[_]]] = {
+  ): Seq[Partition[_]] = {
     val anyPartitions = inputPartitions.asInstanceOf[Seq[Partition[Any]]]
     executeNarrowStage(stageInfo, anyPartitions)
   }
@@ -101,7 +99,7 @@ final class StageExecutor[F[_]: Sync](
       stageInfo: StageBuilder.StageInfo,
       inputPartitions: Seq[Partition[_]],
       stageToShuffleId: Map[StageId, ShuffleId],
-  ): F[Seq[Partition[_]]] = {
+  ): Seq[Partition[_]] = {
     stageInfo.wideOp match {
       case Some(op: JoinWideOp) =>
         executeJoinOperation(stageInfo, op, stageToShuffleId)
@@ -143,12 +141,10 @@ final class StageExecutor[F[_]: Sync](
       case Some(_: PartitionByWideOp) =>
         // Upstream wrote key-hashed (K, V) tuples; the partitioning already happened in the
         // shuffle write, so the stage itself is an identity pass-through
-        Sync[F].pure(inputPartitions)
+        inputPartitions
       case other =>
-        Sync[F].raiseError(
-          new IllegalStateException(
-            s"Stage ${stageInfo.id.toInt} has no executable wide operation (found: $other)",
-          ),
+        throw new IllegalStateException(
+          s"Stage ${stageInfo.id.toInt} has no executable wide operation (found: $other)",
         )
     }
   }
@@ -160,9 +156,9 @@ final class StageExecutor[F[_]: Sync](
   private def executePerPartition[A, B](
       partitions: Seq[Partition[A]],
       stage: Stage[A, B],
-  ): F[Seq[Partition[_]]] = {
+  ): Seq[Partition[_]] = {
     val tasks = partitions.map(partition => Task.StageTask(partition, stage))
-    scheduler.submit(tasks).map(_.asInstanceOf[Seq[Partition[_]]])
+    scheduler.submit(tasks).asInstanceOf[Seq[Partition[_]]]
   }
 
   /**
@@ -203,7 +199,7 @@ final class StageExecutor[F[_]: Sync](
       stageInfo: StageBuilder.StageInfo,
       joinOp: JoinWideOp,
       stageToShuffleId: Map[StageId, ShuffleId],
-  ): F[Seq[Partition[_]]] = {
+  ): Seq[Partition[_]] = {
     val (leftShuffleId, rightShuffleId, numPartitions) =
       resolveBinaryShuffleInputs(stageInfo, stageToShuffleId, "Join")
 
@@ -233,8 +229,8 @@ final class StageExecutor[F[_]: Sync](
       stageInfo: StageBuilder.StageInfo,
       stageToShuffleId: Map[StageId, ShuffleId],
       operationName: String,
-      run: (ShuffleId, ShuffleId, Int) => F[Seq[Partition[_]]],
-  ): F[Seq[Partition[_]]] = {
+      run: (ShuffleId, ShuffleId, Int) => Seq[Partition[_]],
+  ): Seq[Partition[_]] = {
     val (leftShuffleId, rightShuffleId, numPartitions) =
       resolveBinaryShuffleInputs(stageInfo, stageToShuffleId, operationName)
     logger.info(s"Using $operationName for stage ${stageInfo.id.toInt}")
@@ -248,7 +244,7 @@ final class StageExecutor[F[_]: Sync](
   private def executeSortByOperation[A, S](
       sortBy: SortByWideOp[A, S],
       inputPartitions: Seq[Partition[_]],
-  ): F[Seq[Partition[_]]] = {
+  ): Seq[Partition[_]] = {
     val typedPartitions = inputPartitions.asInstanceOf[Seq[Partition[(S, A)]]]
     executePerPartition(typedPartitions, Stage.sortLocal[S, A](sortBy.meta.ordering))
   }
@@ -259,7 +255,7 @@ final class StageExecutor[F[_]: Sync](
    */
   private def executeGroupByKeyOperation(
       inputPartitions: Seq[Partition[_]],
-  ): F[Seq[Partition[_]]] = {
+  ): Seq[Partition[_]] = {
     val typedPartitions = inputPartitions.asInstanceOf[Seq[Partition[(Any, Any)]]]
     executePerPartition(typedPartitions, Stage.groupByKeyLocal[Any, Any])
   }
@@ -270,7 +266,7 @@ final class StageExecutor[F[_]: Sync](
    */
   private def executeCountByKeyOperation(
       inputPartitions: Seq[Partition[_]],
-  ): F[Seq[Partition[_]]] = {
+  ): Seq[Partition[_]] = {
     val typedPartitions = inputPartitions.asInstanceOf[Seq[Partition[(Any, Any)]]]
     executePerPartition(typedPartitions, Stage.countByKeyLocal[Any, Any])
   }
@@ -281,7 +277,7 @@ final class StageExecutor[F[_]: Sync](
    */
   private def executeCountSumByKeyOperation(
       inputPartitions: Seq[Partition[_]],
-  ): F[Seq[Partition[_]]] = {
+  ): Seq[Partition[_]] = {
     val typedPartitions = inputPartitions.asInstanceOf[Seq[Partition[(Any, Any)]]]
     executePerPartition(typedPartitions, Stage.countSumByKeyLocal)
   }
@@ -293,7 +289,7 @@ final class StageExecutor[F[_]: Sync](
   private def executeReduceByKeyOperation[V](
       reduceByKey: ReduceByKeyWideOp[V],
       inputPartitions: Seq[Partition[_]],
-  ): F[Seq[Partition[_]]] = {
+  ): Seq[Partition[_]] = {
     val typedPartitions = inputPartitions.asInstanceOf[Seq[Partition[(Any, V)]]]
     executePerPartition(
       typedPartitions,
@@ -307,7 +303,7 @@ final class StageExecutor[F[_]: Sync](
   private def executeCoGroupOperation(
       stageInfo: StageBuilder.StageInfo,
       stageToShuffleId: Map[StageId, ShuffleId],
-  ): F[Seq[Partition[_]]] = {
+  ): Seq[Partition[_]] = {
     val (leftShuffleId, rightShuffleId, numPartitions) =
       resolveBinaryShuffleInputs(stageInfo, stageToShuffleId, "Cogroup")
     val tasks = (0 until numPartitions).map { partitionId =>
@@ -317,7 +313,7 @@ final class StageExecutor[F[_]: Sync](
         shuffle.readPartition[Any, Any](rightShuffleId, PartitionId(partitionId)).data.toSeq
       Task.createCogroupTask[Any, Any, Any](leftData, rightData)
     }
-    scheduler.submit(tasks).map(_.asInstanceOf[Seq[Partition[_]]])
+    scheduler.submit(tasks).asInstanceOf[Seq[Partition[_]]]
   }
 
   /**
@@ -325,12 +321,10 @@ final class StageExecutor[F[_]: Sync](
    */
   private def executeRepartitionOperation(
       inputPartitions: Seq[Partition[_]],
-  ): F[Seq[Partition[_]]] = {
-    Sync[F].delay {
-      val typed = inputPartitions.asInstanceOf[Seq[Partition[(Any, Unit)]]]
-      val out = typed.map { p => Partition(p.data.iterator.map(_._1).toList) }
-      out
-    }
+  ): Seq[Partition[_]] = {
+    val typed = inputPartitions.asInstanceOf[Seq[Partition[(Any, Unit)]]]
+    val out = typed.map { p => Partition(p.data.iterator.map(_._1).toList) }
+    out
   }
 
   /**
@@ -339,6 +333,6 @@ final class StageExecutor[F[_]: Sync](
   private def executeNarrowStage[A, B](
       stageInfo: StageBuilder.StageInfo,
       inputPartitions: Seq[Partition[A]],
-  ): F[Seq[Partition[_]]] = {
+  ): Seq[Partition[_]] = {
     executePerPartition(inputPartitions, stageInfo.stage.asInstanceOf[Stage[A, B]])
   }

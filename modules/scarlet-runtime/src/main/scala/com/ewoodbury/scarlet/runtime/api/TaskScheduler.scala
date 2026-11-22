@@ -3,9 +3,9 @@ package com.ewoodbury.scarlet.runtime.api
 import com.ewoodbury.scarlet.core.{Partition, RetryPolicy}
 
 /**
- * Schedules tasks for execution and collects their results, within an abstract effect `F[_]`.
+ * Schedules tasks for execution and collects their results.
  */
-trait TaskScheduler[F[_]]:
+trait TaskScheduler:
   /**
    * Submits a sequence of tasks (typically from a single stage) and returns results in order.
    *
@@ -17,10 +17,9 @@ trait TaskScheduler[F[_]]:
    * @tparam B
    *   Output element type produced by each task.
    * @return
-   *   An effect that yields the sequence of output partitions in the same order as the input
-   *   tasks.
+   *   The sequence of output partitions in the same order as the input tasks.
    */
-  def submit[A, B](tasks: Seq[RunnableTask[A, B]]): F[Seq[Partition[B]]]
+  def submit[A, B](tasks: Seq[RunnableTask[A, B]]): Seq[Partition[B]]
 
   /**
    * Submits tasks with retry logic using the provided retry policy.
@@ -34,14 +33,14 @@ trait TaskScheduler[F[_]]:
    * @tparam B
    *   Output element type produced by each task
    * @return
-   *   An effect that yields the sequence of output partitions
+   *   The sequence of output partitions
    */
   def submitWithRetry[A, B](
       tasks: Seq[RunnableTask[A, B]],
       retryPolicy: RetryPolicy,
-  ): F[Seq[Partition[B]]]
+  ): Seq[Partition[B]]
 
   /**
    * Releases any resources (e.g., thread pools) associated with this scheduler.
    */
-  def shutdown(): F[Unit]
+  def shutdown(): Unit

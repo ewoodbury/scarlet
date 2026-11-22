@@ -1,6 +1,5 @@
 package com.ewoodbury.scarlet.execution
 
-import cats.effect.unsafe.implicits.global
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, JoinWriteRuns}
@@ -98,7 +97,7 @@ object GenericJoinCountBench:
             println(s"match_columns $matches")
         case _ => ()
     finally
-      try scheduler.shutdown().unsafeRunSync()
+      try scheduler.shutdown()
       finally
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)

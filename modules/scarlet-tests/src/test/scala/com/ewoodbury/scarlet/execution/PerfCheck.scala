@@ -1,6 +1,5 @@
 package com.ewoodbury.scarlet.execution
 
-import cats.effect.unsafe.implicits.global
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
@@ -46,7 +45,7 @@ object PerfCheck:
         System.err.println(s"perf check failed: ${failures.mkString("; ")}")
         sys.exit(1)
     finally
-      try scheduler.shutdown().unsafeRunSync()
+      try scheduler.shutdown()
       finally
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)

@@ -1,7 +1,5 @@
 package com.ewoodbury.scarlet.runtime
 
-import cats.effect.IO
-
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.api.*
 import com.ewoodbury.scarlet.runtime.local.*
@@ -24,7 +22,7 @@ object ScarletRuntime:
     new ThreadLocal[RuntimeComponents | Null]()
 
   final case class RuntimeComponents(
-      scheduler: TaskScheduler[IO],
+      scheduler: TaskScheduler,
       shuffle: ShuffleService,
       partitioner: Partitioner,
       broadcast: BroadcastService,

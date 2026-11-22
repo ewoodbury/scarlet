@@ -7,7 +7,6 @@ import java.util.Locale
 import scala.util.Random
 import scala.util.control.NonFatal
 
-import cats.effect.unsafe.implicits.global
 import com.sun.management.ThreadMXBean
 
 import com.ewoodbury.scarlet.api.DistCollection
@@ -139,7 +138,7 @@ object SortScaleBench:
         System.err.println(s"allocate $allocRounds")
         val allocOn = allocate(session, cases)
         report(allocOn, cases)
-      finally schedulers.values.foreach(_.shutdown().unsafeRunSync())
+      finally schedulers.values.foreach(_.shutdown())
     finally
       try
         ScarletConf.set(savedConf)
@@ -705,7 +704,7 @@ object SortScaleBench:
             try new LocalTaskScheduler(threads)
             catch
               case NonFatal(thrown) =>
-                opened.values.foreach(_.shutdown().unsafeRunSync())
+                opened.values.foreach(_.shutdown())
                 throw thrown
           open(pending.drop(1), opened.updated(threads, scheduler))
     open(threadCounts, Map.empty)

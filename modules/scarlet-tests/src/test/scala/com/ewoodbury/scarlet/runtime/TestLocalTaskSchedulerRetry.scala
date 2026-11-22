@@ -4,7 +4,6 @@ import java.util.concurrent.atomic.AtomicInteger
 
 import scala.concurrent.duration.FiniteDuration
 
-import cats.effect.unsafe.implicits.global
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -49,7 +48,7 @@ class TestLocalTaskSchedulerRetry extends AnyFlatSpec with Matchers with BeforeA
     val scheduler = new LocalTaskScheduler(parallelism = 2)
     val attempts = new AtomicInteger(0)
 
-    val result = scheduler.submit(Seq(flakyTask(failuresBeforeSuccess = 2, attempts))).unsafeRunSync()
+    val result = scheduler.submit(Seq(flakyTask(failuresBeforeSuccess = 2, attempts)))
 
     result.head.data.toSeq shouldEqual Seq(42)
     attempts.get shouldEqual 3
@@ -61,7 +60,7 @@ class TestLocalTaskSchedulerRetry extends AnyFlatSpec with Matchers with BeforeA
 
     an[IllegalStateException] should be thrownBy scheduler
       .submit(Seq(alwaysFailingTask(attempts)))
-      .unsafeRunSync()
+      
 
     attempts.get shouldEqual 3
   }
@@ -74,7 +73,7 @@ class TestLocalTaskSchedulerRetry extends AnyFlatSpec with Matchers with BeforeA
 
     an[IllegalStateException] should be thrownBy scheduler
       .submit(Seq(alwaysFailingTask(attempts)))
-      .unsafeRunSync()
+      
 
     // fastConf allows 2 retries, so exactly 3 attempts - not the 4 that the
     // construction-time default policy (maxTaskRetries = 3) would produce.
@@ -93,7 +92,7 @@ class TestLocalTaskSchedulerRetry extends AnyFlatSpec with Matchers with BeforeA
     )
 
     val result =
-      scheduler.submitWithRetry(Seq(flakyTask(failuresBeforeSuccess = 3, attempts)), explicitPolicy).unsafeRunSync()
+      scheduler.submitWithRetry(Seq(flakyTask(failuresBeforeSuccess = 3, attempts)), explicitPolicy)
 
     result.head.data.toSeq shouldEqual Seq(42)
     attempts.get shouldEqual 4
@@ -107,7 +106,7 @@ class TestLocalTaskSchedulerRetry extends AnyFlatSpec with Matchers with BeforeA
       }
     }
 
-    val result = scheduler.submit(tasks).unsafeRunSync()
+    val result = scheduler.submit(tasks)
 
     result.map(partition => partition.data.head).toSeq shouldEqual Seq(1, 2, 3)
   }

@@ -1,7 +1,5 @@
 package com.ewoodbury.scarlet.runtime
 
-import cats.effect.IO
-import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -14,17 +12,17 @@ class TestPluggability extends AnyFlatSpec with Matchers {
 
   it should "allow swapping scheduler, shuffle, partitioner, and broadcast implementations" in {
     // Fake scheduler that runs tasks sequentially
-    val fakeScheduler = new TaskScheduler[IO] {
-      def submit[A, B](tasks: Seq[RunnableTask[A, B]]): IO[Seq[Partition[B]]] =
-        IO.pure(tasks.map(_.run()))
+    val fakeScheduler = new TaskScheduler {
+      def submit[A, B](tasks: Seq[RunnableTask[A, B]]): Seq[Partition[B]] =
+        tasks.map(_.run())
 
       def submitWithRetry[A, B](
         tasks: Seq[RunnableTask[A, B]],
         retryPolicy: RetryPolicy,
-      ): IO[Seq[Partition[B]]] =
+      ): Seq[Partition[B]] =
         submit(tasks) // Simple implementation for test
 
-      def shutdown(): IO[Unit] = IO.unit
+      def shutdown(): Unit = ()
     }
 
     val fakePartitioner = new Partitioner { def partition(key: Any, n: Int): Int = 0 }
@@ -59,7 +57,7 @@ class TestPluggability extends AnyFlatSpec with Matchers {
     try {
       val partition = Partition(Seq(1, 2, 3))
       val task = com.ewoodbury.scarlet.execution.Task.StageTask(partition, com.ewoodbury.scarlet.execution.Stage.map((x: Int) => x + 1))
-      val result = ScarletRuntime.get.scheduler.submit(Seq(task)).unsafeRunSync()
+      val result = ScarletRuntime.get.scheduler.submit(Seq(task))
       result.headOption.map(_.data.toSeq) shouldEqual Some(Seq(2, 3, 4))
     } finally {
       ScarletRuntime.set(orig)
