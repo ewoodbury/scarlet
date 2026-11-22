@@ -17,16 +17,17 @@ private[execution] object SelectedSort:
 
   /**
    * Int `sortByIntKey` over a filter selection, a scan, one pair project on that scan or filter
-   * stack, one key or value filter immediately above that project, or one [[PhysicalOp.MapKey]] on
-   * that scan or filter stack. A null key orders as zero and stays null. A null value stays null.
-   * A slot-filter stack sorts survivor ids and does not gather before this split. The index is
-   * over the child [[FilterChain.selected]] interprets. That child is the project, so the slot
-   * sees the projected pairs and not the scan under them. The `None` path interprets the child. A
-   * pair project writes both columns there. A key map writes both columns there, and a null input
-   * key stays null and is not passed to the key function. [[RankSplit]] sorts those batches. This
-   * does not call `visitKeys`. Over the budget, with spill on, the survivor index is written and
-   * dropped rows are not. A project or key-map child has no survivor index, so that path does not
-   * spill the index.
+   * stack, one key or value filter immediately above that project, one [[PhysicalOp.MapKey]] on
+   * that scan or filter stack, or one key or value filter immediately above that map. A null key
+   * orders as zero and stays null. A null value stays null. A slot-filter stack sorts survivor ids
+   * and does not gather before this split. The index is over the child [[FilterChain.selected]]
+   * interprets. That child is the project, so the slot sees the projected pairs and not the scan
+   * under them. The `None` path interprets the child. A pair project writes both columns there. A
+   * key map writes both columns there. A slot above that map filters those pairs. A null input key
+   * stays null and is not passed to the key function or a key predicate. [[RankSplit]] sorts those
+   * batches. This does not call `visitKeys`. Over the budget, with spill on, the survivor index is
+   * written and dropped rows are not. A project, key-map, or slot above that map has no survivor
+   * index, so that path does not spill the index.
    */
   def intKey(
       source: Plan[(Int, Int)],

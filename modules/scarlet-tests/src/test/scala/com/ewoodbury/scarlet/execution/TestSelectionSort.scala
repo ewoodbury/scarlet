@@ -651,6 +651,60 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     valueCalls.get() shouldBe 3
   }
 
+  it should "sort one key or value filter above MapKey through RankSplit" in {
+    val mappedKey = DistCollection
+      .ofIntPairs(Array(3, 1, 2), Array(30, 10, 20), 2)
+      .mapIntKey((key: Int) => key + 1)
+      .filterKeys((key: Int) => key > 2)
+      .sortByIntKey
+    shape(mappedKey) shouldBe "SortByIntKey(FilterKey(MapKey(Scan)))"
+    collect(mappedKey) shouldBe Seq(3 -> 20, 4 -> 30)
+    collect(mappedKey) shouldBe row(mappedKey.collect().toSeq)
+    collectAt(mappedKey, 1) shouldBe collectAt(mappedKey, 8192)
+
+    // Value 10 fails `> 10`, so the mapped `(2, 10)` is dropped.
+    val byValue = DistCollection
+      .ofIntPairs(Array(3, 1, 2), Array(30, 10, 20), 2)
+      .mapIntKey((key: Int) => key + 1)
+      .filterValues((value: Int) => value > 10)
+      .sortByIntKey
+    shape(byValue) shouldBe "SortByIntKey(FilterValue(MapKey(Scan)))"
+    collect(byValue) shouldBe Seq(3 -> 20, 4 -> 30)
+    collect(byValue) shouldBe row(byValue.collect().toSeq)
+    collectAt(byValue, 1) shouldBe collectAt(byValue, 8192)
+
+    val under = DistCollection
+      .ofIntPairs(Array(3, 1, 2), Array(30, 10, 20), 2)
+      .filterKeys((key: Int) => key > 1)
+      .mapIntKey((key: Int) => key + 1)
+      .filterKeys((key: Int) => key > 2)
+      .sortByIntKey
+    shape(under) shouldBe "SortByIntKey(FilterKey(MapKey(FilterKey(Scan))))"
+    collect(under) shouldBe Seq(3 -> 20, 4 -> 30)
+    collect(under) shouldBe row(under.collect().toSeq)
+
+    val sortPlan = mappedKey.plan match
+      case Plan.SortByIntKeyOp(sourcePlan) => sourcePlan
+      case _ => fail("expected SortByIntKeyOp")
+    val mapped =
+      ColumnarPlanner.lower(mappedKey.plan).getOrElse(fail("expected a key sort")) match
+        case PhysicalOp.SortByIntKey(child) => child
+        case _ => fail("expected SortByIntKey")
+    FilterChain
+      .selected(
+        sortPlan,
+        mapped,
+        selectedPartition = None,
+        preserveAbsence = true,
+        ColumnUse.ordinals(sortPlan, mapped),
+      ) shouldBe None
+    MapIntKey.resetPublishedForTest()
+    RankSplit.resetForTest()
+    collect(mappedKey) shouldBe Seq(3 -> 20, 4 -> 30)
+    MapIntKey.publishedForTest should be > 0
+    RankSplit.mergePassesForTest should be > 0
+  }
+
   "other maps" should "stay off sortByIntKey" in {
     val source = pairs
     val values = source.mapValues((value: Int) => value + 1).sortByIntKey
@@ -679,9 +733,10 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .filterKeys((key: Int) => key > 2)
       .filterValues((value: Int) => value > 0)
       .sortByIntKey
-    val mappedKey = source
+    val secondAbove = source
       .mapIntKey((key: Int) => key + 1)
       .filterKeys((key: Int) => key > 0)
+      .filterValues((value: Int) => value > 0)
       .sortByIntKey
     val secondKey = source
       .mapIntKey((key: Int) => key + 1)
@@ -738,7 +793,7 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.lower(twiceMapped.plan) shouldBe None
     ColumnarPlanner.lower(onProject.plan) shouldBe None
     ColumnarPlanner.lower(second.plan) shouldBe None
-    ColumnarPlanner.lower(mappedKey.plan) shouldBe None
+    ColumnarPlanner.lower(secondAbove.plan) shouldBe None
     ColumnarPlanner.lower(secondKey.plan) shouldBe None
     ColumnarPlanner.lower(rowAboveKey.plan) shouldBe None
     ColumnarPlanner.lower(secondSlot.plan) shouldBe None

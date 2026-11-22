@@ -265,15 +265,16 @@ final case class DistCollection[A](plan: Plan[A]):
    * Sorts `(Int, Int)` pairs ascending by column 0. Builds [[Plan.SortByIntKeyOp]] from the
    * key-value plan. Generic [[sortBy]] stays an opaque [[Plan.SortByOp]] and runs on the row path.
    * A scan of int pairs lowers to a columnar rank split. An int-pair filter, including a stack of
-   * one, sorts the survivor index and does not gather first. One int-pair project, or one
-   * `mapIntKey`, on that scan or filter stack lowers too. Neither function is read. A null input
-   * key stays null, is not passed to `mapIntKey`, and orders as zero. A slot or whole-row filter
-   * above that map, a second map, `mapValues`, and any other child stay on the row path. A null
-   * `Int` key orders as zero and the row is retained. This matches `sortBy(_._1)` and is not a
-   * null-safe ordering. A key or value filter drops a null in that column before the sort, while
-   * the row path unboxes the null to `0`. Over the budget, with spill on, the survivor index is
-   * spilled and dropped rows are not written. At or under the budget, and whenever spill is off,
-   * the in-memory split runs and writes nothing.
+   * one, sorts the survivor index and does not gather first. One int-pair project, one
+   * `mapIntKey`, or one `filterKeys` or `filterValues` immediately above that map, on that scan or
+   * filter stack lowers too. Neither function is read. A null input key stays null, is not passed
+   * to `mapIntKey` or a key predicate, and orders as zero. A second slot, a whole-row filter above
+   * that map, a second map, `mapValues`, and any other child stay on the row path. A null `Int`
+   * key orders as zero and the row is retained. This matches `sortBy(_._1)` and is not a null-safe
+   * ordering. A key or value filter drops a null in that column before the sort, while the row
+   * path unboxes the null to `0`. Over the budget, with spill on, the survivor index is spilled
+   * and dropped rows are not written. At or under the budget, and whenever spill is off, the
+   * in-memory split runs and writes nothing.
    */
   def sortByIntKey(using ev: A =:= (Int, Int)): DistCollection[(Int, Int)] =
     DistCollection(Plan.SortByIntKeyOp(kvPlan))
