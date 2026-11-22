@@ -5,7 +5,8 @@ package com.ewoodbury.scarlet.execution
  *
  * The project sits on a scan or a string-pair filter stack. Neither function is read. A second
  * project, a second slot, and a whole-row filter are not this shape. [[FilterChain.selected]]
- * declines a filter that covers the project, so the filter publishes both columns and
+ * declines a filter that covers the project, so a collect still publishes both columns.
+ * `countByKey` of this one slot does not. A second map still publishes, and
  * [[com.ewoodbury.scarlet.columnar.StringHashCount.byKey]] hashes those batches.
  */
 private[execution] object StringPairSlot:
