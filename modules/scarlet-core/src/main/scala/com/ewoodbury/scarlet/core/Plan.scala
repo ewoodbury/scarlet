@@ -309,10 +309,11 @@ object Plan {
    * like [[SortByOp]] with the key `(value, key)` and
    * `Ordering.Tuple2(Ordering.Int.reverse, Ordering.Int)`. Generic [[SortByOp]] stays opaque. A
    * scan of int pairs, or a filter chain over one, lowers to a columnar top-N when `take` asks for
-   * a prefix, and to a full two-key sort when the action materializes every row. A map, aggregate,
-   * or join under the sort stays on the row path. A filter, join, aggregate, or projection above
-   * it stays on the row path. A null value or key orders as zero and stays null. Ties keep input
-   * order.
+   * a prefix, and to a full two-key sort when the action materializes every row. One int-pair
+   * project on that scan or filter stack lowers too. The function is not read. `mapValues`, a
+   * second map, a slot above that project, `MapKey`, an aggregate, or a join under the sort stays
+   * on the row path. A filter, join, aggregate, or projection above it stays on the row path. A
+   * null value or key orders as zero and stays null. Ties keep input order.
    *
    * @param source
    *   The preceding plan node.

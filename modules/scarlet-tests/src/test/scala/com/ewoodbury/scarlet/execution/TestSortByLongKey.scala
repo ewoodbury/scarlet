@@ -262,7 +262,9 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.lower(values.plan) shouldBe None
     ColumnarPlanner.lower(keyed.plan).map(_.shape) shouldBe Some("MapKey(Scan)")
     ColumnarPlanner.lower(keyed.sortByIntKey.plan) shouldBe None
-    ColumnarPlanner.lower(byDesc.plan) shouldBe None
+    ColumnarPlanner.lower(byDesc.plan).map(_.shape) shouldBe Some(
+      "SortByIntValueDesc(Project(Scan))",
+    )
     collect(twice.sortByLongKey) shouldBe rowCollect(twice.sortByLongKey)
     collect(byKey) shouldBe rowCollect(byKey)
     collect(byValue) shouldBe rowCollect(byValue)

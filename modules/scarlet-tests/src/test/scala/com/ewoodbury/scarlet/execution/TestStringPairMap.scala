@@ -19,8 +19,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * `countByKey` of that slot does not publish the pair batch. A whole-row filter, a second slot,
  * and a second map stay empty. One project under
  * `sortByStringKey` lowers. One key or value filter immediately above that project lowers too.
- * `mapValues`, a second map, a second slot, a whole-row filter above the project, and a map under
- * `sortByIntValueDesc` stay empty.
+ * `mapValues`, a second map, a second slot, and a whole-row filter above the project stay empty.
+ * One int-pair project under `sortByIntValueDesc` lowers. `mapValues`, a second map, a slot above
+ * that project, and `MapKey` under that sort stay empty.
  */
 class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -289,7 +290,9 @@ class TestStringPairMap extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val byIntValue = DistCollection(Seq(1 -> 2, 3 -> 4), 1)
       .map((pair: (Int, Int)) => (pair._1, pair._2))
       .sortByIntValueDesc
-    ColumnarPlanner.lower(byIntValue.plan) shouldBe None
+    ColumnarPlanner.lower(byIntValue.plan).map(_.shape) shouldBe Some(
+      "SortByIntValueDesc(Project(Scan))",
+    )
     ColumnarPlanner.lower(
       mapped.filter((pair: (String, Int)) => pair._2 > 0).sortByStringKey.plan,
     ) shouldBe None
