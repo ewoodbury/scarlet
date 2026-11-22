@@ -314,11 +314,14 @@ object Plan {
    * scan of int pairs, or a filter chain over one, lowers to a columnar top-N when `take` asks for
    * a prefix, and to a full two-key sort when the action materializes every row. One int-pair
    * project on that scan or filter stack lowers too. One key map on that scan or filter stack
-   * lowers too. Neither function is read. A null input key stays null, is not passed to the key
-   * function, and orders as zero. `mapValues`, a second map, a slot above that project or map, a
-   * slot or whole-row filter above a key map under a key sort, an aggregate, or a join under the
-   * sort stays on the row path. A filter, join, aggregate, or projection above it stays on the row
-   * path. A null value or key orders as zero and stays null. Ties keep input order.
+   * lowers too. One key or value filter immediately above that key map lowers too. One int
+   * `mapValues` on that scan or filter stack lowers too. Neither function is read. A null input
+   * key stays null, is not passed to the key function, and orders as zero. A null value stays null
+   * and is not passed to `mapValues`. A second map, a slot above that project or above
+   * `mapValues`, a second slot, a whole-row filter, a slot or whole-row filter above a key map
+   * under a key sort, an aggregate, or a join under the sort stays on the row path. A filter,
+   * join, aggregate, or projection above it stays on the row path. A null value or key orders as
+   * zero and stays null. Ties keep input order.
    *
    * @param source
    *   The preceding plan node.

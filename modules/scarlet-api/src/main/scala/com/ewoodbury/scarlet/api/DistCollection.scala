@@ -283,10 +283,13 @@ final case class DistCollection[A](plan: Plan[A]):
    * [[Plan.SortByIntValueDescOp]] from the key-value plan. Generic [[sortBy]] stays an opaque
    * [[Plan.SortByOp]] and runs on the row path. A scan of int pairs, or a filter chain over one,
    * lowers. One `mapIntKey`, and one `filterKeys` or `filterValues` immediately above it, lower
-   * too. `take(n)` is a bounded heap of `n` rows when `n` is below the live row count, and the
-   * full sort when `n` covers every live row. Collect is that same full order. A second map,
-   * `mapValues`, a second slot, a whole-row filter, an aggregate, or a join under the sort stays
-   * on the row path. A null value or key orders as zero and stays null. Ties keep input order.
+   * too. One int-pair project on that scan or filter stack lowers. One int `mapValues` on that
+   * scan or filter stack lowers. Neither function is read. A null value stays null and is not
+   * passed to `mapValues`. `take(n)` is a bounded heap of `n` rows when `n` is below the live row
+   * count, and the full sort when `n` covers every live row. Collect is that same full order. A
+   * second map, a slot above that project or above `mapValues`, a second slot, a whole-row filter,
+   * an aggregate, or a join under the sort stays on the row path. A null value or key orders as
+   * zero and stays null. Ties keep input order.
    */
   def sortByIntValueDesc(using ev: A =:= (Int, Int)): DistCollection[(Int, Int)] =
     DistCollection(Plan.SortByIntValueDescOp(kvPlan))
