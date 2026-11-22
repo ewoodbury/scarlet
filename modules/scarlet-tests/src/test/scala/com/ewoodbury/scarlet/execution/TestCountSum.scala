@@ -405,6 +405,200 @@ class TestCountSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     valueCalls.get() shouldBe 2
   }
 
+  it should "fold one slot above mapIntKey without publishing the pair batch" in {
+    val data = DistCollection.ofIntPairs(Array(1, 2, 1, 3), Array(10, 20, 30, 40), partitions)
+    val counted =
+      data.mapIntKey((key: Int) => key + 1).filterKeys((key: Int) => key > 2).countSumByKey
+    ColumnarPlanner.lower(counted.plan).map(_.shape) shouldBe Some(
+      "CountSum(Exchange(FilterKey(MapKey(Scan))))",
+    )
+    val atBatch = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      MapIntKey.resetPublishedForTest()
+      CountSum.resetByKeyForTest()
+      val rows = ColumnMetrics.withSink(new CountingSink) {
+        val found = counted.collect()
+        ColumnMetrics.primitiveEncodeCount shouldBe 0L
+        found
+      }
+      MapIntKey.publishedForTest shouldBe 0
+      CountSum.byKeyCallsForTest shouldBe 0
+      pairs(rows)
+    }
+    val summed = atBatch(8192)
+    summed shouldBe Map(3 -> (1, 20L), 4 -> (1, 40L))
+    atBatch(1) shouldBe summed
+    summed shouldBe row(pairs(counted.collect()))
+
+    MapIntKey.resetPublishedForTest()
+    val projected = data
+      .mapIntKey((key: Int) => key + 1)
+      .filterKeys((key: Int) => key > 2)
+      .collect()
+      .toList
+      .sorted
+    MapIntKey.publishedForTest should be > 0
+    projected shouldBe List((3, 20), (4, 40))
+
+    val byValue =
+      data.mapIntKey((key: Int) => key + 1).filterValues((value: Int) => value >= 20).countSumByKey
+    ColumnarPlanner.lower(byValue.plan).map(_.shape) shouldBe Some(
+      "CountSum(Exchange(FilterValue(MapKey(Scan))))",
+    )
+    MapIntKey.resetPublishedForTest()
+    CountSum.resetByKeyForTest()
+    val values = ColumnMetrics.withSink(new CountingSink) {
+      val found = pairs(byValue.collect())
+      ColumnMetrics.primitiveEncodeCount shouldBe 0L
+      found
+    }
+    MapIntKey.publishedForTest shouldBe 0
+    CountSum.byKeyCallsForTest shouldBe 0
+    // 10 fails `>= 20`, so the mapped key 2 keeps the value 30.
+    values shouldBe Map(2 -> (1, 30L), 3 -> (1, 20L), 4 -> (1, 40L))
+    values shouldBe row(pairs(byValue.collect()))
+
+    val calls = new AtomicInteger
+    val stacked = DistCollection
+      .ofIntPairs(Array(1, 2, 3, 4, 6), Array(10, -1, 20, 0, 5), partitions)
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+      .mapIntKey { key =>
+        calls.incrementAndGet()
+        key % 100
+      }
+      .filterKeys((key: Int) => key < 50)
+      .countSumByKey
+    ColumnarPlanner.lower(stacked.plan).map(_.shape) shouldBe Some(
+      "CountSum(Exchange(FilterKey(MapKey(FilterValue(FilterKey(Scan))))))",
+    )
+    calls.set(0)
+    MapIntKey.resetPublishedForTest()
+    CountSum.resetByKeyForTest()
+    val filtered = pairs(stacked.collect())
+    calls.get() shouldBe 2
+    MapIntKey.publishedForTest shouldBe 0
+    CountSum.byKeyCallsForTest shouldBe 0
+    filtered shouldBe Map(1 -> (1, 10L), 4 -> (1, 0L))
+    calls.set(0)
+    filtered shouldBe row(pairs(stacked.collect()))
+    calls.get() shouldBe 2
+  }
+
+  it should "skip a null key above the map and count a null value" in {
+    val mapCalls = new AtomicInteger
+    val keyCalls = new AtomicInteger
+    val counted = nullPairs().mapIntKey { key =>
+      mapCalls.incrementAndGet()
+      key + 1
+    }.filterKeys { (key: Int) =>
+      keyCalls.incrementAndGet()
+      key > 2
+    }.countSumByKey
+    val expected = Map(
+      6 -> (2, 4L),
+      3 -> (1, 0L),
+      8 -> (2, 4L),
+    )
+    val atBatch = (size: Int) => {
+      ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = size))
+      ScarletRuntime.get.shuffle.clear()
+      mapCalls.set(0)
+      keyCalls.set(0)
+      MapIntKey.resetPublishedForTest()
+      CountSum.resetByKeyForTest()
+      val found = pairs(counted.collect())
+      MapIntKey.publishedForTest shouldBe 0
+      CountSum.byKeyCallsForTest shouldBe 0
+      (found, mapCalls.get(), keyCalls.get())
+    }
+    val (summed, mapped, keyed) = atBatch(8192)
+    summed shouldBe expected
+    mapped shouldBe 7
+    keyed shouldBe 7
+    atBatch(1) shouldBe (summed, mapped, keyed)
+    mapCalls.set(0)
+    row(pairs(counted.collect())) shouldBe expected
+    mapCalls.get() shouldBe mapped
+
+    val valueCalls = new AtomicInteger
+    val values = nullPairs().mapIntKey { key =>
+      mapCalls.incrementAndGet()
+      key + 1
+    }.filterValues { (value: Int) =>
+      valueCalls.incrementAndGet()
+      value > 0
+    }.countSumByKey
+    mapCalls.set(0)
+    valueCalls.set(0)
+    MapIntKey.resetPublishedForTest()
+    CountSum.resetByKeyForTest()
+    val columnarValues = pairs(values.collect())
+    mapCalls.get() shouldBe 7
+    valueCalls.get() shouldBe 7
+    MapIntKey.publishedForTest shouldBe 0
+    CountSum.byKeyCallsForTest shouldBe 0
+    columnarValues shouldBe Map(2 -> (2, 9L), 6 -> (2, 4L), 8 -> (1, 4L))
+    mapCalls.set(0)
+    row(pairs(values.collect())) shouldBe columnarValues
+    mapCalls.get() shouldBe 7
+
+    val nullValues = nullValue().mapIntKey { key =>
+      mapCalls.incrementAndGet()
+      key * 2
+    }.filterKeys((key: Int) => key > 0).countSumByKey
+    mapCalls.set(0)
+    MapIntKey.resetPublishedForTest()
+    CountSum.resetByKeyForTest()
+    val countedNulls = pairs(nullValues.collect())
+    mapCalls.get() shouldBe 2
+    MapIntKey.publishedForTest shouldBe 0
+    CountSum.byKeyCallsForTest shouldBe 0
+    countedNulls shouldBe Map(2 -> (1, 0L), 8 -> (1, 4L))
+    mapCalls.set(0)
+    row(pairs(nullValues.collect())) shouldBe countedNulls
+    mapCalls.get() shouldBe 2
+  }
+
+  it should "leave a second slot and a whole-row filter above mapIntKey on the row path" in {
+    val data = DistCollection.ofIntPairs(Array(1, 2, 1, 3), Array(10, 20, 30, 40), partitions)
+    val twice = data
+      .mapIntKey((key: Int) => key + 1)
+      .filterKeys((key: Int) => key > 2)
+      .filterValues((value: Int) => value >= 20)
+      .countSumByKey
+    ColumnarPlanner.lower(twice.plan) shouldBe None
+    val stacked = pairs(twice.collect())
+    stacked shouldBe Map(3 -> (1, 20L), 4 -> (1, 40L))
+    stacked shouldBe row(pairs(twice.collect()))
+
+    val whole = data
+      .mapIntKey((key: Int) => key + 1)
+      .filter((pair: (Int, Int)) => pair._1 > 2 && pair._2 >= 20)
+      .countSumByKey
+    ColumnarPlanner.lower(whole.plan) shouldBe None
+    val rows = pairs(whole.collect())
+    rows shouldBe Map(3 -> (1, 20L), 4 -> (1, 40L))
+    rows shouldBe row(pairs(whole.collect()))
+
+    val nested = data
+      .mapIntKey((key: Int) => key + 1)
+      .mapIntKey((key: Int) => key * 2)
+      .filterKeys((key: Int) => key > 2)
+      .countSumByKey
+    ColumnarPlanner.lower(nested.plan).map(_.shape) shouldBe Some(
+      "CountSum(Exchange(FilterKey(MapKey(MapKey(Scan)))))",
+    )
+    MapIntKey.resetPublishedForTest()
+    CountSum.resetByKeyForTest()
+    val doubled = pairs(nested.collect())
+    MapIntKey.publishedForTest should be > 0
+    CountSum.byKeyCallsForTest should be > 0
+    doubled shouldBe Map(4 -> (2, 40L), 6 -> (1, 20L), 8 -> (1, 40L))
+    doubled shouldBe row(pairs(nested.collect()))
+  }
+
   it should "keep a second map and a whole-row filter on the interpreted path" in {
     val data = DistCollection.ofIntPairs(Array(1, 2, 1, 3), Array(10, 20, 30, 40), partitions)
     val twice =

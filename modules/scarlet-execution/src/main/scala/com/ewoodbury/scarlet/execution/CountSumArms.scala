@@ -12,9 +12,13 @@ import ColumnarInterpreter.{Columns, interpretAt, pairsOf}
  * is summed from those arrays. The predicates run inside the scan. The arrays are aliased and not
  * copied, and no survivor index is built. One [[Plan.MapIntKeyOp]] over that source is summed the
  * same way: the function runs once on each present survivor and is not inspected, and the pair
- * batch is not published. A null key is not passed in. Encoded morsels under that one map,
- * including a null value, observe into the same table. One pair [[Plan.MapOp]] whose filters are
- * int slots, or absent, is summed from that project's input morsels. The interpreter's adapter
+ * batch is not published. A null key is not passed in. One key or value slot directly above that
+ * map is summed from the same morsels. The slot runs after the function. A key slot sees the
+ * mapped key and is not called on a null. A value slot sees the original value, including a row
+ * whose key is null. A null value a key slot keeps is counted and not added. A second slot above
+ * the map, and a whole-row filter above it, stay on the row path. Encoded morsels under that one
+ * map, including a null value, observe into the same table. One pair [[Plan.MapOp]] whose filters
+ * are int slots, or absent, is summed from that project's input morsels. The interpreter's adapter
  * runs on every row, including a null key and a null value, and is not inspected. A null projected
  * key is dropped. A null projected value is counted and not added. The pair batch is not
  * published, and [[CountSum.byKey]] is not called. One [[Plan.FilterKeysOp]] or
@@ -54,6 +58,17 @@ private[execution] object CountSumArms:
           batchSize,
         ).orElse(
           foldedAbove(
+            source,
+            child,
+            selectedPartition,
+            preserveAbsence,
+            ordinals,
+            width,
+            workers,
+            batchSize,
+          ),
+        ).orElse(
+          foldedMappedAbove(
             source,
             child,
             selectedPartition,
@@ -247,6 +262,66 @@ private[execution] object CountSumArms:
         case Some(Vector(step @ Selection.Step.Int32(column, _))) if column == 0 || column == 1 =>
           Some(step)
         case _ => None
+    }
+
+  /**
+   * One key or value slot above one [[Plan.MapIntKeyOp]]. Steps under the map stay on the source
+   * and may be empty. The slot runs after the key function. `None` when a second map sits under
+   * the filters, when a step is not an int slot, or when a second slot sits above the map.
+   * [[CountSum.byKey]] is not called. Neither function is read.
+   */
+  private def foldedMappedAbove(
+      source: Plan[_],
+      child: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      width: Int,
+      workers: Int,
+      batchSize: Int,
+  ): Option[Vector[ColumnBatch]] =
+    aboveTarget(source, child, ordinals).flatMap { (plan, op, steps, fn, slot) =>
+      ownedPairs(plan, op) match
+        case Some(parts) =>
+          Some(
+            CountSum.byKeyOwnedMappedAbove(parts, steps, slot, fn, width, workers, batchSize),
+          )
+        case None =>
+          encoded(plan, op, selectedPartition, preserveAbsence, ordinals).map { batches =>
+            CountSum.byKeyMappedAbove(batches, steps, slot, fn, width, workers, batchSize)
+          }
+    }
+
+  /**
+   * One [[Plan.FilterKeysOp]] or [[Plan.FilterValuesOp]] whose child is one [[Plan.MapIntKeyOp]].
+   * The returned plan is the source under that map. The step list is the filters under the map.
+   */
+  private def aboveTarget(
+      source: Plan[_],
+      child: PhysicalOp,
+      ordinals: Set[Int],
+  ): Option[(Plan[_], PhysicalOp, List[Selection.Step], Int => Int, Selection.Step)] =
+    val matched = (source, child) match
+      case (
+            Plan.FilterKeysOp(Plan.MapIntKeyOp(inner, fn), _),
+            PhysicalOp.Filter(PhysicalOp.MapKey(mapped), PhysicalOp.Slot.Key),
+          ) if intPairs(child) =>
+        Some((inner, mapped, fn))
+      case (
+            Plan.FilterValuesOp(Plan.MapIntKeyOp(inner, fn), _),
+            PhysicalOp.Filter(PhysicalOp.MapKey(mapped), PhysicalOp.Slot.Value),
+          ) if intPairs(child) =>
+        Some((inner, mapped, fn))
+      case _ => None
+    matched.flatMap { (inner, mapped, fn) =>
+      val (underPlan, underOp) = PredicatePlan.childOf(inner, mapped)
+      if (pastMap(underPlan)) then None
+      else
+        oneIntSlot(source, child).flatMap { slot =>
+          slotSteps(inner, mapped, ordinals).map { steps =>
+            (underPlan, underOp, steps, fn, slot)
+          }
+        }
     }
 
   /**

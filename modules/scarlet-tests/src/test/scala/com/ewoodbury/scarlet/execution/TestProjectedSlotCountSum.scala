@@ -289,7 +289,7 @@ class TestProjectedSlotCountSum extends AnyFlatSpec with Matchers with BeforeAnd
     found shouldBe row(groups(counted))
   }
 
-  it should "leave a slot above mapIntKey on the published path" in {
+  it should "fold a slot above mapIntKey without publishing the pair batch" in {
     val counted = pairs()
       .mapIntKey((key: Int) => key + 1)
       .filterKeys((key: Int) => key > 2)
@@ -299,8 +299,9 @@ class TestProjectedSlotCountSum extends AnyFlatSpec with Matchers with BeforeAnd
     MapIntKey.resetPublishedForTest()
     CountSum.resetByKeyForTest()
     val found = groups(counted)
-    MapIntKey.publishedForTest should be > 0
+    MapIntKey.publishedForTest shouldBe 0
     IntPairProject.publishedForTest shouldBe 0
+    CountSum.byKeyCallsForTest shouldBe 0
     found shouldBe Map(3 -> (1, 20L), 4 -> (1, 40L))
     found shouldBe row(groups(counted))
   }
