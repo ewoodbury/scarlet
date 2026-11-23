@@ -71,7 +71,7 @@ class TestColumnarContract
     }
   }
 
-  private def acceptedCases: Seq[AcceptedCase] =
+  private[execution] def acceptedCases: Seq[AcceptedCase] =
     val intFilter = Plan.FilterOp(intSource, (value: Int) => value > 1)
     val intMap = Plan.MapOp(intSource, (value: Int) => value + 1)
     val longFilter = Plan.FilterOp(longSource, (value: Long) => value > 1L)

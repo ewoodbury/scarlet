@@ -179,3 +179,39 @@ private[execution] enum Output:
 
 private enum OuterSide:
   case Inner, Left, Right, Full
+
+/**
+ * Named tag for the physical root [[com.ewoodbury.scarlet.execution.ColumnarPlanner.lower]]
+ * returns.
+ *
+ * Hash aggregates are `IntHashAggregate`, `LongHashAggregate`, and `StringHashAggregate`. A hash
+ * aggregate of an `[Int32, Int64]` project is `IntLongProjectSum`. `countByKey` of an int hash
+ * join, with no extra exchange, is `CountThroughProbe`. Each sort, group, distinct, and join class
+ * has its own case. The distinct class is `Dedupe`. Refuse is not a case. [[Describe.describe]]
+ * returns [[scala.None]] when lowering refuses the plan.
+ */
+private[execution] enum KernelChoice:
+
+  /** Ledger text. The case name, not a generated `toString`. */
+  def tag: String = productPrefix
+
+  case IntHashAggregate, LongHashAggregate, StringHashAggregate
+  case IntLongProjectSum
+  case CountByKey, CountThroughProbe, CountSum
+  case JoinProbeSum
+  case SortByIntKey, SortByIntValueDesc, SortByLongKey, SortByStringKey
+  case GroupByKey, GroupedDecode
+  case Dedupe
+  case HashJoin, BroadcastJoin, SortMergeJoin
+  case HashLeftOuter, HashRightOuter, HashFullOuter
+  case BroadcastLeftOuter, BroadcastRightOuter, BroadcastFullOuter
+  case SortMergeLeftOuter, SortMergeRightOuter, SortMergeFullOuter
+  case LongHashJoin, LongBroadcastJoin, LongSortMergeJoin
+  case LongHashLeftOuter, LongHashRightOuter, LongHashFullOuter
+  case LongBroadcastLeftOuter, LongBroadcastRightOuter, LongBroadcastFullOuter
+  case LongSortMergeLeftOuter, LongSortMergeRightOuter, LongSortMergeFullOuter
+  case StringHashJoin, StringBroadcastJoin, StringSortMergeJoin
+  case StringHashLeftOuter, StringHashRightOuter, StringHashFullOuter
+  case StringBroadcastLeftOuter, StringBroadcastRightOuter, StringBroadcastFullOuter
+  case StringSortMergeLeftOuter, StringSortMergeRightOuter, StringSortMergeFullOuter
+  case Scan, Filter, Project, Column, MapValue, MapKey, Pipeline, Union, Exchange
