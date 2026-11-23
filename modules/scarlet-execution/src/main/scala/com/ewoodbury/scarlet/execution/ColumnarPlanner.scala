@@ -74,21 +74,22 @@ object ColumnarPlanner:
    * right, or full, stays a clear validity bit and [[tryRun]] keeps the row. A null value on a
    * long or string outer join makes [[tryRun]] return `None`. [[SortLowering]] accepts an int,
    * long, or string key sort of a scan, or of filters over that scan. One int-pair project, or one
-   * [[PhysicalOp.MapKey]], on that scan or filter stack lowers under [[Plan.SortByIntKeyOp]]. The
-   * function is not read. A null input key stays null, is not passed to the key function, and
-   * orders as zero. [[com.ewoodbury.scarlet.columnar.RankSplit]] sorts the published pairs. One
-   * long-pair project lowers under [[Plan.SortByLongKeyOp]]. One string-pair project lowers under
+   * [[PhysicalOp.MapKey]], on that scan or filter stack, or one key or value filter immediately
+   * above that map, lowers under [[Plan.SortByIntKeyOp]]. The function is not read. A null input
+   * key stays null, is not passed to the key function or a key predicate, and orders as zero.
+   * [[com.ewoodbury.scarlet.columnar.RankSplit]] sorts the published pairs. One long-pair project
+   * lowers under [[Plan.SortByLongKeyOp]]. One string-pair project lowers under
    * [[Plan.SortByStringKeyOp]]. One key or value filter immediately above that int, long, or
-   * string project lowers too. Neither function is read. A slot or whole-row filter above the key
-   * map, `mapValues`, a second map, a second slot or a whole-row filter above the long project, a
-   * second slot, a whole-row filter above the string project, and every other map, aggregate, or
-   * join under a sort stay on the row path. One [[PhysicalOp.MapKey]] on a scan or an int-pair
-   * filter stack, or one key or value filter immediately above that map, lowers under
-   * [[Plan.SortByIntValueDescOp]]. A second slot, a whole-row filter, and that slot under a key
-   * sort stay on the row path. One filter above an int, long, or string key sort lowers to
-   * [[PhysicalOp.Filter]] on [[PhysicalOp.Slot.Row]] around that sort, and only for a fully
-   * present key column. The pair-row filter drops a null key while the row path keeps it. The sort
-   * is [[SortLowering.lowerInt]], [[SortLowering.lowerLong]], or [[SortLowering.lowerString]], not
+   * string project lowers too. Neither function is read. A second slot or a whole-row filter above
+   * the key map, `mapValues`, a second map, a second slot or a whole-row filter above the long
+   * project, a second slot, a whole-row filter above the string project, and every other map,
+   * aggregate, or join under a sort stay on the row path. One [[PhysicalOp.MapKey]] on a scan or
+   * an int-pair filter stack, or one key or value filter immediately above that map, lowers under
+   * [[Plan.SortByIntValueDescOp]]. A second slot and a whole-row filter stay on the row path. One
+   * filter above an int, long, or string key sort lowers to [[PhysicalOp.Filter]] on
+   * [[PhysicalOp.Slot.Row]] around that sort, and only for a fully present key column. The
+   * pair-row filter drops a null key while the row path keeps it. The sort is
+   * [[SortLowering.lowerInt]], [[SortLowering.lowerLong]], or [[SortLowering.lowerString]], not
    * [[lowerChild]]. [[SortLowering.acceptsAsChild]] stays false, so a null key, a second filter, a
    * key or value filter above the sort, and every other parent stay on the row path. A slot filter
    * sorts the survivor index. Over the budget, with spill on, that index is spilled. A long-pair

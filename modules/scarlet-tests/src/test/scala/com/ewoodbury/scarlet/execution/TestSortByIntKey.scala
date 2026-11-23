@@ -104,6 +104,70 @@ class TestSortByIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     collect(onStack) shouldBe rowCollect(onStack)
   }
 
+  it should "sort one slot above mapIntKey and keep a null key off the predicate" in {
+    val calls = new AtomicInteger
+    val pred = new AtomicInteger
+    val rows = Seq(
+      intPair(boxedInt(1), boxedInt(5)),
+      intPair(noInt, boxedInt(9)),
+      intPair(boxedInt(2), noInt),
+      intPair(boxedInt(3), boxedInt(0)),
+    )
+    val byKey = DistCollection(rows, 2)
+      .mapIntKey { (key: Int) =>
+        val _ = calls.incrementAndGet()
+        key + 1
+      }
+      .filterKeys { (key: Int) =>
+        val _ = pred.incrementAndGet()
+        key > 0
+      }
+      .sortByIntKey
+    val byValue = DistCollection(
+      Seq(
+        intPair(boxedInt(1), boxedInt(5)),
+        intPair(noInt, boxedInt(5)),
+        intPair(boxedInt(2), noInt),
+        intPair(boxedInt(3), boxedInt(0)),
+      ),
+      2,
+    ).mapIntKey { (key: Int) =>
+      val _ = calls.incrementAndGet()
+      key + 1
+    }.filterValues((value: Int) => value > 0)
+      .sortByIntKey
+
+    ColumnarPlanner.lower(byKey.plan).map(_.shape) shouldBe Some(
+      "SortByIntKey(FilterKey(MapKey(Scan)))",
+    )
+    calls.set(0)
+    pred.set(0)
+    val keyed = collect(byKey)
+    calls.get() shouldBe 3
+    pred.get() shouldBe 3
+    keyed shouldBe Seq(
+      intPair(boxedInt(2), boxedInt(5)),
+      intPair(boxedInt(3), noInt),
+      intPair(boxedInt(4), boxedInt(0)),
+    )
+    calls.set(0)
+    pred.set(0)
+    keyed shouldBe rowCollect(byKey)
+    calls.get() shouldBe 3
+    ColumnarPlanner.lower(byValue.plan).map(_.shape) shouldBe Some(
+      "SortByIntKey(FilterValue(MapKey(Scan)))",
+    )
+    calls.set(0)
+    val valued = collect(byValue)
+    calls.get() shouldBe 3
+    valued shouldBe Seq(intPair(noInt, boxedInt(5)), intPair(boxedInt(2), boxedInt(5)))
+    calls.set(0)
+    valued shouldBe rowCollect(byValue)
+    calls.get() shouldBe 3
+    effectiveKeys(valued) shouldBe effectiveKeys(valued).sorted
+    valued.exists(pair => !present(pair, 0)) shouldBe true
+  }
+
   it should "retain a null value beside a present key" in {
     val rows = Seq(
       intPair(boxedInt(2), boxedInt(20)),
