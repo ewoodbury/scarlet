@@ -1,0 +1,234 @@
+int source	Scan
+int filter	Filter
+int map	Project
+long source	Scan
+empty long source	Scan
+long filter	Filter
+long map	Project
+boolean source	Scan
+empty boolean source	Scan
+boolean filter	Filter
+boolean filter chain	Filter
+double source	Scan
+double filter	Filter
+double map	Project
+string source	Scan
+string filter	Filter
+string map	Project
+dictionary string equality	Filter
+dictionary equality then string map	Project
+int pair source	Scan
+empty int pair source	Scan
+long pair source	Scan
+empty long pair source	Scan
+int pair row filter	Filter
+int pair key filter	Filter
+int pair value filter	Filter
+int sortByIntKey	SortByIntKey
+filter over sortByIntKey	Filter
+long sortByLongKey	SortByLongKey
+filter over sortByLongKey	Filter
+sortByStringKey of a string-pair scan	SortByStringKey
+filter over sortByStringKey	Filter
+int pair keys	Column
+int pair values	Column
+int mapValues	MapValue
+int mapIntKey	MapKey
+keys of mapIntKey	Column
+values of mapIntKey	Column
+filterKeys above mapIntKey	Filter
+filterValues above mapIntKey	Filter
+keys of string pairs	Column
+values of string pairs	Column
+mapValues on string-key pairs	MapValue
+string filterKeys	Filter
+string filterValues	Filter
+mapped int keys	Project
+mapped int values	Project
+filtered int mapValues	Filter
+keys of long pairs	Column
+values of long pairs	Column
+mapValues on long pairs	MapValue
+filter of long pairs	Filter
+filterKeys of long pairs	Filter
+filterValues of long pairs	Filter
+int reduceByKey	IntHashAggregate
+groupByKey int	GroupByKey
+keys of int groupByKey	Column
+keys of long groupByKey	Column
+keys of string groupByKey	Column
+countByKey int	CountByKey
+countSumByKey int	CountSum
+countByKey of mapIntKey	CountByKey
+countByKey of filterKeys above mapIntKey	CountByKey
+countByKey of filterValues above mapIntKey	CountByKey
+reduceByKey of mapIntKey	IntHashAggregate
+int pair map	Project
+countByKey of int pair map	CountByKey
+countByKey long	CountByKey
+long pair map	Project
+countByKey of long pair map	CountByKey
+countByKey string	CountByKey
+string pair map	Project
+countByKey of string pair map	CountByKey
+groupByKey with string keys	GroupByKey
+groupByKey with long keys	GroupByKey
+long reduceByKey	LongHashAggregate
+reduceByKey with string keys	StringHashAggregate
+long inner join	LongHashJoin
+explicit shuffle-hash long join	LongHashJoin
+explicit broadcast long join	LongBroadcastJoin
+explicit sort-merge long join	LongSortMergeJoin
+join with string keys	StringHashJoin
+explicit broadcast string join	StringBroadcastJoin
+explicit sort-merge string join	StringSortMergeJoin
+filtered int reduceByKey	IntHashAggregate
+mapValues int reduceByKey	IntHashAggregate
+nested int reduceByKey	IntHashAggregate
+int hash join	HashJoin
+explicit shuffle-hash join	HashJoin
+explicit broadcast join	BroadcastJoin
+explicit sort-merge join	SortMergeJoin
+broadcast left outer join	BroadcastLeftOuter
+shuffle-hash left outer join	HashLeftOuter
+broadcast right outer join	BroadcastRightOuter
+shuffle-hash right outer join	HashRightOuter
+right outer join	HashRightOuter
+broadcast full outer join	BroadcastFullOuter
+shuffle-hash full outer join	HashFullOuter
+full outer join	HashFullOuter
+sort-merge left outer join	SortMergeLeftOuter
+sort-merge right outer join	SortMergeRightOuter
+sort-merge full outer join	SortMergeFullOuter
+join after int aggregate	HashJoin
+union	Union
+distinct ints	Dedupe
+distinct strings	Dedupe
+join-key filter	Filter
+join-left-value filter	Filter
+join-right-value filter	Filter
+map on triples	Project
+generic triple filter	Filter
+int element pipeline length=2 pattern=0	Pipeline
+int element pipeline length=2 pattern=1	Pipeline
+int element pipeline length=2 pattern=2	Pipeline
+int element pipeline length=2 pattern=3	Pipeline
+int element pipeline length=3 pattern=0	Pipeline
+int element pipeline length=3 pattern=1	Pipeline
+int element pipeline length=3 pattern=2	Pipeline
+int element pipeline length=3 pattern=3	Pipeline
+int element pipeline length=3 pattern=4	Pipeline
+int element pipeline length=3 pattern=5	Pipeline
+int element pipeline length=3 pattern=6	Pipeline
+int element pipeline length=3 pattern=7	Pipeline
+int element pipeline length=4 pattern=0	Pipeline
+int element pipeline length=4 pattern=1	Pipeline
+int element pipeline length=4 pattern=2	Pipeline
+int element pipeline length=4 pattern=3	Pipeline
+int element pipeline length=4 pattern=4	Pipeline
+int element pipeline length=4 pattern=5	Pipeline
+int element pipeline length=4 pattern=6	Pipeline
+int element pipeline length=4 pattern=7	Pipeline
+int element pipeline length=4 pattern=8	Pipeline
+int element pipeline length=4 pattern=9	Pipeline
+int element pipeline length=4 pattern=10	Pipeline
+int element pipeline length=4 pattern=11	Pipeline
+int element pipeline length=4 pattern=12	Pipeline
+int element pipeline length=4 pattern=13	Pipeline
+int element pipeline length=4 pattern=14	Pipeline
+int element pipeline length=4 pattern=15	Pipeline
+long element pipeline length=2 pattern=0	Pipeline
+long element pipeline length=2 pattern=1	Pipeline
+long element pipeline length=2 pattern=2	Pipeline
+long element pipeline length=2 pattern=3	Pipeline
+long element pipeline length=3 pattern=0	Pipeline
+long element pipeline length=3 pattern=1	Pipeline
+long element pipeline length=3 pattern=2	Pipeline
+long element pipeline length=3 pattern=3	Pipeline
+long element pipeline length=3 pattern=4	Pipeline
+long element pipeline length=3 pattern=5	Pipeline
+long element pipeline length=3 pattern=6	Pipeline
+long element pipeline length=3 pattern=7	Pipeline
+long element pipeline length=4 pattern=0	Pipeline
+long element pipeline length=4 pattern=1	Pipeline
+long element pipeline length=4 pattern=2	Pipeline
+long element pipeline length=4 pattern=3	Pipeline
+long element pipeline length=4 pattern=4	Pipeline
+long element pipeline length=4 pattern=5	Pipeline
+long element pipeline length=4 pattern=6	Pipeline
+long element pipeline length=4 pattern=7	Pipeline
+long element pipeline length=4 pattern=8	Pipeline
+long element pipeline length=4 pattern=9	Pipeline
+long element pipeline length=4 pattern=10	Pipeline
+long element pipeline length=4 pattern=11	Pipeline
+long element pipeline length=4 pattern=12	Pipeline
+long element pipeline length=4 pattern=13	Pipeline
+long element pipeline length=4 pattern=14	Pipeline
+long element pipeline length=4 pattern=15	Pipeline
+double element pipeline length=2 pattern=0	Pipeline
+double element pipeline length=2 pattern=1	Pipeline
+double element pipeline length=2 pattern=2	Pipeline
+double element pipeline length=2 pattern=3	Pipeline
+double element pipeline length=3 pattern=0	Pipeline
+double element pipeline length=3 pattern=1	Pipeline
+double element pipeline length=3 pattern=2	Pipeline
+double element pipeline length=3 pattern=3	Pipeline
+double element pipeline length=3 pattern=4	Pipeline
+double element pipeline length=3 pattern=5	Pipeline
+double element pipeline length=3 pattern=6	Pipeline
+double element pipeline length=3 pattern=7	Pipeline
+double element pipeline length=4 pattern=0	Pipeline
+double element pipeline length=4 pattern=1	Pipeline
+double element pipeline length=4 pattern=2	Pipeline
+double element pipeline length=4 pattern=3	Pipeline
+double element pipeline length=4 pattern=4	Pipeline
+double element pipeline length=4 pattern=5	Pipeline
+double element pipeline length=4 pattern=6	Pipeline
+double element pipeline length=4 pattern=7	Pipeline
+double element pipeline length=4 pattern=8	Pipeline
+double element pipeline length=4 pattern=9	Pipeline
+double element pipeline length=4 pattern=10	Pipeline
+double element pipeline length=4 pattern=11	Pipeline
+double element pipeline length=4 pattern=12	Pipeline
+double element pipeline length=4 pattern=13	Pipeline
+double element pipeline length=4 pattern=14	Pipeline
+double element pipeline length=4 pattern=15	Pipeline
+string element pipeline length=2 pattern=0	Pipeline
+string element pipeline length=2 pattern=1	Pipeline
+string element pipeline length=2 pattern=2	Pipeline
+string element pipeline length=2 pattern=3	Pipeline
+string element pipeline length=3 pattern=0	Pipeline
+string element pipeline length=3 pattern=1	Pipeline
+string element pipeline length=3 pattern=2	Pipeline
+string element pipeline length=3 pattern=3	Pipeline
+string element pipeline length=3 pattern=4	Pipeline
+string element pipeline length=3 pattern=5	Pipeline
+string element pipeline length=3 pattern=6	Pipeline
+string element pipeline length=3 pattern=7	Pipeline
+string element pipeline length=4 pattern=0	Pipeline
+string element pipeline length=4 pattern=1	Pipeline
+string element pipeline length=4 pattern=2	Pipeline
+string element pipeline length=4 pattern=3	Pipeline
+string element pipeline length=4 pattern=4	Pipeline
+string element pipeline length=4 pattern=5	Pipeline
+string element pipeline length=4 pattern=6	Pipeline
+string element pipeline length=4 pattern=7	Pipeline
+string element pipeline length=4 pattern=8	Pipeline
+string element pipeline length=4 pattern=9	Pipeline
+string element pipeline length=4 pattern=10	Pipeline
+string element pipeline length=4 pattern=11	Pipeline
+string element pipeline length=4 pattern=12	Pipeline
+string element pipeline length=4 pattern=13	Pipeline
+string element pipeline length=4 pattern=14	Pipeline
+string element pipeline length=4 pattern=15	Pipeline
+int five-step element pipeline	Project
+int six-step element pipeline	Pipeline
+long five-step element pipeline	Project
+long six-step element pipeline	Pipeline
+double five-step element pipeline	Project
+double six-step element pipeline	Pipeline
+string five-step element pipeline	Project
+string six-step element pipeline	Pipeline
+map above int groupByKey	GroupedDecode
+map above string groupByKey	GroupedDecode
+map above long groupByKey	GroupedDecode
