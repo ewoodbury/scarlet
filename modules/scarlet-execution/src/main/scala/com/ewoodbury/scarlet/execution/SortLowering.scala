@@ -1,6 +1,8 @@
 package com.ewoodbury.scarlet.execution
 
 import com.ewoodbury.scarlet.core.Plan
+import com.ewoodbury.scarlet.execution.schema.ColumnBinding.{Operator, ReducerWitness}
+import com.ewoodbury.scarlet.execution.schema.{Bound, ColumnBinding, KernelChoice, Output}
 
 /**
  * Lowers a typed key sort and reports its layout.
@@ -56,6 +58,12 @@ import com.ewoodbury.scarlet.core.Plan
  * A null int or long key orders as zero and stays null. A null string key orders as `""` and stays
  * null. The caller supplies the columnar layout. Int pairs and long pairs use the same layout
  * today. String pairs use [[Layout.StringPair]].
+ *
+ * Each lower asks [[com.ewoodbury.scarlet.execution.schema.ColumnBinding]] on the child layout
+ * before it builds the sort. [[scala.None]] from the binder is [[scala.None]] from lower. A layout
+ * the sort already accepts still builds the same [[PhysicalOp]] class. The shape checks stay: a
+ * second map, a second slot, and a whole-row filter are not a different layout, and they stay on
+ * the row path. [[com.ewoodbury.scarlet.execution.schema.Describe.tag]] is not this decision.
  */
 private[execution] object SortLowering:
 
@@ -70,57 +78,103 @@ private[execution] object SortLowering:
       source: Plan[(Int, Int)],
       lowerPlan: Plan[_] => Option[PhysicalOp],
   ): Option[PhysicalOp] =
-    lowerPlan(source) match
-      case Some(child) if acceptsIntKeyChild(child) =>
-        Some(PhysicalOp.SortByIntKey(child))
-      case Some(child) =>
-        LoweringTrace.note("SortByIntKeyOp", child.kind, "SortLowering")
-        None
-      case None =>
-        LoweringTrace.noteIfEmpty("SortByIntKeyOp", "SortLowering")
-        None
+    lowerKeyed(
+      lowerPlan(source),
+      Operator.SortByIntKey,
+      "SortByIntKeyOp",
+      acceptsIntKeyChild,
+      PhysicalOp.SortByIntKey(_),
+    )
 
   def lowerIntValueDesc(
       source: Plan[(Int, Int)],
       lowerPlan: Plan[_] => Option[PhysicalOp],
   ): Option[PhysicalOp] =
-    lowerPlan(source) match
-      case Some(child) if acceptsValueDescChild(child) =>
-        Some(PhysicalOp.SortByIntValueDesc(child))
-      case Some(child) =>
-        LoweringTrace.note("SortByIntValueDescOp", child.kind, "SortLowering")
-        None
-      case None =>
-        LoweringTrace.noteIfEmpty("SortByIntValueDescOp", "SortLowering")
-        None
+    lowerKeyed(
+      lowerPlan(source),
+      Operator.SortByIntValueDesc,
+      "SortByIntValueDescOp",
+      acceptsValueDescChild,
+      PhysicalOp.SortByIntValueDesc(_),
+    )
 
   def lowerLong(
       source: Plan[(Long, Long)],
       lowerPlan: Plan[_] => Option[PhysicalOp],
   ): Option[PhysicalOp] =
-    lowerPlan(source) match
-      case Some(child) if acceptsLongKeyChild(child) =>
-        Some(PhysicalOp.SortByLongKey(child))
-      case Some(child) =>
-        LoweringTrace.note("SortByLongKeyOp", child.kind, "SortLowering")
-        None
-      case None =>
-        LoweringTrace.noteIfEmpty("SortByLongKeyOp", "SortLowering")
-        None
+    lowerKeyed(
+      lowerPlan(source),
+      Operator.SortByLongKey,
+      "SortByLongKeyOp",
+      acceptsLongKeyChild,
+      PhysicalOp.SortByLongKey(_),
+    )
 
   def lowerString(
       source: Plan[(String, Int)],
       lowerPlan: Plan[_] => Option[PhysicalOp],
   ): Option[PhysicalOp] =
-    lowerPlan(source) match
-      case Some(child) if acceptsStringKeyChild(child) =>
-        Some(PhysicalOp.SortByStringKey(child))
+    lowerKeyed(
+      lowerPlan(source),
+      Operator.SortByStringKey,
+      "SortByStringKeyOp",
+      acceptsStringKeyChild,
+      PhysicalOp.SortByStringKey(_),
+    )
+
+  /**
+   * Ask [[ColumnBinding]] before building. [[scala.None]] from the binder stays [[scala.None]]. A
+   * tag the sort accepts still has to pass the shape check, which refuses a second map, a second
+   * slot, and a whole-row filter. Those shapes share a layout with a scan the sort already runs.
+   */
+  private def lowerKeyed(
+      lowered: Option[PhysicalOp],
+      operator: Operator,
+      node: String,
+      accepts: PhysicalOp => Boolean,
+      build: PhysicalOp => PhysicalOp,
+  ): Option[PhysicalOp] =
+    lowered match
+      case Some(child) if tagged(child, operator) && accepts(child) =>
+        Some(build(child))
       case Some(child) =>
-        LoweringTrace.note("SortByStringKeyOp", child.kind, "SortLowering")
+        LoweringTrace.note(node, child.kind, "SortLowering")
         None
       case None =>
-        LoweringTrace.noteIfEmpty("SortByStringKeyOp", "SortLowering")
+        LoweringTrace.noteIfEmpty(node, "SortLowering")
         None
+
+  /** Binder tag for `child`, or false when the layout is one this sort refuses. */
+  private def tagged(child: PhysicalOp, operator: Operator): Boolean =
+    asked(child, operator) match
+      case Some(tag) => sameSort(operator, tag)
+      case None => false
+
+  /**
+   * [[ColumnBinding.choose]] on the child columns. An opaque child is [[scala.None]] and does not
+   * call [[ColumnBinding.choose]]. The reducer witness is not a sort input.
+   */
+  private def asked(child: PhysicalOp, operator: Operator): Option[KernelChoice] =
+    val bound = Bound.of(child, Vector.empty, ReducerWitness.NotApplicable)
+    bound.output match
+      case Output.Columns(columns) =>
+        ColumnBinding.choose(
+          columns,
+          operator,
+          ReducerWitness.NotApplicable,
+          Bound.nulls(bound),
+          Bound.side(bound),
+        )
+      case Output.Opaque(_) => None
+
+  /** True when `tag` is the sort `operator` names. Any other tag is a refusal. */
+  private def sameSort(operator: Operator, tag: KernelChoice): Boolean =
+    (operator, tag) match
+      case (Operator.SortByIntKey, KernelChoice.SortByIntKey) => true
+      case (Operator.SortByIntValueDesc, KernelChoice.SortByIntValueDesc) => true
+      case (Operator.SortByLongKey, KernelChoice.SortByLongKey) => true
+      case (Operator.SortByStringKey, KernelChoice.SortByStringKey) => true
+      case _ => false
 
   /**
    * A scan of int pairs, filters over that scan, one pair [[PhysicalOp.Project]] on that scan or

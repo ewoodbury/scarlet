@@ -149,7 +149,9 @@ private[execution] object AggregateBinding:
       case (Operator.ReduceByKey, ReducerWitness.Other | ReducerWitness.NotApplicable) =>
         Layout.known(op) == Layout.AssumedIntLong
       case (
-            Operator.CountByKey | Operator.CountSumByKey | Operator.MapValues | Operator.TupleMap,
+            Operator.CountByKey | Operator.CountSumByKey | Operator.MapValues | Operator.TupleMap |
+            Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
+            Operator.SortByStringKey,
             _,
           ) =>
         false

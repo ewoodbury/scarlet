@@ -1,12 +1,16 @@
 package com.ewoodbury.scarlet.execution.schema
 
+import java.util.concurrent.atomic.AtomicInteger
+
 /**
  * Chooses a [[KernelChoice]] for one parent.
  *
- * The choice is a pure function of the child layout, the operator, the reducer witness, the null
- * policy, and inner or outer. [[scala.None]] is a refusal. Refusal is not a tag. This does not
- * build a [[com.ewoodbury.scarlet.execution.PhysicalOp]]. [[AggregateBinding]] asks it after the
- * peel. The interpreter does not call it.
+ * The returned tag is a function of the child layout, the operator, the reducer witness, the null
+ * policy, and inner or outer. [[chooseCallsForTest]] counts calls and does not change the tag.
+ * [[scala.None]] is a refusal. Refusal is not a tag. This does not build a
+ * [[com.ewoodbury.scarlet.execution.PhysicalOp]]. [[AggregateBinding]] asks it after the peel.
+ * [[com.ewoodbury.scarlet.execution.SortLowering]] asks it before building a typed sort. The
+ * interpreter does not call it.
  *
  * [[NullAdmission.Refused]] means [[com.ewoodbury.scarlet.execution.ScanLowering]] would refuse
  * the source for nulls. The caller passes that policy. Nothing here reads a schema or classifies
@@ -22,14 +26,27 @@ package com.ewoodbury.scarlet.execution.schema
  */
 private[execution] object ColumnBinding:
 
+  private val chooseCalls = new AtomicInteger
+
+  /**
+   * [[choose]] calls since [[resetChooseCallsForTest]]. A kind-only caller leaves this at zero.
+   */
+  private[execution] def chooseCallsForTest: Int = chooseCalls.get
+
+  /** Clears [[chooseCallsForTest]]. */
+  private[execution] def resetChooseCallsForTest(): Unit =
+    chooseCalls.set(0)
+
   /**
    * Parent this binder is asked about.
    *
    * [[Operator.TupleMap]] is a generic tuple `map`. It is not accepted. [[Operator.MapValues]] is
-   * `Int => Long`, which has no pair kernel.
+   * `Int => Long`, which has no pair kernel. The four sort cases are the typed sorts.
+   * [[com.ewoodbury.scarlet.execution.SortLowering]] asks before it builds one.
    */
   enum Operator:
     case CountByKey, ReduceByKey, CountSumByKey, MapValues, TupleMap
+    case SortByIntKey, SortByIntValueDesc, SortByLongKey, SortByStringKey
 
   /**
    * Reducer witness the caller already computed.
@@ -69,6 +86,7 @@ private[execution] object ColumnBinding:
       nulls: NullAdmission,
       side: Side,
   ): Option[KernelChoice] =
+    val _ = chooseCalls.incrementAndGet()
     if declined(operator, layout, nulls, side) then None
     else tag(layout, operator, reducer)
 
@@ -87,7 +105,9 @@ private[execution] object ColumnBinding:
   ): Boolean =
     operator match
       case Operator.MapValues | Operator.TupleMap => true
-      case Operator.CountByKey | Operator.ReduceByKey | Operator.CountSumByKey =>
+      case Operator.CountByKey | Operator.ReduceByKey | Operator.CountSumByKey |
+          Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
+          Operator.SortByStringKey =>
         outer(side) || refused(nulls) || layout.exists(absent)
 
   private def refused(nulls: NullAdmission): Boolean = nulls match
@@ -142,7 +162,9 @@ private[execution] object ColumnBinding:
   /** `countByKey` of the three int columns. `reduceByKey` of a join is not a project sum. */
   private def countThroughProbe(operator: Operator): Option[KernelChoice] = operator match
     case Operator.CountByKey => Some(KernelChoice.CountThroughProbe)
-    case Operator.ReduceByKey | Operator.CountSumByKey | Operator.MapValues | Operator.TupleMap =>
+    case Operator.ReduceByKey | Operator.CountSumByKey | Operator.MapValues | Operator.TupleMap |
+        Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
+        Operator.SortByStringKey =>
       None
 
   private def assumedIntLong(layout: Vector[ColumnLayout]): Boolean = Layout.AssumedIntLong match
@@ -185,7 +207,8 @@ private[execution] object ColumnBinding:
 
   /**
    * `(Int32, Int32)`, `(Int64, Int64)`, and `(Utf8Dict, Int32)` under `Present` or `Nullable`.
-   * Those are the policies the count and reduce kernels already accept.
+   * Those are the policies the count, reduce, and typed-sort kernels already accept. A sort on
+   * another pair is [[scala.None]]. [[NullPolicy.Absence]] never reaches this match.
    */
   private def pair(types: Vector[ColumnType], operator: Operator): Option[KernelChoice] =
     (types, operator) match
@@ -195,13 +218,21 @@ private[execution] object ColumnBinding:
         Some(KernelChoice.IntHashAggregate)
       case (Vector(ColumnType.Int32, ColumnType.Int32), Operator.CountSumByKey) =>
         Some(KernelChoice.CountSum)
+      case (Vector(ColumnType.Int32, ColumnType.Int32), Operator.SortByIntKey) =>
+        Some(KernelChoice.SortByIntKey)
+      case (Vector(ColumnType.Int32, ColumnType.Int32), Operator.SortByIntValueDesc) =>
+        Some(KernelChoice.SortByIntValueDesc)
       case (Vector(ColumnType.Int64, ColumnType.Int64), Operator.CountByKey) =>
         Some(KernelChoice.CountByKey)
       case (Vector(ColumnType.Int64, ColumnType.Int64), Operator.ReduceByKey) =>
         Some(KernelChoice.LongHashAggregate)
+      case (Vector(ColumnType.Int64, ColumnType.Int64), Operator.SortByLongKey) =>
+        Some(KernelChoice.SortByLongKey)
       case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.CountByKey) =>
         Some(KernelChoice.CountByKey)
       case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.ReduceByKey) =>
         Some(KernelChoice.StringHashAggregate)
+      case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.SortByStringKey) =>
+        Some(KernelChoice.SortByStringKey)
       case _ =>
         None
