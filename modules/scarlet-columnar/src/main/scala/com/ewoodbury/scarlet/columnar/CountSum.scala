@@ -42,6 +42,8 @@ object CountSum:
     HashAggregate.Int32Aggs(sum = true, count = true, min = false, max = false)
 
   private val byKeyCalls = new AtomicInteger
+  private val byKeyOwnedCalls = new AtomicInteger
+  private val byKeyOwnedMappedCalls = new AtomicInteger
 
   private val Schema = Vector(LogicalType.Int32, LogicalType.Int64, LogicalType.Int64)
 
@@ -129,6 +131,7 @@ object CountSum:
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    val _ = byKeyOwnedCalls.incrementAndGet()
     val partials = OwnedCountSum.fold(parts, steps, parallelism, () => open(), publish)
     if (partials.isEmpty) then Vector.fill(numPartitions)(emptyBatch())
     else finish(partials, numPartitions, parallelism)
@@ -148,6 +151,7 @@ object CountSum:
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
+    val _ = byKeyOwnedMappedCalls.incrementAndGet()
     val partials =
       OwnedMappedCountSum.fold(parts, steps, mapKey, parallelism, () => open(), publish)
     if (partials.isEmpty) then Vector.fill(numPartitions)(emptyBatch())
@@ -344,6 +348,22 @@ object CountSum:
   /** Clears [[byKeyCallsForTest]]. */
   private[scarlet] def resetByKeyForTest(): Unit =
     byKeyCalls.set(0)
+
+  /**
+   * [[byKeyOwned]] entries since the last [[resetOwnedForTest]]. This does not count [[byKey]].
+   */
+  private[scarlet] def byKeyOwnedCallsForTest: Int = byKeyOwnedCalls.get
+
+  /**
+   * [[byKeyOwnedMapped]] entries since the last [[resetOwnedForTest]]. This does not count
+   * [[byKey]] or [[byKeyOwned]].
+   */
+  private[scarlet] def byKeyOwnedMappedCallsForTest: Int = byKeyOwnedMappedCalls.get
+
+  /** Clears [[byKeyOwnedCallsForTest]] and [[byKeyOwnedMappedCallsForTest]]. */
+  private[scarlet] def resetOwnedForTest(): Unit =
+    byKeyOwnedCalls.set(0)
+    byKeyOwnedMappedCalls.set(0)
 
   private def mappedPartial(
       batch: ColumnBatch,

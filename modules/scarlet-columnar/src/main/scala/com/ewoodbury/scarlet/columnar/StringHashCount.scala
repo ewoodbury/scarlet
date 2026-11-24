@@ -1,6 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicInteger
 
 import com.ewoodbury.scarlet.core.ScarletConf
 
@@ -38,6 +39,8 @@ import com.ewoodbury.scarlet.core.ScarletConf
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object StringHashCount:
+
+  private val byKeyCalls = new AtomicInteger
 
   /**
    * Count one batch. A null key is skipped. Column 1 is not read. An empty batch publishes an
@@ -93,6 +96,7 @@ object StringHashCount:
       batchSize: Int,
   ): Vector[ColumnBatch] =
     requirePositive(numPartitions, parallelism, batchSize)
+    val _ = byKeyCalls.incrementAndGet()
     if (batches.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyStringPairs)
     else
       batches.foreach(requireKey)
@@ -132,6 +136,13 @@ object StringHashCount:
         addCounts,
       )
       finish(combined, numPartitions, parallelism, batchSize)
+
+  /** [[byKey]] entries since the last [[resetByKeyForTest]]. [[byKeySelected]] does not count. */
+  private[scarlet] def byKeyCallsForTest: Int = byKeyCalls.get
+
+  /** Clears [[byKeyCallsForTest]]. */
+  private[scarlet] def resetByKeyForTest(): Unit =
+    byKeyCalls.set(0)
 
   /**
    * Estimated bytes of a count table for `rows` input keys.

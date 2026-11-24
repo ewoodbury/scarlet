@@ -1,0 +1,10 @@
+# label, kernel tag, fused entry
+# The entry is byKeyOwned, byKeyOwnedMapped, or plain.
+# A row with no entry is only for a kernel that has neither owned entry, when plain byKey did not run.
+countByKey of a slot stack above mapIntKey	CountByKey	plain
+reduceByKey of a slot stack above mapIntKey	IntHashAggregate	plain
+countSumByKey of a slot stack above mapIntKey	CountSum	plain
+countByKey of a slot stack above long mapValues	CountByKey
+reduceByKey of a slot stack above long mapValues	LongHashAggregate
+countByKey of a slot stack above string mapValues	CountByKey	plain
+reduceByKey of a slot stack above string mapValues	StringHashAggregate	plain

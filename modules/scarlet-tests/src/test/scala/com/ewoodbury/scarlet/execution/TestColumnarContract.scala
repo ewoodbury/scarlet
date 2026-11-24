@@ -25,12 +25,12 @@ class TestColumnarContract
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    accepted.size shouldBe 234
+    accepted.size shouldBe 241
     // A null key refuses the shape rather than excluding it. Outer joins are covered by execution
     // tests, not contract fixtures, because the contract does not track the int refusals either.
     // A type-changing pair map lowers and declines at tryRun, so it is in neither list.
     excluded.size shouldBe 34
-    (accepted.size + excluded.size) shouldBe 268
+    (accepted.size + excluded.size) shouldBe 275
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -780,7 +780,8 @@ class TestColumnarContract
         plan => Plan.MapOp(plan, (value: String) => value + "!"),
         stringLayout,
       ) ++
-      groupedDecodeCases
+      groupedDecodeCases ++
+      aggregateAdmissionCases
 
   private def excludedCases: Seq[ExcludedCase] =
     val doubleKeys = Plan.KeysOp(doubleKeySource)

@@ -7,8 +7,10 @@ import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 
 import com.ewoodbury.scarlet.api.DistCollection
+import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.Plan
 import com.ewoodbury.scarlet.execution.schema.{Describe, KernelChoice}
+import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
  * Admission ledger for [[TestColumnarContract.acceptedCases]].
@@ -17,11 +19,18 @@ import com.ewoodbury.scarlet.execution.schema.{Describe, KernelChoice}
  * golden file is `admission-ledger.txt`, one label and one tag separated by a tab. Additions,
  * removals, and a changed root fail unless that label is listed in `admission-allowlist.txt`. A
  * missing allowlist is empty, so no admission change passes.
+ *
+ * An allowlist row is a label, a tag, and an optional fused entry: `byKeyOwned`,
+ * `byKeyOwnedMapped`, or `plain`. A row with no entry is allowed only when that kernel has no
+ * `byKeyOwned` or `byKeyOwnedMapped` and the plain `byKey` did not run. A wrong entry fails.
  */
 class TestAdmissionLedger extends AnyFlatSpec with BeforeAndAfterEach with ColumnarContractFixture:
 
   private val Ledger = "admission-ledger.txt"
   private val Allowlist = "admission-allowlist.txt"
+  private val OwnedEntry = "byKeyOwned"
+  private val OwnedMappedEntry = "byKeyOwnedMapped"
+  private val PlainEntry = "plain"
 
   override def beforeEach(): Unit =
     super.beforeEach()
@@ -48,17 +57,41 @@ class TestAdmissionLedger extends AnyFlatSpec with BeforeAndAfterEach with Colum
     }
 
     val current = rows.toMap
+    val plans = cases.map(item => item.label -> item.plan).toMap
     val golden = lines(resource(Ledger).getOrElse(""))
-    val allow = names(resource(Allowlist).getOrElse(""))
+    val allow = allowed(resource(Allowlist).getOrElse(""))
+    val allowByLabel = allow.map(row => row.label -> row).toMap
     val added = current.keySet.diff(golden.keySet)
     val removed = golden.keySet.diff(current.keySet)
     val retagged = current.keySet.intersect(golden.keySet).filterNot { label =>
       Ordering[String].equiv(current(label), golden(label))
     }
-    val report = diff(added, removed, retagged, current, golden, allow)
+    val report = diff(added, removed, retagged, current, golden, allowByLabel)
     if added.nonEmpty || removed.nonEmpty || retagged.nonEmpty then println(report)
-    val unexplained = (added ++ removed ++ retagged).diff(allow)
+    val unexplained = (added ++ removed ++ retagged).diff(allowByLabel.keySet)
     assert(unexplained.isEmpty, report)
+    assert(removed.isEmpty, report)
+    assert(retagged.isEmpty, report)
+    assert(
+      allowByLabel.keySet.diff(added).isEmpty && added.diff(allowByLabel.keySet).isEmpty,
+      report,
+    )
+    allow.foreach { row =>
+      assert(
+        Ordering[String].equiv(current(row.label), row.tag),
+        s"${row.label} tag ${current(row.label)}, allowlist ${row.tag}",
+      )
+      val seen = fused(plans(row.label))
+      assert(
+        Ordering[String].equiv(seen, row.entry),
+        s"${row.label} fused entry [$seen], allowlist [${row.entry}]",
+      )
+      if (row.entry.isEmpty) then
+        assert(
+          !Ordering[String].equiv(row.tag, KernelChoice.CountSum.tag),
+          s"${row.label} has no fused entry, and CountSum still has byKeyOwned",
+        )
+    }
   }
 
   it should "tag the roots that are not the case name, and refuse without a tag" in {
@@ -112,14 +145,73 @@ class TestAdmissionLedger extends AnyFlatSpec with BeforeAndAfterEach with Colum
     assert(duplicate.isEmpty, s"duplicate ledger labels: ${duplicate.distinct.mkString(", ")}")
     parsed.toMap
 
-  private def names(text: String): Set[String] =
-    text
+  private final case class Allowed(label: String, tag: String, entry: String)
+
+  private def allowed(text: String): Seq[Allowed] =
+    val parsed = text
       .replace("\r\n", "\n")
       .split("\n")
       .iterator
       .map(_.trim)
       .filter(line => line.nonEmpty && !line.startsWith("#"))
-      .toSet
+      .map(allowRow)
+      .toSeq
+    val duplicate = parsed.map(_.label).diff(parsed.map(_.label).distinct)
+    assert(duplicate.isEmpty, s"duplicate allowlist labels: ${duplicate.distinct.mkString(", ")}")
+    parsed
+
+  private def allowRow(line: String): Allowed =
+    val fields = line.split("\t", -1).toList
+    val row = fields match
+      case label :: tag :: Nil => Allowed(label, tag, "")
+      case label :: tag :: entry :: Nil => Allowed(label, tag, entry)
+      case _ => fail(s"expected a label, a tag, and an optional fused entry: [$line]")
+    assert(
+      row.label.nonEmpty && row.tag.nonEmpty,
+      s"allowlist row needs a label and a tag: [$line]",
+    )
+    val knownEntry =
+      row.entry.isEmpty || Ordering[String].equiv(row.entry, OwnedEntry) ||
+        Ordering[String].equiv(row.entry, OwnedMappedEntry) ||
+        Ordering[String].equiv(row.entry, PlainEntry)
+    assert(
+      knownEntry,
+      s"fused entry must be $OwnedEntry, $OwnedMappedEntry, $PlainEntry, or absent: [$line]",
+    )
+    row
+
+  private def fused(plan: Plan[_]): String =
+    CountSum.resetByKeyForTest()
+    CountSum.resetOwnedForTest()
+    HashCount.resetByKeyForTest()
+    HashReduce.resetByKeyForTest()
+    LongHashCount.resetByKeyForTest()
+    LongHashReduce.resetByKeyForTest()
+    StringHashCount.resetByKeyForTest()
+    StringHashReduce.resetByKeyForTest()
+    ScarletRuntime.get.shuffle.clear()
+    assert(ColumnarPlanner.tryRun(plan).isDefined, "columnar path did not publish a batch")
+    val owned = List(
+      Option.when(CountSum.byKeyOwnedCallsForTest > 0)(OwnedEntry),
+      Option.when(CountSum.byKeyOwnedMappedCallsForTest > 0)(OwnedMappedEntry),
+    ).flatten
+    val plain = plainCalls
+    assert(
+      owned.size + plain.size <= 1,
+      s"more than one fused entry ran: ${(owned ++ plain).mkString(", ")}",
+    )
+    if (plain.nonEmpty) then PlainEntry else owned.headOption.getOrElse("")
+
+  private def plainCalls: List[String] =
+    List(
+      "CountSum.byKey" -> CountSum.byKeyCallsForTest,
+      "HashCount.byKey" -> HashCount.byKeyCallsForTest,
+      "HashReduce.byKey" -> HashReduce.byKeyCallsForTest,
+      "LongHashCount.byKey" -> LongHashCount.byKeyCallsForTest,
+      "LongHashReduce.byKey" -> LongHashReduce.byKeyCallsForTest,
+      "StringHashCount.byKey" -> StringHashCount.byKeyCallsForTest,
+      "StringHashReduce.byKey" -> StringHashReduce.byKeyCallsForTest,
+    ).collect { case (name, count) if count > 0 => name }
 
   private def diff(
       added: Set[String],
@@ -127,15 +219,17 @@ class TestAdmissionLedger extends AnyFlatSpec with BeforeAndAfterEach with Colum
       retagged: Set[String],
       current: Map[String, String],
       golden: Map[String, String],
-      allow: Set[String],
+      allow: Map[String, Allowed],
   ): String =
     def block(title: String, labels: Set[String])(render: String => String): String =
       if labels.isEmpty then ""
       else labels.toSeq.sorted.map(render).mkString(s"$title\n", "\n", "\n")
 
-    val body =
-      block("additions:", added)(label => s"$label\t${current(label)}") +
-        block("removals:", removed)(label => s"$label\t${golden(label)}") +
-        block("root changes:", retagged)(label => s"$label\t${golden(label)}\t${current(label)}")
-    val listed = if allow.isEmpty then "allowlist is empty" else allow.toSeq.sorted.mkString(", ")
-    s"$body$listed\n"
+    def addition(label: String): String = allow.get(label) match
+      case Some(row) if row.entry.isEmpty => s"${row.label}\t${row.tag}"
+      case Some(row) => s"${row.label}\t${row.tag}\t${row.entry}"
+      case None => s"$label\t${current(label)}"
+
+    block("additions:", added)(addition) +
+      block("removals:", removed)(label => s"$label\t${golden(label)}") +
+      block("root changes:", retagged)(label => s"$label\t${golden(label)}\t${current(label)}")
