@@ -157,7 +157,7 @@ object ColumnarPlanner:
           Partition(decodeSelected(selected, selected.count, op))
         }
       case None =>
-        ColumnarInterpreter.decodeFor(ColumnarInterpreter.interpret(plan, op), op)
+        ColumnarInterpreter.decodeLowered(plan, op)
 
   /**
    * Run an accepted plan until its first `n` results are available. Partition-preserving plans

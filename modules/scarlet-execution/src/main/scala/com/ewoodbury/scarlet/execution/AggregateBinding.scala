@@ -211,6 +211,9 @@ private[execution] object AggregateBinding:
       case Some(KernelChoice.CountThroughProbe) if selection.nonEmpty => None
       case other => other
 
+  /** Long addition, or any other reducer. [[witness]] calls the function. */
+  private[execution] def witnessOf(reducer: Any): ReducerWitness = witness(reducer)
+
   /**
    * Long addition, checked by calling `reducer`. The body is not read. Any other function,
    * including one that does not accept two longs, is [[ReducerWitness.Other]].

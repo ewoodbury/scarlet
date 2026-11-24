@@ -6,11 +6,13 @@ import com.ewoodbury.scarlet.execution.{PhysicalOp, PhysicalSchema}
 /**
  * Output columns of a [[PhysicalOp]], beside [[PhysicalOp.schema]].
  *
- * This is not [[com.ewoodbury.scarlet.execution.Layout]], the batch enum. `schema` and
- * [[PhysicalSchema.isIntLongAggregate]] stay the admission path. The planner does not read this
- * report. [[known]] reads the case class. A filter and an exchange copy the child. A pipeline, a
- * union, and a dedupe report [[PhysicalOp.kind]]. A join's three columns are the columns of its
- * kind. An outer join marks the missing value [[NullPolicy.Absence]]. A triple
+ * This is not [[com.ewoodbury.scarlet.execution.Layout]], the batch enum. `schema` stays the
+ * admission schema. [[com.ewoodbury.scarlet.execution.ExecutionRoute]] chooses
+ * [[KernelChoice.IntLongProjectSum]] from the binder. [[PhysicalSchema.isIntLongAggregate]] only
+ * labels that aggregate for [[com.ewoodbury.scarlet.execution.schema.Describe]]. The planner does
+ * not read this report. [[known]] reads the case class. A filter and an exchange copy the child. A
+ * pipeline, a union, and a dedupe report [[PhysicalOp.kind]]. A join's three columns are the
+ * columns of its kind. An outer join marks the missing value [[NullPolicy.Absence]]. A triple
  * [[PhysicalOp.Project]] is [[Layout.AssumedIntLong]]. [[PhysicalOp.GroupedDecode]] is opaque.
  * [[PhysicalOp.MapKey]] rewrites the key to [[ColumnType.Int32]] and copies the value.
  * [[PhysicalOp.MapValue]] reports the kind it already copies.

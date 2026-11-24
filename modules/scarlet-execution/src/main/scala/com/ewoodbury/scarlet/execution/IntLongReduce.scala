@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import com.ewoodbury.scarlet.columnar.{
   ColumnBatch,
   ColumnarFallback,
@@ -29,6 +31,15 @@ import ColumnarInterpreter.{Columns, interpretAt}
  */
 private[execution] object IntLongReduce:
 
+  private val columnsCalls = new AtomicInteger
+
+  /** [[columns]] entries since the last [[resetColumnsForTest]]. */
+  private[scarlet] def columnsCallsForTest: Int = columnsCalls.get
+
+  /** Clears [[columnsCallsForTest]]. */
+  private[scarlet] def resetColumnsForTest(): Unit =
+    columnsCalls.set(0)
+
   def columns(
       source: Plan[_],
       child: PhysicalOp,
@@ -37,6 +48,7 @@ private[execution] object IntLongReduce:
       preserveAbsence: Boolean,
       ordinals: Set[Int],
   ): Columns =
+    val _ = columnsCalls.incrementAndGet()
     require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
     (source, child) match
       case (Plan.MapOp(input, mapper), PhysicalOp.Project(inputOp)) =>
