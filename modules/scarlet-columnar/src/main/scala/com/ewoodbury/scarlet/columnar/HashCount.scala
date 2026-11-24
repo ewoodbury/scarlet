@@ -105,6 +105,7 @@ object HashCount:
       parallelism: Int,
       batchSize: Int,
   ): Vector[ColumnBatch] =
+    val _ = byKeySelectedCalls.incrementAndGet()
     requirePositive(numPartitions, parallelism, batchSize)
     if (selected.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyIntPairs)
     else
@@ -140,12 +141,18 @@ object HashCount:
       table.supplyKeys(supply)
       table.compact()
 
-  /** [[byKey]] entries since the last [[resetByKeyForTest]]. */
+  /** [[byKey]] entries since the last [[resetByKeyForTest]]. [[byKeySelected]] does not count. */
   private[scarlet] def byKeyCallsForTest: Int = byKeyCalls.get
 
-  /** Clears [[byKeyCallsForTest]]. */
+  /**
+   * [[byKeySelected]] entries since the last [[resetByKeyForTest]]. [[byKey]] does not count.
+   */
+  private[scarlet] def byKeySelectedCallsForTest: Int = byKeySelectedCalls.get
+
+  /** Clears [[byKeyCallsForTest]] and [[byKeySelectedCallsForTest]]. */
   private[scarlet] def resetByKeyForTest(): Unit =
     byKeyCalls.set(0)
+    byKeySelectedCalls.set(0)
 
   /**
    * Estimated bytes of a count table for `rows` input keys.
@@ -253,6 +260,7 @@ object HashCount:
    * [[byKeySelected]] drop the caller's holder, and [[FoldedCount]] drops it after the merge.
    */
   private val byKeyCalls = new AtomicInteger
+  private val byKeySelectedCalls = new AtomicInteger
   private val locals: ThreadLocal[Table | Null] = new ThreadLocal[Table | Null]()
   private val allocatedTables = new AtomicLong
   private val reusedTables = new AtomicLong
