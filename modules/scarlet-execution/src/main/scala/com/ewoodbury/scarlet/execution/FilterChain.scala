@@ -157,6 +157,14 @@ private[execution] object FilterChain:
       case _ =>
         false
 
+  /**
+   * Two or more key or value slots above one [[PhysicalOp.MapValue]]. A row slot, a project, and
+   * one slot are false. [[selectIndexed]] compiles this stack. The long reduce fold leaves it for
+   * [[com.ewoodbury.scarlet.columnar.LongHashReduce.byKeySelected]].
+   */
+  private[execution] def twoOrMoreSlotsAboveMapValue(op: PhysicalOp): Boolean =
+    twoSlotsAboveMapValue(op, 0)
+
   /** True when `depth` key or value slots sit on one [[PhysicalOp.MapValue]]. */
   @tailrec
   private def twoSlotsAboveMapValue(op: PhysicalOp, depth: Int): Boolean =

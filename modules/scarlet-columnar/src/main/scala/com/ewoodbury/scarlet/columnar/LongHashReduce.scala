@@ -195,6 +195,7 @@ object LongHashReduce:
       batchSize: Int,
       op: LongBinOp,
   ): Vector[ColumnBatch] =
+    val _ = byKeySelectedCalls.incrementAndGet()
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
@@ -232,12 +233,18 @@ object LongHashReduce:
       table.supplyPairs(supply)
       table.compact()
 
-  /** [[byKey]] entries since the last [[resetByKeyForTest]]. */
+  /** [[byKey]] entries since the last [[resetByKeyForTest]]. [[byKeySelected]] does not count. */
   private[scarlet] def byKeyCallsForTest: Int = byKeyCalls.get
 
-  /** Clears [[byKeyCallsForTest]]. */
+  /**
+   * [[byKeySelected]] entries since the last [[resetByKeyForTest]]. [[byKey]] does not count.
+   */
+  private[scarlet] def byKeySelectedCallsForTest: Int = byKeySelectedCalls.get
+
+  /** Clears [[byKeyCallsForTest]] and [[byKeySelectedCallsForTest]]. */
   private[scarlet] def resetByKeyForTest(): Unit =
     byKeyCalls.set(0)
+    byKeySelectedCalls.set(0)
 
   /**
    * Exchange combined partials and reduce each bucket. Called by the folded long reduce; [[byKey]]
@@ -289,6 +296,7 @@ object LongHashReduce:
   private val reusedTables = new AtomicLong
   private val peakSlots = new AtomicInteger
   private val byKeyCalls = new AtomicInteger
+  private val byKeySelectedCalls = new AtomicInteger
 
   private val locals: ThreadLocal[Table | Null] = new ThreadLocal[Table | Null]()
 
