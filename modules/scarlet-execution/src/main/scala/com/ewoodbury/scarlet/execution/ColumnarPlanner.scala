@@ -814,13 +814,7 @@ object ColumnarPlanner:
       // rejects a clear bit. That shape stays on the row path.
       UnionLowering.lower(left, right, lowerChild).filterNot(MapIntKey.inTree)
     case Plan.DistinctOp(source) =>
-      lowerChild(source) match
-        case Some(child) =>
-          child.kind match
-            case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Strings =>
-              Some(PhysicalOp.Dedupe(PhysicalOp.Exchange(child)))
-            case _ => None
-        case None => None
+      lowerChild(source).flatMap(DistinctLowering.apply)
     case source: Plan.Source[_] =>
       ScanLowering.classify(source).map(kind => PhysicalOp.Scan(kind, source.partitions))
     case Plan.FilterKeysOp(source, _) =>
@@ -828,11 +822,11 @@ object ColumnarPlanner:
     case Plan.FilterValuesOp(source, _) =>
       columnFilter(source, PhysicalOp.Slot.Value)
     case Plan.KeysOp(Plan.GroupByKeyOp(source)) =>
-      lowerGroupKeys(source)
+      KeyValueLowering.groupKeys(source, lowerChild)
     case Plan.KeysOp(source) =>
-      pairColumn(source, ordinal = 0)
+      KeyValueLowering.project(source, 0, lowerChild)
     case Plan.ValuesOp(source) =>
-      pairColumn(source, ordinal = 1)
+      KeyValueLowering.project(source, 1, lowerChild)
     case Plan.MapValuesOp(source, mapper) =>
       if (returnsUnboxedInt(mapper)) then mapValue(source, PhysicalOp.Kind.Pairs)
       else if (returnsUnboxedLong(mapper)) then mapValue(source, PhysicalOp.Kind.LongPairs)
@@ -1005,37 +999,6 @@ object ColumnarPlanner:
   private def presentLiteral(value: String): Boolean = value match
     case null => false
     case _ => true
-
-  /**
-   * Int, long, and string `keys` of `groupByKey`. [[CountByKeyLowering]] is the typed witness. The
-   * interpreter does not run the count kernel and does not build value lists. A long key column is
-   * [[PhysicalOp.Kind.Longs]]. A string key column is [[PhysicalOp.Kind.Strings]].
-   */
-  private def lowerGroupKeys(source: Plan[_]): Option[PhysicalOp] =
-    lowerChild(source).flatMap { child =>
-      child.kind match
-        case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs =>
-          CountByKeyLowering(child).map(counted => PhysicalOp.Column(counted, 0))
-        case _ => None
-    }
-
-  private def pairColumn(source: Plan[_], ordinal: Int): Option[PhysicalOp] =
-    lowerChild(source).flatMap { child =>
-      // `keys` and `values` of one int MapKey, or of one key or value filter on it.
-      // A null input key stays a clear bit and is not passed to the function or a key
-      // predicate. The value column is the original value. A wider parent still declines.
-      if (mappedIntKey(child, ordinal)) then Some(PhysicalOp.Column(child, ordinal))
-      else if (MapIntKey.inTree(child)) then None
-      else
-        child.kind match
-          case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs =>
-            Some(PhysicalOp.Column(child, ordinal))
-          case _ => None
-    }
-
-  /** Ordinal 0 or 1 of one [[PhysicalOp.MapKey]] or one slot above it. Neither body is read. */
-  private def mappedIntKey(child: PhysicalOp, ordinal: Int): Boolean =
-    (ordinal == 0 || ordinal == 1) && MapIntKey.admitsColumn(child)
 
   private def mapValue(source: Plan[_], kind: PhysicalOp.Kind): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
