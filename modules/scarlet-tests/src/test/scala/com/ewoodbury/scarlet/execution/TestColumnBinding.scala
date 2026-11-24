@@ -152,6 +152,10 @@ class TestColumnBinding extends AnyFlatSpec with Matchers:
     case Operator.CountSumByKey => "countSumByKey"
     case Operator.MapValues => "mapValues"
     case Operator.TupleMap => "map"
+    case Operator.SortByIntKey => "sortByIntKey"
+    case Operator.SortByIntValueDesc => "sortByIntValueDesc"
+    case Operator.SortByLongKey => "sortByLongKey"
+    case Operator.SortByStringKey => "sortByStringKey"
 
   private val table: Vector[Cell] = Vector(
     accepted(
