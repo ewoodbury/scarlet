@@ -13,8 +13,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Checksums for the aggregate admissions.
  *
  * The witness is an int-pair scan, a key slot filter, `mapIntKey`, then `reduceByKey`. Its tag is
- * [[KernelChoice.IntHashAggregate]] and its checksum matches the row path. `mapValues` to `Long`
- * does not lower.
+ * [[KernelChoice.IntHashAggregate]] and its checksum matches the row path. The long and string
+ * stacks name their tags and publish a batch. A checksum alone can match after a row rerun.
+ * `mapValues` to `Long` does not lower.
  */
 class TestAggregateAdmission extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -68,8 +69,18 @@ class TestAggregateAdmission extends AnyFlatSpec with Matchers with BeforeAndAft
       .filterKeys((key: Long) => key > 0L)
       .filterValues((value: Long) => value > 0L)
     val counted = stacked.countByKey
+    published(
+      counted.plan,
+      KernelChoice.CountByKey,
+      "CountByKey(Exchange(FilterValue(FilterKey(MapValue(Project(Scan))))))",
+    )
     counted.collect().toMap shouldBe row(counted.collect().toMap)
     val reduced = stacked.reduceByKey[Long, Long](_ + _)
+    published(
+      reduced.plan,
+      KernelChoice.LongHashAggregate,
+      "LongHashAggregate(Exchange(FilterValue(FilterKey(MapValue(Project(Scan))))))",
+    )
     reduced.collect().toMap shouldBe row(reduced.collect().toMap)
   }
 
@@ -81,10 +92,27 @@ class TestAggregateAdmission extends AnyFlatSpec with Matchers with BeforeAndAft
       .filterKeys((key: String) => key.nonEmpty)
       .filterValues((value: Int) => value > 0)
     val counted = stacked.countByKey
+    published(
+      counted.plan,
+      KernelChoice.CountByKey,
+      "CountByKey(Exchange(FilterValue(FilterKey(MapValue(Project(Scan))))))",
+    )
     counted.collect().toMap shouldBe row(counted.collect().toMap)
     val reduced = stacked.reduceByKey[String, Int](_ + _)
+    published(
+      reduced.plan,
+      KernelChoice.StringHashAggregate,
+      "StringHashAggregate(Exchange(FilterValue(FilterKey(MapValue(Project(Scan))))))",
+    )
     reduced.collect().toMap shouldBe row(reduced.collect().toMap)
   }
+
+  /** Tag and a published batch. A row checksum still matches after [[ColumnarFallback]]. */
+  private def published(plan: Plan[_], tag: KernelChoice, shape: String): Unit =
+    val described = Describe.describe(plan).getOrElse(fail("aggregate did not lower"))
+    described.choice shouldBe tag
+    described.root.shape shouldBe shape
+    ColumnarPlanner.tryRun(plan).isDefined shouldBe true
 
   private def row[A](body: => A): A =
     val current = ScarletConf.get
