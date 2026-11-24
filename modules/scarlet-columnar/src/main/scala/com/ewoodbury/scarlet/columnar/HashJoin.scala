@@ -1,6 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
 import java.util.Arrays
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Inner hash join of `Int32` keys. Null keys are dropped on both sides. A null value is preserved
@@ -45,7 +46,24 @@ object HashJoin:
   /** One side of the join. `key` and `value` are column ordinals in `batch`. */
   final case class JoinSide(batch: ColumnBatch, key: Int, value: Int)
 
+  private val hashJoinCalls = new AtomicInteger
+
+  /**
+   * [[innerInt32]] and [[openInt32]] entries since the last [[resetHashJoinCallsForTest]].
+   * [[countInner]] does not count. A mixed join decodes one side and joins on rows, so this stays
+   * zero there.
+   */
+  private[scarlet] def hashJoinCallsForTest: Int = hashJoinCalls.get
+
+  /** Clears [[hashJoinCallsForTest]]. */
+  private[scarlet] def resetHashJoinCallsForTest(): Unit =
+    hashJoinCalls.set(0)
+
+  private def noteHashJoin(): Unit =
+    val _ = hashJoinCalls.incrementAndGet()
+
   def innerInt32(build: JoinSide, probe: JoinSide): ColumnBatch =
+    noteHashJoin()
     val buildKeys = ColumnHash.int32At(build.batch, build.key)
     val buildValues = ColumnHash.int32At(build.batch, build.value)
     val probeKeys = ColumnHash.int32At(probe.batch, probe.key)
@@ -140,6 +158,7 @@ object HashJoin:
    * with `buildBudgetBytes` before any table array is allocated.
    */
   def openInt32(sides: Vector[JoinSide], buildBudgetBytes: Long): Int32Build =
+    noteHashJoin()
     val checked = sides.map(checkedSide)
     val totalLong = checked.iterator.map(side => side.keys.length.toLong).sum
     require(totalLong <= Int.MaxValue.toLong, s"build side has $totalLong rows")

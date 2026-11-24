@@ -7,9 +7,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * Bridges the API to the execution engine. A bare source returns its partitions. Plans that
  * [[ColumnarPlanner]] accepts run on the columnar kernels. A `mapPartitions` tail runs that child
- * first, then the row function on the decoded partitions. A child the planner refuses publishes
- * nothing. Every other refused plan is compiled into a stage graph and executed through the
- * DAGScheduler.
+ * first, then the row function on the decoded partitions. A join with one lowered side decodes
+ * that side and joins on the row executor. A child the planner refuses publishes nothing. Every
+ * other refused plan is compiled into a stage graph and executed through the DAGScheduler.
  */
 class DefaultExecutionService extends ExecutionService {
 
@@ -23,6 +23,12 @@ class DefaultExecutionService extends ExecutionService {
 
     case Plan.MapPartitionsOp(source, f) =>
       MixedTail.partitions(executePartitions(source), f)
+
+    case other if JoinLowering.isJoin(other) =>
+      // A join that lowers never reaches the split. The split runs only after tryRun refuses.
+      ColumnarPlanner.tryRun(plan).getOrElse {
+        MixedJoin.partitions(other, runRowErased).getOrElse(runRow(plan))
+      }
 
     case _ =>
       ColumnarPlanner.tryRun(plan).getOrElse(runRow(plan))
@@ -125,6 +131,19 @@ class DefaultExecutionService extends ExecutionService {
     val scheduler = new DAGScheduler(runtime.shuffle, runtime.scheduler, runtime.partitioner)
     scheduler.executePartitions(plan)
   }
+
+  /**
+   * [[runRow]] at the plan's erased type. A mixed join's children are not the join's result type.
+   * The cast is the same erasure boundary as [[DAGScheduler.executePartitions]].
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Any",
+    ),
+  )
+  private def runRowErased(plan: Plan[_]): Seq[Partition[_]] =
+    runRow(plan.asInstanceOf[Plan[Any]])
 
   def take[A](plan: Plan[A], n: Int): Seq[A] =
     if (n <= 0) Seq.empty
