@@ -160,6 +160,7 @@ class TestColumnBinding extends AnyFlatSpec with Matchers:
     case Operator.Distinct => "distinct"
     case Operator.Keys => "keys"
     case Operator.Values => "values"
+    case Operator.Union => "union"
 
   private val table: Vector[Cell] = Vector(
     accepted(
