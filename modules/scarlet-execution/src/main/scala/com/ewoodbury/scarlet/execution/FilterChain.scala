@@ -106,6 +106,11 @@ private[execution] object FilterChain:
     // immediately above that map, decline here. [[MapIntKey.inTree]] is that map. A stack of
     // two or more key or value slots above the same map is not the decline: [[selectIndexed]]
     // names the mapped rows. Interpret publishes the one-map pairs.
+    // Two or more key or value slots above one string [[PhysicalOp.MapValue]] are the same
+    // exception to [[StringPairSlot.filterCoversProject]]. [[selectIndexed]] names those mapped
+    // rows. One slot above that map, and a filter over the project with no such stack, stay
+    // declined and use [[com.ewoodbury.scarlet.columnar.StringHashCount.byKey]] or
+    // [[com.ewoodbury.scarlet.columnar.StringHashReduce.byKey]].
     // [[com.ewoodbury.scarlet.columnar.IntTopN]] orders a value sort.
     // [[com.ewoodbury.scarlet.columnar.RankSplit]] orders a key sort. A null input key stays null
     // and is not passed to the function. One int
@@ -120,15 +125,24 @@ private[execution] object FilterChain:
    * One [[PhysicalOp.MapKey]], or one key or value slot directly above it, plus the string and
    * pair-project declines. A stack of two or more key or value slots whose child is that map is
    * not a decline: [[selectIndexed]] compiles those slots against the mapped pairs.
-   * [[MapIntKey.inTree]] stays true for the map itself.
+   * [[MapIntKey.inTree]] stays true for the map itself. Two or more slots above one string
+   * [[PhysicalOp.MapValue]] are the same exception. One slot, and a filter over the project with
+   * no such stack, stay declined.
    */
   private def declinesIndexed(op: PhysicalOp): Boolean =
-    mapKeyDecline(op) || StringPairSlot.filterCoversProject(op) ||
+    mapKeyDecline(op) || stringProjectDecline(op) ||
       SortLowering.pairProjectOnScan(op) || SortLowering.pairMapValueOnScan(op)
 
   /** [[MapIntKey.inTree]] except a stack of two or more slots above one map. */
   private def mapKeyDecline(op: PhysicalOp): Boolean =
     MapIntKey.inTree(op) && !twoSlotsAboveMap(op, 0)
+
+  /**
+   * A filter over a string-pair project, except two or more key or value slots above one
+   * [[PhysicalOp.MapValue]]. That stack is [[selectIndexed]].
+   */
+  private def stringProjectDecline(op: PhysicalOp): Boolean =
+    StringPairSlot.filterCoversProject(op) && !twoSlotsAboveMapValue(op, 0)
 
   /** True when `depth` key or value slots sit on one [[PhysicalOp.MapKey]]. */
   @tailrec
@@ -139,6 +153,19 @@ private[execution] object FilterChain:
       case PhysicalOp.Filter(child, PhysicalOp.Slot.Value) =>
         twoSlotsAboveMap(child, depth + 1)
       case _: PhysicalOp.MapKey =>
+        depth >= 2
+      case _ =>
+        false
+
+  /** True when `depth` key or value slots sit on one [[PhysicalOp.MapValue]]. */
+  @tailrec
+  private def twoSlotsAboveMapValue(op: PhysicalOp, depth: Int): Boolean =
+    op match
+      case PhysicalOp.Filter(child, PhysicalOp.Slot.Key) =>
+        twoSlotsAboveMapValue(child, depth + 1)
+      case PhysicalOp.Filter(child, PhysicalOp.Slot.Value) =>
+        twoSlotsAboveMapValue(child, depth + 1)
+      case _: PhysicalOp.MapValue =>
         depth >= 2
       case _ =>
         false

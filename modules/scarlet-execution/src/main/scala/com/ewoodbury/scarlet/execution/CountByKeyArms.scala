@@ -36,12 +36,14 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * null projected key is dropped and the key predicate is not called. A null projected value still
  * counts when the slot keeps the key, and a value predicate is not called on it. The pair batch is
  * not published, and [[StringHashCount.byKey]] is not called. A second map stays on the published
- * path. A second slot does not lower. No filters, a whole-row or string step, a non-int slot, and
- * a null component the encoder throws on stay on the old path. That path partial-counts survivor
- * ids, including one row, key, or value filter. A scan and a non-pair child stay on the dense
- * count. The value column is not read on that path, so a null value still counts. A long count
- * publishes [[Columns.LongCounts]]. A string count publishes [[Columns.StringPairs]]. The stored
- * count is an `Int`. A null string key is dropped and `""` is kept.
+ * path. A second slot above the project does not lower. Two or more slots above one string
+ * `mapValues` call [[StringHashCount.byKeySelected]]. No filters, a whole-row or string step, a
+ * non-int slot, and a null component the encoder throws on stay on the old path. That path
+ * partial-counts survivor ids, including one row, key, or value filter. A scan and a non-pair
+ * child stay on the dense count. The value column is not read on that path, so a null value still
+ * counts. A long count publishes [[Columns.LongCounts]]. A string count publishes
+ * [[Columns.StringPairs]]. The stored count is an `Int`. A null string key is dropped and `""` is
+ * kept.
  */
 private[execution] object CountByKeyArms:
 

@@ -5,9 +5,10 @@ package com.ewoodbury.scarlet.execution
  *
  * The project sits on a scan or a string-pair filter stack. Neither function is read. A second
  * project, a second slot, and a whole-row filter are not this shape. [[FilterChain.selected]]
- * declines a filter that covers the project, so a collect still publishes both columns.
- * `countByKey` of this one slot does not. `reduceByKey` of this one slot does not either: it
- * inserts the projected pair into the reduce table. A second map still publishes, and
+ * declines a filter that covers the project, so a collect still publishes both columns. A stack of
+ * two or more key or value slots above one string `mapValues` is not that decline. `countByKey` of
+ * this one slot does not. `reduceByKey` of this one slot does not either: it inserts the projected
+ * pair into the reduce table. A second map still publishes, and
  * [[com.ewoodbury.scarlet.columnar.StringHashCount.byKey]] hashes those batches. A bare project
  * under `reduceByKey` still publishes, and
  * [[com.ewoodbury.scarlet.columnar.StringHashReduce.byKey]] hashes that batch.

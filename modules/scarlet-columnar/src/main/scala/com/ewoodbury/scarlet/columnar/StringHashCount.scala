@@ -41,6 +41,7 @@ import com.ewoodbury.scarlet.core.ScarletConf
 object StringHashCount:
 
   private val byKeyCalls = new AtomicInteger
+  private val byKeySelectedCalls = new AtomicInteger
 
   /**
    * Count one batch. A null key is skipped. Column 1 is not read. An empty batch publishes an
@@ -119,6 +120,7 @@ object StringHashCount:
       parallelism: Int,
       batchSize: Int,
   ): Vector[ColumnBatch] =
+    val _ = byKeySelectedCalls.incrementAndGet()
     requirePositive(numPartitions, parallelism, batchSize)
     if (selected.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyStringPairs)
     else
@@ -140,9 +142,15 @@ object StringHashCount:
   /** [[byKey]] entries since the last [[resetByKeyForTest]]. [[byKeySelected]] does not count. */
   private[scarlet] def byKeyCallsForTest: Int = byKeyCalls.get
 
-  /** Clears [[byKeyCallsForTest]]. */
+  /**
+   * [[byKeySelected]] entries since the last [[resetByKeyForTest]]. [[byKey]] does not count.
+   */
+  private[scarlet] def byKeySelectedCallsForTest: Int = byKeySelectedCalls.get
+
+  /** Clears [[byKeyCallsForTest]] and [[byKeySelectedCallsForTest]]. */
   private[scarlet] def resetByKeyForTest(): Unit =
     byKeyCalls.set(0)
+    byKeySelectedCalls.set(0)
 
   /**
    * Estimated bytes of a count table for `rows` input keys.
