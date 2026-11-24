@@ -5,8 +5,8 @@ package com.ewoodbury.scarlet.execution.schema
  *
  * The choice is a pure function of the child layout, the operator, the reducer witness, the null
  * policy, and inner or outer. [[scala.None]] is a refusal. Refusal is not a tag. This does not
- * build a [[com.ewoodbury.scarlet.execution.PhysicalOp]]. The planner and the interpreter do not
- * call it.
+ * build a [[com.ewoodbury.scarlet.execution.PhysicalOp]]. [[AggregateBinding]] asks it after the
+ * peel. The interpreter does not call it.
  *
  * [[NullAdmission.Refused]] means [[com.ewoodbury.scarlet.execution.ScanLowering]] would refuse
  * the source for nulls. The caller passes that policy. Nothing here reads a schema or classifies

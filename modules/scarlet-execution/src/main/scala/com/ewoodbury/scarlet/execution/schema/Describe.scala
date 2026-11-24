@@ -20,6 +20,14 @@ private[execution] object Describe:
     }
 
   /**
+   * Tag an already lowered root.
+   *
+   * Same match as [[describe]]. Does not call [[ColumnarPlanner.lower]], so a parent can compare a
+   * binder tag while it is itself inside that lower.
+   */
+  private[execution] def tag(root: PhysicalOp): KernelChoice = choice(root)
+
+  /**
    * Tag `root`. An `[Int32, Int64]` hash aggregate is [[KernelChoice.IntLongProjectSum]]. A count
    * whose child is an int hash join is [[KernelChoice.CountThroughProbe]]. Every other root keeps
    * its class name. The distinct class is [[PhysicalOp.Dedupe]].
