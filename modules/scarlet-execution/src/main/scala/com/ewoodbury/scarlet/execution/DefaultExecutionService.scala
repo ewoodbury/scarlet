@@ -8,8 +8,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Bridges the API to the execution engine. A bare source returns its partitions. Plans that
  * [[ColumnarPlanner]] accepts run on the columnar kernels. A `mapPartitions` tail runs that child
  * first, then the row function on the decoded partitions. A child the planner refuses publishes
- * nothing. Every other refused plan is compiled into a stage graph and executed through the
- * DAGScheduler.
+ * nothing. A join with one lowered side decodes that side and runs the join on the row executor
+ * when those rows are the rows that executor produces. Every other refused plan is compiled into a
+ * stage graph and executed through the DAGScheduler.
  */
 class DefaultExecutionService extends ExecutionService {
 
@@ -25,7 +26,7 @@ class DefaultExecutionService extends ExecutionService {
       MixedTail.partitions(executePartitions(source), f)
 
     case _ =>
-      ColumnarPlanner.tryRun(plan).getOrElse(runRow(plan))
+      ColumnarPlanner.tryRun(plan).orElse(MixedJoin.partitions(plan)).getOrElse(runRow(plan))
   }
 
   def count[A](plan: Plan[A]): Long =
