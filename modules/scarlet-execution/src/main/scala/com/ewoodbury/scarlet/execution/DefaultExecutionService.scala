@@ -6,8 +6,10 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
  * Bridges the API to the execution engine. A bare source returns its partitions. Plans that
- * [[ColumnarPlanner]] accepts run on the columnar kernels. Every other plan is compiled into a
- * stage graph and executed through the DAGScheduler.
+ * [[ColumnarPlanner]] accepts run on the columnar kernels. A `mapPartitions` tail runs that child
+ * first, then the row function on the decoded partitions. A child the planner refuses publishes
+ * nothing. Every other refused plan is compiled into a stage graph and executed through the
+ * DAGScheduler.
  */
 class DefaultExecutionService extends ExecutionService {
 
@@ -18,6 +20,9 @@ class DefaultExecutionService extends ExecutionService {
     case s: Plan.Source[A] =>
       // A bare source needs no tasks; its partitions are the result
       s.partitions
+
+    case Plan.MapPartitionsOp(source, f) =>
+      MixedTail.partitions(executePartitions(source), f)
 
     case _ =>
       ColumnarPlanner.tryRun(plan).getOrElse(runRow(plan))
@@ -127,9 +132,10 @@ class DefaultExecutionService extends ExecutionService {
       ColumnarPlanner.tryTake(plan, n).getOrElse {
         // Truncate each output partition of the final stage to n elements before executing. Each
         // partition can then contribute at most n elements, so the first n elements of the
-        // partition-ordered result are unchanged.
+        // partition-ordered result are unchanged. The wrapper stays on the row scheduler:
+        // `executePartitions` would run a bound child under it.
         val limited = Plan.MapPartitionsOp(plan, (it: Iterator[A]) => it.take(n))
-        executePartitions(limited).flatMap(_.data).take(n)
+        runRow(limited).flatMap(_.data).take(n)
       }
 }
 
