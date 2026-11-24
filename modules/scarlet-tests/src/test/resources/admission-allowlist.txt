@@ -1,5 +1,6 @@
-# label, kernel tag, fused entry
-# The entry is byKeyOwned, byKeyOwnedMapped, or plain.
+# Fused-entry pins for labels already in admission-ledger.txt.
+# A row is a label, a kernel tag, and an optional entry: byKeyOwned, byKeyOwnedMapped, or plain.
+# This file does not admit a plan. A new accepted label goes in the ledger in the same change.
 # A row with no entry is only for a kernel that has neither owned entry, when plain byKey did not run.
 countByKey of a slot stack above mapIntKey	CountByKey	plain
 reduceByKey of a slot stack above mapIntKey	IntHashAggregate	plain

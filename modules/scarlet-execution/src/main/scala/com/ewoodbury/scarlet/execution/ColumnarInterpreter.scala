@@ -213,11 +213,32 @@ private[execution] object ColumnarInterpreter:
    * longs. String triples are a string inner hash or broadcast join and use
    * [[BatchCodec.decodeStringJoinKeepingNulls]]. A clear value bit is a null int, not an absence
    * bit. A clear key bit is still an error. A fully present batch still decodes to the same
-   * strings and ints. An `[Int32, Int64]` hash aggregate uses [[JoinProbeAggregate.decodeSums]]:
-   * both columns are present, and the sum is a long.
+   * strings and ints. [[ExecutionRoute]] sends [[KernelChoice.IntLongProjectSum]] through
+   * [[JoinProbeAggregate.decodeSums]]: both columns are present, and the sum is a long. Any other
+   * root, including [[PhysicalOp.JoinProbeSum]] and a key map of a triple project, keeps the
+   * decoders below. Those nodes can report `[Int32, Int64]` and still are not that sum.
    */
   private[execution] def decodeFor(columns: Columns, op: PhysicalOp): Seq[Partition[_]] =
-    if (PhysicalSchema.isIntLongAggregate(op)) then intLongSums(columns)
+    decodeRouted(columns, op, None)
+
+  /** [[decodeFor]] using the binder's tag for this `plan`. */
+  private[execution] def decodeFor(
+      columns: Columns,
+      op: PhysicalOp,
+      plan: Plan[_],
+  ): Seq[Partition[_]] =
+    decodeRouted(columns, op, Some(plan))
+
+  /** Interpret `plan` and decode it with the binder's tag. */
+  private[execution] def decodeLowered(plan: Plan[_], op: PhysicalOp): Seq[Partition[_]] =
+    decodeFor(interpret(plan, op), op, plan)
+
+  private def decodeRouted(
+      columns: Columns,
+      op: PhysicalOp,
+      plan: Option[Plan[_]],
+  ): Seq[Partition[_]] =
+    if (ExecutionRoute.decodesAsIntLongSum(plan, op)) then intLongSums(columns)
     else
       decodeWith(
         columns,
@@ -442,28 +463,27 @@ private[execution] object ColumnarInterpreter:
       )
     case (
           Plan.ReduceByKeyOp(source, reduceFunc),
-          aggregate @ PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)),
-        ) if PhysicalSchema.isIntLongAggregate(aggregate) =>
-      IntLongReduce.columns(
-        source,
-        child,
-        reduceFunc,
-        selectedPartition,
-        preserveAbsence,
-        ordinals,
-      )
-    case (
-          Plan.ReduceByKeyOp(source, reduceFunc),
           PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)),
         ) =>
-      ReduceArms.intByKey(
-        source,
-        child,
-        reduceFunc,
-        selectedPartition,
-        preserveAbsence,
-        ordinals,
-      )
+      ExecutionRoute.reduceArm(source, child, reduceFunc) match
+        case ExecutionRoute.Arm.IntLongReduce =>
+          IntLongReduce.columns(
+            source,
+            child,
+            reduceFunc,
+            selectedPartition,
+            preserveAbsence,
+            ordinals,
+          )
+        case ExecutionRoute.Arm.IntHashAggregate =>
+          ReduceArms.intByKey(
+            source,
+            child,
+            reduceFunc,
+            selectedPartition,
+            preserveAbsence,
+            ordinals,
+          )
     case (
           Plan.ReduceByKeyOp(source, reduceFunc),
           PhysicalOp.LongHashAggregate(PhysicalOp.Exchange(child)),

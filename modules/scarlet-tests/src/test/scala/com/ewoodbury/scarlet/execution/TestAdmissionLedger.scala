@@ -16,9 +16,10 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Admission ledger for [[TestColumnarContract.acceptedCases]].
  *
  * Each accepted label is recorded with the root [[KernelChoice]] from [[Describe.describe]]. The
- * golden file is `admission-ledger.txt`, one label and one tag separated by a tab. Additions,
- * removals, and a changed root fail unless that label is listed in `admission-allowlist.txt`. A
- * missing allowlist is empty, so no admission change passes.
+ * golden file is `admission-ledger.txt`, one label and one tag separated by a tab. A new label is
+ * added to that file in the same change. An addition, a removal, or a changed root fails.
+ * `admission-allowlist.txt` pins the fused entry of a label that is already in the golden file. It
+ * does not admit a label by itself. A missing allowlist pins nothing.
  *
  * An allowlist row is a label, a tag, and an optional fused entry: `byKeyOwned`,
  * `byKeyOwnedMapped`, or `plain`. A row with no entry is allowed only when that kernel has no
@@ -68,13 +69,12 @@ class TestAdmissionLedger extends AnyFlatSpec with BeforeAndAfterEach with Colum
     }
     val report = diff(added, removed, retagged, current, golden, allowByLabel)
     if added.nonEmpty || removed.nonEmpty || retagged.nonEmpty then println(report)
-    val unexplained = (added ++ removed ++ retagged).diff(allowByLabel.keySet)
-    assert(unexplained.isEmpty, report)
+    assert(added.isEmpty, report)
     assert(removed.isEmpty, report)
     assert(retagged.isEmpty, report)
     assert(
-      allowByLabel.keySet.diff(added).isEmpty && added.diff(allowByLabel.keySet).isEmpty,
-      report,
+      allowByLabel.keySet.subsetOf(current.keySet),
+      s"allowlist names a label the contract does not accept\n$report",
     )
     allow.foreach { row =>
       assert(

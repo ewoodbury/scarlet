@@ -232,3 +232,16 @@ string six-step element pipeline	Pipeline
 map above int groupByKey	GroupedDecode
 map above string groupByKey	GroupedDecode
 map above long groupByKey	GroupedDecode
+countByKey of a slot stack above mapIntKey	CountByKey
+reduceByKey of a slot stack above mapIntKey	IntHashAggregate
+countSumByKey of a slot stack above mapIntKey	CountSum
+countByKey of a slot stack above long mapValues	CountByKey
+reduceByKey of a slot stack above long mapValues	LongHashAggregate
+countByKey of a slot stack above string mapValues	CountByKey
+reduceByKey of a slot stack above string mapValues	StringHashAggregate
+countByKey of an int hash join	CountThroughProbe
+countByKey of an int broadcast join	CountThroughProbe
+countByKey of an int sort-merge join	CountThroughProbe
+reduceByKey of a project over an int hash join	IntLongProjectSum
+reduceByKey of a project over an int broadcast join	IntLongProjectSum
+reduceByKey of a project over an int sort-merge join	IntLongProjectSum
