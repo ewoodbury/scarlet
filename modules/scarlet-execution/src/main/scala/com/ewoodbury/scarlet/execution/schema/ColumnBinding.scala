@@ -15,7 +15,8 @@ import com.ewoodbury.scarlet.execution.PhysicalOp
  * [[com.ewoodbury.scarlet.execution.GroupByKeyLowering]],
  * [[com.ewoodbury.scarlet.execution.DistinctLowering]], and
  * [[com.ewoodbury.scarlet.execution.KeyValueLowering]] ask it before building `groupByKey`,
- * `distinct`, `keys`, and `values`. The interpreter does not call it.
+ * `distinct`, `keys`, and `values`. [[com.ewoodbury.scarlet.execution.UnionLowering]] asks it on
+ * both children before building a union. The interpreter does not call it.
  *
  * [[NullAdmission.Refused]] means [[com.ewoodbury.scarlet.execution.ScanLowering]] would refuse
  * the source for nulls. The caller passes that policy. Nothing here reads a schema or classifies
@@ -50,11 +51,14 @@ private[execution] object ColumnBinding:
    * [[com.ewoodbury.scarlet.execution.SortLowering]] asks before it builds one.
    * [[Operator.GroupByKey]], [[Operator.Distinct]], [[Operator.Keys]], and [[Operator.Values]] are
    * the group family. [[Operator.Keys]] and [[Operator.Values]] both tag [[KernelChoice.Column]].
+   * [[Operator.Union]] is a concatenation. One side is [[KernelChoice.Union]] for any columns
+   * layout. [[askedUnion]] still requires both sides to be that same layout.
    */
   enum Operator:
     case CountByKey, ReduceByKey, CountSumByKey, MapValues, TupleMap
     case SortByIntKey, SortByIntValueDesc, SortByLongKey, SortByStringKey
     case GroupByKey, Distinct, Keys, Values
+    case Union
 
   /**
    * Reducer witness the caller already computed.
@@ -118,6 +122,41 @@ private[execution] object ColumnBinding:
       case Output.Opaque(_) => None
 
   /**
+   * Tag for a union of `left` and `right`, or [[scala.None]].
+   *
+   * Both outputs have to be [[Output.Columns]] and the same layout. Each side calls [[choose]],
+   * including when the layouts differ, so a mixed union is not refused before the binder runs. An
+   * opaque side is [[scala.None]] and does not call [[choose]]. The reducer witness is not a union
+   * input. A grouped child reports the same columns as a pair. The caller still refuses that kind,
+   * because [[com.ewoodbury.scarlet.execution.ColumnsConcat]] cannot join those batches.
+   */
+  private[execution] def askedUnion(left: PhysicalOp, right: PhysicalOp): Option[KernelChoice] =
+    val leftBound = Bound.of(left, Vector.empty, ReducerWitness.NotApplicable)
+    val rightBound = Bound.of(right, Vector.empty, ReducerWitness.NotApplicable)
+    (leftBound.output, rightBound.output) match
+      case (Output.Columns(leftColumns), Output.Columns(rightColumns)) =>
+        val leftTag = choose(
+          leftColumns,
+          Operator.Union,
+          ReducerWitness.NotApplicable,
+          Bound.nulls(leftBound),
+          Bound.side(leftBound),
+        )
+        val rightTag = choose(
+          rightColumns,
+          Operator.Union,
+          ReducerWitness.NotApplicable,
+          Bound.nulls(rightBound),
+          Bound.side(rightBound),
+        )
+        (leftTag, rightTag) match
+          case (Some(KernelChoice.Union), Some(KernelChoice.Union))
+              if sameLayout(leftColumns, rightColumns) =>
+            Some(KernelChoice.Union)
+          case _ => None
+      case _ => None
+
+  /**
    * Parents that have no tag, an outer side, or a null policy the kernels do not run.
    *
    * `Int => Long` mapValues stays here so a later edit does not tag it
@@ -132,6 +171,12 @@ private[execution] object ColumnBinding:
   ): Boolean =
     operator match
       case Operator.MapValues | Operator.TupleMap => true
+      // Absence is a column policy on an outer join. Two outer sides with that same layout still
+      // concatenate. Only a scan the classifier would refuse is declined.
+      case Operator.Union =>
+        nulls match
+          case NullAdmission.Refused => true
+          case NullAdmission.Policy(_) => false
       case Operator.CountByKey | Operator.ReduceByKey | Operator.CountSumByKey |
           Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
           Operator.SortByStringKey | Operator.GroupByKey | Operator.Distinct | Operator.Keys |
@@ -163,9 +208,12 @@ private[execution] object ColumnBinding:
       operator: Operator,
       reducer: ReducerWitness,
   ): Option[KernelChoice] =
-    if assumedIntLong(layout) then intLong(operator, reducer)
-    else if intJoin(layout) then countThroughProbe(operator)
-    else pair(layout.map(_.columnType), operator)
+    operator match
+      case Operator.Union => Some(KernelChoice.Union)
+      case other =>
+        if assumedIntLong(layout) then intLong(other, reducer)
+        else if intJoin(layout) then countThroughProbe(other)
+        else pair(layout.map(_.columnType), other)
 
   /**
    * `(Int32, Int32, Int32)` under [[NullPolicy.Present]] or [[NullPolicy.Nullable]].
@@ -193,7 +241,7 @@ private[execution] object ColumnBinding:
     case Operator.ReduceByKey | Operator.CountSumByKey | Operator.MapValues | Operator.TupleMap |
         Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
         Operator.SortByStringKey | Operator.GroupByKey | Operator.Distinct | Operator.Keys |
-        Operator.Values =>
+        Operator.Values | Operator.Union =>
       None
 
   private def assumedIntLong(layout: Vector[ColumnLayout]): Boolean = Layout.AssumedIntLong match
@@ -206,6 +254,10 @@ private[execution] object ColumnBinding:
         sameColumn(leftKey, rightKey) && sameColumn(leftValue, rightValue)
       case _ =>
         false
+
+  /** Column types and null policies, at any width. A shorter side is not the same layout. */
+  private def sameLayout(left: Vector[ColumnLayout], right: Vector[ColumnLayout]): Boolean =
+    left.corresponds(right)(sameColumn)
 
   private def sameColumn(left: ColumnLayout, right: ColumnLayout): Boolean =
     sameType(left.columnType, right.columnType) &&

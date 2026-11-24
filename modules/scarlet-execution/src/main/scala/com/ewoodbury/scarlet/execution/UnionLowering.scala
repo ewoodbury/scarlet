@@ -1,13 +1,17 @@
 package com.ewoodbury.scarlet.execution
 
 import com.ewoodbury.scarlet.core.Plan
+import com.ewoodbury.scarlet.execution.schema.{ColumnBinding, KernelChoice}
 
 /**
  * Lowering and partition info for [[Plan.UnionOp]].
  *
- * A union concatenates two inputs of the same kind. It keeps no partitioner: the output is an
- * unknown-width concatenation of both sides, in an unsorted columnar layout. Two sides of
- * different kinds are refused, and the row path runs.
+ * A union concatenates two inputs that share one columns layout. It keeps no partitioner: the
+ * output is an unknown-width concatenation of both sides, in an unsorted columnar layout.
+ * [[lower]] asks [[ColumnBinding]] before it builds. Different layouts stay [[scala.None]],
+ * including when the kinds match. A grouped child reports the same columns as a pair, and
+ * [[ColumnsConcat]] cannot join those batches, so that kind stays on the row path.
+ * [[com.ewoodbury.scarlet.execution.schema.Describe.tag]] is not this decision.
  */
 private[execution] object UnionLowering:
 
@@ -17,12 +21,7 @@ private[execution] object UnionLowering:
       lowerChild: Plan[_] => Option[PhysicalOp],
   ): Option[PhysicalOp] =
     (lowerChild(left), lowerChild(right)) match
-      // A grouped batch is not a ColumnBatch, so ColumnsConcat cannot join two of them. Refusing
-      // here keeps both sides on the row path instead of running them and then falling back.
-      case (Some(leftOp), Some(rightOp))
-          if leftOp.kind == rightOp.kind && leftOp.kind != PhysicalOp.Kind.GroupedInts &&
-            leftOp.kind != PhysicalOp.Kind.GroupedStrings &&
-            leftOp.kind != PhysicalOp.Kind.GroupedLongs =>
+      case (Some(leftOp), Some(rightOp)) if binds(leftOp, rightOp) =>
         Some(PhysicalOp.Union(leftOp, rightOp))
       case (Some(leftOp), Some(rightOp)) =>
         LoweringTrace.note("UnionOp", leftOp.kind, rightOp.kind, "UnionLowering")
@@ -30,6 +29,31 @@ private[execution] object UnionLowering:
       case _ =>
         LoweringTrace.noteIfEmpty("UnionOp", "UnionLowering")
         None
+
+  /**
+   * Same columns layout from the binder, and not a grouped batch.
+   *
+   * The binder runs first. A mixed layout is [[scala.None]] from that ask, not from comparing
+   * [[PhysicalOp.Kind]]. Grouped ints, longs, and strings share their pair columns, so the kind
+   * check is what keeps those batches off [[ColumnsConcat]].
+   */
+  private def binds(left: PhysicalOp, right: PhysicalOp): Boolean =
+    ColumnBinding.askedUnion(left, right) match
+      case Some(KernelChoice.Union) if !grouped(left) && !grouped(right) => true
+      case _ => false
+
+  /** A grouped batch is not a column batch. [[ColumnsConcat]] cannot join two of them. */
+  private def grouped(op: PhysicalOp): Boolean = op.kind match
+    case PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
+        PhysicalOp.Kind.GroupedLongs =>
+      true
+    case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
+        PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples | PhysicalOp.Kind.Strings |
+        PhysicalOp.Kind.Bools | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts |
+        PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples |
+        PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
+        PhysicalOp.Kind.IntLongSums =>
+      false
 
   def info(
       op: PhysicalOp.Union,
