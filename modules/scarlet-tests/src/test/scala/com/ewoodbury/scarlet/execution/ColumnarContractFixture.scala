@@ -177,6 +177,69 @@ trait ColumnarContractFixture extends Matchers:
     )
 
   /**
+   * Join-shaped aggregates. `countByKey` of an int hash, broadcast, or sort-merge join is
+   * count-through-probe: `CountByKey` of a hash join of two exchanges. `reduceByKey` that adds
+   * longs reads the project above that join. The three hints rewrite to the same hash join.
+   */
+  protected def joinAdmissionCases: Seq[AcceptedCase] =
+    val layout = columnarLayout
+    val hash = Plan.JoinOp(pairSource, rightPairSource, None)
+    val broadcast = Plan.JoinOp(
+      pairSource,
+      rightPairSource,
+      Some(Plan.JoinStrategy.Broadcast),
+    )
+    val merged = Plan.JoinOp(
+      pairSource,
+      rightPairSource,
+      Some(Plan.JoinStrategy.SortMerge),
+    )
+    val counted = "CountByKey(HashJoin(Exchange(Scan), Exchange(Scan)))"
+    val summed =
+      "HashAggregate(Exchange(Project(HashJoin(Exchange(Scan), Exchange(Scan)))))"
+    val add = (left: Long, right: Long) => left + right
+    def project(join: Plan[(Int, (Int, Int))]): Plan[(Int, Long)] =
+      Plan.MapOp(join, (row: (Int, (Int, Int))) => (row._1, row._2._1.toLong))
+    Seq(
+      AcceptedCase(
+        "countByKey of an int hash join",
+        Plan.CountByKeyOp(hash),
+        hashedInfo(layout),
+        Some(counted),
+      ),
+      AcceptedCase(
+        "countByKey of an int broadcast join",
+        Plan.CountByKeyOp(broadcast),
+        hashedInfo(layout),
+        Some(counted),
+      ),
+      AcceptedCase(
+        "countByKey of an int sort-merge join",
+        Plan.CountByKeyOp(merged),
+        hashedInfo(layout),
+        Some(counted),
+      ),
+      AcceptedCase(
+        "reduceByKey of a project over an int hash join",
+        Plan.ReduceByKeyOp(project(hash), add),
+        hashedInfo(layout),
+        Some(summed),
+      ),
+      AcceptedCase(
+        "reduceByKey of a project over an int broadcast join",
+        Plan.ReduceByKeyOp(project(broadcast), add),
+        hashedInfo(layout),
+        Some(summed),
+      ),
+      AcceptedCase(
+        "reduceByKey of a project over an int sort-merge join",
+        Plan.ReduceByKeyOp(project(merged), add),
+        hashedInfo(layout),
+        Some(summed),
+      ),
+    )
+
+  /**
    * A boolean filter, then a project. The project is the second element step. `lower` refuses the
    * chain, so `partitioning` and `tryRun` are empty and do not call the mapper. The row path runs
    * it once for each element the filter keeps.
@@ -248,8 +311,7 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
-        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
-        PhysicalOp.Kind.IntLongSums =>
+        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums =>
       false
 
   protected def sumsLongs(op: PhysicalOp): Boolean = op.kind match
@@ -259,8 +321,7 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
-        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
-        PhysicalOp.Kind.IntLongSums =>
+        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums =>
       false
 
   protected def sumsFloats(op: PhysicalOp): Boolean = op.kind match
@@ -270,8 +331,7 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
-        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
-        PhysicalOp.Kind.IntLongSums =>
+        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums =>
       false
 
   protected def preservesPartitions(op: PhysicalOp): Boolean = op match
@@ -285,8 +345,7 @@ trait ColumnarContractFixture extends Matchers:
     case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.LongHashAggregate(_) |
         PhysicalOp.StringHashAggregate(_) | PhysicalOp.GroupByKey(_) |
         PhysicalOp.GroupedDecode(_) | PhysicalOp.CountByKey(_) | PhysicalOp.CountSum(_) |
-        PhysicalOp.JoinProbeSum(_, _, _) |
-        PhysicalOp.HashJoin(_, _) |
+        PhysicalOp.JoinProbeSum(_, _, _) | PhysicalOp.HashJoin(_, _) |
         PhysicalOp.LongHashJoin(_, _) | PhysicalOp.LongSortMergeJoin(_, _) |
         PhysicalOp.StringHashJoin(_, _) | PhysicalOp.StringSortMergeJoin(_, _) |
         PhysicalOp.SortMergeJoin(_, _) | PhysicalOp.SortMergeLeftOuter(_, _) |
@@ -461,10 +520,10 @@ trait ColumnarContractFixture extends Matchers:
 
   /**
    * Structural peel label of an accepted grouped sum. A grouped int-pair source, including an
-   * empty typed source, is `GroupedSum(Scan)`. A row, key, or value filter wraps that scan. A
-   * pair map wraps that peel as `MapPair` only when the child peels. Any other accepted plan is
-   * `None`. Eligibility is [[ColumnarPlanner.groupedPairSource]], so any grouped int-pair source
-   * is included, not one particular source value.
+   * empty typed source, is `GroupedSum(Scan)`. A row, key, or value filter wraps that scan. A pair
+   * map wraps that peel as `MapPair` only when the child peels. Any other accepted plan is `None`.
+   * Eligibility is [[ColumnarPlanner.groupedPairSource]], so any grouped int-pair source is
+   * included, not one particular source value.
    */
   protected def expectedGroupedPeel(plan: Plan[_]): Option[String] =
     def body(current: Plan[_]): Option[String] = current match

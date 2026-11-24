@@ -11,7 +11,14 @@ package com.ewoodbury.scarlet.execution.schema
  * [[NullAdmission.Refused]] means [[com.ewoodbury.scarlet.execution.ScanLowering]] would refuse
  * the source for nulls. The caller passes that policy. Nothing here reads a schema or classifies
  * rows. [[Side.Outer]] and [[NullPolicy.Absence]] are an outer join, and these aggregates refuse
- * it. A generic tuple map is not accepted. An `Int => Long` mapValues is [[scala.None]].
+ * it before a tag is chosen. A generic tuple map is not accepted. An `Int => Long` mapValues is
+ * [[scala.None]].
+ *
+ * An int inner join is three [[ColumnType.Int32]] columns, `(key, left, right)`. `countByKey` on
+ * that layout is [[KernelChoice.CountThroughProbe]]. The join is not [[Layout.AssumedIntLong]].
+ * `reduceByKey` on those three columns is [[scala.None]], including when the witness adds longs.
+ * [[Layout.AssumedIntLong]] is the project above the join, and it is
+ * [[KernelChoice.IntLongProjectSum]] only for [[ReducerWitness.AddsLongs]].
  */
 private[execution] object ColumnBinding:
 
@@ -97,14 +104,46 @@ private[execution] object ColumnBinding:
     case NullPolicy.Absence => true
     case NullPolicy.Present | NullPolicy.Nullable => false
 
-  /** Pair layouts the kernels already run, or long addition on [[Layout.AssumedIntLong]]. */
+  /**
+   * Pair layouts the kernels already run, long addition on [[Layout.AssumedIntLong]], or
+   * [[KernelChoice.CountThroughProbe]] on an int inner join.
+   *
+   * The join arm is three columns. It is not the two-column project above that join.
+   */
   private def tag(
       layout: Vector[ColumnLayout],
       operator: Operator,
       reducer: ReducerWitness,
   ): Option[KernelChoice] =
     if assumedIntLong(layout) then intLong(operator, reducer)
+    else if intJoin(layout) then countThroughProbe(operator)
     else pair(layout.map(_.columnType), operator)
+
+  /**
+   * `(Int32, Int32, Int32)` under [[NullPolicy.Present]] or [[NullPolicy.Nullable]].
+   *
+   * [[NullPolicy.Absence]] does not match. [[declined]] already refused that column, so an outer
+   * join is not a missing arm of this match.
+   */
+  private def intJoin(layout: Vector[ColumnLayout]): Boolean = layout match
+    case Vector(key, left, right) =>
+      intColumn(key) && intColumn(left) && intColumn(right)
+    case _ => false
+
+  private def intColumn(column: ColumnLayout): Boolean =
+    (column.columnType, column.nullPolicy) match
+      case (ColumnType.Int32, NullPolicy.Present) => true
+      case (ColumnType.Int32, NullPolicy.Nullable) => true
+      case (ColumnType.Int32, NullPolicy.Absence) => false
+      case (ColumnType.Int64, _) | (ColumnType.Float64, _) | (ColumnType.Bool, _) |
+          (ColumnType.Utf8Dict, _) =>
+        false
+
+  /** `countByKey` of the three int columns. `reduceByKey` of a join is not a project sum. */
+  private def countThroughProbe(operator: Operator): Option[KernelChoice] = operator match
+    case Operator.CountByKey => Some(KernelChoice.CountThroughProbe)
+    case Operator.ReduceByKey | Operator.CountSumByKey | Operator.MapValues | Operator.TupleMap =>
+      None
 
   private def assumedIntLong(layout: Vector[ColumnLayout]): Boolean = Layout.AssumedIntLong match
     case Output.Columns(columns) => sameColumns(layout, columns)
