@@ -7,10 +7,13 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * Bridges the API to the execution engine. A bare source returns its partitions. Plans that
  * [[ColumnarPlanner]] accepts run on the columnar kernels. A `mapPartitions` tail runs that child
- * first, then the row function on the decoded partitions. A child the planner refuses publishes
- * nothing. A join with one lowered side decodes that side and runs the join on the row executor
- * when those rows are the rows that executor produces. Every other refused plan is compiled into a
- * stage graph and executed through the DAGScheduler.
+ * first, then the row function. A non-source child is kept only when its decoded partitions equal
+ * the row executor's, in order. A lowered filter that drops a null, or a decoder that rejects a
+ * null pair, runs that child on rows. A child the planner refuses publishes nothing. A join with
+ * one lowered side decodes that side and runs the join on the row executor when those rows match.
+ * `take` asks [[ColumnarPlanner.tryTake]] and `count` asks [[ColumnarPlanner.tryCount]] before
+ * either splits the original plan. Neither wraps that plan in `MapPartitionsOp` first. Every other
+ * refused plan is compiled into a stage graph and executed through the DAGScheduler.
  */
 class DefaultExecutionService extends ExecutionService {
 
@@ -23,7 +26,7 @@ class DefaultExecutionService extends ExecutionService {
       s.partitions
 
     case Plan.MapPartitionsOp(source, f) =>
-      MixedTail.partitions(executePartitions(source), f)
+      MixedAction.tail(source, f)
 
     case _ =>
       ColumnarPlanner.tryRun(plan).orElse(MixedJoin.partitions(plan)).getOrElse(runRow(plan))
@@ -31,7 +34,7 @@ class DefaultExecutionService extends ExecutionService {
 
   def count[A](plan: Plan[A]): Long =
     ColumnarPlanner.tryCount(plan).getOrElse {
-      rowPartitions(plan).foldLeft(0L)((total, partition) => total + partition.data.size)
+      MixedAction.partitions(plan).foldLeft(0L)((total, partition) => total + partition.data.size)
     }
 
   def sumInt(plan: Plan[Int]): Long =
@@ -131,12 +134,9 @@ class DefaultExecutionService extends ExecutionService {
     if (n <= 0) Seq.empty
     else
       ColumnarPlanner.tryTake(plan, n).getOrElse {
-        // Truncate each output partition of the final stage to n elements before executing. Each
-        // partition can then contribute at most n elements, so the first n elements of the
-        // partition-ordered result are unchanged. The wrapper stays on the row scheduler:
-        // `executePartitions` would run a bound child under it.
-        val limited = Plan.MapPartitionsOp(plan, (it: Iterator[A]) => it.take(n))
-        runRow(limited).flatMap(_.data).take(n)
+        // First `n` rows of the split plan. Wrapping `it.take(n)` around `plan` first makes the
+        // root opaque, and the row scheduler then publishes no child batch.
+        MixedAction.partitions(plan).iterator.flatMap(_.data.iterator).take(n).toSeq
       }
 }
 
