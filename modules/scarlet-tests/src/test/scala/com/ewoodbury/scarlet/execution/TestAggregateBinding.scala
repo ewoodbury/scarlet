@@ -14,7 +14,9 @@ import com.ewoodbury.scarlet.execution.schema.{Describe, KernelChoice}
  * A slot filter is peeled only when selection steps exist. A key filter over an int-long project
  * does not compile to steps, so the binder is not asked for the project underneath. `countByKey`
  * keeps today's root, which still holds the filter. `reduceByKey` has no arm there and stays
- * empty. A join count and a probe sum stay on the arms they already have.
+ * empty. A join count is [[KernelChoice.CountThroughProbe]] from the join's three columns. A probe
+ * sum stays [[KernelChoice.JoinProbeSum]]. A projected `(Int32, Int64)` whose reducer does not add
+ * longs does not lower.
  */
 class TestAggregateBinding extends AnyFlatSpec with Matchers:
 
@@ -79,13 +81,20 @@ class TestAggregateBinding extends AnyFlatSpec with Matchers:
       "CountByKey(Exchange(FilterKey(Project(HashJoin(Exchange(Scan), Exchange(Scan))))))"
   }
 
-  it should "keep count-through-probe when the binder declines the join" in {
+  it should "tag count-through-probe from the join binder" in {
     val plan = Plan.CountByKeyOp(joined)
+    val child = lowered(joined)
     AggregateBinding.choiceFor(
       joined,
-      lowered(joined),
+      child,
       Operator.CountByKey,
       ReducerWitness.NotApplicable,
+    ) shouldBe Some(KernelChoice.CountThroughProbe)
+    AggregateBinding.choiceFor(
+      joined,
+      child,
+      Operator.ReduceByKey,
+      ReducerWitness.AddsLongs,
     ) shouldBe None
     val root = lowered(plan)
     root.shape shouldBe "CountByKey(HashJoin(Exchange(Scan), Exchange(Scan)))"
@@ -110,6 +119,8 @@ class TestAggregateBinding extends AnyFlatSpec with Matchers:
     summed.shape shouldBe
       "HashAggregate(Exchange(Project(HashJoin(Exchange(Scan), Exchange(Scan)))))"
     Describe.tag(summed) shouldBe KernelChoice.IntLongProjectSum
+    val longest = (left: Long, right: Long) => math.max(left, right)
+    ColumnarPlanner.lower(Plan.ReduceByKeyOp(projected, longest)) shouldBe None
   }
 
   it should "refuse a key filter over an int-long project" in {

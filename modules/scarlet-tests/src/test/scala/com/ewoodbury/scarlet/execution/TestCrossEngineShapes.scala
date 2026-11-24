@@ -285,12 +285,8 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
       .reduceByKey((left: (Int, Int), right: (Int, Int)) =>
         (left._1 + right._1, left._2 + right._2),
       )
-    ColumnarPlanner.lower(nested.plan).isDefined shouldBe true
+    ColumnarPlanner.lower(nested.plan) shouldBe None
     ColumnarPlanner.tryRun(nested.plan).isEmpty shouldBe true
-    val declined = intercept[ColumnarFallback] {
-      ColumnarInterpreter.interpret(nested.plan, ColumnarPlanner.lower(nested.plan).get)
-    }
-    declined.getMessage should include("(Int, Long)")
     val nestedCount = joined.map { case (key, pair) => (key, pair) }.countByKey
     ColumnarPlanner.lower(nestedCount.plan).isDefined shouldBe true
     ColumnarPlanner.tryRun(nestedCount.plan).isEmpty shouldBe true
@@ -434,13 +430,8 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
       .reduceByKey((left: (Int, Int), right: (Int, Int)) =>
         (left._1 + right._1, left._2 + right._2),
       )
+    ColumnarPlanner.lower(nested.plan) shouldBe None
     ColumnarPlanner.tryRun(nested.plan).isEmpty shouldBe true
-    ColumnarPlanner.lower(nested.plan).foreach { op =>
-      val declined = intercept[ColumnarFallback] {
-        ColumnarInterpreter.interpret(nested.plan, op)
-      }
-      declined.getMessage should include("(Int, Long)")
-    }
     val savedNested = ScarletConf.get
     ScarletConf.set(savedNested.copy(columnarExecution = false))
     val rowPairs = nested.collect().toMap

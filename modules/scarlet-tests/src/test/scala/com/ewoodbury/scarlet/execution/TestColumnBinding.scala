@@ -80,6 +80,14 @@ class TestColumnBinding extends AnyFlatSpec with Matchers:
   ): Vector[ColumnLayout] =
     Vector(ColumnLayout(key, policy), ColumnLayout(value, policy))
 
+  /** Int inner join: key, left, and right. Not [[Layout.AssumedIntLong]]. */
+  private def joinColumns(policy: NullPolicy): Vector[ColumnLayout] =
+    Vector(
+      ColumnLayout(ColumnType.Int32, policy),
+      ColumnLayout(ColumnType.Int32, policy),
+      ColumnLayout(ColumnType.Int32, policy),
+    )
+
   private def accepted(
       key: ColumnType,
       value: ColumnType,
@@ -336,6 +344,82 @@ class TestColumnBinding extends AnyFlatSpec with Matchers:
       operator = Operator.ReduceByKey,
       reducer = ReducerWitness.AddsLongs,
       nulls = NullAdmission.Refused,
+      side = Side.Inner,
+      choice = None,
+    ),
+    Cell(
+      label = "(Int32, Int32, Int32) countByKey Present",
+      layout = joinColumns(NullPolicy.Present),
+      operator = Operator.CountByKey,
+      reducer = ReducerWitness.NotApplicable,
+      nulls = NullAdmission.Policy(NullPolicy.Present),
+      side = Side.Inner,
+      choice = Some(KernelChoice.CountThroughProbe),
+    ),
+    Cell(
+      label = "(Int32, Int32, Int32) countByKey Nullable",
+      layout = joinColumns(NullPolicy.Nullable),
+      operator = Operator.CountByKey,
+      reducer = ReducerWitness.NotApplicable,
+      nulls = NullAdmission.Policy(NullPolicy.Nullable),
+      side = Side.Inner,
+      choice = Some(KernelChoice.CountThroughProbe),
+    ),
+    // The join is three columns. Long addition does not make it IntLongProjectSum.
+    Cell(
+      label = "(Int32, Int32, Int32) reduceByKey AddsLongs",
+      layout = joinColumns(NullPolicy.Nullable),
+      operator = Operator.ReduceByKey,
+      reducer = ReducerWitness.AddsLongs,
+      nulls = NullAdmission.Policy(NullPolicy.Nullable),
+      side = Side.Inner,
+      choice = None,
+    ),
+    Cell(
+      label = "(Int32, Int32, Int32) countByKey outer Absence",
+      layout = Vector(
+        ColumnLayout(ColumnType.Int32, NullPolicy.Nullable),
+        ColumnLayout(ColumnType.Int32, NullPolicy.Nullable),
+        ColumnLayout(ColumnType.Int32, NullPolicy.Absence),
+      ),
+      operator = Operator.CountByKey,
+      reducer = ReducerWitness.NotApplicable,
+      nulls = NullAdmission.Policy(NullPolicy.Absence),
+      side = Side.Outer,
+      choice = None,
+    ),
+    Cell(
+      label = "(Int32, Int32, Int32) countByKey scan nulls refused",
+      layout = joinColumns(NullPolicy.Nullable),
+      operator = Operator.CountByKey,
+      reducer = ReducerWitness.NotApplicable,
+      nulls = NullAdmission.Refused,
+      side = Side.Inner,
+      choice = None,
+    ),
+    Cell(
+      label = "(Int64, Int64, Int64) countByKey Nullable",
+      layout = Vector(
+        ColumnLayout(ColumnType.Int64, NullPolicy.Nullable),
+        ColumnLayout(ColumnType.Int64, NullPolicy.Nullable),
+        ColumnLayout(ColumnType.Int64, NullPolicy.Nullable),
+      ),
+      operator = Operator.CountByKey,
+      reducer = ReducerWitness.NotApplicable,
+      nulls = NullAdmission.Policy(NullPolicy.Nullable),
+      side = Side.Inner,
+      choice = None,
+    ),
+    Cell(
+      label = "(Utf8Dict, Int32, Int32) countByKey Nullable",
+      layout = Vector(
+        ColumnLayout(ColumnType.Utf8Dict, NullPolicy.Nullable),
+        ColumnLayout(ColumnType.Int32, NullPolicy.Nullable),
+        ColumnLayout(ColumnType.Int32, NullPolicy.Nullable),
+      ),
+      operator = Operator.CountByKey,
+      reducer = ReducerWitness.NotApplicable,
+      nulls = NullAdmission.Policy(NullPolicy.Nullable),
       side = Side.Inner,
       choice = None,
     ),

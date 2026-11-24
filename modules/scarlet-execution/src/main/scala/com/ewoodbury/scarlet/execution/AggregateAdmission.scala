@@ -13,8 +13,8 @@ import com.ewoodbury.scarlet.execution.schema.{Describe, KernelChoice}
  * one same-type [[Plan.MapValuesOp]], over a child [[ColumnarPlanner.lower]] already accepts. The
  * binder is asked only after those slots compile to selection steps. A whole-row filter, a second
  * map, and an `Int => Long` value map stay empty. The filter plan itself is not lowered here: only
- * the aggregate parent builds this tree. [[JoinProbeAggregate]] and
- * [[CountByKeyLowering.bareInner]] are not on this path.
+ * the aggregate parent builds this tree. [[JoinProbeAggregate]] and [[JoinAggregateBinding]] are
+ * not on this path.
  */
 private[execution] object AggregateAdmission:
 

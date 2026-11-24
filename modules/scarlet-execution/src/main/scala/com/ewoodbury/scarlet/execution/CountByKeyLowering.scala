@@ -17,11 +17,11 @@ package com.ewoodbury.scarlet.execution
  * filter, a second slot, and a sort-merge whose children are not both exchanges, stay on the row
  * path. The count is an `Int` and wraps. The long estimate charges 8-byte keys. The string
  * estimate charges dictionary bytes. [[PhysicalOp.Kind.Pairs]], [[PhysicalOp.Kind.LongPairs]], and
- * [[PhysicalOp.Kind.StringPairs]] lower. An int inner [[PhysicalOp.HashJoin]] of two exchanges is
- * [[PhysicalOp.CountByKey]] of that join: no extra exchange and no inserted project. A hinted
- * sort-merge or broadcast is rewritten to that hash join first. A filter above the join, an outer
- * join, and a non-int join stay on the row path, as does every other kind, including
- * [[PhysicalOp.Kind.LongCounts]]. With spill off, an input that does not fit the budget throws
+ * [[PhysicalOp.Kind.StringPairs]] lower. An int inner hash, broadcast, or sort-merge join is
+ * [[JoinAggregateBinding]]: [[PhysicalOp.CountByKey]] of a hash join of two exchanges, with no
+ * extra exchange and no inserted project. A filter above the join, an outer join, and a non-int
+ * join stay on the row path, as does every other kind, including [[PhysicalOp.Kind.LongCounts]].
+ * With spill off, an input that does not fit the budget throws
  * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] and the action fails instead of rerunning
  * on rows. With spill on, an over-budget post-exchange bucket spills. A count table that still
  * does not fit throws [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]]. The function body is
@@ -33,18 +33,7 @@ private[execution] object CountByKeyLowering:
     hashPartitionedProject(child) match
       case Some(projected) => Some(counted(projected))
       case None if intLongProject(child) => Some(counted(child))
-      case None =>
-        bareInner(child) match
-          case Some(joined) => Some(PhysicalOp.CountByKey(joined))
-          case None => countedKind(child)
-
-  /**
-   * An int inner hash join of two exchanges, or a hinted sort-merge or broadcast rewritten to one.
-   * A filter above the join, a project, and a non-int join do not match.
-   */
-  private def bareInner(op: PhysicalOp): Option[PhysicalOp] = op match
-    case PhysicalOp.HashJoin(PhysicalOp.Exchange(_), PhysicalOp.Exchange(_)) => Some(op)
-    case other => hashedInner(other)
+      case None => JoinAggregateBinding.count(child).orElse(countedKind(child))
 
   private def countedKind(child: PhysicalOp): Option[PhysicalOp] =
     child.kind match
