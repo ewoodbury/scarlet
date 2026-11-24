@@ -141,6 +141,8 @@ class TestJoinAdmission extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       ReducerWitness.NotApplicable,
       Bound.nulls(bound),
       Bound.side(bound),
+      Set.empty,
+      Vector.empty,
     ) shouldBe None
     ColumnarPlanner.lower(outer.countByKey.plan) shouldBe None
     AggregateBinding.choiceFor(

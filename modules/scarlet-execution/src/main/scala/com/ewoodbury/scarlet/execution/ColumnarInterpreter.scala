@@ -2,6 +2,8 @@ package com.ewoodbury.scarlet.execution
 
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
+import com.ewoodbury.scarlet.execution.schema.ColumnBinding.ReducerWitness
+import com.ewoodbury.scarlet.execution.schema.{ColumnBinding, Describe, Layout}
 
 /**
  * Runs a lowered [[PhysicalOp]] tree and encodes source partitions into columns.
@@ -213,19 +215,38 @@ private[execution] object ColumnarInterpreter:
    * longs. String triples are a string inner hash or broadcast join and use
    * [[BatchCodec.decodeStringJoinKeepingNulls]]. A clear value bit is a null int, not an absence
    * bit. A clear key bit is still an error. A fully present batch still decodes to the same
-   * strings and ints. An `[Int32, Int64]` hash aggregate uses [[JoinProbeAggregate.decodeSums]]:
-   * both columns are present, and the sum is a long.
+   * strings and ints. [[KernelChoice.IntLongProjectSum]] uses [[JoinProbeAggregate.decodeSums]]:
+   * both columns are present, and the sum is a long. Any other tag keeps the decoders below,
+   * including a node whose layout is `[Int32, Int64]`.
    */
   private[execution] def decodeFor(columns: Columns, op: PhysicalOp): Seq[Partition[_]] =
-    if (PhysicalSchema.isIntLongAggregate(op)) then intLongSums(columns)
-    else
-      decodeWith(
-        columns,
-        ColumnDecoders.ints(op),
-        ColumnDecoders.intPairs(op),
-        ColumnDecoders.longs(op),
-        ColumnDecoders.triples(op),
-      )
+    KernelRoute.arm(routing(op, Set.empty).kernel) match
+      case KernelRoute.Arm.IntLongReduce => intLongSums(columns)
+      case KernelRoute.Arm.Existing =>
+        decodeWith(
+          columns,
+          ColumnDecoders.ints(op),
+          ColumnDecoders.intPairs(op),
+          ColumnDecoders.longs(op),
+          ColumnDecoders.triples(op),
+        )
+
+  /**
+   * Tag, scan ordinals, empty slot steps, and [[Layout.known]].
+   *
+   * The tag is [[Describe.tag]] of the lowered node. Slot steps already live on the child tree, so
+   * `selection` is empty here. The reducer witness was applied when the node was lowered.
+   * [[IntLongReduce]] still checks addition itself. [[PhysicalSchema.isIntLongAggregate]] is not
+   * read.
+   */
+  private def routing(op: PhysicalOp, ordinals: Set[Int]): ColumnBinding.Choice =
+    ColumnBinding.Choice(
+      Describe.tag(op),
+      ordinals,
+      Vector.empty,
+      ReducerWitness.NotApplicable,
+      Layout.known(op),
+    )
 
   /** Groups of an int-long reduce. A non-pair batch is a bug in the arm, not a row fallback. */
   private def intLongSums(columns: Columns): Seq[Partition[_]] = columns match
@@ -443,27 +464,27 @@ private[execution] object ColumnarInterpreter:
     case (
           Plan.ReduceByKeyOp(source, reduceFunc),
           aggregate @ PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)),
-        ) if PhysicalSchema.isIntLongAggregate(aggregate) =>
-      IntLongReduce.columns(
-        source,
-        child,
-        reduceFunc,
-        selectedPartition,
-        preserveAbsence,
-        ordinals,
-      )
-    case (
-          Plan.ReduceByKeyOp(source, reduceFunc),
-          PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)),
         ) =>
-      ReduceArms.intByKey(
-        source,
-        child,
-        reduceFunc,
-        selectedPartition,
-        preserveAbsence,
-        ordinals,
-      )
+      val choice = routing(aggregate, ordinals)
+      KernelRoute.arm(choice.kernel) match
+        case KernelRoute.Arm.IntLongReduce =>
+          IntLongReduce.columns(
+            source,
+            child,
+            reduceFunc,
+            selectedPartition,
+            preserveAbsence,
+            choice.ordinals,
+          )
+        case KernelRoute.Arm.Existing =>
+          ReduceArms.intByKey(
+            source,
+            child,
+            reduceFunc,
+            selectedPartition,
+            preserveAbsence,
+            choice.ordinals,
+          )
     case (
           Plan.ReduceByKeyOp(source, reduceFunc),
           PhysicalOp.LongHashAggregate(PhysicalOp.Exchange(child)),

@@ -33,13 +33,17 @@ private[execution] object JoinAggregateBinding:
   /** Tag [[ColumnBinding]] returns for a join [[Bound]]. [[Output.Opaque]] is no tag. */
   private def choose(bound: Bound): Option[KernelChoice] = bound.output match
     case Output.Columns(columns) =>
-      ColumnBinding.choose(
-        columns,
-        Operator.CountByKey,
-        bound.reducer,
-        Bound.nulls(bound),
-        Bound.side(bound),
-      )
+      ColumnBinding
+        .choose(
+          columns,
+          Operator.CountByKey,
+          bound.reducer,
+          Bound.nulls(bound),
+          Bound.side(bound),
+          Set.empty,
+          bound.selection,
+        )
+        .map(_.kernel)
     case Output.Opaque(_) => None
 
   /**

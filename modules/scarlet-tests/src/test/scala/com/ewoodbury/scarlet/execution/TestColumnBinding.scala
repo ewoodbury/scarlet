@@ -3,6 +3,7 @@ package com.ewoodbury.scarlet.execution
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import com.ewoodbury.scarlet.columnar.Selection
 import com.ewoodbury.scarlet.execution.schema.*
 
 import ColumnBinding.{NullAdmission, Operator, ReducerWitness, Side}
@@ -55,6 +56,36 @@ class TestColumnBinding extends AnyFlatSpec with Matchers:
     decide(row).isEmpty shouldBe true
   }
 
+  it should "store ordinals, slot steps, the witness, and the output layout" in {
+    val ordinals = Set(0, 1)
+    val choice = ColumnBinding.choose(
+      assumedIntLong,
+      Operator.ReduceByKey,
+      ReducerWitness.AddsLongs,
+      NullAdmission.Policy(NullPolicy.Nullable),
+      Side.Inner,
+      ordinals,
+      Vector.empty,
+    )
+    val found = choice.getOrElse(fail("int-long sum did not bind"))
+    found.kernel shouldBe KernelChoice.IntLongProjectSum
+    found.ordinals shouldBe ordinals
+    found.selection shouldBe Vector.empty[Selection.Step]
+    found.reducer shouldBe ReducerWitness.AddsLongs
+    found.output shouldBe Output.Columns(assumedIntLong)
+    val sameTag = ColumnBinding.choose(
+      assumedIntLong,
+      Operator.ReduceByKey,
+      ReducerWitness.AddsLongs,
+      NullAdmission.Policy(NullPolicy.Nullable),
+      Side.Inner,
+      Set.empty,
+      Vector.empty,
+    )
+    sameTag.map(_.kernel) shouldBe Some(found.kernel)
+    sameTag.map(_.ordinals) shouldBe Some(Set.empty[Int])
+  }
+
   it should "take a refused scan null policy from the caller" in {
     val admitted = named("(Int32, Int32) countByKey Nullable")
     val refused = named("(Int32, Int32) countByKey scan nulls refused")
@@ -71,7 +102,17 @@ class TestColumnBinding extends AnyFlatSpec with Matchers:
     byLabel.getOrElse(label, fail(s"missing truth-table row: $label"))
 
   private def decide(row: Cell): Option[KernelChoice] =
-    ColumnBinding.choose(row.layout, row.operator, row.reducer, row.nulls, row.side)
+    ColumnBinding
+      .choose(
+        row.layout,
+        row.operator,
+        row.reducer,
+        row.nulls,
+        row.side,
+        Set.empty,
+        Vector.empty,
+      )
+      .map(_.kernel)
 
   private def columns(
       key: ColumnType,

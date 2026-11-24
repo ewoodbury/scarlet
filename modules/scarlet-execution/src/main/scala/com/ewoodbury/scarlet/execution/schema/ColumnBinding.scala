@@ -1,12 +1,16 @@
 package com.ewoodbury.scarlet.execution.schema
 
+import com.ewoodbury.scarlet.columnar.Selection
+
 /**
  * Chooses a [[KernelChoice]] for one parent.
  *
  * The choice is a pure function of the child layout, the operator, the reducer witness, the null
  * policy, and inner or outer. [[scala.None]] is a refusal. Refusal is not a tag. This does not
- * build a [[com.ewoodbury.scarlet.execution.PhysicalOp]]. [[AggregateBinding]] asks it after the
- * peel. The interpreter does not call it.
+ * build a [[com.ewoodbury.scarlet.execution.PhysicalOp]] and does not read a plan.
+ * [[AggregateBinding]] asks it after the peel.
+ * [[com.ewoodbury.scarlet.execution.ColumnarInterpreter]] matches the tag on a [[Choice]] for a
+ * tree that already lowered. It does not ask [[choose]] again.
  *
  * [[NullAdmission.Refused]] means [[com.ewoodbury.scarlet.execution.ScanLowering]] would refuse
  * the source for nulls. The caller passes that policy. Nothing here reads a schema or classifies
@@ -57,10 +61,27 @@ private[execution] object ColumnBinding:
     case Refused
 
   /**
-   * Tag for `operator` on `layout`, or [[scala.None]].
+   * What the interpreter reads for one kernel.
+   *
+   * `kernel` is the tag. `ordinals` are the scan slots the caller already computed, or empty when
+   * that walk has not run. `selection` is the compiled slot steps, or empty. `reducer` is the
+   * witness, or [[ReducerWitness.NotApplicable]]. `output` is the layout of `layout`. [[choose]]
+   * stores `ordinals` and `selection`. It does not use them to pick `kernel`.
+   */
+  final case class Choice(
+      kernel: KernelChoice,
+      ordinals: Set[Int],
+      selection: Vector[Selection.Step],
+      reducer: ReducerWitness,
+      output: Output,
+  )
+
+  /**
+   * [[Choice]] for `operator` on `layout`, or [[scala.None]].
    *
    * `layout` is the child columns. `reducer` is the witness result. `nulls` is the source policy,
-   * including a scan the classifier would refuse. `side` is inner or outer.
+   * including a scan the classifier would refuse. `side` is inner or outer. `ordinals` and
+   * `selection` are stored on the [[Choice]] and do not change the tag.
    */
   def choose(
       layout: Vector[ColumnLayout],
@@ -68,9 +89,14 @@ private[execution] object ColumnBinding:
       reducer: ReducerWitness,
       nulls: NullAdmission,
       side: Side,
-  ): Option[KernelChoice] =
+      ordinals: Set[Int],
+      selection: Vector[Selection.Step],
+  ): Option[Choice] =
     if declined(operator, layout, nulls, side) then None
-    else tag(layout, operator, reducer)
+    else
+      tag(layout, operator, reducer).map { kernel =>
+        Choice(kernel, ordinals, selection, reducer, Output.Columns(layout))
+      }
 
   /**
    * Parents that have no tag, an outer side, or a null policy the kernels do not run.

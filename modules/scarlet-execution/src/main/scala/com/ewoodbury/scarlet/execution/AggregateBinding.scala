@@ -205,7 +205,18 @@ private[execution] object AggregateBinding:
     val bound = Bound.of(op, selection, reducer)
     val choice = bound.output match
       case Output.Columns(columns) =>
-        ColumnBinding.choose(columns, operator, reducer, Bound.nulls(bound), Bound.side(bound))
+        // Scan demand is not known here. The interpreter fills ordinals when it routes.
+        ColumnBinding
+          .choose(
+            columns,
+            operator,
+            reducer,
+            Bound.nulls(bound),
+            Bound.side(bound),
+            Set.empty,
+            bound.selection,
+          )
+          .map(_.kernel)
       case Output.Opaque(_) => None
     choice match
       case Some(KernelChoice.CountThroughProbe) if selection.nonEmpty => None

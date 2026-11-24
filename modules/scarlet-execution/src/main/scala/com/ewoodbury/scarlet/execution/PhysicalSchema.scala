@@ -37,7 +37,13 @@ private[execution] object PhysicalSchema:
     case other =>
       ofKind(other.kind)
 
-  /** True for the hash aggregate that sums an `[Int32, Int64]` child. */
+  /**
+   * True for the hash aggregate whose child schema is `[Int32, Int64]`.
+   *
+   * [[com.ewoodbury.scarlet.execution.schema.Describe]] still names
+   * [[com.ewoodbury.scarlet.execution.schema.KernelChoice.IntLongProjectSum]] with this test.
+   * [[ColumnarInterpreter]] does not route on it.
+   */
   def isIntLongAggregate(op: PhysicalOp): Boolean = op match
     case PhysicalOp.HashAggregate(child) if isIntLong(of(child)) => true
     case _ => false
