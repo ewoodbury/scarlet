@@ -850,13 +850,13 @@ object ColumnarPlanner:
     case Plan.ReduceByKeyOp(source, reduce) =>
       JoinProbeAggregate
         .lower(source, reduce, lowerChild)
-        .orElse(lowerChild(source).flatMap(ReduceByKeyLowering.apply))
+        .orElse(AggregateBinding.reduce(source, reduce, lowerChild))
     case Plan.GroupByKeyOp(source) =>
       lowerChild(source).flatMap(GroupByKeyLowering.apply)
     case Plan.CountByKeyOp(source) =>
-      lowerChild(source).flatMap(CountByKeyLowering.apply)
+      AggregateBinding.count(source, lowerChild)
     case Plan.CountSumByKeyOp(source) =>
-      lowerChild(source).flatMap(CountSumLowering.apply)
+      AggregateBinding.countSum(source, lowerChild)
     case plan if JoinLowering.isJoin(plan) => JoinLowering.lower(plan, lowerChild)
     case Plan.SortByIntKeyOp(source) =>
       SortLowering.lowerInt(source, lowerPlan)
