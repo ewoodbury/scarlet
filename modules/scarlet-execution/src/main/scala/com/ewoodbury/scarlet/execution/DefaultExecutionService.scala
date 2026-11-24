@@ -11,6 +11,12 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * nothing. A join with one lowered side decodes that side and runs the join on the row executor
  * when those rows are the rows that executor produces. Every other refused plan is compiled into a
  * stage graph and executed through the DAGScheduler.
+ *
+ * `take` of a fully bound sort stays on [[ColumnarPlanner.tryTake]]. `count` of a fully bound plan
+ * stays on [[ColumnarPlanner.tryCount]]. A miss splits a `mapPartitions` tail or a one-sided join
+ * before any limit: the columnar child publishes, then the tail is limited or counted. `flatMap`
+ * and untyped `sortBy` have no split, so they publish nothing. A [[ColumnarFallback]] from a
+ * kernel still reruns that whole plan on rows.
  */
 class DefaultExecutionService extends ExecutionService {
 
@@ -31,7 +37,7 @@ class DefaultExecutionService extends ExecutionService {
 
   def count[A](plan: Plan[A]): Long =
     ColumnarPlanner.tryCount(plan).getOrElse {
-      rowPartitions(plan).foldLeft(0L)((total, partition) => total + partition.data.size)
+      splitPlan(plan).map(sized).getOrElse(sized(rowPartitions(plan)))
     }
 
   def sumInt(plan: Plan[Int]): Long =
@@ -129,15 +135,51 @@ class DefaultExecutionService extends ExecutionService {
 
   def take[A](plan: Plan[A], n: Int): Seq[A] =
     if (n <= 0) Seq.empty
-    else
-      ColumnarPlanner.tryTake(plan, n).getOrElse {
-        // Truncate each output partition of the final stage to n elements before executing. Each
-        // partition can then contribute at most n elements, so the first n elements of the
-        // partition-ordered result are unchanged. The wrapper stays on the row scheduler:
-        // `executePartitions` would run a bound child under it.
-        val limited = Plan.MapPartitionsOp(plan, (it: Iterator[A]) => it.take(n))
-        runRow(limited).flatMap(_.data).take(n)
-      }
+    else ColumnarPlanner.tryTake(plan, n).getOrElse(takeUnbound(plan, n))
+
+  /**
+   * A refused plan after its columnar child has already run.
+   *
+   * [[Plan.MapPartitionsOp]] runs the child, then the row function. A join with one lowered side
+   * is [[MixedJoin]]. `None` is a plan with nothing to split: a fully bound plan whose take or
+   * count kernel declined, `flatMap`, or untyped `sortBy`. The limit is applied by the caller, so
+   * this does not wrap `take` around the original plan.
+   */
+  private def splitPlan[A](plan: Plan[A]): Option[Seq[Partition[A]]] = plan match {
+    case _: Plan.MapPartitionsOp[?, ?] =>
+      Some(executePartitions(plan))
+    case other =>
+      if (ColumnarPlanner.lower(other).isDefined) None
+      else MixedJoin.partitions(other)
+  }
+
+  /** Row count of partitions a split or the row executor already produced. */
+  private def sized(parts: Seq[Partition[_]]): Long =
+    parts.foldLeft(0L)((total, partition) => total + partition.data.size)
+
+  /**
+   * `take` when [[ColumnarPlanner.tryTake]] declines. A split runs first. The row wrapper is only
+   * the plan [[splitPlan]] refuses, and it stays on the row scheduler so a bound aggregate is not
+   * taken through [[executePartitions]].
+   */
+  private def takeUnbound[A](plan: Plan[A], n: Int): Seq[A] =
+    splitPlan(plan).map(parts => prefix(parts, n)).getOrElse(rowTake(plan, n))
+
+  /**
+   * First `n` elements in partition order, after the split. Each partition contributes at most
+   * `n`, so the prefix matches a per-partition limit followed by a global one.
+   */
+  private def prefix[A](parts: Seq[Partition[A]], n: Int): Seq[A] =
+    parts.iterator.flatMap(partition => partition.data.iterator.take(n)).take(n).toList
+
+  /**
+   * Row `take`. The wrapper limits each output partition before the stage runs. It is not applied
+   * to a plan [[splitPlan]] accepts.
+   */
+  private def rowTake[A](plan: Plan[A], n: Int): Seq[A] = {
+    val limited = Plan.MapPartitionsOp(plan, (it: Iterator[A]) => it.take(n))
+    runRow(limited).flatMap(_.data).take(n)
+  }
 }
 
 /**
