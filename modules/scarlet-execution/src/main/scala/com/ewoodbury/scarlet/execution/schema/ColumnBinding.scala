@@ -15,7 +15,8 @@ import com.ewoodbury.scarlet.execution.PhysicalOp
  * [[com.ewoodbury.scarlet.execution.GroupByKeyLowering]],
  * [[com.ewoodbury.scarlet.execution.DistinctLowering]], and
  * [[com.ewoodbury.scarlet.execution.KeyValueLowering]] ask it before building `groupByKey`,
- * `distinct`, `keys`, and `values`. The interpreter does not call it.
+ * `distinct`, `keys`, and `values`. [[com.ewoodbury.scarlet.execution.UnionLowering]] asks it on
+ * each child before it builds a union. The interpreter does not call it.
  *
  * [[NullAdmission.Refused]] means [[com.ewoodbury.scarlet.execution.ScanLowering]] would refuse
  * the source for nulls. The caller passes that policy. Nothing here reads a schema or classifies
@@ -50,11 +51,15 @@ private[execution] object ColumnBinding:
    * [[com.ewoodbury.scarlet.execution.SortLowering]] asks before it builds one.
    * [[Operator.GroupByKey]], [[Operator.Distinct]], [[Operator.Keys]], and [[Operator.Values]] are
    * the group family. [[Operator.Keys]] and [[Operator.Values]] both tag [[KernelChoice.Column]].
+   * [[Operator.Union]] is one child of a concatenation. [[choose]] returns [[KernelChoice.Union]]
+   * for any column layout, including an outer join.
+   * [[com.ewoodbury.scarlet.execution.UnionLowering]] compares the two children.
    */
   enum Operator:
     case CountByKey, ReduceByKey, CountSumByKey, MapValues, TupleMap
     case SortByIntKey, SortByIntValueDesc, SortByLongKey, SortByStringKey
     case GroupByKey, Distinct, Keys, Values
+    case Union
 
   /**
    * Reducer witness the caller already computed.
@@ -95,8 +100,13 @@ private[execution] object ColumnBinding:
       side: Side,
   ): Option[KernelChoice] =
     val _ = chooseCalls.incrementAndGet()
-    if declined(operator, layout, nulls, side) then None
-    else tag(layout, operator, reducer)
+    // Each union child asks here. Absence is a real outer-join column, so this parent is not
+    // [[declined]]. [[UnionLowering]] compares the two layouts and the kinds the kernel can run.
+    operator match
+      case Operator.Union => Some(KernelChoice.Union)
+      case _ =>
+        if declined(operator, layout, nulls, side) then None
+        else tag(layout, operator, reducer)
 
   /**
    * [[choose]] on the columns of `child`.
@@ -132,6 +142,7 @@ private[execution] object ColumnBinding:
   ): Boolean =
     operator match
       case Operator.MapValues | Operator.TupleMap => true
+      case Operator.Union => false
       case Operator.CountByKey | Operator.ReduceByKey | Operator.CountSumByKey |
           Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
           Operator.SortByStringKey | Operator.GroupByKey | Operator.Distinct | Operator.Keys |
@@ -193,7 +204,7 @@ private[execution] object ColumnBinding:
     case Operator.ReduceByKey | Operator.CountSumByKey | Operator.MapValues | Operator.TupleMap |
         Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
         Operator.SortByStringKey | Operator.GroupByKey | Operator.Distinct | Operator.Keys |
-        Operator.Values =>
+        Operator.Values | Operator.Union =>
       None
 
   private def assumedIntLong(layout: Vector[ColumnLayout]): Boolean = Layout.AssumedIntLong match
