@@ -2,6 +2,8 @@ package com.ewoodbury.scarlet.execution.schema
 
 import java.util.concurrent.atomic.AtomicInteger
 
+import com.ewoodbury.scarlet.execution.PhysicalOp
+
 /**
  * Chooses a [[KernelChoice]] for one parent.
  *
@@ -9,8 +11,11 @@ import java.util.concurrent.atomic.AtomicInteger
  * policy, and inner or outer. [[chooseCallsForTest]] counts calls and does not change the tag.
  * [[scala.None]] is a refusal. Refusal is not a tag. This does not build a
  * [[com.ewoodbury.scarlet.execution.PhysicalOp]]. [[AggregateBinding]] asks it after the peel.
- * [[com.ewoodbury.scarlet.execution.SortLowering]] asks it before building a typed sort. The
- * interpreter does not call it.
+ * [[com.ewoodbury.scarlet.execution.SortLowering]] asks it before building a typed sort.
+ * [[com.ewoodbury.scarlet.execution.GroupByKeyLowering]],
+ * [[com.ewoodbury.scarlet.execution.DistinctLowering]], and
+ * [[com.ewoodbury.scarlet.execution.KeyValueLowering]] ask it before building `groupByKey`,
+ * `distinct`, `keys`, and `values`. The interpreter does not call it.
  *
  * [[NullAdmission.Refused]] means [[com.ewoodbury.scarlet.execution.ScanLowering]] would refuse
  * the source for nulls. The caller passes that policy. Nothing here reads a schema or classifies
@@ -43,10 +48,13 @@ private[execution] object ColumnBinding:
    * [[Operator.TupleMap]] is a generic tuple `map`. It is not accepted. [[Operator.MapValues]] is
    * `Int => Long`, which has no pair kernel. The four sort cases are the typed sorts.
    * [[com.ewoodbury.scarlet.execution.SortLowering]] asks before it builds one.
+   * [[Operator.GroupByKey]], [[Operator.Distinct]], [[Operator.Keys]], and [[Operator.Values]] are
+   * the group family. [[Operator.Keys]] and [[Operator.Values]] both tag [[KernelChoice.Column]].
    */
   enum Operator:
     case CountByKey, ReduceByKey, CountSumByKey, MapValues, TupleMap
     case SortByIntKey, SortByIntValueDesc, SortByLongKey, SortByStringKey
+    case GroupByKey, Distinct, Keys, Values
 
   /**
    * Reducer witness the caller already computed.
@@ -91,6 +99,25 @@ private[execution] object ColumnBinding:
     else tag(layout, operator, reducer)
 
   /**
+   * [[choose]] on the columns of `child`.
+   *
+   * An opaque child is [[scala.None]] and does not call [[choose]]. The reducer witness is not an
+   * input for `groupByKey`, `distinct`, `keys`, or `values`.
+   */
+  private[execution] def asked(child: PhysicalOp, operator: Operator): Option[KernelChoice] =
+    val bound = Bound.of(child, Vector.empty, ReducerWitness.NotApplicable)
+    bound.output match
+      case Output.Columns(columns) =>
+        choose(
+          columns,
+          operator,
+          ReducerWitness.NotApplicable,
+          Bound.nulls(bound),
+          Bound.side(bound),
+        )
+      case Output.Opaque(_) => None
+
+  /**
    * Parents that have no tag, an outer side, or a null policy the kernels do not run.
    *
    * `Int => Long` mapValues stays here so a later edit does not tag it
@@ -107,7 +134,8 @@ private[execution] object ColumnBinding:
       case Operator.MapValues | Operator.TupleMap => true
       case Operator.CountByKey | Operator.ReduceByKey | Operator.CountSumByKey |
           Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
-          Operator.SortByStringKey =>
+          Operator.SortByStringKey | Operator.GroupByKey | Operator.Distinct | Operator.Keys |
+          Operator.Values =>
         outer(side) || refused(nulls) || layout.exists(absent)
 
   private def refused(nulls: NullAdmission): Boolean = nulls match
@@ -164,7 +192,8 @@ private[execution] object ColumnBinding:
     case Operator.CountByKey => Some(KernelChoice.CountThroughProbe)
     case Operator.ReduceByKey | Operator.CountSumByKey | Operator.MapValues | Operator.TupleMap |
         Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
-        Operator.SortByStringKey =>
+        Operator.SortByStringKey | Operator.GroupByKey | Operator.Distinct | Operator.Keys |
+        Operator.Values =>
       None
 
   private def assumedIntLong(layout: Vector[ColumnLayout]): Boolean = Layout.AssumedIntLong match
@@ -207,8 +236,10 @@ private[execution] object ColumnBinding:
 
   /**
    * `(Int32, Int32)`, `(Int64, Int64)`, and `(Utf8Dict, Int32)` under `Present` or `Nullable`.
-   * Those are the policies the count, reduce, and typed-sort kernels already accept. A sort on
-   * another pair is [[scala.None]]. [[NullPolicy.Absence]] never reaches this match.
+   * Those are the policies the count, reduce, typed-sort, group, key, and value kernels already
+   * accept. A sort, group, key, or value on another pair is [[scala.None]]. `distinct` is one
+   * [[ColumnType.Int32]] column or one [[ColumnType.Utf8Dict]] column. [[NullPolicy.Absence]]
+   * never reaches this match.
    */
   private def pair(types: Vector[ColumnType], operator: Operator): Option[KernelChoice] =
     (types, operator) match
@@ -234,5 +265,27 @@ private[execution] object ColumnBinding:
         Some(KernelChoice.StringHashAggregate)
       case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.SortByStringKey) =>
         Some(KernelChoice.SortByStringKey)
+      case (Vector(ColumnType.Int32, ColumnType.Int32), Operator.GroupByKey) =>
+        Some(KernelChoice.GroupByKey)
+      case (Vector(ColumnType.Int64, ColumnType.Int64), Operator.GroupByKey) =>
+        Some(KernelChoice.GroupByKey)
+      case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.GroupByKey) =>
+        Some(KernelChoice.GroupByKey)
+      case (Vector(ColumnType.Int32, ColumnType.Int32), Operator.Keys) =>
+        Some(KernelChoice.Column)
+      case (Vector(ColumnType.Int32, ColumnType.Int32), Operator.Values) =>
+        Some(KernelChoice.Column)
+      case (Vector(ColumnType.Int64, ColumnType.Int64), Operator.Keys) =>
+        Some(KernelChoice.Column)
+      case (Vector(ColumnType.Int64, ColumnType.Int64), Operator.Values) =>
+        Some(KernelChoice.Column)
+      case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.Keys) =>
+        Some(KernelChoice.Column)
+      case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.Values) =>
+        Some(KernelChoice.Column)
+      case (Vector(ColumnType.Int32), Operator.Distinct) =>
+        Some(KernelChoice.Dedupe)
+      case (Vector(ColumnType.Utf8Dict), Operator.Distinct) =>
+        Some(KernelChoice.Dedupe)
       case _ =>
         None

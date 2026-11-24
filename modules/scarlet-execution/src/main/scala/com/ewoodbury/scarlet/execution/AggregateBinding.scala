@@ -151,7 +151,8 @@ private[execution] object AggregateBinding:
       case (
             Operator.CountByKey | Operator.CountSumByKey | Operator.MapValues | Operator.TupleMap |
             Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
-            Operator.SortByStringKey,
+            Operator.SortByStringKey | Operator.GroupByKey | Operator.Distinct | Operator.Keys |
+            Operator.Values,
             _,
           ) =>
         false
