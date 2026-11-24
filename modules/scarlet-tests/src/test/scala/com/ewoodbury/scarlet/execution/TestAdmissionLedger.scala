@@ -22,8 +22,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * does not admit a label by itself. A missing allowlist pins nothing.
  *
  * An allowlist row is a label, a tag, and an optional fused entry: `byKeyOwned`,
- * `byKeyOwnedMapped`, or `plain`. A row with no entry is allowed only when that kernel has no
- * `byKeyOwned` or `byKeyOwnedMapped` and the plain `byKey` did not run. A wrong entry fails.
+ * `byKeyOwnedMapped`, `byKeySelected`, or `plain`. A row with no entry is allowed only when that
+ * kernel has no `byKeyOwned` or `byKeyOwnedMapped`, the plain `byKey` did not run, and
+ * `byKeySelected` did not run without `byKey`. A wrong entry fails.
  */
 class TestAdmissionLedger extends AnyFlatSpec with BeforeAndAfterEach with ColumnarContractFixture:
 
@@ -31,6 +32,7 @@ class TestAdmissionLedger extends AnyFlatSpec with BeforeAndAfterEach with Colum
   private val Allowlist = "admission-allowlist.txt"
   private val OwnedEntry = "byKeyOwned"
   private val OwnedMappedEntry = "byKeyOwnedMapped"
+  private val SelectedEntry = "byKeySelected"
   private val PlainEntry = "plain"
 
   override def beforeEach(): Unit =
@@ -173,10 +175,12 @@ class TestAdmissionLedger extends AnyFlatSpec with BeforeAndAfterEach with Colum
     val knownEntry =
       row.entry.isEmpty || Ordering[String].equiv(row.entry, OwnedEntry) ||
         Ordering[String].equiv(row.entry, OwnedMappedEntry) ||
+        Ordering[String].equiv(row.entry, SelectedEntry) ||
         Ordering[String].equiv(row.entry, PlainEntry)
     assert(
       knownEntry,
-      s"fused entry must be $OwnedEntry, $OwnedMappedEntry, $PlainEntry, or absent: [$line]",
+      s"fused entry must be $OwnedEntry, $OwnedMappedEntry, $SelectedEntry, " +
+        s"$PlainEntry, or absent: [$line]",
     )
     row
 
@@ -196,11 +200,28 @@ class TestAdmissionLedger extends AnyFlatSpec with BeforeAndAfterEach with Colum
       Option.when(CountSum.byKeyOwnedMappedCallsForTest > 0)(OwnedMappedEntry),
     ).flatten
     val plain = plainCalls
+    val selected = selectedCalls
     assert(
-      owned.size + plain.size <= 1,
-      s"more than one fused entry ran: ${(owned ++ plain).mkString(", ")}",
+      owned.size + plain.size + selected.size <= 1,
+      s"more than one fused entry ran: ${(owned ++ plain ++ selected).mkString(", ")}",
     )
-    if (plain.nonEmpty) then PlainEntry else owned.headOption.getOrElse("")
+    if (plain.nonEmpty) then PlainEntry
+    else if (selected.nonEmpty) then SelectedEntry
+    else owned.headOption.getOrElse("")
+
+  /**
+   * `byKeySelected` ran and the matching `byKey` did not. A `byKey` that also moves the selected
+   * counter is [[plainCalls]], not this entry.
+   */
+  private def selectedCalls: List[String] =
+    List(
+      "HashCount.byKeySelected" ->
+        (HashCount.byKeySelectedCallsForTest > 0 && HashCount.byKeyCallsForTest == 0),
+      "HashReduce.byKeySelected" ->
+        (HashReduce.byKeySelectedCallsForTest > 0 && HashReduce.byKeyCallsForTest == 0),
+      "CountSum.byKeySelected" ->
+        (CountSum.byKeySelectedCallsForTest > 0 && CountSum.byKeyCallsForTest == 0),
+    ).collect { case (name, moved) if moved => name }
 
   private def plainCalls: List[String] =
     List(

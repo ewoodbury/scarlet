@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import scala.annotation.tailrec
+
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.Plan
 
@@ -101,20 +103,45 @@ private[execution] object FilterChain:
     // rows, and [[com.ewoodbury.scarlet.columnar.IntTopN]] orders them. A second slot is not
     // that filter.
     // One [[PhysicalOp.MapKey]] on a scan or filter stack, and one key or value filter
-    // immediately above that map, decline here through [[MapIntKey.inTree]]. Interpret publishes
-    // those pairs. [[com.ewoodbury.scarlet.columnar.IntTopN]] orders a value sort.
+    // immediately above that map, decline here. [[MapIntKey.inTree]] is that map. A stack of
+    // two or more key or value slots above the same map is not the decline: [[selectIndexed]]
+    // names the mapped rows. Interpret publishes the one-map pairs.
+    // [[com.ewoodbury.scarlet.columnar.IntTopN]] orders a value sort.
     // [[com.ewoodbury.scarlet.columnar.RankSplit]] orders a key sort. A null input key stays null
-    // and is not passed to the function. A second slot is not that one filter. One int
+    // and is not passed to the function. One int
     // `mapValues` on a scan or a filter stack is the same decline: the index would name scan rows
     // under the map. Interpret publishes the mapped pairs. A null value stays null, is not passed
     // to `mapValues`, and orders as zero. A slot above that project or that map is not
     // [[SortLowering.pairProjectOnScan]] or [[SortLowering.pairMapValueOnScan]].
-    if (
-        MapIntKey.inTree(op) || StringPairSlot.filterCoversProject(op) ||
-        SortLowering.pairProjectOnScan(op) || SortLowering.pairMapValueOnScan(op)
-      )
-    then None
+    if (declinesIndexed(op)) then None
     else selectIndexed(plan, op, selectedPartition, preserveAbsence, ordinals)
+
+  /**
+   * One [[PhysicalOp.MapKey]], or one key or value slot directly above it, plus the string and
+   * pair-project declines. A stack of two or more key or value slots whose child is that map is
+   * not a decline: [[selectIndexed]] compiles those slots against the mapped pairs.
+   * [[MapIntKey.inTree]] stays true for the map itself.
+   */
+  private def declinesIndexed(op: PhysicalOp): Boolean =
+    mapKeyDecline(op) || StringPairSlot.filterCoversProject(op) ||
+      SortLowering.pairProjectOnScan(op) || SortLowering.pairMapValueOnScan(op)
+
+  /** [[MapIntKey.inTree]] except a stack of two or more slots above one map. */
+  private def mapKeyDecline(op: PhysicalOp): Boolean =
+    MapIntKey.inTree(op) && !twoSlotsAboveMap(op, 0)
+
+  /** True when `depth` key or value slots sit on one [[PhysicalOp.MapKey]]. */
+  @tailrec
+  private def twoSlotsAboveMap(op: PhysicalOp, depth: Int): Boolean =
+    op match
+      case PhysicalOp.Filter(child, PhysicalOp.Slot.Key) =>
+        twoSlotsAboveMap(child, depth + 1)
+      case PhysicalOp.Filter(child, PhysicalOp.Slot.Value) =>
+        twoSlotsAboveMap(child, depth + 1)
+      case _: PhysicalOp.MapKey =>
+        depth >= 2
+      case _ =>
+        false
 
   private def selectIndexed(
       plan: Plan[_],

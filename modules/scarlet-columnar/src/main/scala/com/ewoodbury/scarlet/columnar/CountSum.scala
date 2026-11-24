@@ -42,6 +42,7 @@ object CountSum:
     HashAggregate.Int32Aggs(sum = true, count = true, min = false, max = false)
 
   private val byKeyCalls = new AtomicInteger
+  private val byKeySelectedCalls = new AtomicInteger
   private val byKeyOwnedCalls = new AtomicInteger
   private val byKeyOwnedMappedCalls = new AtomicInteger
 
@@ -98,6 +99,7 @@ object CountSum:
       parallelism: Int,
       batchSize: Int,
   ): Vector[ColumnBatch] =
+    val _ = byKeySelectedCalls.incrementAndGet()
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
@@ -342,12 +344,18 @@ object CountSum:
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     Vector.fill(numPartitions)(emptyBatch())
 
-  /** [[byKey]] entries since the last [[resetByKeyForTest]]. */
+  /** [[byKey]] entries since the last [[resetByKeyForTest]]. [[byKeySelected]] does not count. */
   private[scarlet] def byKeyCallsForTest: Int = byKeyCalls.get
 
-  /** Clears [[byKeyCallsForTest]]. */
+  /**
+   * [[byKeySelected]] entries since the last [[resetByKeyForTest]]. [[byKey]] does not count.
+   */
+  private[scarlet] def byKeySelectedCallsForTest: Int = byKeySelectedCalls.get
+
+  /** Clears [[byKeyCallsForTest]] and [[byKeySelectedCallsForTest]]. */
   private[scarlet] def resetByKeyForTest(): Unit =
     byKeyCalls.set(0)
+    byKeySelectedCalls.set(0)
 
   /**
    * [[byKeyOwned]] entries since the last [[resetOwnedForTest]]. This does not count [[byKey]].
