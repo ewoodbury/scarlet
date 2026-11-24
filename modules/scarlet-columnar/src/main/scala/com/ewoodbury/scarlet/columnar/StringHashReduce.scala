@@ -74,10 +74,10 @@ object StringHashReduce:
       batchSize: Int,
       op: (Int, Int) => Int,
   ): Vector[ColumnBatch] =
+    val _ = byKeySelectedCalls.incrementAndGet()
     require(numPartitions > 0, s"numPartitions must be positive, got $numPartitions")
     require(parallelism > 0, s"parallelism must be positive, got $parallelism")
     require(batchSize > 0, s"batch size must be positive, got $batchSize")
-    val _ = byKeyCalls.incrementAndGet()
     if (selected.isEmpty) then Vector.fill(numPartitions)(ColumnBatches.emptyStringPairs)
     else
       val combined = PartialCombine.perBatchSelected(
@@ -122,12 +122,18 @@ object StringHashReduce:
   private[scarlet] def reduce(batch: ColumnBatch, op: (Int, Int) => Int): ColumnBatch =
     reduceBatch(batch, op)
 
-  /** [[byKey]] and [[byKeySelected]] entries since the last [[resetByKeyForTest]]. */
+  /** [[byKey]] entries since the last [[resetByKeyForTest]]. [[byKeySelected]] does not count. */
   private[scarlet] def byKeyCallsForTest: Int = byKeyCalls.get
 
-  /** Clears [[byKeyCallsForTest]]. */
+  /**
+   * [[byKeySelected]] entries since the last [[resetByKeyForTest]]. [[byKey]] does not count.
+   */
+  private[scarlet] def byKeySelectedCallsForTest: Int = byKeySelectedCalls.get
+
+  /** Clears [[byKeyCallsForTest]] and [[byKeySelectedCallsForTest]]. */
   private[scarlet] def resetByKeyForTest(): Unit =
     byKeyCalls.set(0)
+    byKeySelectedCalls.set(0)
 
   /**
    * Exchange combined partials and reduce each bucket. [[byKey]] is not called. An empty input is
@@ -184,6 +190,7 @@ object StringHashReduce:
     table.compact(keys.dictionary)
 
   private val byKeyCalls = new AtomicInteger
+  private val byKeySelectedCalls = new AtomicInteger
 
   private def utf8At(batch: ColumnBatch, ordinal: Int): DictUtf8Column =
     ColumnKernel.asUtf8(ColumnKernel.columnAt(batch, ordinal), ordinal)

@@ -709,8 +709,9 @@ private[execution] object ReduceArms:
    * the adapter. A null projected key is dropped and the key predicate is not called. A present
    * projected key and int value are inserted into [[StringHashReduce]]. A null projected value
    * throws [[ColumnarFallback]]. `""` is present. `"é"` and `"e\u0301"` stay distinct. A second
-   * slot, a whole-row filter, a second map, and a bare project stay on the published interpret
-   * path, which calls [[StringHashReduce.byKey]].
+   * slot above that project does not lower. A whole-row filter, a second map, and a bare project
+   * stay on the published interpret path, which calls [[StringHashReduce.byKey]]. Two or more
+   * slots above one string `mapValues` call [[StringHashReduce.byKeySelected]].
    */
   def stringByKey[V](
       source: Plan[_],

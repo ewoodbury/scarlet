@@ -221,6 +221,11 @@ class TestAdmissionLedger extends AnyFlatSpec with BeforeAndAfterEach with Colum
         (HashReduce.byKeySelectedCallsForTest > 0 && HashReduce.byKeyCallsForTest == 0),
       "CountSum.byKeySelected" ->
         (CountSum.byKeySelectedCallsForTest > 0 && CountSum.byKeyCallsForTest == 0),
+      "StringHashCount.byKeySelected" ->
+        (StringHashCount.byKeySelectedCallsForTest > 0 && StringHashCount.byKeyCallsForTest == 0),
+      "StringHashReduce.byKeySelected" ->
+        (StringHashReduce.byKeySelectedCallsForTest > 0 &&
+          StringHashReduce.byKeyCallsForTest == 0),
     ).collect { case (name, moved) if moved => name }
 
   private def plainCalls: List[String] =
