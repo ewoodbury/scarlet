@@ -410,7 +410,8 @@ class TestProjectedSlotReduce extends AnyFlatSpec with Matchers with BeforeAndAf
     MapIntKey.publishedForTest shouldBe 0
     HashReduce.byKeyCallsForTest shouldBe 0
     dropped shouldBe Map(8 -> 4)
-    // The row reduce keeps a lone null value. This arm drops it, as the unfiltered map reduce does.
+    /* The row reduce keeps a lone null value. This arm drops it, as the unfiltered map reduce
+     * does. */
     mapCalls.set(0)
     keyCalls.set(0)
     val _ = row(nullValues.collect())
@@ -478,7 +479,8 @@ class TestProjectedSlotReduce extends AnyFlatSpec with Matchers with BeforeAndAf
       .filterKeys((key: Int) => key > 2)
       .filterValues((value: Int) => value >= 20)
       .reduceByKey[Int, Int](_ + _)
-    ColumnarPlanner.lower(stacked.plan) shouldBe None
+    shape(stacked) shouldBe
+      "HashAggregate(Exchange(FilterValue(FilterKey(MapKey(Scan)))))"
     stacked.collect().toMap shouldBe row(stacked.collect().toMap)
 
     val whole = pairs()

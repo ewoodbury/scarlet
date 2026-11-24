@@ -21,9 +21,10 @@ import com.ewoodbury.scarlet.execution.schema.ColumnBinding.{
  *
  * When the binder's tag is the tag [[Describe.tag]] records for today's root, the result is that
  * root. When the binder returns [[scala.None]] and today's lowering returns a root, that root is
- * kept. A tag the binder would add while today's lowering returns [[scala.None]] is not built.
- * [[CountByKeyLowering]] still runs, so its join arm stays on that path. [[JoinProbeAggregate]]
- * stays in [[ColumnarPlanner]] ahead of [[reduce]].
+ * kept. When today's lowering returns [[scala.None]], [[AggregateAdmission]] may build a root for
+ * a slot stack over one map. Every other empty plan stays empty. [[CountByKeyLowering]] still
+ * runs, so its join arm stays on that path. [[JoinProbeAggregate]] stays in [[ColumnarPlanner]]
+ * ahead of [[reduce]].
  */
 private[execution] object AggregateBinding:
 
@@ -77,23 +78,32 @@ private[execution] object AggregateBinding:
   ): Option[KernelChoice] =
     bindable(source, child).flatMap(peeled => ask(peeled, operator, reducer))
 
+  /** Tag for an already lowered child. Does not build a [[PhysicalOp]]. */
+  private[execution] def choiceOf(
+      op: PhysicalOp,
+      operator: Operator,
+      reducer: ReducerWitness,
+  ): Option[KernelChoice] = ask(op, operator, reducer)
+
   private def kept(
       source: Plan[_],
       lowerChild: Plan[_] => Option[PhysicalOp],
       operator: Operator,
       reducer: ReducerWitness,
   )(todayOf: PhysicalOp => Option[PhysicalOp]): Option[PhysicalOp] =
-    lowerChild(source) match
+    val today = lowerChild(source) match
       case None => None
       case Some(child) =>
-        val today = todayOf(child)
+        val existing = todayOf(child)
         bindable(source, child) match
-          case None => today
-          case Some(peeled) => reconcile(ask(peeled, operator, reducer), today)
+          case None => existing
+          case Some(peeled) => reconcile(ask(peeled, operator, reducer), existing)
+    today.orElse(AggregateAdmission.admit(source, lowerChild, operator, reducer))
 
   /**
    * Today's root when the binder agrees or declines. A disagreeing tag keeps today's root too, so
-   * a plan that already lowers is not dropped. [[scala.None]] from today is not replaced.
+   * a plan that already lowers is not dropped. [[scala.None]] stays empty here.
+   * [[AggregateAdmission]] is the only later replacement.
    */
   private def reconcile(
       bound: Option[KernelChoice],

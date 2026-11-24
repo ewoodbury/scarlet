@@ -134,14 +134,22 @@ class TestAggregateBinding extends AnyFlatSpec with Matchers:
     Describe.tag(root) shouldBe KernelChoice.JoinProbeSum
   }
 
-  it should "not admit a second slot above mapIntKey" in {
+  it should "admit a slot stack above mapIntKey and leave the filter plan empty" in {
     val mapped = Plan.MapIntKeyOp(pairs, (key: Int) => key + 1)
     val once = Plan.FilterKeysOp(mapped, (key: Int) => key > 0)
     val twice = Plan.FilterKeysOp(once, (key: Int) => key < 10)
-    ColumnarPlanner.lower(Plan.CountByKeyOp(twice)) shouldBe None
-    ColumnarPlanner.lower(
+    ColumnarPlanner.lower(twice) shouldBe None
+    val counted = lowered(Plan.CountByKeyOp(twice))
+    counted.shape shouldBe "CountByKey(Exchange(FilterKey(FilterKey(MapKey(Scan)))))"
+    Describe.tag(counted) shouldBe KernelChoice.CountByKey
+    val reduced = lowered(
       Plan.ReduceByKeyOp(twice, (left: Int, right: Int) => left + right),
-    ) shouldBe None
+    )
+    reduced.shape shouldBe "HashAggregate(Exchange(FilterKey(FilterKey(MapKey(Scan)))))"
+    Describe.tag(reduced) shouldBe KernelChoice.IntHashAggregate
+    val summed = lowered(Plan.CountSumByKeyOp(twice))
+    summed.shape shouldBe "CountSum(Exchange(FilterKey(FilterKey(MapKey(Scan)))))"
+    Describe.tag(summed) shouldBe KernelChoice.CountSum
   }
 
   "countSumByKey" should "keep today's int root" in {

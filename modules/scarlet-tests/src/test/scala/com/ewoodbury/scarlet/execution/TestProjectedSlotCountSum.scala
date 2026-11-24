@@ -481,7 +481,8 @@ class TestProjectedSlotCountSum extends AnyFlatSpec with Matchers with BeforeAnd
       .filterKeys((key: Int) => key > 2)
       .filterValues((value: Int) => value >= 20)
       .countSumByKey
-    ColumnarPlanner.lower(stacked.plan) shouldBe None
+    shape(stacked) shouldBe
+      "CountSum(Exchange(FilterValue(FilterKey(MapKey(Scan)))))"
     stacked.collect().map { case (key, count, sum) => key -> (count, sum) }.toMap shouldBe
       row(groups(stacked))
 

@@ -99,6 +99,84 @@ trait ColumnarContractFixture extends Matchers:
     }
 
   /**
+   * Slot stacks the aggregate parents admit. Two key or value slots sit on one `mapIntKey`, or on
+   * one same-type `mapValues` of a long or string project. One slot above `mapIntKey` already
+   * lowers and is not in this list.
+   */
+  protected def aggregateAdmissionCases: Seq[AcceptedCase] =
+    val layout = columnarLayout
+    val strings = Layout.StringPair(ScarletConf.get.columnarBatchSize)
+    val mapped = Plan.MapIntKeyOp(pairSource, (key: Int) => key + 1)
+    val intStack = Plan.FilterValuesOp(
+      Plan.FilterKeysOp(mapped, (key: Int) => key > 0),
+      (value: Int) => value > 0,
+    )
+    val longProjected = Plan.MapOp(
+      longPairSource,
+      (pair: (Long, Long)) => (pair._1 + 1L, pair._2),
+    )
+    val longMapped = Plan.MapValuesOp(longProjected, (value: Long) => value + 1L)
+    val longStack = Plan.FilterValuesOp(
+      Plan.FilterKeysOp(longMapped, (key: Long) => key > 0L),
+      (value: Long) => value > 0L,
+    )
+    val stringProjected = Plan.MapOp(
+      stringKeySource,
+      (pair: (String, Int)) => (pair._1, pair._2 + 1),
+    )
+    val stringMapped = Plan.MapValuesOp(stringProjected, (value: Int) => value + 1)
+    val stringStack = Plan.FilterValuesOp(
+      Plan.FilterKeysOp(stringMapped, (key: String) => key.nonEmpty),
+      (value: Int) => value > 0,
+    )
+    val intChild = "FilterValue(FilterKey(MapKey(Scan)))"
+    val mappedChild = "FilterValue(FilterKey(MapValue(Project(Scan))))"
+    Seq(
+      AcceptedCase(
+        "countByKey of a slot stack above mapIntKey",
+        Plan.CountByKeyOp(intStack),
+        hashedInfo(layout),
+        Some(s"CountByKey(Exchange($intChild))"),
+      ),
+      AcceptedCase(
+        "reduceByKey of a slot stack above mapIntKey",
+        Plan.ReduceByKeyOp(intStack, (left: Int, right: Int) => left + right),
+        hashedInfo(layout),
+        Some(s"HashAggregate(Exchange($intChild))"),
+      ),
+      AcceptedCase(
+        "countSumByKey of a slot stack above mapIntKey",
+        Plan.CountSumByKeyOp(intStack),
+        hashedInfo(layout),
+        Some(s"CountSum(Exchange($intChild))"),
+      ),
+      AcceptedCase(
+        "countByKey of a slot stack above long mapValues",
+        Plan.CountByKeyOp(longStack),
+        hashedInfo(layout),
+        Some(s"CountByKey(Exchange($mappedChild))"),
+      ),
+      AcceptedCase(
+        "reduceByKey of a slot stack above long mapValues",
+        Plan.ReduceByKeyOp(longStack, (left: Long, right: Long) => left + right),
+        hashedInfo(layout),
+        Some(s"LongHashAggregate(Exchange($mappedChild))"),
+      ),
+      AcceptedCase(
+        "countByKey of a slot stack above string mapValues",
+        Plan.CountByKeyOp(stringStack),
+        hashedInfo(strings),
+        Some(s"CountByKey(Exchange($mappedChild))"),
+      ),
+      AcceptedCase(
+        "reduceByKey of a slot stack above string mapValues",
+        Plan.ReduceByKeyOp(stringStack, (left: Int, right: Int) => left + right),
+        hashedInfo(strings),
+        Some(s"StringHashAggregate(Exchange($mappedChild))"),
+      ),
+    )
+
+  /**
    * A boolean filter, then a project. The project is the second element step. `lower` refuses the
    * chain, so `partitioning` and `tryRun` are empty and do not call the mapper. The row path runs
    * it once for each element the filter keeps.
