@@ -478,9 +478,11 @@ private[execution] object ReduceArms:
     val op = reduceFunc.asInstanceOf[(Long, Long) => Long]
     // One long slot above a long-pair project, and the project itself, each reduce from the input
     // morsels and do not publish. A long key, value, or row stack folds the predicates into the
-    // partial table. The index path remains for a stack the fold does not admit. The `None` path
-    // is the only one that interprets a child the fold did not already scan. The same plan
-    // function keeps one adapter, so a retained partial table accepts the next collect.
+    // partial table. Two or more key or value slots above one long `mapValues` are not that fold:
+    // they call [[LongHashReduce.byKeySelected]]. The index path remains for a stack the fold does
+    // not admit. The `None` path is the only one that interprets a child the fold did not already
+    // scan. The same plan function keeps one adapter, so a retained partial table accepts the next
+    // collect.
     val binOp = longBinOp(op)
     val width = ColumnarPlanner.shuffleWidth
     val workers = ColumnarPlanner.parallelism
@@ -542,8 +544,10 @@ private[execution] object ReduceArms:
 
   /**
    * Scan the child under the filter stack once and fold `steps` into the partial table. `None`
-   * when the stack is not a long key, value, or row selection. The caller then keeps the index
-   * path, which interprets that child itself. An owned long-pair scan is not encoded first.
+   * when the stack is not a long key, value, or row selection, and when two or more key or value
+   * slots sit on one [[PhysicalOp.MapValue]]. That map stack is [[LongHashReduce.byKeySelected]].
+   * The caller then keeps the index path, which interprets that child itself. An owned long-pair
+   * scan is not encoded first.
    */
   private def foldLong(
       source: Plan[_],
@@ -556,15 +560,17 @@ private[execution] object ReduceArms:
       workers: Int,
       batchSize: Int,
   ): Option[Vector[ColumnBatch]] =
-    longSteps(source, child, ordinals).map { steps =>
-      val (underPlan, underOp) = PredicatePlan.childOf(source, child)
-      val batches = sharedLongPairs(underPlan, underOp, selectedPartition, ordinals).getOrElse(
-        longPairsOf(
-          interpretAt(underPlan, underOp, selectedPartition, preserveAbsence, ordinals),
-        ),
-      )
-      FoldedLongReduce.reduce(batches, steps, width, workers, batchSize, binOp)
-    }
+    if (FilterChain.twoOrMoreSlotsAboveMapValue(child)) then None
+    else
+      longSteps(source, child, ordinals).map { steps =>
+        val (underPlan, underOp) = PredicatePlan.childOf(source, child)
+        val batches = sharedLongPairs(underPlan, underOp, selectedPartition, ordinals).getOrElse(
+          longPairsOf(
+            interpretAt(underPlan, underOp, selectedPartition, preserveAbsence, ordinals),
+          ),
+        )
+        FoldedLongReduce.reduce(batches, steps, width, workers, batchSize, binOp)
+      }
 
   /**
    * Owned long-pair partitions for an in-place fold. `None` when the child is not that scan, a

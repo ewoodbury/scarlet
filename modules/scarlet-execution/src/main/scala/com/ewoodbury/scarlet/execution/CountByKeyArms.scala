@@ -27,23 +27,24 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * survivor index, and the slot is applied to the projected key. A null projected value still
  * counts. A second slot, a whole-row filter above the project, and a second map stay interpreted.
  * [[LongHashCount.byKey]] counts a long scan or filter and does not see that project or that slot.
- * One string-pair [[PhysicalOp.Project]] on a scan or a string-pair filter stack is counted from
- * that project's input. The adapter runs on every row, including a null key, and only a present
- * projected key is stored. Each partial owns its dictionary. The pair batch is not published, and
- * [[StringHashCount.byKey]] is not called. The function is not inspected. A null projected value
- * still counts. One key or value slot above that project is counted from the project's input. The
- * adapter runs on every row, including a null key. The slot is applied to the projected pair. A
- * null projected key is dropped and the key predicate is not called. A null projected value still
- * counts when the slot keeps the key, and a value predicate is not called on it. The pair batch is
- * not published, and [[StringHashCount.byKey]] is not called. A second map stays on the published
- * path. A second slot above the project does not lower. Two or more slots above one string
- * `mapValues` call [[StringHashCount.byKeySelected]]. No filters, a whole-row or string step, a
- * non-int slot, and a null component the encoder throws on stay on the old path. That path
- * partial-counts survivor ids, including one row, key, or value filter. A scan and a non-pair
- * child stay on the dense count. The value column is not read on that path, so a null value still
- * counts. A long count publishes [[Columns.LongCounts]]. A string count publishes
- * [[Columns.StringPairs]]. The stored count is an `Int`. A null string key is dropped and `""` is
- * kept.
+ * Two or more key or value slots above one long `mapValues` call [[LongHashCount.byKeySelected]].
+ * [[LongHashCount.byKey]] does not run for that stack. One string-pair [[PhysicalOp.Project]] on a
+ * scan or a string-pair filter stack is counted from that project's input. The adapter runs on
+ * every row, including a null key, and only a present projected key is stored. Each partial owns
+ * its dictionary. The pair batch is not published, and [[StringHashCount.byKey]] is not called.
+ * The function is not inspected. A null projected value still counts. One key or value slot above
+ * that project is counted from the project's input. The adapter runs on every row, including a
+ * null key. The slot is applied to the projected pair. A null projected key is dropped and the key
+ * predicate is not called. A null projected value still counts when the slot keeps the key, and a
+ * value predicate is not called on it. The pair batch is not published, and
+ * [[StringHashCount.byKey]] is not called. A second map stays on the published path. A second slot
+ * above the project does not lower. Two or more slots above one string `mapValues` call
+ * [[StringHashCount.byKeySelected]]. No filters, a whole-row or string step, a non-int slot, and a
+ * null component the encoder throws on stay on the old path. That path partial-counts survivor
+ * ids, including one row, key, or value filter. A scan and a non-pair child stay on the dense
+ * count. The value column is not read on that path, so a null value still counts. A long count
+ * publishes [[Columns.LongCounts]]. A string count publishes [[Columns.StringPairs]]. The stored
+ * count is an `Int`. A null string key is dropped and `""` is kept.
  */
 private[execution] object CountByKeyArms:
 

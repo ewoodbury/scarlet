@@ -7,8 +7,8 @@
 countByKey of a slot stack above mapIntKey	CountByKey	byKeySelected
 reduceByKey of a slot stack above mapIntKey	IntHashAggregate	byKeySelected
 countSumByKey of a slot stack above mapIntKey	CountSum	byKeySelected
-countByKey of a slot stack above long mapValues	CountByKey
-reduceByKey of a slot stack above long mapValues	LongHashAggregate
+countByKey of a slot stack above long mapValues	CountByKey	byKeySelected
+reduceByKey of a slot stack above long mapValues	LongHashAggregate	byKeySelected
 countByKey of a slot stack above string mapValues	CountByKey	byKeySelected
 reduceByKey of a slot stack above string mapValues	StringHashAggregate	byKeySelected
 countByKey of an int hash join	CountThroughProbe
