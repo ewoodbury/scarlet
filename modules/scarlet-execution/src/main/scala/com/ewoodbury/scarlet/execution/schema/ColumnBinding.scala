@@ -27,8 +27,9 @@ import com.ewoodbury.scarlet.execution.PhysicalOp
  * An int inner join is three [[ColumnType.Int32]] columns, `(key, left, right)`. `countByKey` on
  * that layout is [[KernelChoice.CountThroughProbe]]. The join is not [[Layout.AssumedIntLong]].
  * `reduceByKey` on those three columns is [[scala.None]], including when the witness adds longs.
- * [[Layout.AssumedIntLong]] is the project above the join, and it is
- * [[KernelChoice.IntLongProjectSum]] only for [[ReducerWitness.AddsLongs]].
+ * [[Layout.AssumedIntLong]] is the project above the join. `countByKey` of it is
+ * [[KernelChoice.CountByKey]]. It is [[KernelChoice.IntLongProjectSum]] only for
+ * [[ReducerWitness.AddsLongs]].
  */
 private[execution] object ColumnBinding:
 
@@ -164,8 +165,8 @@ private[execution] object ColumnBinding:
     case NullPolicy.Present | NullPolicy.Nullable => false
 
   /**
-   * Pair layouts the kernels already run, long addition on [[Layout.AssumedIntLong]], or
-   * [[KernelChoice.CountThroughProbe]] on an int inner join.
+   * Pair layouts the kernels already run, `countByKey` or long addition on
+   * [[Layout.AssumedIntLong]], or [[KernelChoice.CountThroughProbe]] on an int inner join.
    *
    * The join arm is three columns. It is not the two-column project above that join.
    */
@@ -237,11 +238,20 @@ private[execution] object ColumnBinding:
     case _ =>
       false
 
-  /** Triple-project `[Int32, Int64]`. Only long addition has a kernel. */
+  /**
+   * Triple-project `[Int32, Int64]`.
+   *
+   * `countByKey` is [[KernelChoice.CountByKey]], the class that project already publishes.
+   * `reduceByKey` is [[KernelChoice.IntLongProjectSum]] only when the witness adds longs. This
+   * vector does not show a hinted join the lowering refused, so [[scala.None]] here is not that
+   * refusal.
+   */
   private def intLong(operator: Operator, reducer: ReducerWitness): Option[KernelChoice] =
     (operator, reducer) match
       case (Operator.ReduceByKey, ReducerWitness.AddsLongs) =>
         Some(KernelChoice.IntLongProjectSum)
+      case (Operator.CountByKey, _) =>
+        Some(KernelChoice.CountByKey)
       case _ =>
         None
 

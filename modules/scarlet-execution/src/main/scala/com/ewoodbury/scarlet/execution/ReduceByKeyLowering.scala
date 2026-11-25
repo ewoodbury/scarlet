@@ -1,19 +1,23 @@
 package com.ewoodbury.scarlet.execution
 
+import com.ewoodbury.scarlet.execution.schema.ColumnBinding.Operator
+import com.ewoodbury.scarlet.execution.schema.{ColumnBinding, KernelChoice}
+
 /**
- * Lowers `reduceByKey` for the pair kinds the columnar kernels accept.
+ * Lowers `reduceByKey` for the pair layouts the columnar kernels accept.
  *
- * An `(Int, Int)` child is [[PhysicalOp.HashAggregate]]. A `(Long, Long)` child is
- * [[PhysicalOp.LongHashAggregate]]. A `(String, Int)` child is [[PhysicalOp.StringHashAggregate]].
- * A triple project reports `[Int32, Int64]` and is also [[PhysicalOp.HashAggregate]]. The exchange
- * always wraps that project: the map may replace the join key. An int inner sort-merge or
- * broadcast under that project is rewritten to a hash join of two exchanges. Those nodes are not
- * emitted under the aggregate. Collect of the join itself is unchanged. One filter of the triple
- * row, the triple key, or either triple value, between the project and that join, stays in place
- * and the join under it is rewritten the same way. A second filter stays on the row path. Every
- * other kind stays on the row path. The exchange is the child of the aggregate, and the kernel
- * performs the shuffle. A null string value is not this kind: classification keeps that source on
- * the row path.
+ * The binder tag picks the class. [[KernelChoice.IntHashAggregate]] is
+ * [[PhysicalOp.HashAggregate]]. [[KernelChoice.LongHashAggregate]] is
+ * [[PhysicalOp.LongHashAggregate]]. [[KernelChoice.StringHashAggregate]] is
+ * [[PhysicalOp.StringHashAggregate]]. A triple project reports `[Int32, Int64]` and is also
+ * [[PhysicalOp.HashAggregate]]. The exchange always wraps that project: the map may replace the
+ * join key. An int inner sort-merge or broadcast under that project is rewritten to a hash join of
+ * two exchanges. Those nodes are not emitted under the aggregate. Collect of the join itself is
+ * unchanged. One filter of the triple row, the triple key, or either triple value, between the
+ * project and that join, stays in place and the join under it is rewritten the same way. A second
+ * filter stays on the row path. Every other kind stays on the row path. The exchange is the child
+ * of the aggregate, and the kernel performs the shuffle. A null string value is not this kind:
+ * classification keeps that source on the row path.
  */
 private[execution] object ReduceByKeyLowering:
 
@@ -21,23 +25,28 @@ private[execution] object ReduceByKeyLowering:
     hashPartitionedProject(child) match
       case Some(projected) => Some(aggregated(projected))
       case None if intLongProject(child) => Some(aggregated(child))
-      case None =>
-        child.kind match
-          case PhysicalOp.Kind.Pairs =>
-            Some(PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)))
-          case PhysicalOp.Kind.LongPairs =>
-            Some(PhysicalOp.LongHashAggregate(PhysicalOp.Exchange(child)))
-          case PhysicalOp.Kind.StringPairs =>
-            Some(PhysicalOp.StringHashAggregate(PhysicalOp.Exchange(child)))
-          case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
-              PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.Strings |
-              PhysicalOp.Kind.Bools | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.LongCounts |
-              PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
-              PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
-              PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
-              PhysicalOp.Kind.IntLongSums =>
-            LoweringTrace.note("ReduceByKeyOp", child.kind, "ReduceByKeyLowering")
-            None
+      case None => reducedFromTag(child)
+
+  /**
+   * The binder tag picks the hash-aggregate class.
+   *
+   * Pair aggregates do not read the reducer, so this asks with
+   * [[com.ewoodbury.scarlet.execution.schema.ColumnBinding.ReducerWitness.NotApplicable]].
+   * [[intLongProject]] owns a triple project. That layout is not one of these three tags when the
+   * witness is absent.
+   */
+  private def reducedFromTag(child: PhysicalOp): Option[PhysicalOp] =
+    val exchanged = PhysicalOp.Exchange(child)
+    ColumnBinding.asked(child, Operator.ReduceByKey) match
+      case Some(KernelChoice.IntHashAggregate) =>
+        Some(PhysicalOp.HashAggregate(exchanged))
+      case Some(KernelChoice.LongHashAggregate) =>
+        Some(PhysicalOp.LongHashAggregate(exchanged))
+      case Some(KernelChoice.StringHashAggregate) =>
+        Some(PhysicalOp.StringHashAggregate(exchanged))
+      case _ =>
+        LoweringTrace.note("ReduceByKeyOp", child.kind, "ReduceByKeyLowering")
+        None
 
   private def aggregated(child: PhysicalOp): PhysicalOp =
     PhysicalOp.HashAggregate(PhysicalOp.Exchange(child))
