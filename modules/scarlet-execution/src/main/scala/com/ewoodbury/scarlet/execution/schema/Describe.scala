@@ -95,6 +95,7 @@ private[execution] object Describe:
     case _: PhysicalOp.Project => KernelChoice.Project
     case _: PhysicalOp.Column => KernelChoice.Column
     case _: PhysicalOp.MapValue => KernelChoice.MapValue
+    case _: PhysicalOp.IntLongMapValue => KernelChoice.IntLongMapValue
     case _: PhysicalOp.MapKey => KernelChoice.MapKey
     case _: PhysicalOp.Pipeline => KernelChoice.Pipeline
     case _: PhysicalOp.Union => KernelChoice.Union

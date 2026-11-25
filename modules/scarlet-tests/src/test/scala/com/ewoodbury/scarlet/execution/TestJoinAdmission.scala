@@ -133,6 +133,7 @@ class TestJoinAdmission extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     Bound.side(bound) shouldBe Side.Outer
     val columns = bound.output match
       case Output.Columns(found) => found
+      case Output.IntLongPairs(_) => fail("int-long map values are not join columns")
       case Output.Opaque(reason) => fail(reason)
     columns.exists(absent) shouldBe true
     ColumnBinding.choose(

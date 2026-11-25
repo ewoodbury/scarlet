@@ -15,7 +15,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * The witness is an int-pair scan, a key slot filter, `mapIntKey`, then `reduceByKey`. Its tag is
  * [[KernelChoice.IntHashAggregate]] and its checksum matches the row path. The long and string
  * stacks name their tags and publish a batch. A checksum alone can match after a row rerun.
- * `mapValues` to `Long` does not lower.
+ * `mapValues` to `Long` lowers. A reducer that does not add longs stays empty. A filter stack and
+ * `countByKey` of that map stay empty.
  */
 class TestAggregateAdmission extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -45,19 +46,28 @@ class TestAggregateAdmission extends AnyFlatSpec with Matchers with BeforeAndAft
     println(s"witness checksum $checksum tag ${described.choice.tag}")
   }
 
-  "mapValues to Long" should "stay on the row path" in {
-    val pairs = DistCollection.ofIntPairs(Array(1, 2), Array(10, 20), 2).plan
-    val widened = Plan.MapValuesOp(pairs, (value: Int) => value.toLong)
+  "mapValues to Long" should "publish the widened pairs and sum long addition" in {
+    val pairs = DistCollection.ofIntPairs(Array(1, 2, 1), Array(10, 20, 5), 2)
+    val widened = pairs.mapValues[Int, Int, Long]((value: Int) => value.toLong)
     val stacked = Plan.FilterKeysOp(
-      Plan.FilterValuesOp(widened, (value: Long) => value > 0L),
+      Plan.FilterValuesOp(widened.plan, (value: Long) => value > 0L),
       (key: Int) => key > 0,
     )
     val add = (left: Long, right: Long) => left + right
-    ColumnarPlanner.lower(widened) shouldBe None
+    val keep = (left: Long, _: Long) => left
+    published(widened.plan, KernelChoice.IntLongMapValue, "IntLongMapValue(Scan)")
+    widened.collect().toList shouldBe row(widened.collect().toList)
+    val reduced = widened.reduceByKey[Int, Long](add)
+    published(
+      reduced.plan,
+      KernelChoice.IntLongProjectSum,
+      "HashAggregate(Exchange(IntLongMapValue(Scan)))",
+    )
+    reduced.collect().toMap shouldBe row(reduced.collect().toMap)
     ColumnarPlanner.lower(stacked) shouldBe None
-    ColumnarPlanner.lower(Plan.CountByKeyOp(widened)) shouldBe None
+    ColumnarPlanner.lower(Plan.CountByKeyOp(widened.plan)) shouldBe None
     ColumnarPlanner.lower(Plan.CountByKeyOp(stacked)) shouldBe None
-    ColumnarPlanner.lower(Plan.ReduceByKeyOp(widened, add)) shouldBe None
+    ColumnarPlanner.lower(Plan.ReduceByKeyOp(widened.plan, keep)) shouldBe None
     ColumnarPlanner.lower(Plan.ReduceByKeyOp(stacked, add)) shouldBe None
   }
 

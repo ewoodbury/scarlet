@@ -20,14 +20,16 @@ import com.ewoodbury.scarlet.execution.PhysicalOp
  * before it builds a filter. [[com.ewoodbury.scarlet.execution.ProjectBinding]] asks it before it
  * builds a same-type element project or pipeline.
  * [[com.ewoodbury.scarlet.execution.MapValueBinding]] asks it before it builds a same-type
- * `mapValues`. The interpreter does not call it.
+ * `mapValues`. [[com.ewoodbury.scarlet.execution.IntLongMapBinding]] asks it before it builds an
+ * int-to-long `mapValues`. The interpreter does not call it.
  *
  * [[NullAdmission.Refused]] means [[com.ewoodbury.scarlet.execution.ScanLowering]] would refuse
  * the source for nulls. The caller passes that policy. Nothing here reads a schema or classifies
  * rows. [[Side.Outer]] and [[NullPolicy.Absence]] are an outer join, and these aggregates refuse
  * it before a tag is chosen. A generic tuple map is not accepted. An `Int => Long` `mapValues`
- * does not ask: the witness is not `Int => Int` or `Long => Long`. [[Layout.AssumedIntLong]] with
- * [[Operator.MapValues]] is [[scala.None]], including when the reducer adds longs.
+ * does not ask [[Operator.MapValues]]. [[Operator.IntLongMapValue]] is that widening on an int
+ * pair. [[Layout.AssumedIntLong]] with either operator is [[scala.None]], including when the
+ * reducer adds longs.
  *
  * An int inner join is three [[ColumnType.Int32]] columns, `(key, left, right)`. `countByKey` on
  * that layout is [[KernelChoice.CountThroughProbe]]. The join is not [[Layout.AssumedIntLong]].
@@ -54,7 +56,9 @@ private[execution] object ColumnBinding:
    *
    * [[Operator.TupleMap]] is a generic tuple `map`. It is not accepted. [[Operator.MapValues]] is
    * a same-type `mapValues`. Int, long, and string pairs tag [[KernelChoice.MapValue]].
-   * [[Layout.AssumedIntLong]] is [[scala.None]]. The four sort cases are the typed sorts.
+   * [[Operator.IntLongMapValue]] widens an int value to long and tags
+   * [[KernelChoice.IntLongMapValue]] on an int pair. [[Layout.AssumedIntLong]] is [[scala.None]]
+   * for both map operators. The four sort cases are the typed sorts.
    * [[com.ewoodbury.scarlet.execution.SortLowering]] asks before it builds one.
    * [[Operator.GroupByKey]], [[Operator.Distinct]], [[Operator.Keys]], and [[Operator.Values]] are
    * the group family. [[Operator.Keys]] and [[Operator.Values]] both tag [[KernelChoice.Column]].
@@ -68,7 +72,7 @@ private[execution] object ColumnBinding:
    * column, a pair, and [[Layout.AssumedIntLong]] are [[scala.None]].
    */
   enum Operator:
-    case CountByKey, ReduceByKey, CountSumByKey, MapValues, TupleMap
+    case CountByKey, ReduceByKey, CountSumByKey, MapValues, IntLongMapValue, TupleMap
     case SortByIntKey, SortByIntValueDesc, SortByLongKey, SortByStringKey
     case GroupByKey, Distinct, Keys, Values
     case Filter, FilterKeys, FilterValues
@@ -125,7 +129,10 @@ private[execution] object ColumnBinding:
   /**
    * [[choose]] on the columns of `child`.
    *
-   * An opaque child is [[scala.None]] and does not call [[choose]]. The reducer witness is not an
+   * An opaque child is [[scala.None]] and does not call [[choose]]. [[Output.IntLongPairs]] is
+   * [[scala.None]] too, and does not call [[choose]]: those columns equal
+   * [[Layout.AssumedIntLong]] when both are nullable, and feeding them here would tag a count or a
+   * project sum. [[AggregateBinding]] asks that layout on its own. The reducer witness is not an
    * input for `groupByKey`, `distinct`, `keys`, or `values`.
    */
   private[execution] def asked(child: PhysicalOp, operator: Operator): Option[KernelChoice] =
@@ -139,7 +146,7 @@ private[execution] object ColumnBinding:
           Bound.nulls(bound),
           Bound.side(bound),
         )
-      case Output.Opaque(_) => None
+      case Output.IntLongPairs(_) | Output.Opaque(_) => None
 
   /**
    * Parents that have no tag, an outer side, or a null policy the kernels do not run.
@@ -163,7 +170,7 @@ private[execution] object ColumnBinding:
           Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
           Operator.SortByStringKey | Operator.GroupByKey | Operator.Distinct | Operator.Keys |
           Operator.Values | Operator.FilterKeys | Operator.FilterValues | Operator.Project |
-          Operator.Pipeline | Operator.MapValues =>
+          Operator.Pipeline | Operator.MapValues | Operator.IntLongMapValue =>
         outer(side) || refused(nulls) || layout.exists(absent)
 
   private def refused(nulls: NullAdmission): Boolean = nulls match
@@ -208,10 +215,10 @@ private[execution] object ColumnBinding:
   private def filterParent(operator: Operator): Boolean = operator match
     case Operator.Filter | Operator.FilterKeys | Operator.FilterValues => true
     case Operator.CountByKey | Operator.ReduceByKey | Operator.CountSumByKey | Operator.MapValues |
-        Operator.TupleMap | Operator.SortByIntKey | Operator.SortByIntValueDesc |
-        Operator.SortByLongKey | Operator.SortByStringKey | Operator.GroupByKey |
-        Operator.Distinct | Operator.Keys | Operator.Values | Operator.Project |
-        Operator.Pipeline | Operator.Union =>
+        Operator.IntLongMapValue | Operator.TupleMap | Operator.SortByIntKey |
+        Operator.SortByIntValueDesc | Operator.SortByLongKey | Operator.SortByStringKey |
+        Operator.GroupByKey | Operator.Distinct | Operator.Keys | Operator.Values |
+        Operator.Project | Operator.Pipeline | Operator.Union =>
       false
 
   /**
@@ -298,16 +305,17 @@ private[execution] object ColumnBinding:
   /** `countByKey` of the three int columns. `reduceByKey` of a join is not a project sum. */
   private def countThroughProbe(operator: Operator): Option[KernelChoice] = operator match
     case Operator.CountByKey => Some(KernelChoice.CountThroughProbe)
-    case Operator.ReduceByKey | Operator.CountSumByKey | Operator.MapValues | Operator.TupleMap |
-        Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
-        Operator.SortByStringKey | Operator.GroupByKey | Operator.Distinct | Operator.Keys |
-        Operator.Values | Operator.Filter | Operator.FilterKeys | Operator.FilterValues |
-        Operator.Project | Operator.Pipeline | Operator.Union =>
+    case Operator.ReduceByKey | Operator.CountSumByKey | Operator.MapValues |
+        Operator.IntLongMapValue | Operator.TupleMap | Operator.SortByIntKey |
+        Operator.SortByIntValueDesc | Operator.SortByLongKey | Operator.SortByStringKey |
+        Operator.GroupByKey | Operator.Distinct | Operator.Keys | Operator.Values |
+        Operator.Filter | Operator.FilterKeys | Operator.FilterValues | Operator.Project |
+        Operator.Pipeline | Operator.Union =>
       None
 
   private def assumedIntLong(layout: Vector[ColumnLayout]): Boolean = Layout.AssumedIntLong match
     case Output.Columns(columns) => sameColumns(layout, columns)
-    case Output.Opaque(_) => false
+    case Output.IntLongPairs(_) | Output.Opaque(_) => false
 
   private def sameColumns(left: Vector[ColumnLayout], right: Vector[ColumnLayout]): Boolean =
     (left, right) match
@@ -412,5 +420,7 @@ private[execution] object ColumnBinding:
         Some(KernelChoice.MapValue)
       case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.MapValues) =>
         Some(KernelChoice.MapValue)
+      case (Vector(ColumnType.Int32, ColumnType.Int32), Operator.IntLongMapValue) =>
+        Some(KernelChoice.IntLongMapValue)
       case _ =>
         None

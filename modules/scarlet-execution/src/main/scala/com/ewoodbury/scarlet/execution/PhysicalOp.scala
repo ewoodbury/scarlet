@@ -58,6 +58,12 @@ enum PhysicalOp:
   case MapValue(child: PhysicalOp)
 
   /**
+   * `mapValues` whose int value becomes a long. Kind stays the child's kind. The schema is
+   * `[Int32, Int64]`. That layout is not the triple-project assumption.
+   */
+  case IntLongMapValue(child: PhysicalOp)
+
+  /**
    * `mapIntKey` rewrites column 0. Kind stays [[PhysicalOp.Kind.Pairs]]. A null key stays null and
    * the function is not called. The plan node is the witness. The function is not inspected.
    */
@@ -558,6 +564,7 @@ enum PhysicalOp:
         case PhysicalOp.Kind.LongPairs => PhysicalOp.Kind.LongPairs
         case PhysicalOp.Kind.StringPairs => PhysicalOp.Kind.StringPairs
         case _ => PhysicalOp.Kind.Pairs
+    case IntLongMapValue(child) => child.kind
     case MapKey(_) => PhysicalOp.Kind.Pairs
     case SortByIntKey(_) => PhysicalOp.Kind.Pairs
     case SortByIntValueDesc(_) => PhysicalOp.Kind.Pairs
@@ -668,6 +675,7 @@ enum PhysicalOp:
         case other => s"Column$other"
       s"$label(${child.shape})"
     case MapValue(child) => s"MapValue(${child.shape})"
+    case IntLongMapValue(child) => s"IntLongMapValue(${child.shape})"
     case MapKey(child) => s"MapKey(${child.shape})"
     case SortByIntKey(child) => s"SortByIntKey(${child.shape})"
     case SortByIntValueDesc(child) => s"SortByIntValueDesc(${child.shape})"

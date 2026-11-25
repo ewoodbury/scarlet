@@ -132,6 +132,7 @@ class TestFilterBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     Layout.known(child) shouldBe Layout.AssumedIntLong
     val columns = Layout.AssumedIntLong match
       case Output.Columns(found) => found
+      case Output.IntLongPairs(_) => fail("int-long map values are not AssumedIntLong")
       case Output.Opaque(reason) => fail(reason)
     ColumnBinding.choose(
       columns,

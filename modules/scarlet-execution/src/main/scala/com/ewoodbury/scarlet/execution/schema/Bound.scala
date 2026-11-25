@@ -43,13 +43,14 @@ private[execution] object Bound:
    */
   def nulls(bound: Bound): NullAdmission = bound.output match
     case Output.Columns(columns) => NullAdmission.Policy(policy(columns))
+    case Output.IntLongPairs(columns) => NullAdmission.Policy(policy(columns))
     case Output.Opaque(_) => NullAdmission.Refused
 
   /** [[Side.Outer]] when a column is [[NullPolicy.Absence]]. */
   def side(bound: Bound): Side = bound.output match
     case Output.Columns(columns) if columns.exists(absent) => Side.Outer
-    case Output.Columns(_) => Side.Inner
-    case Output.Opaque(_) => Side.Inner
+    case Output.IntLongPairs(columns) if columns.exists(absent) => Side.Outer
+    case Output.Columns(_) | Output.IntLongPairs(_) | Output.Opaque(_) => Side.Inner
 
   private def policy(columns: Vector[ColumnLayout]): NullPolicy =
     if (columns.exists(absent)) then NullPolicy.Absence

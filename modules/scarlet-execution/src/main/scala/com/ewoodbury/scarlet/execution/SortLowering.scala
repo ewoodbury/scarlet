@@ -165,7 +165,7 @@ private[execution] object SortLowering:
           Bound.nulls(bound),
           Bound.side(bound),
         )
-      case Output.Opaque(_) => None
+      case Output.IntLongPairs(_) | Output.Opaque(_) => None
 
   /** True when `tag` is the sort `operator` names. Any other tag is a refusal. */
   private def sameSort(operator: Operator, tag: KernelChoice): Boolean =

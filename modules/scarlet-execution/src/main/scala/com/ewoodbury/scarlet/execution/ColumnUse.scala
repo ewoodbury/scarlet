@@ -34,6 +34,8 @@ private[execution] object ColumnUse:
       walk(source, child, parent union slotDemand(slot))
     case (Plan.MapValuesOp(source, _), PhysicalOp.MapValue(child)) =>
       walk(source, child, parent union Set(0, 1))
+    case (Plan.MapValuesOp(source, _), PhysicalOp.IntLongMapValue(child)) =>
+      walk(source, child, parent union Set(0, 1))
     case (Plan.MapIntKeyOp(source, _), PhysicalOp.MapKey(child)) =>
       // The key is always read. A values-only parent still has to encode column 0.
       walk(source, child, parent union Set(0))

@@ -9,7 +9,8 @@ import com.ewoodbury.scarlet.execution.schema.{ColumnBinding, KernelChoice}
  * The tag that comes back is [[KernelChoice.MapValue]], the class this parent already builds. A
  * binder [[scala.None]] is [[scala.None]]. [[ColumnarPlanner]] asks only after the witness:
  * `Int => Int` on an int or string pair, or `Long => Long` on a long pair. `Int => Long` fails
- * that witness and does not ask. [[MapIntKey.inTree]] still refuses before this ask.
+ * that witness and does not ask here. [[IntLongMapBinding]] owns that map. [[MapIntKey.inTree]]
+ * still refuses before this ask.
  *
  * [[Layout.AssumedIntLong]] is [[scala.None]] here. That layout is not [[KernelChoice.MapValue]]
  * and it is not [[KernelChoice.IntLongProjectSum]].

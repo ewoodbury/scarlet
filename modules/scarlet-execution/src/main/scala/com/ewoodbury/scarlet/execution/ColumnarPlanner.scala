@@ -830,12 +830,13 @@ object ColumnarPlanner:
     case Plan.MapValuesOp(source, mapper) =>
       if (returnsUnboxedInt(mapper)) then mapValue(source, PhysicalOp.Kind.Pairs)
       else if (returnsUnboxedLong(mapper)) then mapValue(source, PhysicalOp.Kind.LongPairs)
+      else if (FunctionWitness.declaredIntToLong(mapper)) then intLongMapValue(source)
       else None
     case Plan.MapIntKeyOp(source, _) =>
       lowerChild(source).flatMap { child =>
         // A second key map above a slot filter would publish the filtered key. Two maps with
-        // no filter between them still lower.
-        if (MapIntKey.filtered(child)) then None
+        // no filter between them still lower. An int-to-long value is not an int pair.
+        if (MapIntKey.filtered(child) || intLongMapped(child)) then None
         else
           child.kind match
             case PhysicalOp.Kind.Pairs => Some(PhysicalOp.MapKey(child))
@@ -932,6 +933,7 @@ object ColumnarPlanner:
         case ElementStep.Filter(_) if LongPairSlot.containsProject(child) => None
         case ElementStep.Filter(predicate) =>
           FilterBinding.row(child, predicate)
+        case ElementStep.Project(_) if intLongMapped(child) => None
         case ElementStep.Project(mapper) =>
           child.kind match
             case PhysicalOp.Kind.Triples if child.isInnerTriple =>
@@ -959,6 +961,24 @@ object ColumnarPlanner:
   private def presentLiteral(value: String): Boolean = value match
     case null => false
     case _ => true
+
+  /**
+   * Int value to long value. The kind check runs before the ask, so a string pair and a long pair
+   * leave [[ColumnBinding.chooseCallsForTest]] at zero. [[MapIntKey.inTree]] refuses first.
+   */
+  private def intLongMapValue(source: Plan[_]): Option[PhysicalOp] =
+    lowerChild(source).flatMap { child =>
+      if (MapIntKey.inTree(child)) then None
+      else
+        child.kind match
+          case PhysicalOp.Kind.Pairs => IntLongMapBinding.value(child)
+          case _ => None
+    }
+
+  /** The widened map. A parent that matches [[PhysicalOp.Kind.Pairs]] must not build on it. */
+  private def intLongMapped(op: PhysicalOp): Boolean = op match
+    case _: PhysicalOp.IntLongMapValue => true
+    case _ => false
 
   private def mapValue(source: Plan[_], kind: PhysicalOp.Kind): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
@@ -1023,6 +1043,7 @@ object ColumnarPlanner:
     case column @ PhysicalOp.Column(child, _) =>
       infoOf(child).withoutPairDistribution.copy(layout = layoutOf(column.kind))
     case PhysicalOp.MapValue(child) => infoOf(child)
+    case PhysicalOp.IntLongMapValue(child) => infoOf(child)
     case PhysicalOp.MapKey(child) => infoOf(child).withoutPairDistribution
     case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey =>
       SortLowering.info(shuffleWidth, layoutOf(PhysicalOp.Kind.Pairs))

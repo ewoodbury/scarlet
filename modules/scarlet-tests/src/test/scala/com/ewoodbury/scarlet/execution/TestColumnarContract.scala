@@ -25,12 +25,12 @@ class TestColumnarContract
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    accepted.size shouldBe 247
+    accepted.size shouldBe 249
     // A null key refuses the shape rather than excluding it. Outer joins are covered by execution
     // tests, not contract fixtures, because the contract does not track the int refusals either.
     // A type-changing pair map lowers and declines at tryRun, so it is in neither list.
     excluded.size shouldBe 34
-    (accepted.size + excluded.size) shouldBe 281
+    (accepted.size + excluded.size) shouldBe 283
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
         case None => Nil
@@ -275,6 +275,12 @@ class TestColumnarContract
       AcceptedCase("int pair keys", keys, narrowInfo(2, layout), Some("Key(Scan)")),
       AcceptedCase("int pair values", values, narrowInfo(2, layout), Some("Value(Scan)")),
       AcceptedCase("int mapValues", mapValues, narrowInfo(2, layout), Some("MapValue(Scan)")),
+      AcceptedCase(
+        "int mapValues to long",
+        Plan.MapValuesOp(pairSource, (value: Int) => value.toLong),
+        narrowInfo(2, layout),
+        Some("IntLongMapValue(Scan)"),
+      ),
       AcceptedCase("int mapIntKey", mapIntKey, narrowInfo(2, layout), Some("MapKey(Scan)")),
       AcceptedCase(
         "keys of mapIntKey",
@@ -566,6 +572,15 @@ class TestColumnarContract
         reducedAfterMapValues,
         hashedInfo(layout),
         Some("HashAggregate(Exchange(MapValue(Scan)))"),
+      ),
+      AcceptedCase(
+        "int mapValues to long reduceByKey",
+        Plan.ReduceByKeyOp(
+          Plan.MapValuesOp(pairSource, (value: Int) => value.toLong),
+          (left: Long, right: Long) => left + right,
+        ),
+        hashedInfo(layout),
+        Some("HashAggregate(Exchange(IntLongMapValue(Scan)))"),
       ),
       AcceptedCase(
         "nested int reduceByKey",

@@ -34,6 +34,8 @@ private[execution] object PhysicalSchema:
       of(child)
     case PhysicalOp.HashAggregate(child, _) if isIntLong(of(child)) =>
       IntLong
+    case _: PhysicalOp.IntLongMapValue =>
+      IntLong
     case other =>
       ofKind(other.kind)
 

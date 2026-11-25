@@ -86,6 +86,8 @@ private[execution] object Layout:
       columns(node.kind)
     case node: PhysicalOp.MapValue =>
       columns(node.kind)
+    case PhysicalOp.IntLongMapValue(child) =>
+      intLongPairs(child)
     case _: PhysicalOp.GroupByKey =>
       Grouped
     case node: PhysicalOp.CountByKey =>
@@ -166,12 +168,30 @@ private[execution] object Layout:
     case PhysicalOp.Kind.Triples => true
     case _ => false
 
+  /**
+   * `(Int32, Int64)` for an int-to-long `mapValues`. Null policy comes from the child. This is not
+   * [[AssumedIntLong]]: that value is [[Output.Columns]] of the same two types, and a parent that
+   * compared them would treat this map as a triple project.
+   */
+  private def intLongPairs(child: PhysicalOp): Output = known(child) match
+    case Output.Columns(Vector(key, value)) =>
+      Output.IntLongPairs(
+        Vector(
+          ColumnLayout(ColumnType.Int32, key.nullPolicy),
+          ColumnLayout(ColumnType.Int64, value.nullPolicy),
+        ),
+      )
+    case Output.Columns(_) | Output.Opaque(_) | Output.IntLongPairs(_) =>
+      Output.Opaque("int-long map value child is not a pair")
+
   /** Key becomes [[ColumnType.Int32]]. The value column is the child's. */
   private def mapKey(child: PhysicalOp): Output = known(child) match
     case Output.Columns(Vector(key, value, _*)) =>
       Output.Columns(Vector(ColumnLayout(ColumnType.Int32, key.nullPolicy), value))
     case Output.Opaque(reason) =>
       Output.Opaque(reason)
+    case Output.IntLongPairs(_) =>
+      Output.Opaque("map key does not read an int-long map value")
     case Output.Columns(_) =>
       Output.Opaque("map key child has fewer than 2 columns")
 
@@ -209,6 +229,12 @@ private[execution] final case class ColumnLayout(columnType: ColumnType, nullPol
 
 private[execution] enum Output:
   case Columns(columns: Vector[ColumnLayout])
+
+  /**
+   * `(Int32, Int64)` written by an int-to-long `mapValues`. Both columns keep the child's null
+   * policy. This is not [[Layout.AssumedIntLong]] and not [[Layout.ProbeSum]].
+   */
+  case IntLongPairs(columns: Vector[ColumnLayout])
   case Opaque(reason: String)
 
 private enum OuterSide:
@@ -249,4 +275,4 @@ private[execution] enum KernelChoice:
   case StringHashLeftOuter, StringHashRightOuter, StringHashFullOuter
   case StringBroadcastLeftOuter, StringBroadcastRightOuter, StringBroadcastFullOuter
   case StringSortMergeLeftOuter, StringSortMergeRightOuter, StringSortMergeFullOuter
-  case Scan, Filter, Project, Column, MapValue, MapKey, Pipeline, Union, Exchange
+  case Scan, Filter, Project, Column, MapValue, IntLongMapValue, MapKey, Pipeline, Union, Exchange

@@ -5,6 +5,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import com.ewoodbury.scarlet.columnar.{
   ColumnBatch,
   ColumnarFallback,
+  IntLongMap,
   TripleIntLongSum,
   TripleToIntLong,
 }
@@ -80,6 +81,22 @@ private[execution] object IntLongReduce:
               adapted,
             )
             throw new ColumnarFallback("int-long reduceByKey is the sum")
+      case (Plan.MapValuesOp(input, mapper), PhysicalOp.IntLongMapValue(inputOp))
+          if addsLongs(reduceFunc) =>
+        // The scan under the map. Interpreting the map node would run the function twice.
+        Columns.Pairs(
+          IntLongMap.reduce(
+            ColumnarInterpreter.pairsOf(
+              interpretAt(input, inputOp, selectedPartition, preserveAbsence, ordinals),
+            ),
+            ColumnarPlanner.shuffleWidth,
+            ColumnarPlanner.parallelism,
+            ColumnarPlanner.batchSize,
+            longValue(mapper),
+          ),
+        )
+      case (_: Plan.MapValuesOp[?, ?, ?], _: PhysicalOp.IntLongMapValue) =>
+        throw new ColumnarFallback("int-long reduceByKey is the sum")
       case _ =>
         throw new ColumnarFallback("int-long reduceByKey expected a triple project")
 
@@ -114,6 +131,11 @@ private[execution] object IntLongReduce:
     columns match
       case Columns.Triples(parts) => parts
       case _ => throw new ColumnarFallback("int-long reduceByKey expected triples")
+
+  /** Named erasure boundary. [[FunctionWitness.declaredIntToLong]] checked `apply$mcJI$sp`. */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+  private def longValue(mapper: Any): Int => Long =
+    mapper.asInstanceOf[Int => Long]
 
   /**
    * Addition, checked by calling the function. The body is not read. `max` and `min` miss one of
