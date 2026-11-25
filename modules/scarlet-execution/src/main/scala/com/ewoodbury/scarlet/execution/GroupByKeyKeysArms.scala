@@ -39,14 +39,13 @@ private[execution] object GroupByKeyKeysArms:
       parts: Vector[Selected],
       width: Int,
       workers: Int,
-  ): Columns = child.kind match
-    case PhysicalOp.Kind.Pairs =>
+  ): Columns = arm(child) match
+    case ExecutionRoute.PairArm.IntPairs =>
       Columns.Ints(GroupByKeyKeys.int32Selected(parts, width, workers))
-    case PhysicalOp.Kind.LongPairs =>
+    case ExecutionRoute.PairArm.LongPairs =>
       Columns.Longs(GroupByKeyKeys.int64Selected(parts, width, workers))
-    case PhysicalOp.Kind.StringPairs =>
+    case ExecutionRoute.PairArm.StringPairs =>
       Columns.Strings(GroupByKeyKeys.stringsSelected(parts, width, workers))
-    case other => refuse(other)
 
   private def denseColumns(
       source: Plan[_],
@@ -64,22 +63,26 @@ private[execution] object GroupByKeyKeysArms:
       preserveAbsence,
       ordinals,
     )
-    child.kind match
-      case PhysicalOp.Kind.Pairs =>
+    arm(child) match
+      case ExecutionRoute.PairArm.IntPairs =>
         Columns.Ints(
           GroupByKeyKeys.int32(ColumnarInterpreter.pairsOf(input), width, workers),
         )
-      case PhysicalOp.Kind.LongPairs =>
+      case ExecutionRoute.PairArm.LongPairs =>
         Columns.Longs(
           GroupByKeyKeys.int64(ColumnarInterpreter.longPairsOf(input), width, workers),
         )
-      case PhysicalOp.Kind.StringPairs =>
+      case ExecutionRoute.PairArm.StringPairs =>
         Columns.Strings(
           GroupByKeyKeys.strings(StringPairWalk.batches(input), width, workers),
         )
-      case other => refuse(other)
 
-  private def refuse(kind: PhysicalOp.Kind): Nothing =
-    throw new IllegalArgumentException(
-      s"groupByKey keys expects int, long, or string pairs, found $kind",
-    )
+  /** Pair family. A layout that is not an int, long, or string pair fails the action. */
+  private def arm(child: PhysicalOp): ExecutionRoute.PairArm =
+    ExecutionRoute
+      .pairArm(child)
+      .getOrElse(
+        throw new IllegalArgumentException(
+          s"groupByKey keys expects int, long, or string pairs, found ${child.shape}",
+        ),
+      )

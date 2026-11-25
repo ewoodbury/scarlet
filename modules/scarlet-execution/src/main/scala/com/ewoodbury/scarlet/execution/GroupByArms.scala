@@ -25,8 +25,8 @@ private[execution] object GroupByArms:
   ): Columns =
     val width = ColumnarPlanner.shuffleWidth
     val workers = ColumnarPlanner.parallelism
-    child.kind match
-      case PhysicalOp.Kind.Pairs =>
+    ExecutionRoute.requirePair(child, "groupByKey") match
+      case ExecutionRoute.PairArm.IntPairs =>
         FilterChain.selected(
           source,
           child,
@@ -47,7 +47,7 @@ private[execution] object GroupByArms:
               ),
             )
             Columns.GroupedInts(GroupByKey.int32(pairs, width, workers))
-      case PhysicalOp.Kind.StringPairs =>
+      case ExecutionRoute.PairArm.StringPairs =>
         FilterChain.selected(
           source,
           child,
@@ -69,7 +69,7 @@ private[execution] object GroupByArms:
             val batches = StringPairWalk.batches(input)
             StringPairWalk.refuseNullValues(batches)
             Columns.GroupedStrings(GroupByKey.strings(batches, width, workers))
-      case PhysicalOp.Kind.LongPairs =>
+      case ExecutionRoute.PairArm.LongPairs =>
         val input = ColumnarInterpreter.interpretAt(
           source,
           child,
@@ -79,8 +79,4 @@ private[execution] object GroupByArms:
         )
         Columns.GroupedLongs(
           GroupByKey.int64(ColumnarInterpreter.longPairsOf(input), width, workers),
-        )
-      case other =>
-        throw new IllegalStateException(
-          s"groupByKey column is $other, expected int, long, or string pairs",
         )

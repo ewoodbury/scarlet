@@ -5,19 +5,20 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, HashReduce}
+import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.execution.schema.{Describe, KernelChoice, Layout}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
- * The hash-aggregate route is the binder's tag.
+ * The execution route is the binder tag for a hash aggregate and the child layout for a pair.
  *
  * [[KernelChoice.IntLongProjectSum]] is the only tag that runs [[IntLongReduce]].
  * [[PhysicalSchema.isIntLongAggregate]] still labels that shape for [[Describe]]. A projected join
  * sum publishes a batch. [[KernelChoice.JoinProbeSum]] reports [[Layout.ProbeSum]], not
- * [[Layout.AssumedIntLong]], and does not enter [[IntLongReduce]]. A pass that maps every other
- * tag to the old match is not this test.
+ * [[Layout.AssumedIntLong]], and does not enter [[IntLongReduce]]. A count of that project is
+ * [[ExecutionRoute.CountArm.IntLong]]. Long and string counts publish through their own kernels. A
+ * pass that maps every other tag to the old match is not this test.
  */
 class TestExecutionRoute extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -28,12 +29,18 @@ class TestExecutionRoute extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     ScarletRuntime.get.shuffle.clear()
     IntLongReduce.resetColumnsForTest()
     HashReduce.resetByKeyForTest()
+    HashCount.resetByKeyForTest()
+    LongHashCount.resetByKeyForTest()
+    StringHashCount.resetByKeyForTest()
 
   override def afterEach(): Unit =
     ScarletRuntime.get.shuffle.clear()
     ScarletConf.set(saved)
     IntLongReduce.resetColumnsForTest()
     HashReduce.resetByKeyForTest()
+    HashCount.resetByKeyForTest()
+    LongHashCount.resetByKeyForTest()
+    StringHashCount.resetByKeyForTest()
     ()
 
   "a projected join sum" should "run IntLongReduce from the binder" in {
@@ -105,6 +112,75 @@ class TestExecutionRoute extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     IntLongReduce.columnsCallsForTest shouldBe 0
   }
 
+  "pair layouts" should "name the arm the tag shares" in {
+    val ints = PhysicalOp.Scan(PhysicalOp.Kind.Ints, Seq.empty)
+    val strings = PhysicalOp.Scan(PhysicalOp.Kind.Strings, Seq.empty)
+    val pairs = PhysicalOp.Scan(PhysicalOp.Kind.Pairs, Seq.empty)
+    val longs = PhysicalOp.Scan(PhysicalOp.Kind.LongPairs, Seq.empty)
+    val text = PhysicalOp.Scan(PhysicalOp.Kind.StringPairs, Seq.empty)
+    val grouped = PhysicalOp.GroupByKey(PhysicalOp.Exchange(pairs))
+    val triples = PhysicalOp.Project(PhysicalOp.Scan(PhysicalOp.Kind.Triples, Seq.empty))
+    val aggregate = PhysicalOp.HashAggregate(PhysicalOp.Exchange(triples))
+    ExecutionRoute.pairArm(pairs) shouldBe Some(ExecutionRoute.PairArm.IntPairs)
+    ExecutionRoute.pairArm(longs) shouldBe Some(ExecutionRoute.PairArm.LongPairs)
+    ExecutionRoute.pairArm(text) shouldBe Some(ExecutionRoute.PairArm.StringPairs)
+    ExecutionRoute.pairArm(grouped) shouldBe None
+    ExecutionRoute.pairArm(triples) shouldBe None
+    Layout.known(grouped) shouldBe Layout.Grouped
+    ExecutionRoute.distinctArm(ints) shouldBe ExecutionRoute.DistinctArm.Ints
+    ExecutionRoute.distinctArm(strings) shouldBe ExecutionRoute.DistinctArm.Strings
+    ExecutionRoute.mapValueArm(pairs) shouldBe ExecutionRoute.MapValueArm.IntValues
+    ExecutionRoute.mapValueArm(longs) shouldBe ExecutionRoute.MapValueArm.LongValues
+    ExecutionRoute.mapValueArm(text) shouldBe ExecutionRoute.MapValueArm.StringValues
+    ExecutionRoute.stringPairs(text) shouldBe true
+    ExecutionRoute.stringPairs(pairs) shouldBe false
+    ExecutionRoute.countArm(pairs) shouldBe ExecutionRoute.CountArm.IntPairs
+    ExecutionRoute.countArm(longs) shouldBe ExecutionRoute.CountArm.LongPairs
+    ExecutionRoute.countArm(text) shouldBe ExecutionRoute.CountArm.StringPairs
+    ExecutionRoute.countArm(triples) shouldBe ExecutionRoute.CountArm.IntLong
+    Layout.known(aggregate) should not be Layout.AssumedIntLong
+    ExecutionRoute.countArm(aggregate) shouldBe ExecutionRoute.CountArm.IntLong
+  }
+
+  "a long count" should "run the long kernel" in {
+    val counted = DistCollection.ofLongPairs(Array(1L, 2L, 1L), Array(10L, 20L, 30L), 2).countByKey
+    val described = Describe.describe(counted.plan).getOrElse(fail("long count did not lower"))
+    described.choice shouldBe KernelChoice.CountByKey
+    ExecutionRoute.countArm(countChild(described.root)) shouldBe ExecutionRoute.CountArm.LongPairs
+    val columnar = published(counted.collect().toMap)
+    LongHashCount.byKeyCallsForTest should be > 0
+    HashCount.byKeyCallsForTest shouldBe 0
+    StringHashCount.byKeyCallsForTest shouldBe 0
+    columnar shouldBe row(counted.collect().toMap)
+  }
+
+  "a string count" should "run the string kernel" in {
+    val counted = DistCollection(Seq("a" -> 1, "b" -> 2, "a" -> 3), 2).countByKey
+    val described = Describe.describe(counted.plan).getOrElse(fail("string count did not lower"))
+    described.choice shouldBe KernelChoice.CountByKey
+    ExecutionRoute.countArm(countChild(described.root)) shouldBe
+      ExecutionRoute.CountArm.StringPairs
+    val columnar = published(counted.collect().toMap)
+    StringHashCount.byKeyCallsForTest should be > 0
+    LongHashCount.byKeyCallsForTest shouldBe 0
+    HashCount.byKeyCallsForTest shouldBe 0
+    columnar shouldBe row(counted.collect().toMap)
+  }
+
+  "a count of a triple project" should "enter IntLongCount and publish" in {
+    val left = pairs(Array(1, 2, 1), Array(10, 20, 30))
+    val right = pairs(Array(1, 2, 3), Array(100, 200, 300))
+    val counted = project(left, right).countByKey
+    val described = Describe.describe(counted.plan).getOrElse(fail("count did not lower"))
+    described.choice shouldBe KernelChoice.CountByKey
+    ExecutionRoute.countArm(countChild(described.root)) shouldBe ExecutionRoute.CountArm.IntLong
+    val columnar = published(counted.collect().toMap)
+    HashCount.byKeyCallsForTest shouldBe 0
+    LongHashCount.byKeyCallsForTest shouldBe 0
+    StringHashCount.byKeyCallsForTest shouldBe 0
+    columnar shouldBe row(counted.collect().toMap)
+  }
+
   private def add: (Long, Long) => Long = (left, right) => left + right
 
   private def intAdd: (Int, Int) => Int = (left, right) => left + right
@@ -128,6 +204,10 @@ class TestExecutionRoute extends AnyFlatSpec with Matchers with BeforeAndAfterEa
   private def exchangeChild(op: PhysicalOp): PhysicalOp = op match
     case PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)) => child
     case other => fail(s"expected a hash aggregate exchange, got ${other.shape}")
+
+  private def countChild(op: PhysicalOp): PhysicalOp = op match
+    case PhysicalOp.CountByKey(PhysicalOp.Exchange(child)) => child
+    case other => fail(s"expected a count exchange, got ${other.shape}")
 
   private def published[A](body: => A): A =
     val sink = new CountingSink
