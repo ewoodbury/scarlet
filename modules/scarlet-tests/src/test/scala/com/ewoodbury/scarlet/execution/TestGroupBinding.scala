@@ -6,7 +6,7 @@ import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.execution.schema.*
-import com.ewoodbury.scarlet.execution.schema.ColumnBinding.{Operator, ReducerWitness}
+import com.ewoodbury.scarlet.execution.schema.ColumnBinding.Operator
 
 /**
  * `groupByKey`, `distinct`, `keys`, and `values` ask [[ColumnBinding]] before they build.
@@ -93,7 +93,7 @@ class TestGroupBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnBinding.resetChooseCallsForTest()
     GroupByKeyLowering.apply(child) shouldBe None
     ColumnBinding.chooseCallsForTest should be > 0
-    asked(child, Operator.GroupByKey) shouldBe None
+    ColumnBinding.asked(child, Operator.GroupByKey) shouldBe None
   }
 
   "distinct" should "ask the binder for an accepted int column" in {
@@ -117,7 +117,7 @@ class TestGroupBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     child.kind shouldBe PhysicalOp.Kind.Ints
     Layout.known(child) shouldBe Layout.Grouped
     DistinctLowering.apply(child) shouldBe None
-    asked(child, Operator.Distinct) shouldBe None
+    ColumnBinding.asked(child, Operator.Distinct) shouldBe None
   }
 
   "keys and values" should "ask the binder and keep Column" in {
@@ -140,7 +140,7 @@ class TestGroupBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnBinding.resetChooseCallsForTest()
     KeyValueLowering.project(intPairs, 0, _ => Some(child)) shouldBe None
     ColumnBinding.chooseCallsForTest should be > 0
-    asked(child, Operator.Keys) shouldBe None
+    ColumnBinding.asked(child, Operator.Keys) shouldBe None
   }
 
   it should "keep keys of groupByKey on the count witness" in {
@@ -217,7 +217,7 @@ class TestGroupBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
   ): Unit =
     val op = lowered.getOrElse(fail(s"expected ${tag.tag}"))
     opClass(Some(op), tag.tag) shouldBe tag.tag
-    asked(askedChild(op), operator) shouldBe Some(tag)
+    ColumnBinding.asked(askedChild(op), operator) shouldBe Some(tag)
 
   private def askedChild(op: PhysicalOp): PhysicalOp = op match
     case PhysicalOp.GroupByKey(child) => child
@@ -225,22 +225,6 @@ class TestGroupBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     case PhysicalOp.Column(PhysicalOp.CountByKey(child), _) => child
     case PhysicalOp.Column(child, _) => child
     case other => fail(s"no asked child in ${other.shape}")
-
-  /**
-   * Same question the group lowerings ask. An opaque child does not call [[ColumnBinding.choose]].
-   */
-  private def asked(child: PhysicalOp, operator: Operator): Option[KernelChoice] =
-    val bound = Bound.of(child, Vector.empty, ReducerWitness.NotApplicable)
-    bound.output match
-      case Output.Columns(columns) =>
-        ColumnBinding.choose(
-          columns,
-          operator,
-          ReducerWitness.NotApplicable,
-          Bound.nulls(bound),
-          Bound.side(bound),
-        )
-      case Output.Opaque(_) => None
 
   private def opClass(lowered: Option[PhysicalOp], expected: String): String =
     lowered match

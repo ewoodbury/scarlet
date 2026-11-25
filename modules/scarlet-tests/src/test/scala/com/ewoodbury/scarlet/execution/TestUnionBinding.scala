@@ -7,7 +7,7 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.execution.schema.*
-import com.ewoodbury.scarlet.execution.schema.ColumnBinding.{Operator, ReducerWitness}
+import com.ewoodbury.scarlet.execution.schema.ColumnBinding.Operator
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
@@ -74,8 +74,8 @@ class TestUnionBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnBinding.resetChooseCallsForTest()
     UnionLowering.lower(leftPlan, rightPlan, childFor(leftPlan, projected, scan)) shouldBe None
     ColumnBinding.chooseCallsForTest should be > 0
-    asked(projected, Operator.Union) shouldBe Some(KernelChoice.Union)
-    asked(scan, Operator.Union) shouldBe Some(KernelChoice.Union)
+    ColumnBinding.asked(projected, Operator.Union) shouldBe Some(KernelChoice.Union)
+    ColumnBinding.asked(scan, Operator.Union) shouldBe Some(KernelChoice.Union)
   }
 
   it should "keep a join-probe sum union a triple project on the row path" in {
@@ -166,25 +166,9 @@ class TestUnionBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
   /** Each child is tagged [[KernelChoice.Union]]. The root class is that tag. */
   private def follows(lowered: Option[PhysicalOp]): Unit = lowered match
     case Some(PhysicalOp.Union(left, right)) =>
-      asked(left, Operator.Union) shouldBe Some(KernelChoice.Union)
-      asked(right, Operator.Union) shouldBe Some(KernelChoice.Union)
+      ColumnBinding.asked(left, Operator.Union) shouldBe Some(KernelChoice.Union)
+      ColumnBinding.asked(right, Operator.Union) shouldBe Some(KernelChoice.Union)
     case other => fail(s"expected Union, got $other")
-
-  /**
-   * Same question [[UnionLowering]] asks. An opaque child does not call [[ColumnBinding.choose]].
-   */
-  private def asked(child: PhysicalOp, operator: Operator): Option[KernelChoice] =
-    val bound = Bound.of(child, Vector.empty, ReducerWitness.NotApplicable)
-    bound.output match
-      case Output.Columns(columns) =>
-        ColumnBinding.choose(
-          columns,
-          operator,
-          ReducerWitness.NotApplicable,
-          Bound.nulls(bound),
-          Bound.side(bound),
-        )
-      case Output.Opaque(_) => None
 
   @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
   private def erase[A](plan: Plan[_]): Plan[A] =

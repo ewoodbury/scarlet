@@ -82,7 +82,7 @@ class TestSortBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     ColumnBinding.resetChooseCallsForTest()
     SortLowering.lowerInt(intPairs, _ => Some(child)) shouldBe None
     ColumnBinding.chooseCallsForTest should be > 0
-    asked(child, Operator.SortByIntKey) shouldBe None
+    ColumnBinding.asked(child, Operator.SortByIntKey) shouldBe None
   }
 
   it should "return None for a layout the int sort refuses" in {
@@ -130,7 +130,7 @@ class TestSortBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       tag: KernelChoice,
   ): Unit =
     sortClass(lowered, tag.tag)
-    asked(sortChild(lowered), operator) shouldBe Some(tag)
+    ColumnBinding.asked(sortChild(lowered), operator) shouldBe Some(tag)
 
   private def sortChild(lowered: Option[PhysicalOp]): PhysicalOp = lowered match
     case Some(PhysicalOp.SortByIntKey(child)) => child
@@ -138,22 +138,6 @@ class TestSortBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     case Some(PhysicalOp.SortByLongKey(child)) => child
     case Some(PhysicalOp.SortByStringKey(child)) => child
     case other => fail(s"expected a sort, got $other")
-
-  /**
-   * Same question [[SortLowering]] asks. An opaque child does not call [[ColumnBinding.choose]].
-   */
-  private def asked(child: PhysicalOp, operator: Operator): Option[KernelChoice] =
-    val bound = Bound.of(child, Vector.empty, ReducerWitness.NotApplicable)
-    bound.output match
-      case Output.Columns(columns) =>
-        ColumnBinding.choose(
-          columns,
-          operator,
-          ReducerWitness.NotApplicable,
-          Bound.nulls(bound),
-          Bound.side(bound),
-        )
-      case Output.Opaque(_) => None
 
   private def sortClass(lowered: Option[PhysicalOp], name: String): Unit =
     val found = lowered match
