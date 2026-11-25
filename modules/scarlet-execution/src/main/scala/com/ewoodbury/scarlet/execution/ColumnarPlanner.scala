@@ -965,11 +965,13 @@ object ColumnarPlanner:
       // mapValues keeps a null key. The pair decoder of that parent rejects the clear bit.
       if (MapIntKey.inTree(child)) then None
       else
+        // The kind agrees the value column with the witness. [[MapValueBinding]] asks.
+        // This match does not build the class.
         (child.kind, kind) match
           case (PhysicalOp.Kind.Pairs | PhysicalOp.Kind.StringPairs, PhysicalOp.Kind.Pairs) =>
-            Some(PhysicalOp.MapValue(child))
+            MapValueBinding.value(child)
           case (PhysicalOp.Kind.LongPairs, PhysicalOp.Kind.LongPairs) =>
-            Some(PhysicalOp.MapValue(child))
+            MapValueBinding.value(child)
           case _ => None
     }
 

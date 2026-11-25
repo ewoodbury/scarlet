@@ -18,13 +18,16 @@ import com.ewoodbury.scarlet.execution.PhysicalOp
  * `distinct`, `keys`, and `values`. [[com.ewoodbury.scarlet.execution.UnionLowering]] asks it on
  * each child before it builds a union. [[com.ewoodbury.scarlet.execution.FilterBinding]] asks it
  * before it builds a filter. [[com.ewoodbury.scarlet.execution.ProjectBinding]] asks it before it
- * builds a same-type element project or pipeline. The interpreter does not call it.
+ * builds a same-type element project or pipeline.
+ * [[com.ewoodbury.scarlet.execution.MapValueBinding]] asks it before it builds a same-type
+ * `mapValues`. The interpreter does not call it.
  *
  * [[NullAdmission.Refused]] means [[com.ewoodbury.scarlet.execution.ScanLowering]] would refuse
  * the source for nulls. The caller passes that policy. Nothing here reads a schema or classifies
  * rows. [[Side.Outer]] and [[NullPolicy.Absence]] are an outer join, and these aggregates refuse
- * it before a tag is chosen. A generic tuple map is not accepted. An `Int => Long` mapValues is
- * [[scala.None]].
+ * it before a tag is chosen. A generic tuple map is not accepted. An `Int => Long` `mapValues`
+ * does not ask: the witness is not `Int => Int` or `Long => Long`. [[Layout.AssumedIntLong]] with
+ * [[Operator.MapValues]] is [[scala.None]], including when the reducer adds longs.
  *
  * An int inner join is three [[ColumnType.Int32]] columns, `(key, left, right)`. `countByKey` on
  * that layout is [[KernelChoice.CountThroughProbe]]. The join is not [[Layout.AssumedIntLong]].
@@ -50,7 +53,8 @@ private[execution] object ColumnBinding:
    * Parent this binder is asked about.
    *
    * [[Operator.TupleMap]] is a generic tuple `map`. It is not accepted. [[Operator.MapValues]] is
-   * `Int => Long`, which has no pair kernel. The four sort cases are the typed sorts.
+   * a same-type `mapValues`. Int, long, and string pairs tag [[KernelChoice.MapValue]].
+   * [[Layout.AssumedIntLong]] is [[scala.None]]. The four sort cases are the typed sorts.
    * [[com.ewoodbury.scarlet.execution.SortLowering]] asks before it builds one.
    * [[Operator.GroupByKey]], [[Operator.Distinct]], [[Operator.Keys]], and [[Operator.Values]] are
    * the group family. [[Operator.Keys]] and [[Operator.Values]] both tag [[KernelChoice.Column]].
@@ -140,9 +144,9 @@ private[execution] object ColumnBinding:
   /**
    * Parents that have no tag, an outer side, or a null policy the kernels do not run.
    *
-   * `Int => Long` mapValues stays here so a later edit does not tag it
-   * [[KernelChoice.IntLongProjectSum]]. A generic tuple map is not a parent this binder accepts,
-   * so no tag is built for it.
+   * [[Operator.MapValues]] on [[Layout.AssumedIntLong]] is [[scala.None]] in [[intLong]], so it is
+   * not [[KernelChoice.IntLongProjectSum]]. A generic tuple map is not a parent this binder
+   * accepts, so no tag is built for it.
    */
   private def declined(
       operator: Operator,
@@ -151,7 +155,7 @@ private[execution] object ColumnBinding:
       side: Side,
   ): Boolean =
     operator match
-      case Operator.MapValues | Operator.TupleMap => true
+      case Operator.TupleMap => true
       case Operator.Union => false
       case Operator.Filter =>
         false
@@ -159,7 +163,7 @@ private[execution] object ColumnBinding:
           Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
           Operator.SortByStringKey | Operator.GroupByKey | Operator.Distinct | Operator.Keys |
           Operator.Values | Operator.FilterKeys | Operator.FilterValues | Operator.Project |
-          Operator.Pipeline =>
+          Operator.Pipeline | Operator.MapValues =>
         outer(side) || refused(nulls) || layout.exists(absent)
 
   private def refused(nulls: NullAdmission): Boolean = nulls match
@@ -350,10 +354,11 @@ private[execution] object ColumnBinding:
 
   /**
    * `(Int32, Int32)`, `(Int64, Int64)`, and `(Utf8Dict, Int32)` under `Present` or `Nullable`.
-   * Those are the policies the count, reduce, typed-sort, group, key, and value kernels already
-   * accept. A sort, group, key, or value on another pair is [[scala.None]]. `distinct` is one
-   * [[ColumnType.Int32]] column or one [[ColumnType.Utf8Dict]] column. [[NullPolicy.Absence]]
-   * never reaches this match.
+   * Those are the policies the count, reduce, typed-sort, group, key, value, and same-type
+   * `mapValues` kernels already accept. A sort, group, key, value, or `mapValues` on another pair
+   * is [[scala.None]]. `distinct` is one [[ColumnType.Int32]] column or one
+   * [[ColumnType.Utf8Dict]] column. [[NullPolicy.Absence]] never reaches this match.
+   * [[Layout.AssumedIntLong]] does not reach this match.
    */
   private def pair(types: Vector[ColumnType], operator: Operator): Option[KernelChoice] =
     (types, operator) match
@@ -401,5 +406,11 @@ private[execution] object ColumnBinding:
         Some(KernelChoice.Dedupe)
       case (Vector(ColumnType.Utf8Dict), Operator.Distinct) =>
         Some(KernelChoice.Dedupe)
+      case (Vector(ColumnType.Int32, ColumnType.Int32), Operator.MapValues) =>
+        Some(KernelChoice.MapValue)
+      case (Vector(ColumnType.Int64, ColumnType.Int64), Operator.MapValues) =>
+        Some(KernelChoice.MapValue)
+      case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.MapValues) =>
+        Some(KernelChoice.MapValue)
       case _ =>
         None

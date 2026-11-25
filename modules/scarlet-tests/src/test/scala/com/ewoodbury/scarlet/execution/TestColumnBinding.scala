@@ -447,6 +447,30 @@ class TestColumnBinding extends AnyFlatSpec with Matchers:
       side = Side.Inner,
       choice = None,
     ),
+    accepted(
+      ColumnType.Int32,
+      ColumnType.Int32,
+      Operator.MapValues,
+      ReducerWitness.NotApplicable,
+      NullPolicy.Nullable,
+      KernelChoice.MapValue,
+    ),
+    accepted(
+      ColumnType.Int64,
+      ColumnType.Int64,
+      Operator.MapValues,
+      ReducerWitness.NotApplicable,
+      NullPolicy.Nullable,
+      KernelChoice.MapValue,
+    ),
+    accepted(
+      ColumnType.Utf8Dict,
+      ColumnType.Int32,
+      Operator.MapValues,
+      ReducerWitness.NotApplicable,
+      NullPolicy.Nullable,
+      KernelChoice.MapValue,
+    ),
     // Not accepted. This cell constructs no KernelChoice.
     Cell(
       label = "generic tuple map",
