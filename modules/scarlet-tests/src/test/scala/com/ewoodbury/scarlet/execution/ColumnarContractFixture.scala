@@ -341,6 +341,7 @@ trait ColumnarContractFixture extends Matchers:
     case PhysicalOp.Pipeline(child, _) => preservesPartitions(child)
     case PhysicalOp.Column(child, _) => preservesPartitions(child)
     case PhysicalOp.MapValue(child) => preservesPartitions(child)
+    case PhysicalOp.IntLongMapValue(child) => preservesPartitions(child)
     case PhysicalOp.MapKey(child) => preservesPartitions(child)
     case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_, _) |
         PhysicalOp.LongHashAggregate(_) | PhysicalOp.StringHashAggregate(_) |

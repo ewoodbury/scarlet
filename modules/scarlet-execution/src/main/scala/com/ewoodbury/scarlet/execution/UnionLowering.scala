@@ -76,7 +76,7 @@ private[execution] object UnionLowering:
 
   private def columnsOf(op: PhysicalOp): Option[Vector[ColumnLayout]] = Layout.known(op) match
     case Output.Columns(columns) => Some(columns)
-    case Output.Opaque(_) => None
+    case Output.IntLongPairs(_) | Output.Opaque(_) => None
 
   /**
    * Same kind, and a batch [[ColumnsConcat]] can append.

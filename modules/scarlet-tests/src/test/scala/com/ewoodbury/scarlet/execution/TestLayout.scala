@@ -78,6 +78,22 @@ class TestLayout extends AnyFlatSpec with Matchers:
       columns(LogicalType.Utf8Dict, LogicalType.Int32)
   }
 
+  it should "name both columns of an int value widened to long" in {
+    val widened = PhysicalOp.IntLongMapValue(pairs)
+    widened.schema shouldBe PhysicalSchema.IntLong
+    widened.kind shouldBe PhysicalOp.Kind.Pairs
+    Layout.known(widened) match
+      case Output.IntLongPairs(Vector(key, value)) =>
+        key.columnType shouldBe ColumnType.Int32
+        value.columnType shouldBe ColumnType.Int64
+        key.nullPolicy shouldBe NullPolicy.Nullable
+        value.nullPolicy shouldBe NullPolicy.Nullable
+      case other => fail(s"expected int-long pairs, got $other")
+    Layout.known(widened) should not be Layout.AssumedIntLong
+    Layout.known(widened) should not be Layout.ProbeSum
+    Layout.known(PhysicalOp.Project(triples)) shouldBe Layout.AssumedIntLong
+  }
+
   it should "project one column" in {
     Layout.known(PhysicalOp.Column(stringPairs, 0)) shouldBe columns(LogicalType.Utf8Dict)
     Layout.known(PhysicalOp.Column(stringPairs, 1)) shouldBe columns(LogicalType.Int32)

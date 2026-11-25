@@ -89,6 +89,7 @@ class TestSortBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     refuse(pair(ColumnType.Int64, ColumnType.Int64))
     val assumed = Layout.AssumedIntLong match
       case Output.Columns(columns) => columns
+      case Output.IntLongPairs(_) => fail("int-long map values are not an int sort")
       case Output.Opaque(reason) => fail(reason)
     refuse(assumed)
 

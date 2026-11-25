@@ -84,7 +84,7 @@ private[execution] object JoinLowering:
   private def keyOf(op: PhysicalOp): Option[ColumnType] = Columns.known(op) match
     case Output.Columns(key +: rest) if !absent(key) && !rest.exists(absent) =>
       Some(key.columnType)
-    case Output.Columns(_) | Output.Opaque(_) => None
+    case Output.Columns(_) | Output.IntLongPairs(_) | Output.Opaque(_) => None
 
   private def absent(column: ColumnLayout): Boolean = column.nullPolicy match
     case NullPolicy.Absence => true

@@ -40,7 +40,7 @@ private[execution] object JoinAggregateBinding:
         Bound.nulls(bound),
         Bound.side(bound),
       )
-    case Output.Opaque(_) => None
+    case Output.IntLongPairs(_) | Output.Opaque(_) => None
 
   /**
    * An int inner hash join of two exchanges, or a hinted sort-merge or broadcast rewritten to one.

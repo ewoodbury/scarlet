@@ -25,6 +25,7 @@ private[execution] object ReduceByKeyLowering:
     hashPartitionedProject(child) match
       case Some(projected) => Some(aggregated(projected))
       case None if intLongProject(child) => Some(aggregated(child))
+      case None if intLongMapValue(child) => Some(aggregated(child))
       case None => reducedFromTag(child)
 
   /**
@@ -88,6 +89,11 @@ private[execution] object ReduceByKeyLowering:
   private def exchanged(op: PhysicalOp): PhysicalOp = op match
     case present: PhysicalOp.Exchange => present
     case other => PhysicalOp.Exchange(other)
+
+  /** The widened map itself. A filter above it is not this node. */
+  private def intLongMapValue(child: PhysicalOp): Boolean = child match
+    case _: PhysicalOp.IntLongMapValue => true
+    case _ => false
 
   /**
    * A triple [[PhysicalOp.Project]] reports `[Int32, Int64]`. Kind stays triples.

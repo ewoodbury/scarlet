@@ -129,8 +129,8 @@ private[execution] object JoinClass:
           KernelChoice.SortByLongKey | KernelChoice.SortByStringKey | KernelChoice.GroupByKey |
           KernelChoice.GroupedDecode | KernelChoice.Dedupe | KernelChoice.Scan |
           KernelChoice.Filter | KernelChoice.Project | KernelChoice.Column |
-          KernelChoice.MapValue | KernelChoice.MapKey | KernelChoice.Pipeline |
-          KernelChoice.Union | KernelChoice.Exchange =>
+          KernelChoice.MapValue | KernelChoice.IntLongMapValue | KernelChoice.MapKey |
+          KernelChoice.Pipeline | KernelChoice.Union | KernelChoice.Exchange =>
         None
 
   /** Pair kinds the int, long, and string joins already run. Outer kinds are not pairs. */

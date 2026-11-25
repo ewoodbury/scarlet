@@ -239,6 +239,7 @@ private[execution] object ColumnarInterpreter:
       plan: Option[Plan[_]],
   ): Seq[Partition[_]] =
     if (ExecutionRoute.decodesAsIntLongSum(plan, op)) then intLongSums(columns)
+    else if (IntLongMapRun.decodes(op)) then IntLongMapRun.partitions(columns)
     else
       decodeWith(
         columns,
@@ -260,14 +261,16 @@ private[execution] object ColumnarInterpreter:
    * `limit <= 0` returns empty without reading a batch.
    */
   private[execution] def decodePrefixFor(columns: Columns, limit: Int, op: PhysicalOp): Seq[Any] =
-    decodePrefixWith(
-      columns,
-      limit,
-      ColumnDecoders.ints(op),
-      ColumnDecoders.intPairs(op),
-      ColumnDecoders.longs(op),
-      ColumnDecoders.triples(op),
-    )
+    if (IntLongMapRun.decodes(op)) then IntLongMapRun.prefix(columns, limit)
+    else
+      decodePrefixWith(
+        columns,
+        limit,
+        ColumnDecoders.ints(op),
+        ColumnDecoders.intPairs(op),
+        ColumnDecoders.longs(op),
+        ColumnDecoders.triples(op),
+      )
 
   private def decodePrefixWith(
       columns: Columns,
@@ -453,6 +456,11 @@ private[execution] object ColumnarInterpreter:
         case ExecutionRoute.MapValueArm.LongValues => mapLongValues(input, mapper)
         case ExecutionRoute.MapValueArm.StringValues => StringPairWalk.mapValues(input, mapper)
         case ExecutionRoute.MapValueArm.IntValues => mapIntValues(input, mapper)
+    case (Plan.MapValuesOp(source, mapper), PhysicalOp.IntLongMapValue(child)) =>
+      IntLongMapRun.columns(
+        interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),
+        mapper,
+      )
     case (Plan.MapIntKeyOp(source, mapper), PhysicalOp.MapKey(child)) =>
       MapIntKey.columns(
         interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),

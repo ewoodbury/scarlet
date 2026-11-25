@@ -13,8 +13,20 @@ package com.ewoodbury.scarlet.execution
  * cell that is not a string or an int. The check reads method descriptors and does not call the
  * function. A primitive specialized apply is not a bridge. `Boolean` has no specialized apply, so
  * [[declaredElement]] is false for that kind and does not inspect the function.
+ * [[declaredIntToLong]] is the separate `Int => Long` witness. [[declaredElement]] does not call
+ * it, so an element map of that shape stays refused.
  */
 private[execution] object FunctionWitness:
+
+  /**
+   * True when `function` declares `apply$mcJI$sp`: an int value becoming a long value.
+   *
+   * This does not call `function`. A `Tuple2 => Tuple2` apply is not this method. Erasure still
+   * cannot see `(Int, Int) => (Int, Long)`.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any"))
+  def declaredIntToLong(function: Any): Boolean =
+    declaredSignature(function, "apply$mcJI$sp", classOf[Int], classOf[Long], allowBridge = false)
 
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
   def declaredElement(kind: PhysicalOp.Kind, function: Any): Boolean = kind match

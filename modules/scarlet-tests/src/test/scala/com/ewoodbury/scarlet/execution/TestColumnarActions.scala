@@ -9,6 +9,7 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, NoOpSink}
 import com.ewoodbury.scarlet.core.ScarletConf
+import com.ewoodbury.scarlet.execution.schema.{Describe, KernelChoice}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
@@ -855,14 +856,24 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
     armColumnar()
     ColumnarPlanner.partitioning(strings.plan) shouldBe None
-    ColumnarPlanner.partitioning(widened.plan) shouldBe None
+    ColumnarPlanner.partitioning(widened.plan).isDefined shouldBe true
+    val described =
+      Describe.describe(widened.plan).getOrElse(fail("mapValues to long did not lower"))
+    described.choice shouldBe KernelChoice.IntLongMapValue
+    described.root.shape shouldBe "IntLongMapValue(Scan)"
+    ColumnarPlanner.tryRun(widened.plan).isDefined shouldBe true
     val collected = ColumnMetrics.withSink(new CountingSink) {
       val rows = strings.collect()
       ColumnMetrics.batchCount should be > 0L
       rows
     }
+    val widenedRows = ColumnMetrics.withSink(new CountingSink) {
+      val rows = widened.collect()
+      ColumnMetrics.batchCount should be > 0L
+      rows
+    }
     collected shouldBe row(strings.collect())
-    columnar(widened.collect()) shouldBe row(widened.collect())
+    widenedRows shouldBe row(widened.collect())
   }
 
   it should "sum values after filterValues and stay columnar" in {

@@ -108,7 +108,7 @@ private[execution] object ExecutionRoute:
         columns match
           case Vector(key, value) => pairTypes(key.columnType, value.columnType)
           case _ => None
-      case Output.Opaque(_) => None
+      case Output.IntLongPairs(_) | Output.Opaque(_) => None
 
   /** Pair family, or a failure that names `what`. A grouped child fails here. */
   def requirePair(child: PhysicalOp, what: String): PairArm =
@@ -138,7 +138,7 @@ private[execution] object ExecutionRoute:
     output match
       case Output.Columns(Vector(ColumnLayout(ColumnType.Int32, _))) => DistinctArm.Ints
       case Output.Columns(Vector(ColumnLayout(ColumnType.Utf8Dict, _))) => DistinctArm.Strings
-      case Output.Columns(_) | Output.Opaque(_) =>
+      case Output.Columns(_) | Output.IntLongPairs(_) | Output.Opaque(_) =>
         throw new IllegalStateException(
           s"distinct column is $output, expected int or string",
         )

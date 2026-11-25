@@ -20,6 +20,8 @@ class TestColumnBinding extends AnyFlatSpec with Matchers:
 
   private val assumedIntLong: Vector[ColumnLayout] = Layout.AssumedIntLong match
     case Output.Columns(columns) => columns
+    case Output.IntLongPairs(_) =>
+      throw new IllegalStateException("AssumedIntLong is not an int-long map value")
     case Output.Opaque(reason) => throw new IllegalStateException(reason)
 
   private val outerAssumed: Vector[ColumnLayout] = assumedIntLong match
@@ -151,6 +153,7 @@ class TestColumnBinding extends AnyFlatSpec with Matchers:
     case Operator.ReduceByKey => "reduceByKey"
     case Operator.CountSumByKey => "countSumByKey"
     case Operator.MapValues => "mapValues"
+    case Operator.IntLongMapValue => "intLongMapValue"
     case Operator.TupleMap => "map"
     case Operator.SortByIntKey => "sortByIntKey"
     case Operator.SortByIntValueDesc => "sortByIntValueDesc"
@@ -470,6 +473,14 @@ class TestColumnBinding extends AnyFlatSpec with Matchers:
       ReducerWitness.NotApplicable,
       NullPolicy.Nullable,
       KernelChoice.MapValue,
+    ),
+    accepted(
+      ColumnType.Int32,
+      ColumnType.Int32,
+      Operator.IntLongMapValue,
+      ReducerWitness.NotApplicable,
+      NullPolicy.Nullable,
+      KernelChoice.IntLongMapValue,
     ),
     // Not accepted. This cell constructs no KernelChoice.
     Cell(

@@ -171,10 +171,22 @@ private[execution] object AggregateBinding:
     val choice = bound.output match
       case Output.Columns(columns) =>
         ColumnBinding.choose(columns, operator, reducer, Bound.nulls(bound), Bound.side(bound))
+      case Output.IntLongPairs(_) => intLongMap(operator, reducer)
       case Output.Opaque(_) => None
     choice match
       case Some(KernelChoice.CountThroughProbe) if selection.nonEmpty => None
       case other => other
+
+  /**
+   * Long addition on an int-to-long `mapValues`. Every other operator, including `countByKey`, is
+   * [[scala.None]]. Routing these columns through [[ColumnBinding.choose]] would also tag a count,
+   * because they compare equal to [[Layout.AssumedIntLong]].
+   */
+  private def intLongMap(operator: Operator, reducer: ReducerWitness): Option[KernelChoice] =
+    (operator, reducer) match
+      case (Operator.ReduceByKey, ReducerWitness.AddsLongs) =>
+        Some(KernelChoice.IntLongProjectSum)
+      case _ => None
 
   /** Long addition, or any other reducer. [[witness]] calls the function. */
   private[execution] def witnessOf(reducer: Any): ReducerWitness = witness(reducer)

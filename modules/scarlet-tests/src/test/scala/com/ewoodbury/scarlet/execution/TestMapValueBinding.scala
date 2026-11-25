@@ -23,9 +23,10 @@ import com.ewoodbury.scarlet.execution.schema.ColumnBinding.{
  * [[ColumnBinding.chooseCallsForTest]] moves. A kind-only lower of an int `mapValues` leaves the
  * counter at zero. [[Describe.tag]] is not the check.
  *
- * `Int => Long` stays [[scala.None]] and does not ask, even though an int pair tags
- * [[KernelChoice.MapValue]]. The witness refuses `apply$mcJI$sp`. A `mapValues` above
- * [[Plan.MapIntKeyOp]] stays [[scala.None]] before the ask.
+ * `Int => Long` builds [[PhysicalOp.IntLongMapValue]] when the tag is
+ * [[KernelChoice.IntLongMapValue]]. The same-type [[Operator.MapValues]] choice on that pair stays
+ * [[KernelChoice.MapValue]]. A `mapValues` above [[Plan.MapIntKeyOp]] stays [[scala.None]] before
+ * the ask. A string pair widened to long fails the kind check and does not ask.
  */
 class TestMapValueBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -72,20 +73,53 @@ class TestMapValueBinding extends AnyFlatSpec with Matchers with BeforeAndAfterE
     follows(strings)
   }
 
-  it should "leave an int value widened to long unasked" in {
-    lower(Plan.MapValuesOp(intPairs, (value: Int) => value.toLong)) shouldBe None
-    ColumnBinding.chooseCallsForTest shouldBe 0
+  it should "ask before widening an int value to long" in {
+    val mapped = lower(Plan.MapValuesOp(intPairs, (value: Int) => value.toLong))
+    mapped.map(_.shape) shouldBe Some("IntLongMapValue(Scan)")
+    ColumnBinding.chooseCallsForTest shouldBe 1
+    className(mapped, "IntLongMapValue")
+    val root = mapped.getOrElse(fail("int mapValues to long did not lower"))
+    root.schema shouldBe PhysicalSchema.IntLong
+    Layout.known(root) should not be Layout.AssumedIntLong
+    Layout.known(root) should not be Layout.ProbeSum
     choose(
       Vector(
         ColumnLayout(ColumnType.Int32, NullPolicy.Nullable),
         ColumnLayout(ColumnType.Int32, NullPolicy.Nullable),
       ),
     ) shouldBe Some(KernelChoice.MapValue)
+    ColumnBinding.choose(
+      Vector(
+        ColumnLayout(ColumnType.Int32, NullPolicy.Nullable),
+        ColumnLayout(ColumnType.Int32, NullPolicy.Nullable),
+      ),
+      Operator.IntLongMapValue,
+      ReducerWitness.NotApplicable,
+      NullAdmission.Policy(NullPolicy.Nullable),
+      Side.Inner,
+    ) shouldBe Some(KernelChoice.IntLongMapValue)
+  }
+
+  it should "recognize apply$mcJI$sp without calling the function" in {
+    val bomb = new Function1[Int, Long]:
+      def apply(value: Int): Long = throw new IllegalStateException("called")
+    FunctionWitness.declaredIntToLong(bomb) shouldBe true
+    FunctionWitness.declaredIntToLong((value: Int) => value + 1) shouldBe false
+    FunctionWitness.declaredIntToLong((pair: (Int, Int)) => pair) shouldBe false
+    FunctionWitness.declaredElement(PhysicalOp.Kind.Ints, (value: Int) => value.toLong) shouldBe
+      false
+  }
+
+  it should "leave a string pair widened to long unasked" in {
+    lower(Plan.MapValuesOp(stringPairs, (value: Int) => value.toLong)) shouldBe None
+    ColumnBinding.chooseCallsForTest shouldBe 0
   }
 
   it should "leave mapValues above an int key map unasked" in {
     val keyed = Plan.MapIntKeyOp(intPairs, (key: Int) => key + 1)
     lower(Plan.MapValuesOp(keyed, (value: Int) => value + 1)) shouldBe None
+    ColumnBinding.chooseCallsForTest shouldBe 0
+    lower(Plan.MapValuesOp(keyed, (value: Int) => value.toLong)) shouldBe None
     ColumnBinding.chooseCallsForTest shouldBe 0
   }
 
@@ -99,6 +133,10 @@ class TestMapValueBinding extends AnyFlatSpec with Matchers with BeforeAndAfterE
     MapValueBinding.value(child) shouldBe None
     ColumnBinding.chooseCallsForTest should be > 0
     ColumnBinding.asked(child, Operator.MapValues) shouldBe None
+    ColumnBinding.resetChooseCallsForTest()
+    IntLongMapBinding.value(child) shouldBe None
+    ColumnBinding.chooseCallsForTest should be > 0
+    ColumnBinding.asked(child, Operator.IntLongMapValue) shouldBe None
   }
 
   /**
@@ -118,9 +156,11 @@ class TestMapValueBinding extends AnyFlatSpec with Matchers with BeforeAndAfterE
     case Some(PhysicalOp.MapValue(child)) => child
     case other => fail(s"expected a map value, got $other")
 
-  private def className(lowered: Option[PhysicalOp]): String = lowered match
-    case Some(_: PhysicalOp.MapValue) => "MapValue"
-    case other => fail(s"expected MapValue, got $other")
+  private def className(lowered: Option[PhysicalOp], expected: String = "MapValue"): String =
+    lowered match
+      case Some(_: PhysicalOp.MapValue) => "MapValue"
+      case Some(_: PhysicalOp.IntLongMapValue) => "IntLongMapValue"
+      case other => fail(s"expected $expected, got $other")
 
   private def choose(layout: Vector[ColumnLayout]): Option[KernelChoice] =
     ColumnBinding.choose(

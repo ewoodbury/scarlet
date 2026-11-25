@@ -33,6 +33,8 @@ filter over sortByStringKey	Filter
 int pair keys	Column
 int pair values	Column
 int mapValues	MapValue
+int mapValues to long	IntLongMapValue
+int mapValues to long reduceByKey	IntLongProjectSum
 int mapIntKey	MapKey
 keys of mapIntKey	Column
 values of mapIntKey	Column
