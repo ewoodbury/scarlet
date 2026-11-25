@@ -9,10 +9,11 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * [[ColumnarPlanner]] accepts run on the columnar kernels. A `mapPartitions` tail runs that child
  * first, then the row function. A `flatMap` keeps a decoded child only when those partitions equal
  * the row executor's, in order, and then runs the flat-map function. `flatMapValues` uses that
- * same decode and runs the value function. It does not grow a second decoder. A mismatch runs the
- * original plan on rows. A non-source child of `mapPartitions` is kept only when its decoded
- * partitions equal the row executor's, in order. A lowered filter that drops a null, or a decoder
- * that rejects a null pair, runs that child on rows. A child the planner refuses publishes
+ * same decode and runs the value function. It does not grow a second decoder. An untyped `sortBy`
+ * sorts that decoded child with the row scheduler. A typed sort stays on its kernel. A mismatch
+ * runs the original plan on rows. A non-source child of `mapPartitions` is kept only when its
+ * decoded partitions equal the row executor's, in order. A lowered filter that drops a null, or a
+ * decoder that rejects a null pair, runs that child on rows. A child the planner refuses publishes
  * nothing. A join with one lowered side decodes that side and runs the join on the row executor
  * when those rows match. `take` asks [[ColumnarPlanner.tryTake]] and `count` asks
  * [[ColumnarPlanner.tryCount]] before either splits the original plan. Neither wraps that plan in
@@ -37,6 +38,9 @@ class DefaultExecutionService extends ExecutionService {
 
     case Plan.FlatMapValuesOp(source, f) =>
       RowBoundary.flatMapValues(source, f).getOrElse(runRow(plan))
+
+    case Plan.SortByOp(source, keyFunc, ordering) =>
+      RowBoundary.sortBy(source, keyFunc, ordering).getOrElse(runRow(plan))
 
     case _ =>
       ColumnarPlanner.tryRun(plan).orElse(MixedJoin.partitions(plan)).getOrElse(runRow(plan))
