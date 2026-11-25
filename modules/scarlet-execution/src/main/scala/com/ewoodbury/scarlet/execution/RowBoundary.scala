@@ -12,7 +12,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * partitions of that same child, in order. Anything else is [[scala.None]], and the caller runs
  * the original plan on rows. This does not wrap that plan in another operator. `flatMapValues`
  * uses the same decode. Untyped `sortBy` sorts those partitions with the row scheduler. Typed
- * sorts stay on their kernels. [[MixedAction]] and [[MixedJoin]] stay on their own paths.
+ * sorts stay on their kernels. `cogroup` decodes each child on its own and runs the row cogroup.
+ * One disagreement runs the original plan on rows. [[MixedAction]] and [[MixedJoin]] stay on their
+ * own paths.
  */
 @SuppressWarnings(
   Array(
@@ -21,6 +23,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
     "org.wartremover.warts.Equals",
     "org.wartremover.warts.Null",
     "org.wartremover.warts.Product",
+    "org.wartremover.warts.Throw",
   ),
 )
 private[execution] object RowBoundary:
@@ -56,6 +59,25 @@ private[execution] object RowBoundary:
     }
 
   /**
+   * `cogroup` over children decoded on their own.
+   *
+   * A child that matches becomes a source of those partitions. A child that does not lower stays
+   * that plan, and the row cogroup executes it. A null mismatch, or a decode that throws, is
+   * [[scala.None]] for the whole cogroup. This is not a join.
+   */
+  def cogroup[K, V, W](
+      left: Plan[(K, V)],
+      right: Plan[(K, W)],
+  ): Option[Seq[Partition[(K, (Iterable[V], Iterable[W]))]]] =
+    val leftSide = childOf(left)
+    val rightSide = childOf(right)
+    (leftSide, rightSide) match
+      case (Child.Disagree(), _) | (_, Child.Disagree()) => None
+      case _ if !ready(leftSide) && !ready(rightSide) => None
+      case _ =>
+        Some(runRow(Plan.CoGroupOp(asPlan(leftSide), asPlan(rightSide))))
+
+  /**
    * Decoded partitions when they are the row executor's partitions, in order.
    *
    * [[scala.None]] is a refused decode, a null pair the decoder rejects, or a different row.
@@ -72,6 +94,38 @@ private[execution] object RowBoundary:
   private def decode[A](plan: Plan[A]): Option[Seq[Partition[A]]] =
     try ColumnarPlanner.tryRun(plan)
     catch case _: IllegalArgumentException => None
+
+  /** One cogroup child. [[Child.Disagree]] refuses the whole cogroup. */
+  private enum Child[A]:
+    case Ready(parts: Seq[Partition[A]])
+    case Kept(plan: Plan[A])
+    case Disagree[B]() extends Child[B]
+
+  /**
+   * A matching decode, the original plan when the child does not lower, or a disagreement.
+   *
+   * [[IllegalArgumentException]] is a disagreement, not a row child. A refused `tryRun` keeps the
+   * plan.
+   */
+  private def childOf[A](plan: Plan[A]): Child[A] =
+    try
+      ColumnarPlanner.tryRun(plan) match
+        case None => Child.Kept(plan)
+        case Some(parts) =>
+          val columns = freeze(parts)
+          val rows = freeze(runRow(plan))
+          if sameOrder(columns, rows) then Child.Ready(columns) else Child.Disagree()
+    catch case _: IllegalArgumentException => Child.Disagree()
+
+  private def ready[A](side: Child[A]): Boolean = side match
+    case Child.Ready(_) => true
+    case Child.Kept(_) | Child.Disagree() => false
+
+  private def asPlan[A](side: Child[A]): Plan[A] = side match
+    case Child.Ready(parts) => Plan.Source(parts)
+    case Child.Kept(plan) => plan
+    case Child.Disagree() =>
+      throw new IllegalStateException("a disagreement does not build a cogroup child")
 
   private def applyOnce[A, B](rows: Iterable[A], f: A => IterableOnce[B]): Vector[B] =
     rows.iterator.flatMap(row => f(row).iterator).toVector

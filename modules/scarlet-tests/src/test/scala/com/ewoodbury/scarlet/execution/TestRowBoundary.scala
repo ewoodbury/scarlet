@@ -19,7 +19,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * `collect` equals the row plan. Unboxing the null to `0` and calling that a match is not this
  * test. `flatMapValues` uses that same decode. An int-pair scan publishes a batch. A null value on
  * a lowered filter is [[scala.None]]. Untyped `sortBy` publishes the child and matches the row
- * order. A per-partition sort is not this test.
+ * order. A per-partition sort is not this test. `cogroup` publishes each scan. One null mismatch
+ * is [[scala.None]] for the whole cogroup. A hash join is not this test.
  */
 class TestRowBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -135,6 +136,84 @@ class TestRowBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     found shouldBe row(show(collect(sorted)))
     found.exists(_.contains("null")) shouldBe true
   }
+
+  "two int-pair scans under cogroup" should "publish both scans and match the row groups" in {
+    val left = DistCollection.ofIntPairs(Array(1, 2), Array(10, 20), 1)
+    val right = DistCollection.ofIntPairs(Array(2, 3), Array(30, 40), 1)
+    val grouped = left.cogroup(right)
+    Describe.describe(grouped.plan) shouldBe Option.empty[Describe.Described]
+    ColumnarPlanner.lower(left.plan).isDefined shouldBe true
+    ColumnarPlanner.lower(right.plan).isDefined shouldBe true
+    grouped.plan match
+      case Plan.CoGroupOp(leftPlan, rightPlan) =>
+        RowBoundary.cogroup(leftPlan, rightPlan).isDefined shouldBe true
+      case other => fail(s"expected cogroup, got $other")
+
+    val sink = new CountingSink
+    val found = ColumnMetrics.withSink(sink) {
+      ScarletRuntime.get.shuffle.clear()
+      grouped.collect().toSeq
+    }
+    sink.batchCount should be >= 2L
+    intGroups(found) shouldBe Map(
+      1 -> (Seq(10), Seq.empty[Int]),
+      2 -> (Seq(20), Seq(30)),
+      3 -> (Seq.empty[Int], Seq(40)),
+    )
+    found shouldBe row(grouped.collect().toSeq)
+  }
+
+  "a null key on one cogroup side" should "refuse the whole cogroup" in {
+    val left = DistCollection(Seq((1, 10), erased(None, Some(20)), (2, 30)), 1)
+      .filterKeys((key: Int) => key >= 0)
+    val right = DistCollection.ofIntPairs(Array(1), Array(40), 1)
+    val grouped = left.cogroup(right)
+    Describe.describe(grouped.plan) shouldBe Option.empty[Describe.Described]
+    grouped.plan match
+      case Plan.CoGroupOp(leftPlan, rightPlan) =>
+        RowBoundary.cogroup(leftPlan, rightPlan) shouldBe None
+      case other => fail(s"expected cogroup, got $other")
+    grouped.collect().toSeq shouldBe row(grouped.collect().toSeq)
+  }
+
+  "a scan beside a row map under cogroup" should "publish the scan and match the row groups" in {
+    val left = DistCollection.ofIntPairs(Array(1, 2), Array(10, 20), 1)
+    val right =
+      DistCollection.ofIntPairs(Array(2), Array(7), 1).mapValues((value: Int) => value.toString)
+    val grouped = left.cogroup(right)
+    ColumnarPlanner.lower(left.plan).isDefined shouldBe true
+    ColumnarPlanner.lower(right.plan).isDefined shouldBe false
+    grouped.plan match
+      case Plan.CoGroupOp(leftPlan, rightPlan) =>
+        RowBoundary.cogroup(leftPlan, rightPlan).isDefined shouldBe true
+      case other => fail(s"expected cogroup, got $other")
+
+    val sink = new CountingSink
+    val found = ColumnMetrics.withSink(sink) {
+      ScarletRuntime.get.shuffle.clear()
+      grouped.collect().toSeq
+    }
+    sink.batchCount should be > 0L
+    stringGroups(found) shouldBe Map(
+      1 -> (Seq(10), Seq.empty[String]),
+      2 -> (Seq(20), Seq("7")),
+    )
+    found shouldBe row(grouped.collect().toSeq)
+  }
+
+  private def intGroups(
+      rows: Seq[(Int, (Iterable[Int], Iterable[Int]))],
+  ): Map[Int, (Seq[Int], Seq[Int])] =
+    rows.map { case (key, (leftVals, rightVals)) =>
+      key -> (leftVals.toSeq, rightVals.toSeq)
+    }.toMap
+
+  private def stringGroups(
+      rows: Seq[(Int, (Iterable[Int], Iterable[String]))],
+  ): Map[Int, (Seq[Int], Seq[String])] =
+    rows.map { case (key, (leftVals, rightVals)) =>
+      key -> (leftVals.toSeq, rightVals.toSeq)
+    }.toMap
 
   private def refuse(mapped: DistCollection[(Int, Int)]): Unit =
     Describe.describe(mapped.plan) shouldBe Option.empty[Describe.Described]
