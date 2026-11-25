@@ -13,12 +13,12 @@ import com.ewoodbury.scarlet.execution.schema.ColumnBinding.{Operator, ReducerWi
  * [[com.ewoodbury.scarlet.execution.schema.Describe.tag]] is not this decision.
  *
  * The kind check stays. [[PhysicalOp.Union.kind]] is the left child, and [[PhysicalSchema.of]]
- * reads that kind. A join-probe sum and a triple project both report `[Int32, Int64]` and their
- * kinds differ. Binding them would publish the left kind. A project on the left would report three
- * [[com.ewoodbury.scarlet.columnar.LogicalType.Int32]] columns. [[PhysicalOp.JoinProbeSum]] has no
- * interpreter arm, and that failure is not a [[com.ewoodbury.scarlet.columnar.ColumnarFallback]],
- * so the row path would not run. A grouped batch is not a column batch. Those shapes stay on the
- * row path.
+ * reads that kind. [[PhysicalOp.JoinProbeSum]] is [[Layout.ProbeSum]], not
+ * [[Layout.AssumedIntLong]], so a probe sum and a triple project do not share a layout. Two probe
+ * sums still do. Binding them would publish [[PhysicalOp.Kind.IntLongSums]]. The union interpreter
+ * does not run that node, and the failure is not a
+ * [[com.ewoodbury.scarlet.columnar.ColumnarFallback]], so the row path would not run. A grouped
+ * batch is not a column batch. Those shapes stay on the row path.
  */
 private[execution] object UnionLowering:
 

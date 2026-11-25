@@ -109,8 +109,12 @@ class TestLayout extends AnyFlatSpec with Matchers:
       LogicalType.Int32,
       LogicalType.Int32,
     )
-    Layout.known(PhysicalOp.JoinProbeSum(pairs, pairs, PhysicalOp.ProbeMeasure.Left)) shouldBe
-      columns(LogicalType.Int32, LogicalType.Int64)
+    val probe = PhysicalOp.JoinProbeSum(pairs, pairs, PhysicalOp.ProbeMeasure.Left)
+    Layout.known(probe) shouldBe Layout.ProbeSum
+    Layout.known(PhysicalOp.JoinProbeSum(pairs, pairs, PhysicalOp.ProbeMeasure.Right)) shouldBe
+      Layout.ProbeSum
+    Layout.ProbeSum should not be Layout.AssumedIntLong
+    probe.schema shouldBe PhysicalSchema.IntLong
     Layout.known(PhysicalOp.SortByIntKey(pairs)) shouldBe
       columns(LogicalType.Int32, LogicalType.Int32)
     Layout.known(PhysicalOp.SortByIntValueDesc(pairs)) shouldBe
@@ -119,17 +123,21 @@ class TestLayout extends AnyFlatSpec with Matchers:
       columns(LogicalType.Int64, LogicalType.Int64)
     Layout.known(PhysicalOp.SortByStringKey(stringPairs)) shouldBe
       columns(LogicalType.Utf8Dict, LogicalType.Int32)
-    Layout.known(PhysicalOp.GroupByKey(PhysicalOp.Exchange(pairs))) shouldBe
-      columns(LogicalType.Int32, LogicalType.Int32)
-    Layout.known(PhysicalOp.GroupByKey(PhysicalOp.Exchange(longPairs))) shouldBe
-      columns(LogicalType.Int64, LogicalType.Int64)
-    Layout.known(PhysicalOp.GroupByKey(PhysicalOp.Exchange(stringPairs))) shouldBe
-      columns(LogicalType.Utf8Dict, LogicalType.Int32)
+    val grouped = PhysicalOp.GroupByKey(PhysicalOp.Exchange(pairs))
+    Layout.known(grouped) shouldBe Layout.Grouped
+    Layout.Grouped shouldBe Output.Opaque("grouped values")
+    Layout.known(grouped) should not be Layout.known(pairs)
+    val longGrouped = PhysicalOp.GroupByKey(PhysicalOp.Exchange(longPairs))
+    Layout.known(longGrouped) shouldBe Layout.Grouped
+    Layout.known(longGrouped) should not be Layout.known(longPairs)
+    val stringGrouped = PhysicalOp.GroupByKey(PhysicalOp.Exchange(stringPairs))
+    Layout.known(stringGrouped) shouldBe Layout.Grouped
+    Layout.known(stringGrouped) should not be Layout.known(stringPairs)
   }
 
   it should "treat grouped decode as opaque" in {
     val grouped = PhysicalOp.GroupByKey(PhysicalOp.Exchange(pairs))
-    Layout.known(PhysicalOp.GroupedDecode(grouped)) shouldBe Output.Opaque("grouped values")
+    Layout.known(PhysicalOp.GroupedDecode(grouped)) shouldBe Layout.Grouped
   }
 
   it should "mark the missing side of an outer join absent" in {

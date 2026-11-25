@@ -13,9 +13,10 @@ import com.ewoodbury.scarlet.execution.{PhysicalOp, PhysicalSchema}
  * not read this report. [[known]] reads the case class. A filter and an exchange copy the child. A
  * pipeline, a union, and a dedupe report [[PhysicalOp.kind]]. A join's three columns are the
  * columns of its kind. An outer join marks the missing value [[NullPolicy.Absence]]. A triple
- * [[PhysicalOp.Project]] is [[Layout.AssumedIntLong]]. [[PhysicalOp.GroupedDecode]] is opaque.
- * [[PhysicalOp.MapKey]] rewrites the key to [[ColumnType.Int32]] and copies the value.
- * [[PhysicalOp.MapValue]] reports the kind it already copies.
+ * [[PhysicalOp.Project]] is [[Layout.AssumedIntLong]]. [[PhysicalOp.GroupByKey]] and
+ * [[PhysicalOp.GroupedDecode]] are [[Layout.Grouped]]. [[PhysicalOp.JoinProbeSum]] is
+ * [[Layout.ProbeSum]]. [[PhysicalOp.MapKey]] rewrites the key to [[ColumnType.Int32]] and copies
+ * the value. [[PhysicalOp.MapValue]] reports the kind it already copies.
  */
 private[execution] object Layout:
 
@@ -25,6 +26,36 @@ private[execution] object Layout:
       Vector(
         ColumnLayout(ColumnType.Int32, NullPolicy.Nullable),
         ColumnLayout(ColumnType.Int64, NullPolicy.Nullable),
+      ),
+    )
+
+  /**
+   * Grouped values, not a pair of columns.
+   *
+   * [[PhysicalOp.Kind.GroupedInts]], [[PhysicalOp.Kind.GroupedLongs]], and
+   * [[PhysicalOp.Kind.GroupedStrings]] use the same two types as int, long, and string pairs.
+   * Reporting those columns aliases the pair layout, so a binder that reads [[known]] cannot tell
+   * a grouped child from a pair. [[PhysicalOp.GroupedDecode]] already uses this reason: the case
+   * class determines a grouped batch, and a parent cannot read it as columns. One opaque reason is
+   * that report. It does not invent a column vector.
+   */
+  val Grouped: Output = Output.Opaque("grouped values")
+
+  /**
+   * `(Int32, Int64)` written by [[PhysicalOp.JoinProbeSum]]. Both columns are
+   * [[NullPolicy.Present]].
+   *
+   * A null key is not a probe hit, and a null measured value adds as zero, so the case class does
+   * not publish a null. [[AssumedIntLong]] is those same types under [[NullPolicy.Nullable]],
+   * assumed for a triple [[PhysicalOp.Project]] whose function is not read. Both nodes have
+   * physical schema `(Int32, Int64)`. Sharing [[AssumedIntLong]] would make a binder treat the
+   * probe sum as that project. Present nulls keep the real columns and are not that alias.
+   */
+  val ProbeSum: Output =
+    Output.Columns(
+      Vector(
+        ColumnLayout(ColumnType.Int32, NullPolicy.Present),
+        ColumnLayout(ColumnType.Int64, NullPolicy.Present),
       ),
     )
 
@@ -43,7 +74,7 @@ private[execution] object Layout:
     case PhysicalOp.MapKey(child) =>
       mapKey(child)
     case _: PhysicalOp.GroupedDecode =>
-      Output.Opaque("grouped values")
+      Grouped
     case node: PhysicalOp.Pipeline =>
       columns(node.kind)
     case node: PhysicalOp.Union =>
@@ -54,8 +85,8 @@ private[execution] object Layout:
       columns(node.kind)
     case node: PhysicalOp.MapValue =>
       columns(node.kind)
-    case node: PhysicalOp.GroupByKey =>
-      columns(node.kind)
+    case _: PhysicalOp.GroupByKey =>
+      Grouped
     case node: PhysicalOp.CountByKey =>
       columns(node.kind)
     case node: PhysicalOp.CountSum =>
@@ -66,8 +97,8 @@ private[execution] object Layout:
       columns(node.kind)
     case node: PhysicalOp.StringHashAggregate =>
       columns(node.kind)
-    case node: PhysicalOp.JoinProbeSum =>
-      columns(node.kind)
+    case _: PhysicalOp.JoinProbeSum =>
+      ProbeSum
     case node: PhysicalOp.SortByIntKey =>
       columns(node.kind)
     case node: PhysicalOp.SortByIntValueDesc =>

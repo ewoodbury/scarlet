@@ -15,8 +15,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  *
  * [[KernelChoice.IntLongProjectSum]] is the only tag that runs [[IntLongReduce]].
  * [[PhysicalSchema.isIntLongAggregate]] still labels that shape for [[Describe]]. A projected join
- * sum publishes a batch. [[KernelChoice.JoinProbeSum]] has the same layout and does not enter
- * [[IntLongReduce]]. A pass that maps every other tag to the old match is not this test.
+ * sum publishes a batch. [[KernelChoice.JoinProbeSum]] reports [[Layout.ProbeSum]], not
+ * [[Layout.AssumedIntLong]], and does not enter [[IntLongReduce]]. A pass that maps every other
+ * tag to the old match is not this test.
  */
 class TestExecutionRoute extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -64,13 +65,14 @@ class TestExecutionRoute extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     columnar shouldBe row(reduced.collect().toMap)
   }
 
-  "sumJoinLeft" should "keep the int-long layout off IntLongReduce" in {
+  "sumJoinLeft" should "keep its own layout off IntLongReduce" in {
     val left = pairs(Array(1, 2), Array(10, 20))
     val right = pairs(Array(1, 2), Array(100, 200))
     val summed = left.join(right).sumJoinLeft
     val described = Describe.describe(summed.plan).getOrElse(fail("probe sum did not lower"))
     described.choice shouldBe KernelChoice.JoinProbeSum
-    Layout.known(described.root) shouldBe Layout.AssumedIntLong
+    Layout.known(described.root) shouldBe Layout.ProbeSum
+    Layout.known(described.root) should not be Layout.AssumedIntLong
     PhysicalSchema.isIntLongAggregate(described.root) shouldBe false
     ExecutionRoute.decodesAsIntLongSum(Some(summed.plan), described.root) shouldBe false
     val columnar = published(summed.collect().toMap)

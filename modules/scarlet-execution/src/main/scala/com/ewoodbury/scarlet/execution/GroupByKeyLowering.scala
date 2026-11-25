@@ -20,8 +20,10 @@ import com.ewoodbury.scarlet.execution.schema.{ColumnBinding, KernelChoice}
  * lower. Every other kind stays on the row path.
  *
  * [[apply]] asks [[ColumnBinding]] before it builds. [[scala.None]] from the binder stays
- * [[scala.None]]. A grouped child reports the same two column types as a pair, so the kind check
- * still refuses it. [[com.ewoodbury.scarlet.execution.schema.Describe.tag]] is not this decision.
+ * [[scala.None]]. A [[PhysicalOp.GroupByKey]] child is
+ * [[com.ewoodbury.scarlet.execution.schema.Layout.Grouped]], so the binder refuses it. The kind
+ * check still refuses a grouped kind. [[com.ewoodbury.scarlet.execution.schema.Describe.tag]] is
+ * not this decision.
  */
 private[execution] object GroupByKeyLowering:
 
@@ -39,8 +41,8 @@ private[execution] object GroupByKeyLowering:
       case _ => false
 
   /**
-   * Int, long, or string pairs. A grouped child has the same column types as a pair and is not
-   * this shape.
+   * Int, long, or string pairs. A grouped kind is not this shape. The binder already refuses an
+   * opaque [[PhysicalOp.GroupByKey]].
    */
   private def acceptedKind(child: PhysicalOp): Boolean = child.kind match
     case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs =>

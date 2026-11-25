@@ -15,8 +15,9 @@ import com.ewoodbury.scarlet.execution.schema.{ColumnBinding, KernelChoice}
  * a clear bit and is not passed to the function or a key predicate. The value column is the
  * original value. A wider parent still declines.
  *
- * A grouped child reports the same two column types as a pair. The kind check still refuses it, so
- * `values` of `groupByKey` stays on the row path and is not a columnar project over the group.
+ * A grouped child is [[com.ewoodbury.scarlet.execution.schema.Layout.Grouped]], so the binder
+ * refuses `values` of `groupByKey`. That projection stays on the row path and is not a columnar
+ * project over the group. The kind check still refuses a grouped kind.
  * [[com.ewoodbury.scarlet.execution.schema.Describe.tag]] is not this decision.
  */
 private[execution] object KeyValueLowering:
