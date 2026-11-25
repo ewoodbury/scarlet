@@ -7,18 +7,20 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.execution.schema.*
+import com.ewoodbury.scarlet.execution.schema.ColumnBinding.{Operator, ReducerWitness}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
  * `union` asks [[ColumnBinding]] before it builds.
  *
- * An accepted int-pair union goes through [[ColumnarPlanner.lower]].
- * [[ColumnBinding.chooseCallsForTest]] moves. A lower that refuses a mixed union from
- * [[PhysicalOp.Kind]] alone leaves that counter at zero. [[Describe.tag]] is not the check.
+ * An accepted int-pair union goes through [[ColumnarPlanner.lower]]. The root is
+ * [[PhysicalOp.Union]] only when [[ColumnBinding.choose]] tags each child [[KernelChoice.Union]]
+ * and the column layouts match. The same [[PhysicalOp.Kind]] with two layouts stays unbound: a
+ * kind match that ignores the tag would concatenate them. [[Describe.tag]] is not the check.
  *
- * A join-probe sum and a triple project both report `[Int32, Int64]` and their kinds differ.
- * That union stays unbound. [[ColumnarPlanner.tryRun]] does not throw, and `collect` matches the
- * row path. With the sum on the left, an interpreter miss is an `IllegalStateException`, which
+ * A join-probe sum is [[Layout.ProbeSum]]. A triple project is [[Layout.AssumedIntLong]]. That
+ * union stays unbound. [[ColumnarPlanner.tryRun]] does not throw, and `collect` matches the row
+ * path. With the sum on the left, an interpreter miss is an `IllegalStateException`, which
  * [[ColumnarPlanner.tryRun]] does not catch. With the project on the left, [[PhysicalOp.Union]]
  * would report three [[com.ewoodbury.scarlet.columnar.LogicalType.Int32]] columns.
  */
@@ -45,6 +47,7 @@ class TestUnionBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val lowered = ColumnarPlanner.lower(united.plan)
     lowered.map(_.shape) shouldBe Some("Union(Scan, Scan)")
     ColumnBinding.chooseCallsForTest should be > 0
+    follows(lowered)
     val ran = ColumnarPlanner.tryRun(united.plan).getOrElse(fail("int pair union did not run"))
     val expected = row(united.collect().toList)
     ran.flatMap(_.data).toList shouldBe expected
@@ -57,6 +60,22 @@ class TestUnionBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val longs = DistCollection.ofLongPairs(Array(1L), Array(10L), 1).plan
     ColumnarPlanner.lower(Plan.UnionOp(ints, erase(longs))) shouldBe Option.empty[PhysicalOp]
     ColumnBinding.chooseCallsForTest should be > 0
+  }
+
+  it should "refuse one kind when the two layouts differ" in {
+    val leftPlan = Plan.Source(Seq.empty[Partition[Int]], Plan.SourceDescriptor.Pairs)
+    val rightPlan = Plan.Source(Seq.empty[Partition[Int]], Plan.SourceDescriptor.Ints)
+    val triples = PhysicalOp.Scan(PhysicalOp.Kind.Triples, Seq.empty)
+    val projected = PhysicalOp.Project(triples)
+    val scan = PhysicalOp.Scan(PhysicalOp.Kind.Triples, Seq.empty)
+    projected.kind shouldBe scan.kind
+    Layout.known(projected) shouldBe Layout.AssumedIntLong
+    Layout.known(scan) should not be Layout.known(projected)
+    ColumnBinding.resetChooseCallsForTest()
+    UnionLowering.lower(leftPlan, rightPlan, childFor(leftPlan, projected, scan)) shouldBe None
+    ColumnBinding.chooseCallsForTest should be > 0
+    asked(projected, Operator.Union) shouldBe Some(KernelChoice.Union)
+    asked(scan, Operator.Union) shouldBe Some(KernelChoice.Union)
   }
 
   it should "keep a join-probe sum union a triple project on the row path" in {
@@ -90,13 +109,16 @@ class TestUnionBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val lowered = ColumnarPlanner.lower(united.plan)
     lowered.map(_.shape).getOrElse(fail("outer union did not lower")) should startWith("Union(")
     ColumnBinding.chooseCallsForTest should be > 0
+    follows(lowered)
     ColumnarPlanner.tryRun(united.plan).isDefined shouldBe true
     val expected = row(united.collect().toList)
     ScarletRuntime.get.shuffle.clear()
     united.collect().toList should contain theSameElementsAs expected
   }
 
-  /** Same `[Int32, Int64]` layout, different kinds. The binder is asked by [[onRows]]. */
+  /**
+   * Probe sum and triple project. Different layouts, different kinds. [[onRows]] asks the binder.
+   */
   @SuppressWarnings(Array("org.wartremover.warts.Equals"))
   private def differentKinds(leftPlan: Plan[_], rightPlan: Plan[_]): Unit =
     val left = ColumnarPlanner.lower(leftPlan).getOrElse(fail("left child did not lower"))
@@ -107,7 +129,8 @@ class TestUnionBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     right match
       case _: PhysicalOp.Project => ()
       case other => fail(s"expected Project, got $other")
-    Layout.known(left) shouldBe Layout.known(right)
+    Layout.known(left) shouldBe Layout.ProbeSum
+    Layout.known(right) shouldBe Layout.AssumedIntLong
     left.kind == right.kind shouldBe false
 
   /**
@@ -130,6 +153,38 @@ class TestUnionBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
           Option.empty[Seq[Partition[(Int, Long)]]]
     ScarletRuntime.get.shuffle.clear()
     united.collect().toList should contain theSameElementsAs expected
+
+  /** The callback sees the same left plan object [[UnionLowering.lower]] was given. */
+  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+  private def childFor(
+      leftPlan: Plan[_],
+      projected: PhysicalOp,
+      scan: PhysicalOp,
+  )(plan: Plan[_]): Option[PhysicalOp] =
+    if plan eq leftPlan then Some(projected) else Some(scan)
+
+  /** Each child is tagged [[KernelChoice.Union]]. The root class is that tag. */
+  private def follows(lowered: Option[PhysicalOp]): Unit = lowered match
+    case Some(PhysicalOp.Union(left, right)) =>
+      asked(left, Operator.Union) shouldBe Some(KernelChoice.Union)
+      asked(right, Operator.Union) shouldBe Some(KernelChoice.Union)
+    case other => fail(s"expected Union, got $other")
+
+  /**
+   * Same question [[UnionLowering]] asks. An opaque child does not call [[ColumnBinding.choose]].
+   */
+  private def asked(child: PhysicalOp, operator: Operator): Option[KernelChoice] =
+    val bound = Bound.of(child, Vector.empty, ReducerWitness.NotApplicable)
+    bound.output match
+      case Output.Columns(columns) =>
+        ColumnBinding.choose(
+          columns,
+          operator,
+          ReducerWitness.NotApplicable,
+          Bound.nulls(bound),
+          Bound.side(bound),
+        )
+      case Output.Opaque(_) => None
 
   @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
   private def erase[A](plan: Plan[_]): Plan[A] =
