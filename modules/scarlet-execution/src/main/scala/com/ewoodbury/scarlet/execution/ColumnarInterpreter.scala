@@ -54,11 +54,11 @@ private[execution] object ColumnarInterpreter:
 
   /** The pair batches `child` produced. A wrong column type is a planner bug, not a fallback. */
   private def pairBatches(child: PhysicalOp, columns: Columns): Vector[ColumnBatch] =
-    child.kind match
-      case PhysicalOp.Kind.LongPairs => longPairsOf(columns)
-      case PhysicalOp.Kind.Pairs => pairsOf(columns)
-      case PhysicalOp.Kind.StringPairs => StringPairWalk.batches(columns)
-      case _ =>
+    ExecutionRoute.pairArm(child) match
+      case Some(ExecutionRoute.PairArm.LongPairs) => longPairsOf(columns)
+      case Some(ExecutionRoute.PairArm.IntPairs) => pairsOf(columns)
+      case Some(ExecutionRoute.PairArm.StringPairs) => StringPairWalk.batches(columns)
+      case None =>
         throw new IllegalStateException("columnar projection expected a pair")
 
   private def projectColumn(parts: Vector[ColumnBatch], ordinal: Int): Vector[ColumnBatch] =
@@ -368,13 +368,11 @@ private[execution] object ColumnarInterpreter:
       val batches =
         batchesOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals))
       val width = ColumnarPlanner.shuffleWidth
-      child.kind match
-        case PhysicalOp.Kind.Ints => Columns.Ints(DistinctKernel.ints(batches, width))
-        case PhysicalOp.Kind.Strings => Columns.Strings(DistinctKernel.strings(batches, width))
-        case _ =>
-          throw new IllegalStateException(
-            s"distinct column is ${child.kind}, expected int or string",
-          )
+      ExecutionRoute.distinctArm(child) match
+        case ExecutionRoute.DistinctArm.Ints =>
+          Columns.Ints(DistinctKernel.ints(batches, width))
+        case ExecutionRoute.DistinctArm.Strings =>
+          Columns.Strings(DistinctKernel.strings(batches, width))
     case (_: Plan.DistinctOp[_], _: PhysicalOp.Dedupe) =>
       throw new ColumnarFallback("distinct needs an exchange")
     case (Plan.Source(partitions, _), PhysicalOp.Scan(kind, _)) =>
@@ -408,8 +406,7 @@ private[execution] object ColumnarInterpreter:
     // of two or more atoms is one selection pass in [[FilterChain.run]]. A lone long-pair filter
     // still chains. A sort reads [[FilterChain.selected]], which does not compact.
     // `accepts` walks the logical plan, so it runs only for a filter node.
-    case (logical, physical @ PhysicalOp.Filter(child, _))
-        if child.kind eq PhysicalOp.Kind.StringPairs =>
+    case (logical, physical @ PhysicalOp.Filter(child, _)) if ExecutionRoute.stringPairs(child) =>
       StringPairWalk.filter(logical, physical, selectedPartition, preserveAbsence, ordinals)
     case (logical, physical)
         if physical.isInstanceOf[PhysicalOp.Filter] && FilterChain.accepts(logical, physical) =>
@@ -452,10 +449,10 @@ private[execution] object ColumnarInterpreter:
       )
     case (Plan.MapValuesOp(source, mapper), PhysicalOp.MapValue(child)) =>
       val input = interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)
-      child.kind match
-        case PhysicalOp.Kind.LongPairs => mapLongValues(input, mapper)
-        case PhysicalOp.Kind.StringPairs => StringPairWalk.mapValues(input, mapper)
-        case _ => mapIntValues(input, mapper)
+      ExecutionRoute.mapValueArm(child) match
+        case ExecutionRoute.MapValueArm.LongValues => mapLongValues(input, mapper)
+        case ExecutionRoute.MapValueArm.StringValues => StringPairWalk.mapValues(input, mapper)
+        case ExecutionRoute.MapValueArm.IntValues => mapIntValues(input, mapper)
     case (Plan.MapIntKeyOp(source, mapper), PhysicalOp.MapKey(child)) =>
       MapIntKey.columns(
         interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),
@@ -532,19 +529,19 @@ private[execution] object ColumnarInterpreter:
     case (
           Plan.CountByKeyOp(source),
           PhysicalOp.CountByKey(PhysicalOp.Exchange(child)),
-        ) if PhysicalSchema.isIntLong(child.schema) =>
-      IntLongCount.columns(
-        source,
-        child,
-        selectedPartition,
-        preserveAbsence,
-        ordinals,
-      )
-    case (
-          Plan.CountByKeyOp(source),
-          PhysicalOp.CountByKey(PhysicalOp.Exchange(child)),
         ) =>
-      CountByKeyArms.columns(source, child, selectedPartition, preserveAbsence, ordinals)
+      ExecutionRoute.countArm(child) match
+        case ExecutionRoute.CountArm.IntLong =>
+          IntLongCount.columns(
+            source,
+            child,
+            selectedPartition,
+            preserveAbsence,
+            ordinals,
+          )
+        case ExecutionRoute.CountArm.IntPairs | ExecutionRoute.CountArm.LongPairs |
+            ExecutionRoute.CountArm.StringPairs =>
+          CountByKeyArms.columns(source, child, selectedPartition, preserveAbsence, ordinals)
     case (
           Plan.CountSumByKeyOp(source),
           PhysicalOp.CountSum(PhysicalOp.Exchange(child)),

@@ -60,8 +60,8 @@ private[execution] object CountByKeyArms:
     val width = ColumnarPlanner.shuffleWidth
     val workers = ColumnarPlanner.parallelism
     val batchSize = ColumnarPlanner.batchSize
-    child.kind match
-      case PhysicalOp.Kind.Pairs =>
+    ExecutionRoute.requirePair(child, "countByKey") match
+      case ExecutionRoute.PairArm.IntPairs =>
         val counted = tryFold(
           source,
           child,
@@ -97,7 +97,7 @@ private[execution] object CountByKeyArms:
                   batchSize,
                 )
         Columns.Pairs(counted)
-      case PhysicalOp.Kind.LongPairs =>
+      case ExecutionRoute.PairArm.LongPairs =>
         val counted = countAboveProjectedLong(
           source,
           child,
@@ -136,7 +136,7 @@ private[execution] object CountByKeyArms:
                     )
                     LongHashCount.byKey(batches, width, workers, batchSize)
         Columns.LongCounts(counted)
-      case PhysicalOp.Kind.StringPairs =>
+      case ExecutionRoute.PairArm.StringPairs =>
         // One project on a scan or a filter stack is counted without a pair batch. One key or
         // value slot above that project is counted the same way. A second map still publishes,
         // and byKey hashes those dictionaries. A null int is not a fallback.
@@ -179,10 +179,6 @@ private[execution] object CountByKeyArms:
                     )
                     StringHashCount.byKey(batches, width, workers, batchSize)
         Columns.StringPairs(counted)
-      case other =>
-        throw new IllegalStateException(
-          s"countByKey column is $other, expected int, long, or string pairs",
-        )
 
   /**
    * Present keys [[columns]] publishes for an int-pair source. Each occupied slot of the count
