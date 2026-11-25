@@ -460,7 +460,7 @@ private[execution] object ColumnarInterpreter:
       )
     case (
           Plan.ReduceByKeyOp(source, reduceFunc),
-          PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)),
+          PhysicalOp.HashAggregate(PhysicalOp.Exchange(child), _),
         ) =>
       ExecutionRoute.reduceArm(source, child, reduceFunc) match
         case ExecutionRoute.Arm.IntLongReduce =>

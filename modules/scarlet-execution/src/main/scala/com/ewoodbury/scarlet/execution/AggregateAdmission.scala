@@ -116,13 +116,14 @@ private[execution] object AggregateAdmission:
   /**
    * The exchange is the aggregate's child, as today's roots are. A tag this parent does not build,
    * including [[KernelChoice.CountThroughProbe]] and [[KernelChoice.IntLongProjectSum]], is empty.
-   * [[Describe.tag]] has to agree, so an `[Int32, Int64]` retag is not published.
+   * [[Describe.tag]] reports the tag stored on the node. The child schema does not rename it.
    */
   private def root(tag: KernelChoice, child: PhysicalOp): Option[PhysicalOp] =
     val exchanged = PhysicalOp.Exchange(child)
     val built = tag match
       case KernelChoice.CountByKey => Some(PhysicalOp.CountByKey(exchanged))
-      case KernelChoice.IntHashAggregate => Some(PhysicalOp.HashAggregate(exchanged))
+      case KernelChoice.IntHashAggregate =>
+        Some(PhysicalOp.HashAggregate(exchanged, PhysicalOp.HashAggregateTag.IntHash))
       case KernelChoice.LongHashAggregate => Some(PhysicalOp.LongHashAggregate(exchanged))
       case KernelChoice.StringHashAggregate => Some(PhysicalOp.StringHashAggregate(exchanged))
       case KernelChoice.CountSum => Some(PhysicalOp.CountSum(exchanged))

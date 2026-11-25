@@ -32,20 +32,20 @@ private[execution] object PhysicalSchema:
       of(child)
     case PhysicalOp.Exchange(child) =>
       of(child)
-    case PhysicalOp.HashAggregate(child) if isIntLong(of(child)) =>
+    case PhysicalOp.HashAggregate(child, _) if isIntLong(of(child)) =>
       IntLong
     case other =>
       ofKind(other.kind)
 
   /**
-   * True for a hash aggregate whose child schema is `[Int32, Int64]`.
+   * True when the child schema is `[Int32, Int64]`.
    *
-   * [[com.ewoodbury.scarlet.execution.schema.Describe]] still labels
-   * [[com.ewoodbury.scarlet.execution.schema.KernelChoice.IntLongProjectSum]] with this test.
-   * [[ExecutionRoute]] does not. The interpreter does not call it.
+   * [[Describe]] does not read this. The stored [[PhysicalOp.HashAggregateTag]] is the ledger
+   * label. [[ExecutionRoute]] does not call this test. [[ExecutionRoute.countArm]] still calls
+   * [[isIntLong]] on the output schema.
    */
   def isIntLongAggregate(op: PhysicalOp): Boolean = op match
-    case PhysicalOp.HashAggregate(child) if isIntLong(of(child)) => true
+    case PhysicalOp.HashAggregate(child, _) if isIntLong(of(child)) => true
     case _ => false
 
   private def isTriples(op: PhysicalOp): Boolean = op.kind match

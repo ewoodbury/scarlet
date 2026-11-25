@@ -75,7 +75,11 @@ enum PhysicalOp:
   /** Whole-row dedupe of an [[Exchange]] child. One row per distinct value, order unspecified. */
   case Dedupe(child: PhysicalOp)
   case Exchange(child: PhysicalOp)
-  case HashAggregate(child: PhysicalOp)
+
+  /**
+   * Int hash reduce. `tag` is the binder tag the builder stored. The child schema does not set it.
+   */
+  case HashAggregate(child: PhysicalOp, tag: PhysicalOp.HashAggregateTag)
 
   /**
    * In-memory hash reduce of `(Long, Long)` pairs. `child` is an [[Exchange]]. The kernel
@@ -559,7 +563,7 @@ enum PhysicalOp:
     case SortByIntValueDesc(_) => PhysicalOp.Kind.Pairs
     case SortByLongKey(_) => PhysicalOp.Kind.LongPairs
     case SortByStringKey(_) => PhysicalOp.Kind.StringPairs
-    case HashAggregate(_) => PhysicalOp.Kind.Pairs
+    case HashAggregate(_, _) => PhysicalOp.Kind.Pairs
     case LongHashAggregate(_) => PhysicalOp.Kind.LongPairs
     case StringHashAggregate(_) => PhysicalOp.Kind.StringPairs
     case GroupByKey(child) =>
@@ -669,7 +673,7 @@ enum PhysicalOp:
     case SortByIntValueDesc(child) => s"SortByIntValueDesc(${child.shape})"
     case SortByLongKey(child) => s"SortByLongKey(${child.shape})"
     case SortByStringKey(child) => s"SortByStringKey(${child.shape})"
-    case HashAggregate(child) => s"HashAggregate(${child.shape})"
+    case HashAggregate(child, _) => s"HashAggregate(${child.shape})"
     case LongHashAggregate(child) => s"LongHashAggregate(${child.shape})"
     case StringHashAggregate(child) => s"StringHashAggregate(${child.shape})"
     case GroupByKey(child) => s"GroupByKey(${child.shape})"
@@ -736,6 +740,18 @@ enum PhysicalOp:
       s"StringSortMergeFullOuter(${left.shape}, ${right.shape})"
 
 object PhysicalOp:
+
+  /**
+   * Tag the builder stored on [[HashAggregate]].
+   *
+   * This is not derived from the child schema. An `[Int32, Int64]` child may still be
+   * [[HashAggregateTag.IntHash]]. [[HashAggregateTag.IntLongSum]] is what the int-long aggregate
+   * path stores.
+   */
+  enum HashAggregateTag:
+    case IntHash
+    case IntLongSum
+
   enum Kind:
     case Ints, Longs, Floats, Pairs, Triples, Strings, Bools, LongPairs, LongCounts, LongTriples,
       StringPairs, StringTriples, GroupedInts, GroupedStrings, GroupedLongs, LongOuter,

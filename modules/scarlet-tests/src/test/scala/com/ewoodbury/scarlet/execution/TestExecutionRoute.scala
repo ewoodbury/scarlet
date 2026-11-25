@@ -13,12 +13,14 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * The execution route is the binder tag for a hash aggregate and the child layout for a pair.
  *
- * [[KernelChoice.IntLongProjectSum]] is the only tag that runs [[IntLongReduce]].
- * [[PhysicalSchema.isIntLongAggregate]] still labels that shape for [[Describe]]. A projected join
- * sum publishes a batch. [[KernelChoice.JoinProbeSum]] reports [[Layout.ProbeSum]], not
- * [[Layout.AssumedIntLong]], and does not enter [[IntLongReduce]]. A count of that project is
- * [[ExecutionRoute.CountArm.IntLong]]. Long and string counts publish through their own kernels. A
- * pass that maps every other tag to the old match is not this test.
+ * [[KernelChoice.IntLongProjectSum]] is the only tag that runs [[IntLongReduce]]. [[Describe]]
+ * reads the tag stored on the hash aggregate. [[PhysicalSchema.isIntLongAggregate]] is the schema
+ * fact and is not that label. A projected join sum publishes a batch.
+ * [[KernelChoice.JoinProbeSum]] reports [[Layout.ProbeSum]], not [[Layout.AssumedIntLong]], and
+ * does not enter [[IntLongReduce]]. A count of that project is [[ExecutionRoute.CountArm.IntLong]]
+ * because [[ExecutionRoute.countArm]] still calls [[PhysicalSchema.isIntLong]]. Long and string
+ * counts publish through their own kernels. A pass that maps every other tag to the old match is
+ * not this test.
  */
 class TestExecutionRoute extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -90,7 +92,10 @@ class TestExecutionRoute extends AnyFlatSpec with Matchers with BeforeAndAfterEa
   "a non-adding reducer on an int-long project" should "not take the schema route" in {
     val triples = PhysicalOp.Scan(PhysicalOp.Kind.Triples, Seq.empty)
     val project = PhysicalOp.Project(triples)
-    val aggregate = PhysicalOp.HashAggregate(PhysicalOp.Exchange(project))
+    val aggregate = PhysicalOp.HashAggregate(
+      PhysicalOp.Exchange(project),
+      PhysicalOp.HashAggregateTag.IntLongSum,
+    )
     val source = Plan.MapOp(
       Plan.JoinOp(intPairs, intPairs, None),
       (row: (Int, (Int, Int))) => (row._1, row._2._1.toLong),
@@ -120,7 +125,10 @@ class TestExecutionRoute extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     val text = PhysicalOp.Scan(PhysicalOp.Kind.StringPairs, Seq.empty)
     val grouped = PhysicalOp.GroupByKey(PhysicalOp.Exchange(pairs))
     val triples = PhysicalOp.Project(PhysicalOp.Scan(PhysicalOp.Kind.Triples, Seq.empty))
-    val aggregate = PhysicalOp.HashAggregate(PhysicalOp.Exchange(triples))
+    val aggregate = PhysicalOp.HashAggregate(
+      PhysicalOp.Exchange(triples),
+      PhysicalOp.HashAggregateTag.IntHash,
+    )
     ExecutionRoute.pairArm(pairs) shouldBe Some(ExecutionRoute.PairArm.IntPairs)
     ExecutionRoute.pairArm(longs) shouldBe Some(ExecutionRoute.PairArm.LongPairs)
     ExecutionRoute.pairArm(text) shouldBe Some(ExecutionRoute.PairArm.StringPairs)
@@ -202,7 +210,7 @@ class TestExecutionRoute extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     case other => fail(s"expected reduceByKey, got $other")
 
   private def exchangeChild(op: PhysicalOp): PhysicalOp = op match
-    case PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)) => child
+    case PhysicalOp.HashAggregate(PhysicalOp.Exchange(child), _) => child
     case other => fail(s"expected a hash aggregate exchange, got ${other.shape}")
 
   private def countChild(op: PhysicalOp): PhysicalOp = op match

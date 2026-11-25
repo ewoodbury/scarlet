@@ -8,8 +8,9 @@ import com.ewoodbury.scarlet.execution.{PhysicalOp, PhysicalSchema}
  *
  * This is not [[com.ewoodbury.scarlet.execution.Layout]], the batch enum. `schema` stays the
  * admission schema. [[com.ewoodbury.scarlet.execution.ExecutionRoute]] chooses
- * [[KernelChoice.IntLongProjectSum]] from the binder. [[PhysicalSchema.isIntLongAggregate]] only
- * labels that aggregate for [[com.ewoodbury.scarlet.execution.schema.Describe]]. The planner does
+ * [[KernelChoice.IntLongProjectSum]] from the binder.
+ * [[com.ewoodbury.scarlet.execution.schema.Describe]] reads the tag stored on the hash aggregate.
+ * [[PhysicalSchema.isIntLongAggregate]] is the schema fact and is not that label. The planner does
  * not read this report. [[known]] reads the case class. A filter and an exchange copy the child. A
  * pipeline, a union, and a dedupe report [[PhysicalOp.kind]]. A join's three columns are the
  * columns of its kind. An outer join marks the missing value [[NullPolicy.Absence]]. A triple
@@ -217,11 +218,12 @@ private enum OuterSide:
  * Named tag for the physical root [[com.ewoodbury.scarlet.execution.ColumnarPlanner.lower]]
  * returns.
  *
- * Hash aggregates are `IntHashAggregate`, `LongHashAggregate`, and `StringHashAggregate`. A hash
- * aggregate of an `[Int32, Int64]` project is `IntLongProjectSum`. `countByKey` of an int hash
- * join, with no extra exchange, is `CountThroughProbe`. Each sort, group, distinct, and join class
- * has its own case. The distinct class is `Dedupe`. Refuse is not a case. [[Describe.describe]]
- * returns [[scala.None]] when lowering refuses the plan.
+ * Hash aggregates are `IntHashAggregate`, `LongHashAggregate`, and `StringHashAggregate`.
+ * `IntLongProjectSum` is the tag stored for an int-long aggregate. An `[Int32, Int64]` child does
+ * not imply it. `countByKey` of an int hash join, with no extra exchange, is `CountThroughProbe`.
+ * Each sort, group, distinct, and join class has its own case. The distinct class is `Dedupe`.
+ * Refuse is not a case. [[Describe.describe]] returns [[scala.None]] when lowering refuses the
+ * plan.
  */
 private[execution] enum KernelChoice:
 
