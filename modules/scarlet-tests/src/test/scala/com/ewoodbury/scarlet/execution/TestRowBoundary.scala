@@ -17,7 +17,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * is not this test. A null key or null value on a lowered filter does not match: the filter drops
  * the null, and the row predicate keeps the unboxed null. That `flatMap` is [[scala.None]], and
  * `collect` equals the row plan. Unboxing the null to `0` and calling that a match is not this
- * test.
+ * test. `flatMapValues` uses that same decode. An int-pair scan publishes a batch. A null value on
+ * a lowered filter is [[scala.None]].
  */
 class TestRowBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -67,6 +68,37 @@ class TestRowBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val found = show(collect(mapped))
     found shouldBe row(show(collect(mapped)))
     found.exists(_.contains("null")) shouldBe true
+  }
+
+  "an int-pair scan under flatMapValues" should "publish the scan and match the row function" in {
+    val scanned = DistCollection.ofIntPairs(Array(1, 2, 3, 4), Array(10, 20, 30, 40), 2)
+    val mapped = scanned.flatMapValues((value: Int) => Seq(value, value + 1))
+    Describe.describe(mapped.plan) shouldBe Option.empty[Describe.Described]
+    ColumnarPlanner.lower(scanned.plan).isDefined shouldBe true
+    mapped.plan match
+      case Plan.FlatMapValuesOp(source, f) =>
+        RowBoundary.flatMapValues(source, f).isDefined shouldBe true
+      case other => fail(s"expected flatMapValues, got $other")
+
+    val sink = new CountingSink
+    val found = ColumnMetrics.withSink(sink) {
+      ScarletRuntime.get.shuffle.clear()
+      mapped.collect().toSeq
+    }
+    sink.batchCount should be > 0L
+    found shouldBe row(mapped.collect().toSeq)
+  }
+
+  "a null value on filterValues under flatMapValues" should "stay on the row plan" in {
+    val scanned = DistCollection(Seq((1, 10), erased(Some(2), None), (3, 30)), 1)
+    val mapped =
+      scanned.filterValues((value: Int) => value >= 0).flatMapValues((value: Int) => Seq(value))
+    Describe.describe(mapped.plan) shouldBe Option.empty[Describe.Described]
+    mapped.plan match
+      case Plan.FlatMapValuesOp(source, f) =>
+        RowBoundary.flatMapValues(source, f) shouldBe None
+      case other => fail(s"expected flatMapValues, got $other")
+    collect(mapped) shouldBe row(collect(mapped))
   }
 
   private def refuse(mapped: DistCollection[(Int, Int)]): Unit =

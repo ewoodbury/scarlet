@@ -10,8 +10,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * [[ColumnarPlanner.tryRun]] of the child. [[IllegalArgumentException]] is a failed decode,
  * including `null Int32 pair at row N`. The decoded partitions must equal the row executor's
  * partitions of that same child, in order. Anything else is [[scala.None]], and the caller runs
- * the original plan on rows. This does not wrap that plan in another operator. [[MixedAction]] and
- * [[MixedJoin]] stay on their own paths.
+ * the original plan on rows. This does not wrap that plan in another operator. `flatMapValues`
+ * uses the same decode. [[MixedAction]] and [[MixedJoin]] stay on their own paths.
  */
 @SuppressWarnings(
   Array(
@@ -27,6 +27,17 @@ private[execution] object RowBoundary:
   /** `flatMap` over a child whose decoded partitions match the row executor. */
   def flatMap[A, B](source: Plan[A], f: A => IterableOnce[B]): Option[Seq[Partition[B]]] =
     matched(source).map(parts => parts.map(part => Partition(applyOnce(part.data, f))))
+
+  /**
+   * `flatMapValues` over a child whose decoded partitions match the row executor.
+   *
+   * The value function runs on the decoded pairs. This is the same decode as [[flatMap]].
+   */
+  def flatMapValues[K, V, B](
+      source: Plan[(K, V)],
+      f: V => IterableOnce[B],
+  ): Option[Seq[Partition[(K, B)]]] =
+    matched(source).map(parts => parts.map(part => Partition(applyValues(part.data, f))))
 
   /**
    * Decoded partitions when they are the row executor's partitions, in order.
@@ -48,6 +59,20 @@ private[execution] object RowBoundary:
 
   private def applyOnce[A, B](rows: Iterable[A], f: A => IterableOnce[B]): Vector[B] =
     rows.iterator.flatMap(row => f(row).iterator).toVector
+
+  /**
+   * One output pair per value the function yields. The key is the decoded key.
+   *
+   * This runs only after [[matched]] agreed with the row executor. The row stage extracts the pair
+   * the same way.
+   */
+  private def applyValues[K, V, B](
+      rows: Iterable[(K, V)],
+      f: V => IterableOnce[B],
+  ): Vector[(K, B)] =
+    rows.iterator.flatMap { case (key, value) =>
+      f(value).iterator.map(out => (key, out))
+    }.toVector
 
   private def sameOrder(decoded: Seq[Partition[_]], rows: Seq[Partition[_]]): Boolean =
     decoded.lengthCompare(rows.length) == 0 && decoded.zip(rows).forall { (left, right) =>
