@@ -1,5 +1,8 @@
 package com.ewoodbury.scarlet.execution
 
+import com.ewoodbury.scarlet.execution.schema.ColumnBinding.Operator
+import com.ewoodbury.scarlet.execution.schema.{ColumnBinding, KernelChoice, Layout}
+
 /**
  * Lowers int, long, and string `countByKey`, and `countByKey` of a triple project.
  *
@@ -16,12 +19,12 @@ package com.ewoodbury.scarlet.execution
  * project is kept, and a hinted join under that project is rewritten the same way. A second
  * filter, a second slot, and a sort-merge whose children are not both exchanges, stay on the row
  * path. The count is an `Int` and wraps. The long estimate charges 8-byte keys. The string
- * estimate charges dictionary bytes. [[PhysicalOp.Kind.Pairs]], [[PhysicalOp.Kind.LongPairs]], and
- * [[PhysicalOp.Kind.StringPairs]] lower. An int inner hash, broadcast, or sort-merge join is
- * [[JoinAggregateBinding]]: [[PhysicalOp.CountByKey]] of a hash join of two exchanges, with no
- * extra exchange and no inserted project. A filter above the join, an outer join, and a non-int
- * join stay on the row path, as does every other kind, including [[PhysicalOp.Kind.LongCounts]].
- * With spill off, an input that does not fit the budget throws
+ * estimate charges dictionary bytes. The binder tag [[KernelChoice.CountByKey]] builds
+ * [[PhysicalOp.CountByKey]] for an int, long, or string pair. An int inner hash, broadcast, or
+ * sort-merge join is [[JoinAggregateBinding]]: [[PhysicalOp.CountByKey]] of a hash join of two
+ * exchanges, with no extra exchange and no inserted project. A filter above the join, an outer
+ * join, and a non-int join stay on the row path, as does every other kind, including
+ * [[PhysicalOp.Kind.LongCounts]]. With spill off, an input that does not fit the budget throws
  * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] and the action fails instead of rerunning
  * on rows. With spill on, an over-budget post-exchange bucket spills. A count table that still
  * does not fit throws [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]]. The function body is
@@ -33,20 +36,29 @@ private[execution] object CountByKeyLowering:
     hashPartitionedProject(child) match
       case Some(projected) => Some(counted(projected))
       case None if intLongProject(child) => Some(counted(child))
-      case None => JoinAggregateBinding.count(child).orElse(countedKind(child))
+      case None => JoinAggregateBinding.count(child).orElse(countedFromTag(child))
 
-  private def countedKind(child: PhysicalOp): Option[PhysicalOp] =
-    child.kind match
-      case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs =>
-        Some(counted(child))
-      case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
-          PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.Strings |
-          PhysicalOp.Kind.Bools | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.LongCounts |
-          PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
-          PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter |
-          PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums =>
-        LoweringTrace.note("CountByKeyOp", child.kind, "CountByKeyLowering")
-        None
+  /**
+   * Pair count. [[KernelChoice.CountByKey]] builds [[PhysicalOp.CountByKey]].
+   *
+   * [[Layout.AssumedIntLong]] is not this arm. [[intLongProject]] already accepted or refused that
+   * project, and the same tag would admit a hinted project this lowering refuses.
+   */
+  private def countedFromTag(child: PhysicalOp): Option[PhysicalOp] =
+    if assumedIntLong(child) then
+      LoweringTrace.note("CountByKeyOp", child.kind, "CountByKeyLowering")
+      None
+    else
+      ColumnBinding.asked(child, Operator.CountByKey) match
+        case Some(KernelChoice.CountByKey) => Some(counted(child))
+        case _ =>
+          LoweringTrace.note("CountByKeyOp", child.kind, "CountByKeyLowering")
+          None
+
+  /** The triple-project layout. Not an int, long, or string pair. */
+  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+  private def assumedIntLong(child: PhysicalOp): Boolean =
+    Layout.known(child) == Layout.AssumedIntLong
 
   private def counted(child: PhysicalOp): PhysicalOp =
     PhysicalOp.CountByKey(PhysicalOp.Exchange(child))

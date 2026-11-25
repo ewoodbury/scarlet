@@ -15,11 +15,11 @@ import com.ewoodbury.scarlet.execution.schema.ColumnBinding.{Operator, ReducerWi
  * for a predicate it will not run.
  *
  * When the binder's tag is the tag [[Describe.tag]] records for today's root, the result is that
- * root. When the binder returns [[scala.None]] and today's lowering returns a root, that root is
- * kept, except a projected `(Int32, Int64)` whose reducer does not add longs: that plan is
- * [[scala.None]] and the row path runs the whole plan. When today's lowering returns
- * [[scala.None]], [[AggregateAdmission]] may build a root for a slot stack over one map. Every
- * other empty plan stays empty.
+ * root. [[scala.None]] from the binder is [[scala.None]]. A different tag is [[scala.None]] too:
+ * the plan does not keep today's root because the binder disagreed. A projected `(Int32, Int64)`
+ * whose reducer does not add longs is that [[scala.None]], and the row path runs the whole plan.
+ * When today's lowering returns [[scala.None]], [[AggregateAdmission]] may build a root for a slot
+ * stack over one map. Every other empty plan stays empty.
  *
  * `countByKey` of an int inner join asks [[ColumnBinding]] on the join's [[Bound]]. The three
  * columns are `(key, left, right)`. [[JoinAggregateBinding]] builds
@@ -110,12 +110,14 @@ private[execution] object AggregateBinding:
     today.orElse(AggregateAdmission.admit(source, lowerChild, operator, reducer))
 
   /**
-   * Today's root when the binder agrees or declines. A disagreeing tag keeps today's root too, so
-   * a plan that already lowers is not dropped. [[scala.None]] stays empty here.
-   * [[AggregateAdmission]] is the only later replacement.
+   * Today's root when [[Describe.tag]] is the binder's tag.
    *
-   * A projected `(Int32, Int64)` whose reducer is not long addition is the exception: the binder's
-   * [[scala.None]] is the result, and today's hash aggregate is not kept.
+   * [[scala.None]] from the binder is [[scala.None]]. A tag that is not today's tag is
+   * [[scala.None]] as well. The plan does not fall back to today's root. [[AggregateAdmission]] is
+   * the only later replacement.
+   *
+   * [[refusedProject]] names the projected `(Int32, Int64)` whose reducer is not long addition.
+   * That binder [[scala.None]] is the result.
    */
   private def reconcile(
       bound: Option[KernelChoice],
@@ -127,9 +129,7 @@ private[execution] object AggregateBinding:
     (bound, today) match
       case (Some(tag), Some(op)) if agrees(tag, op) => Some(op)
       case (None, Some(_)) if refusedProject(peeled, operator, reducer) => None
-      case (None, Some(op)) => Some(op)
-      case (Some(_), Some(op)) => Some(op)
-      case (_, None) => None
+      case _ => None
 
   /**
    * `reduceByKey` of [[Layout.AssumedIntLong]] with any witness other than long addition.

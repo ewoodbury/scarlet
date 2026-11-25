@@ -293,6 +293,16 @@ class TestColumnBinding extends AnyFlatSpec with Matchers:
       side = Side.Inner,
       choice = None,
     ),
+    // The triple-project count publishes CountByKey. Describe agrees with that tag.
+    Cell(
+      label = "AssumedIntLong countByKey",
+      layout = assumedIntLong,
+      operator = Operator.CountByKey,
+      reducer = ReducerWitness.NotApplicable,
+      nulls = NullAdmission.Policy(NullPolicy.Nullable),
+      side = Side.Inner,
+      choice = Some(KernelChoice.CountByKey),
+    ),
     outer(
       ColumnType.Int32,
       ColumnType.Int32,
