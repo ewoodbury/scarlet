@@ -2,7 +2,7 @@ package com.ewoodbury.scarlet.execution
 
 import scala.annotation.tailrec
 
-import com.ewoodbury.scarlet.api.{DictionaryStringPredicate, IntJoinTriplePredicate}
+import com.ewoodbury.scarlet.api.DictionaryStringPredicate
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 
@@ -749,15 +749,15 @@ object ColumnarPlanner:
    */
   private def filterOverKeySort(base: Plan[_]): Option[PhysicalOp] = base match
     case Plan.SortByIntKeyOp(source) if presentSortKey(source, PhysicalOp.Kind.Pairs) =>
-      SortLowering.lowerInt(source, lowerPlan).map(rowFilter)
+      SortLowering.lowerInt(source, lowerPlan).flatMap(rowFilter)
     case Plan.SortByLongKeyOp(source) if presentSortKey(source, PhysicalOp.Kind.LongPairs) =>
-      SortLowering.lowerLong(source, lowerPlan).map(rowFilter)
+      SortLowering.lowerLong(source, lowerPlan).flatMap(rowFilter)
     case Plan.SortByStringKeyOp(source) if presentSortKey(source, PhysicalOp.Kind.StringPairs) =>
-      SortLowering.lowerString(source, lowerPlan).map(rowFilter)
+      SortLowering.lowerString(source, lowerPlan).flatMap(rowFilter)
     case _ => None
 
-  private def rowFilter(sorted: PhysicalOp): PhysicalOp =
-    PhysicalOp.Filter(sorted, PhysicalOp.Slot.Row)
+  private def rowFilter(sorted: PhysicalOp): Option[PhysicalOp] =
+    FilterBinding.fixed(sorted, PhysicalOp.Slot.Row)
 
   /**
    * True when every pair under `plan` has a present key of `kind`. A filter does not invent a key,
@@ -888,10 +888,11 @@ object ColumnarPlanner:
       steps: List[ElementStep],
   ): Option[PhysicalOp] = child.kind match
     case PhysicalOp.Kind.Bools =>
-      BoolPipeline.lower(child, steps)
+      if (FilterBinding.element(child, steps)) then BoolPipeline.lower(child, steps) else None
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Strings =>
-      if (elementProjectsMatch(child.kind, steps)) then Some(lowerElementPipeline(child, steps))
+      if (elementProjectsMatch(child.kind, steps) && FilterBinding.element(child, steps)) then
+        Some(lowerElementPipeline(child, steps))
       else None
     case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongPairs =>
       steps.foldLeft(Option(child)) { (current, step) =>
@@ -915,7 +916,7 @@ object ColumnarPlanner:
   private def lowerStringRow(child: PhysicalOp, step: ElementStep): Option[PhysicalOp] =
     step match
       case ElementStep.Filter(_) if StringPairSlot.containsProject(child) => None
-      case ElementStep.Filter(_) => Some(PhysicalOp.Filter(child, PhysicalOp.Slot.Row))
+      case ElementStep.Filter(_) => FilterBinding.fixed(child, PhysicalOp.Slot.Row)
       case ElementStep.Project(mapper)
           if returnsIntPair(mapper) && !StringPairSlot.filterCoversProject(child) =>
         Some(PhysicalOp.Project(child))
@@ -930,16 +931,7 @@ object ColumnarPlanner:
         // scan, or over a long-pair filter stack that has no project, still lowers.
         case ElementStep.Filter(_) if LongPairSlot.containsProject(child) => None
         case ElementStep.Filter(predicate) =>
-          child.kind match
-            case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs =>
-              Some(PhysicalOp.Filter(child, PhysicalOp.Slot.Row))
-            case PhysicalOp.Kind.Triples =>
-              tripleFilterSlot(predicate) match
-                case Some(slot) => Some(PhysicalOp.Filter(child, slot))
-                case None if child.isInnerTriple =>
-                  Some(PhysicalOp.Filter(child, PhysicalOp.Slot.TripleRow))
-                case None => None
-            case _ => None
+          FilterBinding.row(child, predicate)
         case ElementStep.Project(mapper) =>
           child.kind match
             case PhysicalOp.Kind.Triples if child.isInnerTriple =>
@@ -949,14 +941,6 @@ object ColumnarPlanner:
             case PhysicalOp.Kind.LongPairs if returnsIntPair(mapper) =>
               Some(PhysicalOp.Project(child))
             case _ => None
-
-  private def tripleFilterSlot(predicate: Any): Option[PhysicalOp.Slot] = predicate match
-    case recognized: IntJoinTriplePredicate[?] =>
-      recognized.selectedSlot match
-        case IntJoinTriplePredicate.Slot.Key => Some(PhysicalOp.Slot.TripleKey)
-        case IntJoinTriplePredicate.Slot.LeftValue => Some(PhysicalOp.Slot.TripleLeftValue)
-        case IntJoinTriplePredicate.Slot.RightValue => Some(PhysicalOp.Slot.TripleRightValue)
-    case _ => None
 
   private def lowerElementPipeline(child: PhysicalOp, steps: List[ElementStep]): PhysicalOp =
     def lower(current: PhysicalOp, remaining: List[ElementStep]): PhysicalOp =
@@ -1045,9 +1029,9 @@ object ColumnarPlanner:
 
   private def columnFilter(source: Plan[_], slot: PhysicalOp.Slot): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
-      // One key or value slot above one int key map, one string-pair project, one long-pair
-      // project, or one triple project whose schema is `[Int32, Int64]`. The predicate is not
-      // read. A second slot above that triple project, and an unprojected join, stay empty.
+      // One key or value slot above one int key map, one string-pair project, or one long-pair
+      // project. The predicate is not read. Every other child asks [[FilterBinding]]. One slot
+      // above an int-long project stays there. A second slot, and an unprojected join, stay empty.
       if (
           MapIntKey.slotAbove(child, slot) || StringPairSlot.oneProject(child) ||
           LongPairSlot.oneProject(child)
@@ -1058,13 +1042,7 @@ object ColumnarPlanner:
           StringPairSlot.containsProject(child)
         )
       then None
-      else
-        child.kind match
-          case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.LongPairs =>
-            Some(PhysicalOp.Filter(child, slot))
-          case PhysicalOp.Kind.Triples if PhysicalSchema.isIntLongProject(child) =>
-            Some(PhysicalOp.Filter(child, slot))
-          case _ => None
+      else FilterBinding.slot(child, slot)
     }
 
   private[execution] def infoOf(op: PhysicalOp): PartitioningInfo = op match

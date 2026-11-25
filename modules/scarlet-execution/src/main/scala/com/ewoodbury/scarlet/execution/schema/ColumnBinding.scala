@@ -16,7 +16,8 @@ import com.ewoodbury.scarlet.execution.PhysicalOp
  * [[com.ewoodbury.scarlet.execution.DistinctLowering]], and
  * [[com.ewoodbury.scarlet.execution.KeyValueLowering]] ask it before building `groupByKey`,
  * `distinct`, `keys`, and `values`. [[com.ewoodbury.scarlet.execution.UnionLowering]] asks it on
- * each child before it builds a union. The interpreter does not call it.
+ * each child before it builds a union. [[com.ewoodbury.scarlet.execution.FilterBinding]] asks it
+ * before it builds a filter. The interpreter does not call it.
  *
  * [[NullAdmission.Refused]] means [[com.ewoodbury.scarlet.execution.ScanLowering]] would refuse
  * the source for nulls. The caller passes that policy. Nothing here reads a schema or classifies
@@ -55,11 +56,14 @@ private[execution] object ColumnBinding:
    * [[Operator.Union]] is one child of a concatenation. [[choose]] returns [[KernelChoice.Union]]
    * for any column layout, including an outer join.
    * [[com.ewoodbury.scarlet.execution.UnionLowering]] compares the two children.
+   * [[Operator.Filter]], [[Operator.FilterKeys]], and [[Operator.FilterValues]] are the three
+   * filter parents. Each one tags [[KernelChoice.Filter]] on a layout that parent already runs.
    */
   enum Operator:
     case CountByKey, ReduceByKey, CountSumByKey, MapValues, TupleMap
     case SortByIntKey, SortByIntValueDesc, SortByLongKey, SortByStringKey
     case GroupByKey, Distinct, Keys, Values
+    case Filter, FilterKeys, FilterValues
     case Union
 
   /**
@@ -144,10 +148,12 @@ private[execution] object ColumnBinding:
     operator match
       case Operator.MapValues | Operator.TupleMap => true
       case Operator.Union => false
+      case Operator.Filter =>
+        false
       case Operator.CountByKey | Operator.ReduceByKey | Operator.CountSumByKey |
           Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
           Operator.SortByStringKey | Operator.GroupByKey | Operator.Distinct | Operator.Keys |
-          Operator.Values =>
+          Operator.Values | Operator.FilterKeys | Operator.FilterValues =>
         outer(side) || refused(nulls) || layout.exists(absent)
 
   private def refused(nulls: NullAdmission): Boolean = nulls match
@@ -175,9 +181,55 @@ private[execution] object ColumnBinding:
       operator: Operator,
       reducer: ReducerWitness,
   ): Option[KernelChoice] =
+    // A whole-row filter on three int columns is [[KernelChoice.Filter]], not a count through
+    // the probe. `filterKeys` and `filterValues` on that layout are [[scala.None]]: an
+    // unprojected join is not a pair slot. [[Layout.AssumedIntLong]] still goes to [[intLong]]
+    // first, so a filter there is [[scala.None]]. The one slot above that project is kept
+    // outside this match.
     if assumedIntLong(layout) then intLong(operator, reducer)
+    else if filterParent(operator) then filterChoice(layout, operator)
     else if intJoin(layout) then countThroughProbe(operator)
     else pair(layout.map(_.columnType), operator)
+
+  /** `filter`, `filterKeys`, and `filterValues`. Each one builds [[KernelChoice.Filter]]. */
+  private def filterParent(operator: Operator): Boolean = operator match
+    case Operator.Filter | Operator.FilterKeys | Operator.FilterValues => true
+    case Operator.CountByKey | Operator.ReduceByKey | Operator.CountSumByKey | Operator.MapValues |
+        Operator.TupleMap | Operator.SortByIntKey | Operator.SortByIntValueDesc |
+        Operator.SortByLongKey | Operator.SortByStringKey | Operator.GroupByKey |
+        Operator.Distinct | Operator.Keys | Operator.Values | Operator.Union =>
+      false
+
+  /**
+   * Layouts a filter already runs: int, long, and string pairs, one int, long, double, string, or
+   * boolean column, and three int columns for a whole-row filter only. `filterKeys` and
+   * `filterValues` on three int columns are [[scala.None]], so an unprojected join does not grow a
+   * key or value slot. A whole-row filter is not declined for [[NullPolicy.Absence]]: an outer int
+   * join already lowers one named column, and that kernel fails closed. Those two slot parents
+   * still refuse that column. [[Layout.AssumedIntLong]] does not reach this match.
+   */
+  private def filterChoice(
+      layout: Vector[ColumnLayout],
+      operator: Operator,
+  ): Option[KernelChoice] =
+    if (filterLayout(layout.map(_.columnType), operator)) then Some(KernelChoice.Filter) else None
+
+  private def filterLayout(types: Vector[ColumnType], operator: Operator): Boolean = types match
+    case Vector(ColumnType.Int32, ColumnType.Int32) => true
+    case Vector(ColumnType.Int64, ColumnType.Int64) => true
+    case Vector(ColumnType.Utf8Dict, ColumnType.Int32) => true
+    case Vector(ColumnType.Int32, ColumnType.Int32, ColumnType.Int32) => wholeRow(operator)
+    case Vector(ColumnType.Int32) => true
+    case Vector(ColumnType.Int64) => true
+    case Vector(ColumnType.Float64) => true
+    case Vector(ColumnType.Utf8Dict) => true
+    case Vector(ColumnType.Bool) => true
+    case _ => false
+
+  /** A whole-row filter. A key or value slot on three int columns is not this parent. */
+  private def wholeRow(operator: Operator): Boolean = operator match
+    case Operator.Filter => true
+    case _ => false
 
   /**
    * `(Int32, Int32, Int32)` under [[NullPolicy.Present]] or [[NullPolicy.Nullable]].
@@ -205,7 +257,8 @@ private[execution] object ColumnBinding:
     case Operator.ReduceByKey | Operator.CountSumByKey | Operator.MapValues | Operator.TupleMap |
         Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
         Operator.SortByStringKey | Operator.GroupByKey | Operator.Distinct | Operator.Keys |
-        Operator.Values | Operator.Union =>
+        Operator.Values | Operator.Filter | Operator.FilterKeys | Operator.FilterValues |
+        Operator.Union =>
       None
 
   private def assumedIntLong(layout: Vector[ColumnLayout]): Boolean = Layout.AssumedIntLong match
