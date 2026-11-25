@@ -163,6 +163,8 @@ class TestColumnBinding extends AnyFlatSpec with Matchers:
     case Operator.Filter => "filter"
     case Operator.FilterKeys => "filterKeys"
     case Operator.FilterValues => "filterValues"
+    case Operator.Project => "project"
+    case Operator.Pipeline => "pipeline"
     case Operator.Union => "union"
 
   private val table: Vector[Cell] = Vector(

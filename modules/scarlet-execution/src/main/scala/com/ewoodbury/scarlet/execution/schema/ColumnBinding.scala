@@ -17,7 +17,8 @@ import com.ewoodbury.scarlet.execution.PhysicalOp
  * [[com.ewoodbury.scarlet.execution.KeyValueLowering]] ask it before building `groupByKey`,
  * `distinct`, `keys`, and `values`. [[com.ewoodbury.scarlet.execution.UnionLowering]] asks it on
  * each child before it builds a union. [[com.ewoodbury.scarlet.execution.FilterBinding]] asks it
- * before it builds a filter. The interpreter does not call it.
+ * before it builds a filter. [[com.ewoodbury.scarlet.execution.ProjectBinding]] asks it before it
+ * builds a same-type element project or pipeline. The interpreter does not call it.
  *
  * [[NullAdmission.Refused]] means [[com.ewoodbury.scarlet.execution.ScanLowering]] would refuse
  * the source for nulls. The caller passes that policy. Nothing here reads a schema or classifies
@@ -58,12 +59,16 @@ private[execution] object ColumnBinding:
    * [[com.ewoodbury.scarlet.execution.UnionLowering]] compares the two children.
    * [[Operator.Filter]], [[Operator.FilterKeys]], and [[Operator.FilterValues]] are the three
    * filter parents. Each one tags [[KernelChoice.Filter]] on a layout that parent already runs.
+   * [[Operator.Project]] and [[Operator.Pipeline]] are a same-type element map. One column of int,
+   * long, double, or string tags [[KernelChoice.Project]] or [[KernelChoice.Pipeline]]. A boolean
+   * column, a pair, and [[Layout.AssumedIntLong]] are [[scala.None]].
    */
   enum Operator:
     case CountByKey, ReduceByKey, CountSumByKey, MapValues, TupleMap
     case SortByIntKey, SortByIntValueDesc, SortByLongKey, SortByStringKey
     case GroupByKey, Distinct, Keys, Values
     case Filter, FilterKeys, FilterValues
+    case Project, Pipeline
     case Union
 
   /**
@@ -153,7 +158,8 @@ private[execution] object ColumnBinding:
       case Operator.CountByKey | Operator.ReduceByKey | Operator.CountSumByKey |
           Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
           Operator.SortByStringKey | Operator.GroupByKey | Operator.Distinct | Operator.Keys |
-          Operator.Values | Operator.FilterKeys | Operator.FilterValues =>
+          Operator.Values | Operator.FilterKeys | Operator.FilterValues | Operator.Project |
+          Operator.Pipeline =>
         outer(side) || refused(nulls) || layout.exists(absent)
 
   private def refused(nulls: NullAdmission): Boolean = nulls match
@@ -185,9 +191,12 @@ private[execution] object ColumnBinding:
     // the probe. `filterKeys` and `filterValues` on that layout are [[scala.None]]: an
     // unprojected join is not a pair slot. [[Layout.AssumedIntLong]] still goes to [[intLong]]
     // first, so a filter there is [[scala.None]]. The one slot above that project is kept
-    // outside this match.
+    // outside this match. A same-type element map is [[KernelChoice.Project]] or
+    // [[KernelChoice.Pipeline]] on one int, long, double, or string column. It is not a filter
+    // and not a count through the probe.
     if assumedIntLong(layout) then intLong(operator, reducer)
     else if filterParent(operator) then filterChoice(layout, operator)
+    else if projectParent(operator) then projectChoice(layout, operator)
     else if intJoin(layout) then countThroughProbe(operator)
     else pair(layout.map(_.columnType), operator)
 
@@ -197,7 +206,8 @@ private[execution] object ColumnBinding:
     case Operator.CountByKey | Operator.ReduceByKey | Operator.CountSumByKey | Operator.MapValues |
         Operator.TupleMap | Operator.SortByIntKey | Operator.SortByIntValueDesc |
         Operator.SortByLongKey | Operator.SortByStringKey | Operator.GroupByKey |
-        Operator.Distinct | Operator.Keys | Operator.Values | Operator.Union =>
+        Operator.Distinct | Operator.Keys | Operator.Values | Operator.Project |
+        Operator.Pipeline | Operator.Union =>
       false
 
   /**
@@ -232,6 +242,36 @@ private[execution] object ColumnBinding:
     case _ => false
 
   /**
+   * A same-type element map. [[Operator.Project]] is one step. [[Operator.Pipeline]] is a group.
+   */
+  private def projectParent(operator: Operator): Boolean = operator match
+    case Operator.Project | Operator.Pipeline => true
+    case _ => false
+
+  /**
+   * One int, long, double, or string column. A boolean column stays [[scala.None]]: there is no
+   * specialized boolean apply. A pair and three int columns are not this map.
+   * [[Layout.AssumedIntLong]] does not reach this match.
+   */
+  private def projectChoice(
+      layout: Vector[ColumnLayout],
+      operator: Operator,
+  ): Option[KernelChoice] =
+    if (projectLayout(layout.map(_.columnType))) then projectTag(operator) else None
+
+  private def projectLayout(types: Vector[ColumnType]): Boolean = types match
+    case Vector(ColumnType.Int32) => true
+    case Vector(ColumnType.Int64) => true
+    case Vector(ColumnType.Float64) => true
+    case Vector(ColumnType.Utf8Dict) => true
+    case _ => false
+
+  private def projectTag(operator: Operator): Option[KernelChoice] = operator match
+    case Operator.Project => Some(KernelChoice.Project)
+    case Operator.Pipeline => Some(KernelChoice.Pipeline)
+    case _ => None
+
+  /**
    * `(Int32, Int32, Int32)` under [[NullPolicy.Present]] or [[NullPolicy.Nullable]].
    *
    * [[NullPolicy.Absence]] does not match. [[declined]] already refused that column, so an outer
@@ -258,7 +298,7 @@ private[execution] object ColumnBinding:
         Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
         Operator.SortByStringKey | Operator.GroupByKey | Operator.Distinct | Operator.Keys |
         Operator.Values | Operator.Filter | Operator.FilterKeys | Operator.FilterValues |
-        Operator.Union =>
+        Operator.Project | Operator.Pipeline | Operator.Union =>
       None
 
   private def assumedIntLong(layout: Vector[ColumnLayout]): Boolean = Layout.AssumedIntLong match
