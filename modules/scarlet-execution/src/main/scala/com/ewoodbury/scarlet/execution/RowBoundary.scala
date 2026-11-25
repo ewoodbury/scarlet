@@ -11,7 +11,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * including `null Int32 pair at row N`. The decoded partitions must equal the row executor's
  * partitions of that same child, in order. Anything else is [[scala.None]], and the caller runs
  * the original plan on rows. This does not wrap that plan in another operator. `flatMapValues`
- * uses the same decode. [[MixedAction]] and [[MixedJoin]] stay on their own paths.
+ * uses the same decode. Untyped `sortBy` sorts those partitions with the row scheduler. Typed
+ * sorts stay on their kernels. [[MixedAction]] and [[MixedJoin]] stay on their own paths.
  */
 @SuppressWarnings(
   Array(
@@ -38,6 +39,21 @@ private[execution] object RowBoundary:
       f: V => IterableOnce[B],
   ): Option[Seq[Partition[(K, B)]]] =
     matched(source).map(parts => parts.map(part => Partition(applyValues(part.data, f))))
+
+  /**
+   * Untyped `sortBy` over a child whose decoded partitions match the row executor.
+   *
+   * The row scheduler sorts a source of those partitions, so the order is the row `sortBy` order.
+   * This does not call [[SortLowering]] and it does not add a sort kernel.
+   */
+  def sortBy[A, B](
+      source: Plan[A],
+      keyFunc: A => B,
+      ordering: Ordering[B],
+  ): Option[Seq[Partition[A]]] =
+    matched(source).map { parts =>
+      runRow(Plan.SortByOp(Plan.Source(parts), keyFunc, ordering))
+    }
 
   /**
    * Decoded partitions when they are the row executor's partitions, in order.

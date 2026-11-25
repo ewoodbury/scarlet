@@ -18,7 +18,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * the null, and the row predicate keeps the unboxed null. That `flatMap` is [[scala.None]], and
  * `collect` equals the row plan. Unboxing the null to `0` and calling that a match is not this
  * test. `flatMapValues` uses that same decode. An int-pair scan publishes a batch. A null value on
- * a lowered filter is [[scala.None]].
+ * a lowered filter is [[scala.None]]. Untyped `sortBy` publishes the child and matches the row
+ * order. A per-partition sort is not this test.
  */
 class TestRowBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -99,6 +100,40 @@ class TestRowBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
         RowBoundary.flatMapValues(source, f) shouldBe None
       case other => fail(s"expected flatMapValues, got $other")
     collect(mapped) shouldBe row(collect(mapped))
+  }
+
+  "an int scan under sortBy" should "publish the scan and match the row order" in {
+    val scanned = DistCollection.ofInts(Array(3, 1, 4, 2), 2)
+    val sorted = scanned.sortBy((n: Int) => n)
+    Describe.describe(sorted.plan) shouldBe Option.empty[Describe.Described]
+    ColumnarPlanner.lower(scanned.plan).isDefined shouldBe true
+    sorted.plan match
+      case Plan.SortByOp(source, keyFunc, ordering) =>
+        RowBoundary.sortBy(source, keyFunc, ordering).isDefined shouldBe true
+      case other => fail(s"expected sortBy, got $other")
+
+    val sink = new CountingSink
+    val found = ColumnMetrics.withSink(sink) {
+      ScarletRuntime.get.shuffle.clear()
+      sorted.collect().toSeq
+    }
+    sink.batchCount should be > 0L
+    found shouldBe Seq(1, 2, 3, 4)
+    found shouldBe row(sorted.collect().toSeq)
+  }
+
+  "a null key on filterKeys under sortBy" should "stay on the row plan" in {
+    val scanned = DistCollection(Seq((1, 10), erased(None, Some(20)), (2, 30)), 1)
+    val sorted =
+      scanned.filterKeys((key: Int) => key >= 0).sortBy((pair: (Int, Int)) => pair._1)
+    Describe.describe(sorted.plan) shouldBe Option.empty[Describe.Described]
+    sorted.plan match
+      case Plan.SortByOp(source, keyFunc, ordering) =>
+        RowBoundary.sortBy(source, keyFunc, ordering) shouldBe None
+      case other => fail(s"expected sortBy, got $other")
+    val found = show(collect(sorted))
+    found shouldBe row(show(collect(sorted)))
+    found.exists(_.contains("null")) shouldBe true
   }
 
   private def refuse(mapped: DistCollection[(Int, Int)]): Unit =
