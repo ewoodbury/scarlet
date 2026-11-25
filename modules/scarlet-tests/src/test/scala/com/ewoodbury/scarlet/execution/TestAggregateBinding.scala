@@ -13,8 +13,9 @@ import com.ewoodbury.scarlet.execution.schema.{Describe, KernelChoice}
  *
  * A slot filter is peeled only when selection steps exist. A key filter over an int-long project
  * does not compile to steps, so the binder is not asked for the project underneath. `countByKey`
- * keeps today's root, which still holds the filter. `reduceByKey` has no arm there and stays
- * empty. A join count is [[KernelChoice.CountThroughProbe]] from the join's three columns. A probe
+ * keeps today's root, which still holds the filter. Two slots above that project do not lower.
+ * `reduceByKey` has no arm there and stays empty. A join count is
+ * [[KernelChoice.CountThroughProbe]] from the join's three columns. A probe
  * sum stays [[KernelChoice.JoinProbeSum]]. A projected `(Int32, Int64)` whose reducer does not add
  * longs does not lower.
  */
@@ -79,6 +80,12 @@ class TestAggregateBinding extends AnyFlatSpec with Matchers:
     ) shouldBe None
     lowered(plan).shape shouldBe
       "CountByKey(Exchange(FilterKey(Project(HashJoin(Exchange(Scan), Exchange(Scan))))))"
+  }
+
+  it should "refuse a slot stack above an int-long project" in {
+    val values = Plan.FilterValuesOp(projected, (value: Long) => value >= 0L)
+    val stacked = Plan.FilterKeysOp(values, (key: Int) => key > 0)
+    ColumnarPlanner.lower(Plan.CountByKeyOp(stacked)) shouldBe None
   }
 
   it should "tag count-through-probe from the join binder" in {
