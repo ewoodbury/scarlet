@@ -249,7 +249,7 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
     summed.result shouldBe row(chained.sum)
   }
 
-  "a type-changing trailing map" should "stay on the row path" in {
+  "a type-changing trailing map" should "keep the int prefix and match the row values" in {
     val calls = Array.fill(5)(new AtomicInteger)
     val chained = DistCollection(Seq(1, 2, 3), 1)
       .map { value =>
@@ -286,15 +286,17 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
       ColumnMetrics.primitiveEncodeCount shouldBe 0L
     }
 
-    val collected = chained.collect().toList
-    collected shouldBe List(5L, 6L, 7L)
-    calls.map(_.get()).toSeq shouldBe Seq(3, 3, 3, 3, 3)
-    collected shouldBe row(chained.collect().toList)
-    ColumnMetrics.withSink(new CountingSink) {
-      chained.collect()
-      ColumnMetrics.batchCount shouldBe 0L
-      ColumnMetrics.visitCount shouldBe 0L
+    // The four int maps run in the columnar child and again in the row oracle. The trailing
+    // map runs once on those decoded rows. A whole-plan row rerun would leave the batch count at 0
+    // and every counter at 3.
+    val collected = ColumnMetrics.withSink(new CountingSink) {
+      val rows = chained.collect().toList
+      ColumnMetrics.batchCount should be > 0L
+      rows
     }
+    collected shouldBe List(5L, 6L, 7L)
+    calls.map(_.get()).toSeq shouldBe Seq(6, 6, 6, 6, 3)
+    collected shouldBe row(chained.collect().toList)
   }
 
   "sum" should "keep a long total when five increments wrap" in {
@@ -378,10 +380,12 @@ class TestTrailingProject extends AnyFlatSpec with Matchers with BeforeAndAfterE
   private def morselCount(rows: Int, parts: Int, size: Int): Long =
     val base = rows / parts
     val remainder = rows % parts
-    Vector.tabulate(parts) { index =>
-      val length = if (index < remainder) base + 1 else base
-      ColumnBatches.cuts(length, size).length.toLong
-    }.sum
+    Vector
+      .tabulate(parts) { index =>
+        val length = if (index < remainder) base + 1 else base
+        ColumnBatches.cuts(length, size).length.toLong
+      }
+      .sum
 
   private def studyConf: ScarletConf =
     originalConf.copy(

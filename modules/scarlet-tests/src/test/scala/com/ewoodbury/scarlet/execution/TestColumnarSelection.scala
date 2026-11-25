@@ -61,7 +61,8 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
       ),
     )
     val filtered = Plan.FilterOp(source, (value: Int) => value > 0)
-    val info = ColumnarPlanner.partitioning(filtered).getOrElse(fail("empty partitions hid the ints"))
+    val info =
+      ColumnarPlanner.partitioning(filtered).getOrElse(fail("empty partitions hid the ints"))
     info.distribution shouldBe Distribution.Unknown(3)
     info.layout shouldBe Layout.Columnar(ScarletConf.get.columnarBatchSize)
     DistCollection(filtered).collect() shouldBe Seq(4, 5)
@@ -72,7 +73,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     )
   }
 
-  "int map to string" should "return strings on the row path" in {
+  "int map to string" should "return the row strings" in {
     DistCollection(Seq(1, 2, 3), 2).map(_.toString).collect() shouldBe Seq("1", "2", "3")
   }
 
@@ -92,7 +93,8 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     found shouldBe expected
     found shouldBe Map("a" -> Seq(1, 2), "b" -> Seq(3))
 
-    val reduced = DistCollection(Seq("a" -> 1, "a" -> 2, "b" -> 3), 2).reduceByKey[String, Int](_ + _)
+    val reduced =
+      DistCollection(Seq("a" -> 1, "a" -> 2, "b" -> 3), 2).reduceByKey[String, Int](_ + _)
     reduced.collect().toMap shouldBe Map("a" -> 3, "b" -> 3)
     val reducedInfo = infoOf(reduced).getOrElse(fail("string reduce stayed on the row path"))
     reducedInfo.layout shouldBe Layout.StringPair(ScarletConf.get.columnarBatchSize)
@@ -124,7 +126,15 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
 
   "int reduceByKey" should "hash into the shuffle width and apply the user operator" in {
     ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 2, threadPoolSize = 4))
-    val rows = Seq(0 -> 1, 0 -> 2, 4 -> 3, 1 -> Int.MaxValue, 1 -> 10, Int.MinValue -> 8, Int.MinValue -> -3)
+    val rows = Seq(
+      0 -> 1,
+      0 -> 2,
+      4 -> 3,
+      1 -> Int.MaxValue,
+      1 -> 10,
+      Int.MinValue -> 8,
+      Int.MinValue -> -3,
+    )
     val reduced = DistCollection(rows, 3).reduceByKey[Int, Int](_ + _)
     val width = ScarletConf.get.defaultShufflePartitions
 
@@ -240,7 +250,8 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
   it should "rewrite a one-column value ordinal to index 0" in {
     val filtered = DistCollection(Seq(1 -> 10, 2 -> 3), 1).filterValues[Int, Int](_ > 5)
     val op = ColumnarPlanner.lower(filtered.plan).getOrElse(fail("value filter did not lower"))
-    val compiled = PredicatePlan.compile(filtered.plan, op).getOrElse(fail("stack did not compile"))
+    val compiled =
+      PredicatePlan.compile(filtered.plan, op).getOrElse(fail("stack did not compile"))
     val wide = PredicatePlan.selectionSteps(compiled).getOrElse(fail("no wide steps"))
     val narrow = PredicatePlan
       .selectionSteps(PredicatePlan.encoded(compiled, Set(1)))
@@ -435,7 +446,8 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     valueCalls.get() shouldBe 2
 
     val keyOnNullValue = Seq(Selection.Step.Int32(0, (key: Int) => key > 0))
-    // Every key passes. The null value is not a filter slot, so the row survives and the sum skips it.
+    /* Every key passes. The null value is not a filter slot, so the row survives and the sum skips
+     * it. */
     summed(nullValues, keyOnNullValue, 1) shouldBe 4L
     summed(nullValues, keyOnNullValue, 0) shouldBe 6L
 
@@ -627,12 +639,12 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
   }
 
   "string filter" should "keep input order, nulls, and a dictionary layout" in {
-    val filtered = DistCollection(texts(Some("a"), None, Some("bb"), Some("a"), Some("")), 2).filter {
-      value =>
+    val filtered =
+      DistCollection(texts(Some("a"), None, Some("bb"), Some("a"), Some("")), 2).filter { value =>
         Option(value) match
           case Some("bb") => false
           case _ => true
-    }
+      }
 
     filtered.collect() shouldBe texts(Some("a"), None, Some("a"), Some(""))
     assertUtf8(filtered, 2)
@@ -678,7 +690,8 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     val values = texts(Some("US"), None, Some("CA"), Some("MX"), Some("US"))
     val actual = columnar(DistCollection(values, 2).filterStringIn("CA", "US", "GB"))
     assertUtf8(actual, 2)
-    val expected = row(DistCollection(values, 2).filter(value => Set("CA", "US", "GB").contains(value)))
+    val expected =
+      row(DistCollection(values, 2).filter(value => Set("CA", "US", "GB").contains(value)))
 
     actual.collect() shouldBe expected.collect()
     actual.collect() shouldBe texts(Some("US"), Some("CA"), Some("US"))

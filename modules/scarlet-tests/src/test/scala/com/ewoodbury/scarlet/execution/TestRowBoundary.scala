@@ -7,7 +7,7 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
-import com.ewoodbury.scarlet.execution.schema.Describe
+import com.ewoodbury.scarlet.execution.schema.{Describe, KernelChoice}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
@@ -20,7 +20,10 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * test. `flatMapValues` uses that same decode. An int-pair scan publishes a batch. A null value on
  * a lowered filter is [[scala.None]]. Untyped `sortBy` publishes the child and matches the row
  * order. A per-partition sort is not this test. `cogroup` publishes each scan. One null mismatch
- * is [[scala.None]] for the whole cogroup. A hash join is not this test.
+ * is [[scala.None]] for the whole cogroup. A hash join is not this test. A refused `mapValues` to
+ * string publishes the int-pair scan and matches the row map. A same-type `mapValues` still
+ * lowers. A null key under that refused map is [[scala.None]]. Unboxing that null to `0` and
+ * calling it a match is not this test.
  */
 class TestRowBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -201,6 +204,69 @@ class TestRowBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     found shouldBe row(grouped.collect().toSeq)
   }
 
+  "an int-pair scan under mapValues to string" should "publish the scan and match the row map" in {
+    val scanned = DistCollection.ofIntPairs(Array(1, 2, 3, 4), Array(10, 20, 30, 40), 2)
+    val mapped = scanned.mapValues((value: Int) => value.toString)
+    Describe.describe(mapped.plan) shouldBe Option.empty[Describe.Described]
+    ColumnarPlanner.lower(mapped.plan).isDefined shouldBe false
+    ColumnarPlanner.lower(scanned.plan).isDefined shouldBe true
+    mapped.plan match
+      case Plan.MapValuesOp(source, f) =>
+        RowBoundary.mapValues(source, f).isDefined shouldBe true
+      case other => fail(s"expected mapValues, got $other")
+
+    val sink = new CountingSink
+    val found = ColumnMetrics.withSink(sink) {
+      ScarletRuntime.get.shuffle.clear()
+      mapped.collect().toSeq
+    }
+    sink.batchCount should be > 0L
+    found shouldBe Seq((1, "10"), (2, "20"), (3, "30"), (4, "40"))
+    found shouldBe row(mapped.collect().toSeq)
+  }
+
+  "an int scan under map to string" should "publish the scan and match the row map" in {
+    val scanned = DistCollection.ofInts(Array(1, 2, 3, 4), 2)
+    val mapped = scanned.map((n: Int) => n.toString)
+    Describe.describe(mapped.plan) shouldBe Option.empty[Describe.Described]
+    ColumnarPlanner.lower(mapped.plan).isDefined shouldBe false
+    ColumnarPlanner.lower(scanned.plan).isDefined shouldBe true
+    mapped.plan match
+      case Plan.MapOp(source, f) =>
+        RowBoundary.map(source, f).isDefined shouldBe true
+      case other => fail(s"expected map, got $other")
+
+    val sink = new CountingSink
+    val found = ColumnMetrics.withSink(sink) {
+      ScarletRuntime.get.shuffle.clear()
+      mapped.collect().toSeq
+    }
+    sink.batchCount should be > 0L
+    found shouldBe Seq("1", "2", "3", "4")
+    found shouldBe row(mapped.collect().toSeq)
+  }
+
+  "an int mapValues" should "still lower as MapValue" in {
+    val scanned = DistCollection.ofIntPairs(Array(1, 2), Array(10, 20), 1)
+    val mapped = scanned.mapValues((value: Int) => value + 1)
+    ColumnarPlanner.lower(mapped.plan).isDefined shouldBe true
+    Describe.describe(mapped.plan).map(_.choice) shouldBe Some(KernelChoice.MapValue)
+  }
+
+  "a null key on filterKeys under mapValues to string" should "stay on the row plan" in {
+    val scanned = DistCollection(Seq((1, 10), erased(None, Some(20)), (2, 30)), 1)
+    val mapped =
+      scanned.filterKeys((key: Int) => key >= 0).mapValues((value: Int) => value.toString)
+    Describe.describe(mapped.plan) shouldBe Option.empty[Describe.Described]
+    mapped.plan match
+      case Plan.MapValuesOp(source, f) =>
+        RowBoundary.mapValues(source, f) shouldBe None
+      case other => fail(s"expected mapValues, got $other")
+    val found = collect(mapped).map(showCell)
+    found shouldBe row(collect(mapped).map(showCell))
+    found.exists(_.contains("null")) shouldBe true
+  }
+
   private def intGroups(
       rows: Seq[(Int, (Iterable[Int], Iterable[Int]))],
   ): Map[Int, (Seq[Int], Seq[Int])] =
@@ -224,7 +290,7 @@ class TestRowBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   private def keep(row: (Int, Int)): Seq[(Int, Int)] = Seq(row)
 
-  private def collect(mapped: DistCollection[(Int, Int)]): Seq[(Int, Int)] =
+  private def collect[A](mapped: DistCollection[A]): Seq[A] =
     ScarletRuntime.get.shuffle.clear()
     mapped.collect().toSeq
 
@@ -237,7 +303,7 @@ class TestRowBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       "org.wartremover.warts.Product",
     ),
   )
-  private def showCell(row: (Int, Int)): String =
+  private def showCell(row: Product): String =
     val cells = (0 until row.productArity).map { index =>
       row.productElement(index) match
         case null => "null"
