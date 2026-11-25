@@ -891,9 +891,9 @@ object ColumnarPlanner:
       if (FilterBinding.element(child, steps)) then BoolPipeline.lower(child, steps) else None
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Strings =>
-      if (elementProjectsMatch(child.kind, steps) && FilterBinding.element(child, steps)) then
-        Some(lowerElementPipeline(child, steps))
-      else None
+      // The kind names this element chain. [[ProjectBinding]] asks for [[KernelChoice.Project]]
+      // or [[KernelChoice.Pipeline]]. This match does not pick the class.
+      ProjectBinding.chain(child, steps)
     case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongPairs =>
       steps.foldLeft(Option(child)) { (current, step) =>
         current.flatMap(op => lowerElementStep(op, step))
@@ -941,30 +941,6 @@ object ColumnarPlanner:
             case PhysicalOp.Kind.LongPairs if returnsIntPair(mapper) =>
               Some(PhysicalOp.Project(child))
             case _ => None
-
-  private def lowerElementPipeline(child: PhysicalOp, steps: List[ElementStep]): PhysicalOp =
-    def lower(current: PhysicalOp, remaining: List[ElementStep]): PhysicalOp =
-      val (ordinary, rest) = remaining.span {
-        case ElementStep.Filter(predicate) =>
-          child.kind match
-            case PhysicalOp.Kind.Strings => dictionaryStringLiterals(predicate).isEmpty
-            case _ => true
-        case ElementStep.Project(_) => true
-      }
-      val chunked = ordinary.grouped(4).foldLeft(current) { (parent, group) =>
-        group match
-          case List(ElementStep.Filter(_)) => PhysicalOp.Filter(parent, PhysicalOp.Slot.Element)
-          case List(ElementStep.Project(_)) => PhysicalOp.Project(parent)
-          case _ => PhysicalOp.Pipeline(parent, group.length)
-      }
-      rest match
-        case ElementStep.Filter(_) :: tail =>
-          lower(PhysicalOp.Filter(chunked, PhysicalOp.Slot.Element), tail)
-        case Nil => chunked
-        case _ =>
-          throw new IllegalStateException("only a dictionary string filter splits a pipeline")
-
-    lower(child, steps)
 
   private val MaxDictionaryStringLiterals = 8
 
@@ -1016,16 +992,6 @@ object ColumnarPlanner:
   /** Unboxed `Long => Long` via [[FunctionWitness]], same as a long element project. */
   private def returnsUnboxedLong(function: Any): Boolean =
     FunctionWitness.declaredElement(PhysicalOp.Kind.Longs, function)
-
-  /**
-   * True when every project in `steps` declares the signature of `kind`. A filter does not change
-   * the element type. One failing project refuses the chain. This does not call the functions.
-   */
-  private def elementProjectsMatch(kind: PhysicalOp.Kind, steps: List[ElementStep]): Boolean =
-    steps.forall {
-      case ElementStep.Filter(_) => true
-      case ElementStep.Project(mapper) => FunctionWitness.declaredElement(kind, mapper)
-    }
 
   private def columnFilter(source: Plan[_], slot: PhysicalOp.Slot): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>

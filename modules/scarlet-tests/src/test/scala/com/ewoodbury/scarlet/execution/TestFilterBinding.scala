@@ -26,7 +26,7 @@ import com.ewoodbury.scarlet.execution.schema.ColumnBinding.{
  * One slot above a triple project whose schema is `[Int32, Int64]` still lowers. That layout is
  * [[Layout.AssumedIntLong]], and [[ColumnBinding.choose]] of a filter on it is [[scala.None]].
  * [[PhysicalSchema.isIntLongProject]] is the fact the layout cannot say. [[Describe.tag]] is not
- * the check. A pure int map does not ask. That project is a later section.
+ * the check. A same-type element map asks in [[TestProjectBinding]].
  */
 class TestFilterBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -108,12 +108,6 @@ class TestFilterBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnBinding.chooseCallsForTest should be > 0
     follows(boolsFiltered, Operator.Filter)
     boolsFiltered.map(_.shape) shouldBe Some("Filter(Scan)")
-  }
-
-  it should "leave a pure int map unasked" in {
-    val mapped = lower(Plan.MapOp(ints, (value: Int) => value + 1))
-    mapped.map(_.shape) shouldBe Some("Project(Scan)")
-    ColumnBinding.chooseCallsForTest shouldBe 0
   }
 
   it should "not build a filter from Kind.Pairs when the binder returns None" in {
