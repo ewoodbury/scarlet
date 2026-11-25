@@ -11,10 +11,12 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * the row executor's, in order, and then runs the flat-map function. `flatMapValues` uses that
  * same decode and runs the value function. It does not grow a second decoder. An untyped `sortBy`
  * sorts that decoded child with the row scheduler. A typed sort stays on its kernel. A `cogroup`
- * decodes each child on its own. One disagreement runs the original plan on rows. A mismatch runs
- * the original plan on rows. A non-source child of `mapPartitions` is kept only when its decoded
- * partitions equal the row executor's, in order. A lowered filter that drops a null, or a decoder
- * that rejects a null pair, runs that child on rows. A child the planner refuses publishes
+ * decodes each child on its own. One disagreement runs the original plan on rows. A `map` or
+ * `mapValues` that [[ColumnarPlanner.tryRun]] accepts stays on that kernel. A refused one keeps a
+ * decoded child and runs the row function. A same-type map never takes that boundary. A mismatch
+ * runs the original plan on rows. A non-source child of `mapPartitions` is kept only when its
+ * decoded partitions equal the row executor's, in order. A lowered filter that drops a null, or a
+ * decoder that rejects a null pair, runs that child on rows. A child the planner refuses publishes
  * nothing. A join with one lowered side decodes that side and runs the join on the row executor
  * when those rows match. `take` asks [[ColumnarPlanner.tryTake]] and `count` asks
  * [[ColumnarPlanner.tryCount]] before either splits the original plan. Neither wraps that plan in
@@ -45,6 +47,16 @@ class DefaultExecutionService extends ExecutionService {
 
     case Plan.CoGroupOp(left, right) =>
       RowBoundary.cogroup(left, right).getOrElse(runRow(plan))
+
+    case Plan.MapOp(source, f) =>
+      ColumnarPlanner
+        .tryRun(plan)
+        .getOrElse(RowBoundary.map(source, f).getOrElse(runRow(plan)))
+
+    case Plan.MapValuesOp(source, mapFunction) =>
+      ColumnarPlanner
+        .tryRun(plan)
+        .getOrElse(RowBoundary.mapValues(source, mapFunction).getOrElse(runRow(plan)))
 
     case _ =>
       ColumnarPlanner.tryRun(plan).orElse(MixedJoin.partitions(plan)).getOrElse(runRow(plan))

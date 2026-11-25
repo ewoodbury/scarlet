@@ -566,7 +566,10 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
       source.filterKeys[Int, Int](_ > 0).plan,
       source.filter { case (key, value) => key > 0 && value > 1 }.plan,
       source.map { case (key, value) => (key + 1, value + key) }.plan,
-      source.filter { case (_, value) => value > 0 }.map { case (key, value) => (value, key) }.plan,
+      source
+        .filter { case (_, value) => value > 0 }
+        .map { case (key, value) => (value, key) }
+        .plan,
       primitive.plan,
       empty.plan,
     )
@@ -842,11 +845,12 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     checked
   }
 
-  it should "leave a mapValues that changes type on the row path" in {
+  it should "publish the scan under a mapValues that changes type" in {
     val keys = Array(1, 2, 3)
     val values = Array(4, 5, 6)
 
-    def strings = DistCollection.ofIntPairs(keys, values, 2).mapValues[Int, Int, String](_.toString)
+    def strings =
+      DistCollection.ofIntPairs(keys, values, 2).mapValues[Int, Int, String](_.toString)
     def widened = DistCollection.ofIntPairs(keys, values, 2).mapValues[Int, Int, Long](_.toLong)
 
     armColumnar()
@@ -854,8 +858,7 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     ColumnarPlanner.partitioning(widened.plan) shouldBe None
     val collected = ColumnMetrics.withSink(new CountingSink) {
       val rows = strings.collect()
-      ColumnMetrics.batchCount shouldBe 0L
-      ColumnMetrics.visitCount shouldBe 0L
+      ColumnMetrics.batchCount should be > 0L
       rows
     }
     collected shouldBe row(strings.collect())

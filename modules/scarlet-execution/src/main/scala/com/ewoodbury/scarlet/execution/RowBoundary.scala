@@ -13,8 +13,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * the original plan on rows. This does not wrap that plan in another operator. `flatMapValues`
  * uses the same decode. Untyped `sortBy` sorts those partitions with the row scheduler. Typed
  * sorts stay on their kernels. `cogroup` decodes each child on its own and runs the row cogroup.
- * One disagreement runs the original plan on rows. [[MixedAction]] and [[MixedJoin]] stay on their
- * own paths.
+ * One disagreement runs the original plan on rows. A refused `map` or `mapValues` uses this same
+ * decode. A plan [[ColumnarPlanner.tryRun]] accepts never reaches it. [[MixedAction]] and
+ * [[MixedJoin]] stay on their own paths.
  */
 @SuppressWarnings(
   Array(
@@ -57,6 +58,27 @@ private[execution] object RowBoundary:
     matched(source).map { parts =>
       runRow(Plan.SortByOp(Plan.Source(parts), keyFunc, ordering))
     }
+
+  /**
+   * `map` over a child whose decoded partitions match the row executor.
+   *
+   * The caller asks [[ColumnarPlanner.tryRun]] on the whole map first. This runs only when that
+   * returns [[scala.None]].
+   */
+  def map[A, B](source: Plan[A], f: A => B): Option[Seq[Partition[B]]] =
+    matched(source).map(parts => parts.map(part => Partition(applyMap(part.data, f))))
+
+  /**
+   * `mapValues` over a child whose decoded partitions match the row executor.
+   *
+   * The value function runs on the decoded pairs. This is the same decode as [[map]]. The caller
+   * asks [[ColumnarPlanner.tryRun]] on the whole map first.
+   */
+  def mapValues[K, V, B](
+      source: Plan[(K, V)],
+      f: V => B,
+  ): Option[Seq[Partition[(K, B)]]] =
+    matched(source).map(parts => parts.map(part => Partition(applyMapValues(part.data, f))))
 
   /**
    * `cogroup` over children decoded on their own.
@@ -129,6 +151,19 @@ private[execution] object RowBoundary:
 
   private def applyOnce[A, B](rows: Iterable[A], f: A => IterableOnce[B]): Vector[B] =
     rows.iterator.flatMap(row => f(row).iterator).toVector
+
+  /** One output per decoded row. This runs only after [[matched]] agreed with the row executor. */
+  private def applyMap[A, B](rows: Iterable[A], f: A => B): Vector[B] =
+    rows.iterator.map(f).toVector
+
+  /**
+   * One output pair per decoded pair. The key is the decoded key.
+   *
+   * This runs only after [[matched]] agreed with the row executor. The row stage pairs the key and
+   * the mapped value the same way.
+   */
+  private def applyMapValues[K, V, B](rows: Iterable[(K, V)], f: V => B): Vector[(K, B)] =
+    rows.iterator.map { case (key, value) => (key, f(value)) }.toVector
 
   /**
    * One output pair per value the function yields. The key is the decoded key.
