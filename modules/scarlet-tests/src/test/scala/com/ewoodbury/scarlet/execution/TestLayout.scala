@@ -85,10 +85,15 @@ class TestLayout extends AnyFlatSpec with Matchers:
   }
 
   it should "report aggregates and sorts from their kind" in {
-    val summed = PhysicalOp.HashAggregate(PhysicalOp.Project(triples))
+    val summed = PhysicalOp.HashAggregate(
+      PhysicalOp.Project(triples),
+      PhysicalOp.HashAggregateTag.IntLongSum,
+    )
     Layout.known(summed) shouldBe columns(LogicalType.Int32, LogicalType.Int32)
     summed.schema shouldBe PhysicalSchema.IntLong
-    Layout.known(PhysicalOp.HashAggregate(PhysicalOp.Exchange(pairs))) shouldBe
+    Layout.known(
+      PhysicalOp.HashAggregate(PhysicalOp.Exchange(pairs), PhysicalOp.HashAggregateTag.IntHash),
+    ) shouldBe
       columns(LogicalType.Int32, LogicalType.Int32)
     Layout.known(PhysicalOp.LongHashAggregate(PhysicalOp.Exchange(longPairs))) shouldBe
       columns(LogicalType.Int64, LogicalType.Int64)

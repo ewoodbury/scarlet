@@ -39,7 +39,7 @@ private[execution] object ReduceByKeyLowering:
     val exchanged = PhysicalOp.Exchange(child)
     ColumnBinding.asked(child, Operator.ReduceByKey) match
       case Some(KernelChoice.IntHashAggregate) =>
-        Some(PhysicalOp.HashAggregate(exchanged))
+        Some(PhysicalOp.HashAggregate(exchanged, PhysicalOp.HashAggregateTag.IntHash))
       case Some(KernelChoice.LongHashAggregate) =>
         Some(PhysicalOp.LongHashAggregate(exchanged))
       case Some(KernelChoice.StringHashAggregate) =>
@@ -49,7 +49,7 @@ private[execution] object ReduceByKeyLowering:
         None
 
   private def aggregated(child: PhysicalOp): PhysicalOp =
-    PhysicalOp.HashAggregate(PhysicalOp.Exchange(child))
+    PhysicalOp.HashAggregate(PhysicalOp.Exchange(child), PhysicalOp.HashAggregateTag.IntLongSum)
 
   /**
    * A triple project over an int inner sort-merge or broadcast join.

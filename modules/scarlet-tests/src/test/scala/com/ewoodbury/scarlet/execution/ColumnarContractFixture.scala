@@ -342,10 +342,10 @@ trait ColumnarContractFixture extends Matchers:
     case PhysicalOp.Column(child, _) => preservesPartitions(child)
     case PhysicalOp.MapValue(child) => preservesPartitions(child)
     case PhysicalOp.MapKey(child) => preservesPartitions(child)
-    case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_) | PhysicalOp.LongHashAggregate(_) |
-        PhysicalOp.StringHashAggregate(_) | PhysicalOp.GroupByKey(_) |
-        PhysicalOp.GroupedDecode(_) | PhysicalOp.CountByKey(_) | PhysicalOp.CountSum(_) |
-        PhysicalOp.JoinProbeSum(_, _, _) | PhysicalOp.HashJoin(_, _) |
+    case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_, _) |
+        PhysicalOp.LongHashAggregate(_) | PhysicalOp.StringHashAggregate(_) |
+        PhysicalOp.GroupByKey(_) | PhysicalOp.GroupedDecode(_) | PhysicalOp.CountByKey(_) |
+        PhysicalOp.CountSum(_) | PhysicalOp.JoinProbeSum(_, _, _) | PhysicalOp.HashJoin(_, _) |
         PhysicalOp.LongHashJoin(_, _) | PhysicalOp.LongSortMergeJoin(_, _) |
         PhysicalOp.StringHashJoin(_, _) | PhysicalOp.StringSortMergeJoin(_, _) |
         PhysicalOp.SortMergeJoin(_, _) | PhysicalOp.SortMergeLeftOuter(_, _) |

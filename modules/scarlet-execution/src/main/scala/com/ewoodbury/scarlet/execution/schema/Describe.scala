@@ -1,7 +1,7 @@
 package com.ewoodbury.scarlet.execution.schema
 
 import com.ewoodbury.scarlet.core.Plan
-import com.ewoodbury.scarlet.execution.{ColumnarPlanner, PhysicalOp, PhysicalSchema}
+import com.ewoodbury.scarlet.execution.{ColumnarPlanner, PhysicalOp}
 
 /**
  * Tags the root [[ColumnarPlanner.lower]] returns today.
@@ -28,14 +28,18 @@ private[execution] object Describe:
   private[execution] def tag(root: PhysicalOp): KernelChoice = choice(root)
 
   /**
-   * Tag `root`. An `[Int32, Int64]` hash aggregate is [[KernelChoice.IntLongProjectSum]]. A count
-   * whose child is an int hash join is [[KernelChoice.CountThroughProbe]]. Every other root keeps
-   * its class name. The distinct class is [[PhysicalOp.Dedupe]].
+   * Tag `root`. A hash aggregate reports the tag its builder stored.
+   * [[PhysicalOp.HashAggregateTag.IntHash]] is [[KernelChoice.IntHashAggregate]] even when the
+   * child schema is `[Int32, Int64]`. [[PhysicalOp.HashAggregateTag.IntLongSum]] is
+   * [[KernelChoice.IntLongProjectSum]]. A count whose child is an int hash join is
+   * [[KernelChoice.CountThroughProbe]]. Every other root keeps its class name. The distinct class
+   * is [[PhysicalOp.Dedupe]].
    */
   private def choice(root: PhysicalOp): KernelChoice = root match
-    case aggregate: PhysicalOp.HashAggregate =>
-      if PhysicalSchema.isIntLongAggregate(aggregate) then KernelChoice.IntLongProjectSum
-      else KernelChoice.IntHashAggregate
+    case PhysicalOp.HashAggregate(_, tag) =>
+      tag match
+        case PhysicalOp.HashAggregateTag.IntHash => KernelChoice.IntHashAggregate
+        case PhysicalOp.HashAggregateTag.IntLongSum => KernelChoice.IntLongProjectSum
     case PhysicalOp.CountByKey(PhysicalOp.HashJoin(_, _)) =>
       KernelChoice.CountThroughProbe
     case _: PhysicalOp.LongHashAggregate => KernelChoice.LongHashAggregate

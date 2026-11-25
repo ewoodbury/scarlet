@@ -87,7 +87,7 @@ private[execution] object ExecutionRoute:
     (plan, op) match
       case (
             Some(Plan.ReduceByKeyOp(source, reducer)),
-            PhysicalOp.HashAggregate(PhysicalOp.Exchange(child)),
+            PhysicalOp.HashAggregate(PhysicalOp.Exchange(child), _),
           ) =>
         reduceArm(source, child, reducer) match
           case Arm.IntLongReduce => true

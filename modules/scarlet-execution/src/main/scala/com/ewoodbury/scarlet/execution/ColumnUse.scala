@@ -52,7 +52,7 @@ private[execution] object ColumnUse:
       else walk(source, child, parent union consumedOrdinals(child.kind))
     case (plan, PhysicalOp.Exchange(child)) =>
       walk(plan, child, parent union Set(0, 1))
-    case (Plan.ReduceByKeyOp(source, _), PhysicalOp.HashAggregate(child)) =>
+    case (Plan.ReduceByKeyOp(source, _), PhysicalOp.HashAggregate(child, _)) =>
       walk(source, child, parent union Set(0, 1))
     case (Plan.ReduceByKeyOp(source, _), PhysicalOp.LongHashAggregate(child)) =>
       walk(source, child, parent union Set(0, 1))
