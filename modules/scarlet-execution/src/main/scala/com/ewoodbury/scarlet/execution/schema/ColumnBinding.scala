@@ -181,11 +181,13 @@ private[execution] object ColumnBinding:
       operator: Operator,
       reducer: ReducerWitness,
   ): Option[KernelChoice] =
-    // A filter on three int columns is [[KernelChoice.Filter]], not a count through the probe.
-    // [[Layout.AssumedIntLong]] still goes to [[intLong]] first, so a filter there is
-    // [[scala.None]]. The one slot above that project is kept outside this match.
+    // A whole-row filter on three int columns is [[KernelChoice.Filter]], not a count through
+    // the probe. `filterKeys` and `filterValues` on that layout are [[scala.None]]: an
+    // unprojected join is not a pair slot. [[Layout.AssumedIntLong]] still goes to [[intLong]]
+    // first, so a filter there is [[scala.None]]. The one slot above that project is kept
+    // outside this match.
     if assumedIntLong(layout) then intLong(operator, reducer)
-    else if filterParent(operator) then filterChoice(layout)
+    else if filterParent(operator) then filterChoice(layout, operator)
     else if intJoin(layout) then countThroughProbe(operator)
     else pair(layout.map(_.columnType), operator)
 
@@ -199,25 +201,34 @@ private[execution] object ColumnBinding:
       false
 
   /**
-   * Layouts a filter already runs: int, long, and string pairs, three int columns, and one int,
-   * long, double, string, or boolean column. A whole-row filter is not declined for
-   * [[NullPolicy.Absence]]: an outer int join already lowers one named column, and that kernel
-   * fails closed. [[Operator.FilterKeys]] and [[Operator.FilterValues]] still refuse that column.
-   * [[Layout.AssumedIntLong]] does not reach this match.
+   * Layouts a filter already runs: int, long, and string pairs, one int, long, double, string, or
+   * boolean column, and three int columns for a whole-row filter only. `filterKeys` and
+   * `filterValues` on three int columns are [[scala.None]], so an unprojected join does not grow a
+   * key or value slot. A whole-row filter is not declined for [[NullPolicy.Absence]]: an outer int
+   * join already lowers one named column, and that kernel fails closed. Those two slot parents
+   * still refuse that column. [[Layout.AssumedIntLong]] does not reach this match.
    */
-  private def filterChoice(layout: Vector[ColumnLayout]): Option[KernelChoice] =
-    if (filterLayout(layout.map(_.columnType))) then Some(KernelChoice.Filter) else None
+  private def filterChoice(
+      layout: Vector[ColumnLayout],
+      operator: Operator,
+  ): Option[KernelChoice] =
+    if (filterLayout(layout.map(_.columnType), operator)) then Some(KernelChoice.Filter) else None
 
-  private def filterLayout(types: Vector[ColumnType]): Boolean = types match
+  private def filterLayout(types: Vector[ColumnType], operator: Operator): Boolean = types match
     case Vector(ColumnType.Int32, ColumnType.Int32) => true
     case Vector(ColumnType.Int64, ColumnType.Int64) => true
     case Vector(ColumnType.Utf8Dict, ColumnType.Int32) => true
-    case Vector(ColumnType.Int32, ColumnType.Int32, ColumnType.Int32) => true
+    case Vector(ColumnType.Int32, ColumnType.Int32, ColumnType.Int32) => wholeRow(operator)
     case Vector(ColumnType.Int32) => true
     case Vector(ColumnType.Int64) => true
     case Vector(ColumnType.Float64) => true
     case Vector(ColumnType.Utf8Dict) => true
     case Vector(ColumnType.Bool) => true
+    case _ => false
+
+  /** A whole-row filter. A key or value slot on three int columns is not this parent. */
+  private def wholeRow(operator: Operator): Boolean = operator match
+    case Operator.Filter => true
     case _ => false
 
   /**

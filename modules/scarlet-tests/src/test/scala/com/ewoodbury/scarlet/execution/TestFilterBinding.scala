@@ -149,6 +149,43 @@ class TestFilterBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     lower(Plan.FilterValuesOp(projected, (value: Long) => value >= 0L)).isDefined shouldBe true
   }
 
+  it should "leave filterKeys on an unprojected int join empty" in {
+    val joined = Plan.JoinOp(intPairs, rightPairs, None)
+    val columns = Vector(
+      ColumnLayout(ColumnType.Int32, NullPolicy.Nullable),
+      ColumnLayout(ColumnType.Int32, NullPolicy.Nullable),
+      ColumnLayout(ColumnType.Int32, NullPolicy.Nullable),
+    )
+    ColumnBinding.choose(
+      columns,
+      Operator.FilterKeys,
+      ReducerWitness.NotApplicable,
+      NullAdmission.Policy(NullPolicy.Nullable),
+      Side.Inner,
+    ) shouldBe None
+    ColumnBinding.choose(
+      columns,
+      Operator.FilterValues,
+      ReducerWitness.NotApplicable,
+      NullAdmission.Policy(NullPolicy.Nullable),
+      Side.Inner,
+    ) shouldBe None
+    ColumnBinding.choose(
+      columns,
+      Operator.Filter,
+      ReducerWitness.NotApplicable,
+      NullAdmission.Policy(NullPolicy.Nullable),
+      Side.Inner,
+    ) shouldBe Some(KernelChoice.Filter)
+    lower(Plan.FilterKeysOp(joined, (key: Int) => key > 0)) shouldBe None
+    val row = lower(Plan.FilterOp(joined, (row: (Int, (Int, Int))) => row._1 > 0))
+    ColumnBinding.chooseCallsForTest should be > 0
+    follows(row, Operator.Filter)
+    row.map(_.shape) shouldBe Some(
+      "FilterTripleRow(HashJoin(Exchange(Scan), Exchange(Scan)))",
+    )
+  }
+
   /**
    * The class is the tag [[ColumnBinding.choose]] returns for the child the filter wrapped.
    * [[Describe.tag]] is not this comparison.
