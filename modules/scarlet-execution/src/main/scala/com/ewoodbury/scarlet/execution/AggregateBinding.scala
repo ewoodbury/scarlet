@@ -178,12 +178,14 @@ private[execution] object AggregateBinding:
       case other => other
 
   /**
-   * Long addition on an int-to-long `mapValues`. Every other operator, including `countByKey`, is
-   * [[scala.None]]. Routing these columns through [[ColumnBinding.choose]] would also tag a count,
-   * because they compare equal to [[Layout.AssumedIntLong]].
+   * `countByKey` and long addition on an int-to-long `mapValues`. Every other operator is
+   * [[scala.None]]. The count reads the int key and does not read the long value. Routing these
+   * columns through [[ColumnBinding.choose]] would also tag a count, because they compare equal to
+   * [[Layout.AssumedIntLong]].
    */
   private def intLongMap(operator: Operator, reducer: ReducerWitness): Option[KernelChoice] =
     (operator, reducer) match
+      case (Operator.CountByKey, _) => Some(KernelChoice.CountByKey)
       case (Operator.ReduceByKey, ReducerWitness.AddsLongs) =>
         Some(KernelChoice.IntLongProjectSum)
       case _ => None

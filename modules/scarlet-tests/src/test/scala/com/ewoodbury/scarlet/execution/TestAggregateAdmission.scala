@@ -65,7 +65,9 @@ class TestAggregateAdmission extends AnyFlatSpec with Matchers with BeforeAndAft
     )
     reduced.collect().toMap shouldBe row(reduced.collect().toMap)
     ColumnarPlanner.lower(stacked) shouldBe None
-    ColumnarPlanner.lower(Plan.CountByKeyOp(widened.plan)) shouldBe None
+    ColumnarPlanner.lower(Plan.CountByKeyOp(widened.plan)).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(IntLongMapValue(Scan)))",
+    )
     ColumnarPlanner.lower(Plan.CountByKeyOp(stacked)) shouldBe None
     ColumnarPlanner.lower(Plan.ReduceByKeyOp(widened.plan, keep)) shouldBe None
     ColumnarPlanner.lower(Plan.ReduceByKeyOp(stacked, add)) shouldBe None

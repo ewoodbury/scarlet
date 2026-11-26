@@ -135,8 +135,10 @@ class TestFoundationLock extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     ColumnarPlanner.lower(byRow.plan) shouldBe None
   }
 
-  "countByKey of the widened map" should "stay empty" in {
-    ColumnarPlanner.lower(widened.countByKey.plan) shouldBe None
+  "countByKey of the widened map" should "count the int keys" in {
+    ColumnarPlanner.lower(widened.countByKey.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(IntLongMapValue(Scan)))",
+    )
   }
 
   "reduceByKey that keeps the left long" should "stay empty" in {

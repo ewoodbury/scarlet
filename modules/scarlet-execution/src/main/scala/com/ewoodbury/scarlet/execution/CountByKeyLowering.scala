@@ -36,6 +36,7 @@ private[execution] object CountByKeyLowering:
     hashPartitionedProject(child) match
       case Some(projected) => Some(counted(projected))
       case None if intLongProject(child) => Some(counted(child))
+      case None if intLongValue(child) => Some(counted(child))
       case None => JoinAggregateBinding.count(child).orElse(countedFromTag(child))
 
   /**
@@ -126,6 +127,11 @@ private[execution] object CountByKeyLowering:
       child.kind match
         case PhysicalOp.Kind.Triples => PhysicalSchema.isIntLong(child.schema)
         case _ => false
+
+  /** Int-to-long `mapValues`. The count hashes the int key and does not read the long value. */
+  private def intLongValue(child: PhysicalOp): Boolean = child match
+    case _: PhysicalOp.IntLongMapValue => true
+    case _ => false
 
   private def keyOrValue(slot: PhysicalOp.Slot): Boolean = slot match
     case PhysicalOp.Slot.Key | PhysicalOp.Slot.Value => true

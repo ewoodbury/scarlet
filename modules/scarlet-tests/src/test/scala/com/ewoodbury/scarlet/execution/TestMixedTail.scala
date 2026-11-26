@@ -15,8 +15,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  *
  * The tail does not lower. [[Describe.describe]] has no tag for it, and the tag is not the route.
  * A whole-plan row rerun matches the checksum and publishes nothing. The bound child has to
- * publish a batch. `countByKey` of an `Int => Long` `mapValues` does not lower, and that tail
- * publishes nothing. `take` is not this shape.
+ * publish a batch. `countByKey` of an `Int => Long` `mapValues` lowers the same way, and that tail
+ * keeps the count batch. `take` is not this shape.
  */
 class TestMixedTail extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -59,12 +59,22 @@ class TestMixedTail extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     CrossEngineShapes.pairChecksum(found) shouldBe CrossEngineShapes.pairChecksum(expected)
   }
 
-  "countByKey of Int => Long under mapPartitions" should "publish nothing and match rows" in {
+  "countByKey of Int => Long under mapPartitions" should "publish the count batch and match rows" in {
     val counted = pairs.mapValues[Int, Int, Long]((value: Int) => value.toLong).countByKey
     val tailed = bump(counted)
     Describe.describe(tailed.plan) shouldBe Option.empty[Describe.Described]
-    ColumnarPlanner.lower(counted.plan) shouldBe Option.empty[PhysicalOp]
+    ColumnarPlanner.lower(counted.plan).map(_.shape) shouldBe Some(
+      "CountByKey(Exchange(IntLongMapValue(Scan)))",
+    )
     ColumnarPlanner.lower(tailed.plan) shouldBe Option.empty[PhysicalOp]
+
+    val child = new CountingSink
+    val childRan = ColumnMetrics.withSink(child) {
+      ScarletRuntime.get.shuffle.clear()
+      ColumnarPlanner.tryRun(counted.plan).isDefined
+    }
+    childRan shouldBe true
+    child.batchCount should be > 0L
 
     val sink = new CountingSink
     val found = ColumnMetrics.withSink(sink) {
@@ -72,7 +82,8 @@ class TestMixedTail extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       tailed.collect()
     }
     val expected = row(tailed.collect())
-    sink.batchCount shouldBe 0L
+    sink.batchCount shouldBe child.batchCount
+    sink.batchCount should be > 0L
     found.toMap shouldBe Map(1 -> 3, 2 -> 2, 3 -> 2)
     found.toMap shouldBe expected.toMap
     CrossEngineShapes.pairChecksum(found) shouldBe CrossEngineShapes.pairChecksum(expected)
