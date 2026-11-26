@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import java.util.concurrent.atomic.AtomicLong
+
 import com.ewoodbury.scarlet.core.{Partition, Plan}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
@@ -8,14 +10,18 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  *
  * This is not a kernel and it does not build a [[PhysicalOp]]. Decode is
  * [[ColumnarPlanner.tryRun]] of the child. [[IllegalArgumentException]] is a failed decode,
- * including `null Int32 pair at row N`. The decoded partitions must equal the row executor's
- * partitions of that same child, in order. Anything else is [[scala.None]], and the caller runs
- * the original plan on rows. This does not wrap that plan in another operator. `flatMapValues`
- * uses the same decode. Untyped `sortBy` sorts those partitions with the row scheduler. Typed
- * sorts stay on their kernels. `cogroup` decodes each child on its own and runs the row cogroup.
- * One disagreement runs the original plan on rows. A refused `map` or `mapValues` uses this same
- * decode. A plan [[ColumnarPlanner.tryRun]] accepts never reaches it. [[MixedAction]] and
- * [[MixedJoin]] stay on their own paths.
+ * including `null Int32 pair at row N`. A numeric array source has no null cell, so a successful
+ * decode is kept without running that child again. A boxed source, a string source, or a join
+ * still compares the decode with the row executor, in order. A disagreement is [[scala.None]], and
+ * the caller runs the original plan on rows. This does not wrap that plan in another operator.
+ * `flatMapValues` uses the same decode. Untyped `sortBy` sorts the kept partitions with the row
+ * scheduler. Typed sorts stay on their kernels. `cogroup` decodes each child on its own and runs
+ * the row cogroup. One disagreement runs the original plan on rows. A refused `map` or `mapValues`
+ * uses this same decode. A plan [[ColumnarPlanner.tryRun]] accepts never reaches it.
+ * [[MixedAction]] and [[MixedJoin]] stay on their own paths.
+ *
+ * [[childOracleRunsForTest]] counts the row-child compare. A numeric array child must not
+ * increment it. A boxed child that still decodes must.
  */
 @SuppressWarnings(
   Array(
@@ -29,7 +35,19 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 )
 private[execution] object RowBoundary:
 
-  /** `flatMap` over a child whose decoded partitions match the row executor. */
+  private val childOracleRuns = new AtomicLong
+
+  /** Times the row executor re-ran a decoded child. A numeric array child stays at zero. */
+  private[execution] def childOracleRunsForTest: Long = childOracleRuns.get()
+
+  /** Test hook. Production does not call this. */
+  private[execution] def resetChildOracleRunsForTest(): Unit = childOracleRuns.set(0L)
+
+  private def noteChildOracle(): Unit =
+    val updated = childOracleRuns.incrementAndGet()
+    if updated < 0L then throw new IllegalStateException("oracle count wrapped")
+
+  /** `flatMap` over a child whose decoded partitions are kept. */
   def flatMap[A, B](source: Plan[A], f: A => IterableOnce[B]): Option[Seq[Partition[B]]] =
     matched(source).map(parts => parts.map(part => Partition(applyOnce(part.data, f))))
 
@@ -100,14 +118,17 @@ private[execution] object RowBoundary:
         Some(runRow(Plan.CoGroupOp(asPlan(leftSide), asPlan(rightSide))))
 
   /**
-   * Decoded partitions when they are the row executor's partitions, in order.
+   * Decoded partitions.
    *
+   * A numeric array child is kept. Anything else is kept only when it matches the row executor.
    * [[scala.None]] is a refused decode, a null pair the decoder rejects, or a different row.
    */
   private def matched[A](source: Plan[A]): Option[Seq[Partition[A]]] =
     decode(source) match
       case None => None
+      case Some(decoded) if trusted(source) => Some(freeze(decoded))
       case Some(decoded) =>
+        noteChildOracle()
         val columns = freeze(decoded)
         val rows = freeze(runRow(source))
         if sameOrder(columns, rows) then Some(columns) else None
@@ -133,7 +154,9 @@ private[execution] object RowBoundary:
     try
       ColumnarPlanner.tryRun(plan) match
         case None => Child.Kept(plan)
+        case Some(parts) if trusted(plan) => Child.Ready(freeze(parts))
         case Some(parts) =>
+          noteChildOracle()
           val columns = freeze(parts)
           val rows = freeze(runRow(plan))
           if sameOrder(columns, rows) then Child.Ready(columns) else Child.Disagree()
@@ -215,6 +238,56 @@ private[execution] object RowBoundary:
     case other =>
       val boxed = other.asInstanceOf[AnyRef]
       Cell.Leaf(boxed.getClass.getName, String.valueOf(other))
+
+  /**
+   * A child whose sources are numeric arrays and which is not a join.
+   *
+   * Those arrays have no null cell, so the decode cannot disagree by unboxing a null to `0`. A
+   * string array can hold null. A boxed source is [[Plan.SourceDescriptor.Unknown]]. Both keep the
+   * row compare. A join can publish an absent partner, so it keeps the compare too.
+   */
+  private def trusted(plan: Plan[?]): Boolean =
+    plan match
+      case Plan.Source(_, descriptor) => numeric(descriptor)
+      case _: Plan.JoinOp[?, ?, ?] => false
+      case _: Plan.LeftOuterJoinOp[?, ?, ?] => false
+      case _: Plan.RightOuterJoinOp[?, ?, ?] => false
+      case _: Plan.FullOuterJoinOp[?, ?, ?] => false
+      case _: Plan.MapPartitionsOp[?, ?] => false
+      case Plan.UnionOp(left, right) => trusted(left) && trusted(right)
+      case Plan.CoGroupOp(left, right) => trusted(left) && trusted(right)
+      case Plan.RepartitionOp(source, _) => trusted(source)
+      case Plan.CoalesceOp(source, _) => trusted(source)
+      case Plan.PartitionByOp(source, _) => trusted(source)
+      case Plan.MapOp(source, _) => trusted(source)
+      case Plan.FilterOp(source, _) => trusted(source)
+      case Plan.FlatMapOp(source, _) => trusted(source)
+      case Plan.DistinctOp(source) => trusted(source)
+      case Plan.KeysOp(source) => trusted(source)
+      case Plan.ValuesOp(source) => trusted(source)
+      case Plan.MapValuesOp(source, _) => trusted(source)
+      case Plan.MapIntKeyOp(source, _) => trusted(source)
+      case Plan.FilterKeysOp(source, _) => trusted(source)
+      case Plan.FilterValuesOp(source, _) => trusted(source)
+      case Plan.FlatMapValuesOp(source, _) => trusted(source)
+      case Plan.GroupByKeyOp(source) => trusted(source)
+      case Plan.CountByKeyOp(source) => trusted(source)
+      case Plan.CountSumByKeyOp(source) => trusted(source)
+      case Plan.ReduceByKeyOp(source, _) => trusted(source)
+      case Plan.SortByOp(source, _, _) => trusted(source)
+      case Plan.SortByIntKeyOp(source) => trusted(source)
+      case Plan.SortByIntValueDescOp(source) => trusted(source)
+      case Plan.SortByLongKeyOp(source) => trusted(source)
+      case Plan.SortByStringKeyOp(source) => trusted(source)
+
+  private def numeric(descriptor: Plan.SourceDescriptor): Boolean =
+    descriptor match
+      case Plan.SourceDescriptor.Ints | Plan.SourceDescriptor.Longs |
+          Plan.SourceDescriptor.Doubles | Plan.SourceDescriptor.Pairs |
+          Plan.SourceDescriptor.Bools | Plan.SourceDescriptor.LongPairs =>
+        true
+      case Plan.SourceDescriptor.Unknown | Plan.SourceDescriptor.Strings =>
+        false
 
   private def runRow[A](plan: Plan[A]): Seq[Partition[A]] =
     val runtime = ScarletRuntime.get
