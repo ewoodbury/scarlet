@@ -17,7 +17,9 @@ import com.ewoodbury.scarlet.execution.schema.{ColumnBinding, KernelChoice}
  * is [[GroupedDecode]]: the group runs once and the function sees the decoded rows. Int, long, and
  * string `keys` lower separately and do not build value lists. `count` is the number of groups.
  * [[PhysicalOp.Kind.Pairs]], [[PhysicalOp.Kind.LongPairs]], and [[PhysicalOp.Kind.StringPairs]]
- * lower. Every other kind stays on the row path.
+ * lower. An int-to-long [[PhysicalOp.IntLongMapValue]] also lowers. A filter of that map does not:
+ * its layout is still int-long pairs, and [[ColumnBinding.asked]] refuses it. Every other kind
+ * stays on the row path. The int-long group keeps a null value in the list.
  *
  * [[apply]] asks [[ColumnBinding]] before it builds. [[scala.None]] from the binder stays
  * [[scala.None]]. A [[PhysicalOp.GroupByKey]] child is
@@ -28,11 +30,17 @@ import com.ewoodbury.scarlet.execution.schema.{ColumnBinding, KernelChoice}
 private[execution] object GroupByKeyLowering:
 
   def apply(child: PhysicalOp): Option[PhysicalOp] =
-    if tagged(child) && acceptedKind(child) then
+    if intLongValue(child) then Some(PhysicalOp.GroupByKey(PhysicalOp.Exchange(child)))
+    else if tagged(child) && acceptedKind(child) then
       Some(PhysicalOp.GroupByKey(PhysicalOp.Exchange(child)))
     else
       LoweringTrace.note("GroupByKeyOp", child.kind, "GroupByKeyLowering")
       None
+
+  /** Int-to-long `mapValues`. A filter of that map is not this node. */
+  private def intLongValue(child: PhysicalOp): Boolean = child match
+    case _: PhysicalOp.IntLongMapValue => true
+    case _ => false
 
   /** Binder tag for this group, or false when the layout is one the group refuses. */
   private def tagged(child: PhysicalOp): Boolean =
@@ -52,5 +60,6 @@ private[execution] object GroupByKeyLowering:
         PhysicalOp.Kind.Bools | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.LongCounts |
         PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
         PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter |
-        PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums =>
+        PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums |
+        PhysicalOp.Kind.GroupedIntLongs =>
       false

@@ -155,6 +155,34 @@ object GroupByKey:
       )
 
   /**
+   * Groups `(Int, Long)` after the value has already been widened.
+   *
+   * Every batch is `[Int32, Int64]`. A null key is dropped by [[HashExchange.partitionAll]]. A
+   * null value is copied with its validity bit and stays in the group. This does not call
+   * [[requirePresentValues]]. Spill stays off for this shape: an over-budget bucket is still
+   * grouped in memory, and [[GroupByKeySpill.finish]] is not used, because that path groups int
+   * values.
+   */
+  def intLong(
+      batches: Vector[ColumnBatch],
+      partitions: Int,
+      parallelism: Int,
+  ): Vector[GroupedIntLongBatch] =
+    require(partitions > 0, s"partitions must be positive, got $partitions")
+    require(parallelism > 0, s"parallelism must be positive, got $parallelism")
+    if (batches.isEmpty) then Vector.fill(partitions)(GroupedIntLongBatch.empty)
+    else
+      require(
+        batches.forall(batch =>
+          batch.schema.length == 2 && batch.schema(0) == LogicalType.Int32 &&
+            batch.schema(1) == LogicalType.Int64,
+        ),
+        "groupByKey expects (Int32, Int64) batches",
+      )
+      val buckets = HashExchange.partitionAll(batches, keyOrdinal = 0, partitions, parallelism)
+      MorselScheduler.map(buckets, parallelism)((_, bucket) => groupIntLong(bucket))
+
+  /**
    * [[strings]] for a selection. Present values are checked on `rows(0 until count)` only. The
    * exchange scatters those rows, then each bucket uses the dense [[groupStrings]].
    */
@@ -412,6 +440,71 @@ object GroupByKey:
         Int64Column.of(outKeys, Validity.allValid(groups), groups),
         offsets,
         outValues,
+      )
+
+  private[columnar] def groupIntLong(batch: ColumnBatch): GroupedIntLongBatch =
+    val keys = ColumnHash.int32At(batch, 0)
+    val values = ColumnHash.int64At(batch, 1)
+    require(keys.length == values.length, "key and value columns differ in length")
+    if (keys.length == 0) then GroupedIntLongBatch.empty
+    else fillIntLong(keys, values, ColumnHash.fullyPresent(keys))
+
+  private def fillIntLong(
+      keys: Int32Column,
+      values: Int64Column,
+      presentKeys: Boolean,
+  ): GroupedIntLongBatch =
+    val rows = keys.length
+    val capacity = ColumnHash.tableSize(rows)
+    require(capacity >= 2 * rows, s"group table capacity $capacity is below 2 * $rows")
+    val table = new GroupTable(capacity)
+    val keyValues = keys.values
+    val valueValues = values.values
+    val keyWords = keys.validity.words
+    val valueWordsIn = values.validity.words
+    val presentValues = ColumnHash.fullyPresent(values)
+    var row = 0
+    while (row < rows) {
+      if (presentKeys || Validity.isSet(keyWords, row)) then table.add(keyValues(row))
+      row += 1
+    }
+    val groups = table.groups
+    if (groups == 0) then GroupedIntLongBatch.empty
+    else
+      noteValueLists(groups)
+      val offsets = new Array[Int](groups + 1)
+      var cursor = 0
+      var group = 0
+      while (group < groups) {
+        offsets(group) = cursor
+        cursor += table.count(group)
+        group += 1
+      }
+      offsets(groups) = cursor
+      val outValues = new Array[Long](cursor)
+      val outValueWords = Validity.allocate(cursor)
+      val writeAt = Arrays.copyOf(offsets, groups)
+      row = 0
+      while (row < rows) {
+        if (presentKeys || Validity.isSet(keyWords, row)) then
+          val atGroup = table.indexOf(keyValues(row))
+          val dest = writeAt(atGroup)
+          outValues(dest) = valueValues(row)
+          if (presentValues || Validity.isSet(valueWordsIn, row)) then
+            Validity.setBit(outValueWords, dest)
+          writeAt(atGroup) = dest + 1
+        row += 1
+      }
+      val outKeys = new Array[Int](groups)
+      group = 0
+      while (group < groups) {
+        outKeys(group) = table.key(group)
+        group += 1
+      }
+      GroupedIntLongBatch(
+        Int32Column.of(outKeys, Validity.allValid(groups), groups),
+        offsets,
+        Int64Column.of(outValues, Validity.fromWords(outValueWords, cursor), cursor),
       )
 
   private def utf8At(batch: ColumnBatch, ordinal: Int): DictUtf8Column =

@@ -906,7 +906,8 @@ object ColumnarPlanner:
     case PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
         PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
         PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter |
-        PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums =>
+        PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums |
+        PhysicalOp.Kind.GroupedIntLongs =>
       None
 
   /**
@@ -1101,6 +1102,8 @@ object ColumnarPlanner:
       Layout.GroupedString(ScarletConf.get.columnarBatchSize)
     case PhysicalOp.Kind.GroupedLongs =>
       Layout.GroupedLong(ScarletConf.get.columnarBatchSize)
+    case PhysicalOp.Kind.GroupedIntLongs =>
+      Layout.GroupedIntLong(ScarletConf.get.columnarBatchSize)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Bools | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |

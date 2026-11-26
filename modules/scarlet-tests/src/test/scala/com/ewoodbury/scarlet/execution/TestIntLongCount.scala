@@ -13,8 +13,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * `countByKey` after `mapValues` to long hashes the int key. The long value is not read.
  *
- * The fake leaves `lower` empty. A filter, a `groupByKey`, and a non-adding `reduceByKey` above
- * the widening stay empty. A null key is dropped. The value function does not run.
+ * The fake leaves `lower` empty. A filter and a non-adding `reduceByKey` above the widening stay
+ * empty. `groupByKey` of the widening lowers. A null key is dropped. The value function does not
+ * run.
  */
 @SuppressWarnings(
   Array(
@@ -58,7 +59,9 @@ class TestIntLongCount extends AnyFlatSpec with Matchers with BeforeAndAfterEach
 
     val widened = rows.mapValues(widen)
     assert(ColumnarPlanner.lower(widened.filterValues((value: Long) => value > 0L).plan).isEmpty)
-    assert(ColumnarPlanner.lower(widened.groupByKey.plan).isEmpty)
+    ColumnarPlanner.lower(widened.groupByKey.plan).map(_.shape) shouldBe Some(
+      "GroupByKey(Exchange(IntLongMapValue(Scan)))",
+    )
     assert(
       ColumnarPlanner
         .lower(widened.reduceByKey[Int, Long]((left: Long, _: Long) => left).plan)

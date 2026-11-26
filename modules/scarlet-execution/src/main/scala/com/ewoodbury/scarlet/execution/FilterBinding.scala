@@ -78,7 +78,7 @@ private[execution] object FilterBinding:
           PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
           PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs |
           PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
-          PhysicalOp.Kind.IntLongSums =>
+          PhysicalOp.Kind.IntLongSums | PhysicalOp.Kind.GroupedIntLongs =>
         None
 
   private def innerRow(child: PhysicalOp): Option[PhysicalOp.Slot] =

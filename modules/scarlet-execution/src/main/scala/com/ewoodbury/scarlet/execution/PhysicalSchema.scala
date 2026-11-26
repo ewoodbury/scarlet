@@ -84,3 +84,5 @@ private[execution] object PhysicalSchema:
     case PhysicalOp.Kind.GroupedInts => Vector(LogicalType.Int32, LogicalType.Int32)
     case PhysicalOp.Kind.GroupedLongs => Vector(LogicalType.Int64, LogicalType.Int64)
     case PhysicalOp.Kind.GroupedStrings => Vector(LogicalType.Utf8Dict, LogicalType.Int32)
+    // Not a pair a parent can read. [[schema.Layout.known]] of GroupByKey stays opaque.
+    case PhysicalOp.Kind.GroupedIntLongs => IntLong
