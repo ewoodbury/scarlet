@@ -340,8 +340,8 @@ object StageBuilder:
    *   2. **Narrow Transformations**:
    *      - Accumulates operations using appendOperation() when possible
    *      - Creates new stages when chaining is not feasible
-   *      - Handles: MapOp, FilterOp, FlatMapOp, DistinctOp, KeysOp, ValuesOp, MapValuesOp,
-   *        FilterKeysOp, FilterValuesOp, FlatMapValuesOp, MapPartitionsOp
+   *      - Handles: MapOp, FilterOp, FlatMapOp, KeysOp, ValuesOp, MapValuesOp, FilterKeysOp,
+   *        FilterValuesOp, FlatMapValuesOp, MapPartitionsOp
    *   3. **Multi-input Operations**:
    *      - UnionOp: Creates a new stage that reads from both input stages
    *      - Preserves no partitioning metadata due to input consolidation
@@ -349,7 +349,7 @@ object StageBuilder:
    *      - GroupByKeyOp, CountByKeyOp, ReduceByKeyOp: Supports shuffle bypass optimization when
    *        already partitioned correctly
    *      - SortByOp, SortByIntKeyOp, SortByIntValueDescOp, SortByLongKeyOp, SortByStringKeyOp,
-   *        PartitionByOp, RepartitionOp, CoalesceOp: Always creates shuffle boundaries
+   *        PartitionByOp, RepartitionOp, CoalesceOp, DistinctOp: Always creates shuffle boundaries
    *      - JoinOp, LeftOuterJoinOp, RightOuterJoinOp, FullOuterJoinOp, CoGroupOp: Multi-input wide
    *        operations with side tagging for disambiguation
    *      - Uses WideOp metadata structures for shuffle execution planning
@@ -438,16 +438,8 @@ object StageBuilder:
         )
         (resultId, Some(plan))
 
-      case Plan.DistinctOp(sourcePlan) =>
-        val (sourceStageId, _) = buildStagesFromPlan(ctx, sourcePlan, builderMap, dependencies)
-        val resultId = appendOperation(
-          ctx,
-          sourceStageId,
-          Operation.fromPlan(plan),
-          builderMap,
-          dependencies,
-        )
-        (resultId, Some(plan))
+      case distinct: Plan.DistinctOp[_] =>
+        DistinctStages.attach(ctx, distinct, builderMap, dependencies)
 
       case Plan.KeysOp(sourcePlan) =>
         val (sourceStageId, _) = buildStagesFromPlan(ctx, sourcePlan, builderMap, dependencies)
@@ -1050,6 +1042,7 @@ object StageBuilder:
       case PartitionByWideOp(m) => m
       case RepartitionWideOp(m) => m
       case CoalesceWideOp(m) => m
+      case DistinctWideOp(m) => m
       case JoinWideOp(m) => m
       case LeftOuterJoinWideOp(m) => m
       case RightOuterJoinWideOp(m) => m
@@ -1089,7 +1082,7 @@ object StageBuilder:
         Some(PartitioningInfo.hash(meta.numPartitions))
       case WideOpKind.SortBy =>
         Some(PartitioningInfo.rangeSorted(meta.numPartitions))
-      case WideOpKind.Repartition =>
+      case WideOpKind.Repartition | WideOpKind.Distinct =>
         // The writer hashes the element. That is not pair-key hash and not round-robin.
         Some(PartitioningInfo.unknown(meta.numPartitions))
       case WideOpKind.Coalesce =>

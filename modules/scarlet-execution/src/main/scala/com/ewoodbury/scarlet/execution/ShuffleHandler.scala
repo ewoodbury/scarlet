@@ -241,3 +241,38 @@ final class ShuffleHandler(
     )
     actualShuffleId
   }
+
+  /**
+   * Distinct. Each mapper partition is deduped locally, then the survivors are hash-partitioned by
+   * the element. The original partitions are not mutated. A null element is a key and hashes to
+   * partition 0.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.MutableDataStructures",
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  def handleDistinctOutput(
+      stageInfo: StageBuilder.StageInfo,
+      results: Seq[Partition[_]],
+      numPartitions: Int,
+  ): ShuffleId = {
+    val keyed = results.map { partition =>
+      val unique = Stage.distinct[Any].execute(partition.asInstanceOf[Partition[Any]])
+      val pairs = unique.data.iterator.map(element => (element, ())).toList
+      Partition(pairs)
+    }
+    val shuffleData = shuffle.partitionByKey[Any, Unit](
+      data = keyed,
+      numPartitions = numPartitions,
+      partitioner = partitioner,
+    )
+    val actualShuffleId = shuffle.write[Any, Unit](shuffleData)
+    logger.debug(
+      s"Stored distinct shuffle data for stage ${stageInfo.id.toInt} with shuffle ID ${actualShuffleId.toInt}",
+    )
+    actualShuffleId
+  }

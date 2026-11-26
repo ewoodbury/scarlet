@@ -84,8 +84,8 @@ final case class DistCollection[A](plan: Plan[A]):
     DistCollection(Plan.MapPartitionsOp(this.plan, f))
 
   /**
-   * Transformation: Returns a new DistCollection with distinct elements. Does not trigger
-   * computation.
+   * Transformation: Returns a new DistCollection with one copy of each element. A value that
+   * appears in two partitions is kept once. Does not trigger computation.
    */
   def distinct(): DistCollection[A] =
     DistCollection(Plan.DistinctOp(this.plan))
