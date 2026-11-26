@@ -29,7 +29,7 @@ object PlanWide {
         _: Plan.JoinOp[_, _, _] | _: Plan.LeftOuterJoinOp[_, _, _] |
         _: Plan.RightOuterJoinOp[_, _, _] | _: Plan.FullOuterJoinOp[_, _, _] |
         _: Plan.CoGroupOp[_, _, _] | _: Plan.RepartitionOp[_] | _: Plan.CoalesceOp[_] |
-        _: Plan.PartitionByOp[_, _] =>
+        _: Plan.PartitionByOp[_, _] | _: Plan.DistinctOp[_] =>
       true
 
     // Narrow operations - recurse on source(s) to check for downstream wide operations
@@ -37,7 +37,6 @@ object PlanWide {
     case Plan.FilterOp(source, _) => isWide(source)
     case Plan.FlatMapOp(source, _) => isWide(source)
     case Plan.MapPartitionsOp(source, _) => isWide(source)
-    case Plan.DistinctOp(source) => isWide(source)
     case Plan.KeysOp(source) => isWide(source)
     case Plan.ValuesOp(source) => isWide(source)
     case Plan.MapValuesOp(source, _) => isWide(source)
@@ -70,7 +69,7 @@ object PlanWide {
         _: Plan.JoinOp[_, _, _] | _: Plan.LeftOuterJoinOp[_, _, _] |
         _: Plan.RightOuterJoinOp[_, _, _] | _: Plan.FullOuterJoinOp[_, _, _] |
         _: Plan.CoGroupOp[_, _, _] | _: Plan.RepartitionOp[_] | _: Plan.CoalesceOp[_] |
-        _: Plan.PartitionByOp[_, _] =>
+        _: Plan.PartitionByOp[_, _] | _: Plan.DistinctOp[_] =>
       true
     case _ => false
   }

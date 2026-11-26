@@ -8,7 +8,15 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
-/** Columnar distinct: each value once, whatever the partition count. */
+/**
+ * Distinct keeps one copy of each value across partitions.
+ *
+ * Int and string columns lower to `Dedupe(Exchange(Scan))`. Every other type, and an int column
+ * with columnar execution off, hash-shuffles on the row path and then dedupes inside each shuffle
+ * partition. A per-partition `iterator.distinct` with no shuffle keeps a duplicate that landed in
+ * two source partitions.
+ */
+@SuppressWarnings(Array("org.wartremover.warts.Null"))
 class TestDistinct extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   private val original = ScarletConf.get
@@ -25,9 +33,6 @@ class TestDistinct extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   private def columnar(values: Seq[Int], partitions: Int): Seq[Int] =
     DistCollection(values, partitions).distinct().collect().toSeq.sorted
-
-  // The row path runs distinct per partition, so duplicates that land in different partitions
-  // survive. That is a row-path bug tracked in RETIRE-ROW.md; the columnar path is global.
 
   "a columnar distinct" should "keep one of each value across partitions" in {
     // Values 1 and 4 sit in different source partitions, so a per-partition dedupe would keep
@@ -58,4 +63,58 @@ class TestDistinct extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val lowered = ColumnarPlanner.lower(DistCollection(Seq(1, 2, 2), 2).distinct().plan).get
     lowered.shape shouldBe "Dedupe(Exchange(Scan))"
     PartitionPreserving.of(lowered) shouldBe Option.empty[Int]
+  }
+
+  /**
+   * Fails if each source partition dedupes itself and never shuffles. The long `1` is in both
+   * source partitions, so that fake counts 4. The global answer is 3.
+   */
+  it should "drop a duplicate that lands in another partition" in {
+    val longs = DistCollection.ofLongs(Array(0L, 1L, 0L, 1L, 2L, 2L), 2)
+    assert(ColumnarPlanner.lower(longs.distinct().plan).isEmpty)
+    val longDistinct = longs.distinct()
+    longDistinct.count() shouldBe 3L
+    longDistinct.collect().toSet shouldBe Set(0L, 1L, 2L)
+    val graph = StageBuilder.buildStageGraph(longDistinct.plan)
+    val shuffle = graph.stages(graph.finalStageId)
+    shuffle.isShuffleStage shouldBe true
+    shuffle.wideOp shouldBe Some(
+      DistinctWideOp(
+        SimpleWideOpMeta(
+          kind = WideOpKind.Distinct,
+          numPartitions = ScarletConf.get.defaultShufflePartitions,
+        ),
+      ),
+    )
+    shuffle.outputPartitioning.map(_.distribution) shouldBe Some(
+      Distribution.Unknown(ScarletConf.get.defaultShufflePartitions),
+    )
+
+    val doubles = DistCollection.ofDoubles(Array(1.0, 2.0, 1.0, 2.0), 2)
+    doubles.distinct().count() shouldBe 2L
+    val bools = DistCollection.ofBools(Array(true, false, true, false), 2)
+    bools.distinct().count() shouldBe 2L
+    val pairs = DistCollection.ofIntPairs(Array(1, 2, 1, 2), Array(10, 20, 10, 20), 2)
+    pairs.distinct().count() shouldBe 2L
+    pairs.distinct().collect().toSet shouldBe Set((1, 10), (2, 20))
+    val floats = DistCollection(Seq(1.0f, 2.0f, 1.0f, 2.0f), 2)
+    floats.distinct().count() shouldBe 2L
+    // Each source partition is already unique, so only a shuffle drops the second copy.
+    val nullKey = DistCollection(
+      Seq[(String, Int)]((null, 1), ("k", 2), (null, 1), ("k", 2)),
+      2,
+    )
+    nullKey.distinct().count() shouldBe 2L
+    nullKey.distinct().collect().toSet shouldBe Set((null, 1), ("k", 2))
+
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = false))
+    val values = Seq(1, 2, 2, 3, 1, 4, 4, 4, 0, -1)
+    val ints = DistCollection(values, 3).distinct()
+    ints.count() shouldBe 6L
+    ints.collect().toSeq.sorted shouldBe Seq(-1, 0, 1, 2, 3, 4)
+    DistCollection(Seq.empty[Int], 3).distinct().collect() shouldBe empty
+    DistCollection(Seq(7, 7, 7), 1).distinct().collect().toSeq shouldBe Seq(7)
+    val words = DistCollection(Seq[String]("a", null, "b", null, "a"), 2).distinct()
+    words.count() shouldBe 3L
+    words.collect().toSet shouldBe Set[String]("a", "b", null)
   }

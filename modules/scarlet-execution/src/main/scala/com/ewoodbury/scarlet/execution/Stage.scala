@@ -59,10 +59,13 @@ object Stage {
     }
   }
 
+  /**
+   * Local distinct of one partition. Global distinct hash-shuffles by the element first, then runs
+   * this on each shuffle partition. The view stays stable across traversals of the same partition.
+   */
   def distinct[A]: Stage[A, A] = {
     SingleOpStage { p =>
       val it = p.data.iterator.distinct
-      // Distinct must be stable over multiple traversals of the same partition view
       Partition(IterUtil.iterableOf(it))
     }
   }

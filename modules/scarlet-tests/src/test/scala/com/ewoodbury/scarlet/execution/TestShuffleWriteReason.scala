@@ -58,6 +58,14 @@ class TestShuffleWriteReason extends AnyFlatSpec with Matchers {
       ),
     )
 
+  private def distinctStage(id: Int, numPartitions: Int): StageBuilder.StageInfo =
+    simpleWideStage(
+      id,
+      DistinctWideOp(
+        SimpleWideOpMeta(kind = WideOpKind.Distinct, numPartitions = numPartitions),
+      ),
+    )
+
   private def groupByStage(id: Int): StageBuilder.StageInfo =
     simpleWideStage(
       id,
@@ -94,6 +102,18 @@ class TestShuffleWriteReason extends AnyFlatSpec with Matchers {
 
     ShuffleWriteReason.forDependents(dependents) shouldBe
       ShuffleWriteReason.DownstreamRepartition(5)
+  }
+
+  it should "hash by element when every dependent is distinct" in {
+    val dependents = Seq(distinctStage(1, 4), distinctStage(2, 4))
+
+    ShuffleWriteReason.forDependents(dependents) shouldBe ShuffleWriteReason.DownstreamDistinct(4)
+  }
+
+  it should "refuse a distinct dependent mixed with another shuffle" in {
+    val dependents = Seq(distinctStage(1, 4), groupByStage(2))
+
+    an[IllegalStateException] should be thrownBy ShuffleWriteReason.forDependents(dependents)
   }
 
   it should "fall back to a generic keyed write for groupByKey dependents" in {

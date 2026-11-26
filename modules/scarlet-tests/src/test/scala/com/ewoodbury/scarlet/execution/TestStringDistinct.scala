@@ -12,8 +12,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * Columnar string `distinct`: one copy of each string, including one null and one `""`.
  *
- * The oracle is `values.toSet`. The row `Stage.distinct` dedupes per partition and is not the
- * oracle. Order is unspecified. `count` is the global cardinality.
+ * The oracle is `values.toSet`. Order is unspecified. `count` is the global cardinality.
+ * [[Stage.distinct]] is only the local step; the row scheduler hash-shuffles before it.
  */
 class TestStringDistinct extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 

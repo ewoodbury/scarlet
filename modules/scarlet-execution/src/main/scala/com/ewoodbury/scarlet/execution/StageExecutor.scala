@@ -138,6 +138,8 @@ final class StageExecutor(
         executeCoGroupOperation(stageInfo, stageToShuffleId)
       case Some(_: RepartitionWideOp) | Some(_: CoalesceWideOp) =>
         executeRepartitionOperation(inputPartitions)
+      case Some(_: DistinctWideOp) =>
+        executeDistinctOperation(inputPartitions)
       case Some(_: PartitionByWideOp) =>
         // Upstream wrote key-hashed (K, V) tuples; the partitioning already happened in the
         // shuffle write, so the stage itself is an identity pass-through
@@ -325,6 +327,20 @@ final class StageExecutor(
     val typed = inputPartitions.asInstanceOf[Seq[Partition[(Any, Unit)]]]
     val out = typed.map { p => Partition(p.data.iterator.map(_._1).toList) }
     out
+  }
+
+  /**
+   * Per-partition distinct. The shuffle writer already hashed by element and deduped each mapper
+   * partition, so a value that arrived from two mappers meets in one partition and is kept once.
+   */
+  private def executeDistinctOperation(
+      inputPartitions: Seq[Partition[_]],
+  ): Seq[Partition[_]] = {
+    val typed = inputPartitions.asInstanceOf[Seq[Partition[(Any, Any)]]]
+    val elements = typed.map { partition =>
+      Partition(partition.data.iterator.map(_._1).toList)
+    }
+    executePerPartition(elements, Stage.distinct[Any])
   }
 
   /**

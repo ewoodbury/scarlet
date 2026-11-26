@@ -10,8 +10,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.{HashPartitioner, LocalShuffleService}
 
 /**
- * Map-side combine for reduceByKey: mapper partitions are locally reduced before the shuffle
- * write when every shuffle dependent is that reduce. Mixed diamonds write raw records.
+ * Map-side combine for reduceByKey: mapper partitions are locally reduced before the shuffle write
+ * when every shuffle dependent is that reduce. Mixed diamonds write raw records.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.AsInstanceOf"))
 class TestMapSideCombine extends AnyFlatSpec with Matchers with BeforeAndAfterEach {
@@ -47,7 +47,6 @@ class TestMapSideCombine extends AnyFlatSpec with Matchers with BeforeAndAfterEa
 
     val shuffleId = handler
       .handleCombinedKeyedOutput(stageInfo, mapperPartitions, numPartitions = 4, add)
-      
 
     val shuffled = recordsIn(shuffle, shuffleId, 4)
     shuffled.size shouldBe 3
@@ -55,7 +54,7 @@ class TestMapSideCombine extends AnyFlatSpec with Matchers with BeforeAndAfterEa
 
     val uncombinedId = handler
       .handleKeyedOutput(stageInfo, mapperPartitions, numPartitions = 4)
-      
+
     recordsIn(shuffle, uncombinedId, 4).size shouldBe 4
   }
 
@@ -68,7 +67,6 @@ class TestMapSideCombine extends AnyFlatSpec with Matchers with BeforeAndAfterEa
 
     handler
       .handleCombinedKeyedOutput(stageInfo, mapperPartitions, numPartitions = 4, add)
-      
 
     mapperPartitions.flatMap(_.data).toList shouldBe original
   }
@@ -84,7 +82,6 @@ class TestMapSideCombine extends AnyFlatSpec with Matchers with BeforeAndAfterEa
 
     val shuffleId = handler
       .handleCombinedKeyedOutput(stageInfo, mapperPartitions, numPartitions = 4, add)
-      
 
     recordsIn(shuffle, shuffleId, 4) should contain theSameElementsAs Seq("solo" -> 9)
   }
@@ -99,7 +96,9 @@ class TestMapSideCombine extends AnyFlatSpec with Matchers with BeforeAndAfterEa
   }
 
   it should "reduce an empty collection to empty" in {
-    DistCollection(Seq.empty[(String, Int)], 2).reduceByKey[String, Int](_ + _).collect() shouldBe empty
+    DistCollection(Seq.empty[(String, Int)], 2)
+      .reduceByKey[String, Int](_ + _)
+      .collect() shouldBe empty
   }
 
   it should "not combine a parent that also feeds groupByKey" in {
@@ -114,5 +113,32 @@ class TestMapSideCombine extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     both.collect() should contain theSameElementsAs Seq("a" -> 3, "a" -> 6)
     groupedSizes.collect().toMap shouldBe Map("a" -> 3)
     reduced.collect().toMap shouldBe Map("a" -> 6)
+  }
+
+  "handleDistinctOutput" should "shuffle one copy of a value per mapper partition" in {
+    val shuffle = new LocalShuffleService
+    val handler = new ShuffleHandler(shuffle, new HashPartitioner)
+    val mapperPartitions = Seq(
+      Partition(Seq[Any](1, 1, 2)),
+      Partition(Seq[Any](2, 2, 3)),
+    )
+
+    val shuffleId = handler.handleDistinctOutput(stageInfo, mapperPartitions, numPartitions = 4)
+
+    val shuffled = recordsIn(shuffle, shuffleId, 4)
+    shuffled.map(_._1).toSet shouldBe Set[Any](1, 2, 3)
+    // Without the local dedupe the write would keep all six source rows.
+    shuffled.size shouldBe 4
+  }
+
+  it should "not mutate the mapper partitions" in {
+    val shuffle = new LocalShuffleService
+    val handler = new ShuffleHandler(shuffle, new HashPartitioner)
+    val original = Seq[Any](1, 1, 2)
+    val mapperPartitions = Seq(Partition(original))
+
+    handler.handleDistinctOutput(stageInfo, mapperPartitions, numPartitions = 4)
+
+    mapperPartitions.flatMap(_.data).toList shouldBe original
   }
 }

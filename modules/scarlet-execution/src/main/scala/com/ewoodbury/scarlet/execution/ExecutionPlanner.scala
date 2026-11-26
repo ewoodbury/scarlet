@@ -13,31 +13,55 @@ sealed trait ShuffleWriteReason
 object ShuffleWriteReason:
 
   /**
-   * Selects the write reason for a stage whose dependents include shuffle stages. SortBy wins
-   * regardless of dependent order because range partitioning is the only scheme change; among the
-   * rest, partitionBy (key-hash into its own count) beats repartition/coalesce; then a combine
+   * Selects the write reason for a stage whose dependents include shuffle stages. A distinct
+   * dependent hashes the element and cannot share that write. SortBy wins among the rest
+   * regardless of dependent order because range partitioning is the only scheme change; among
+   * those, partitionBy (key-hash into its own count) beats repartition/coalesce; then a combine
    * write if every dependent is the same reduceByKey; otherwise the default keyed write.
    */
   private[execution] def forDependents(
       shuffleDependents: Seq[StageBuilder.StageInfo],
-  ): ShuffleWriteReason = {
-    val wideOps = shuffleDependents.flatMap(_.wideOp)
-    if (wideOps.exists(_.isInstanceOf[SortByWideOp[_, _]])) DownstreamSortBy
-    else {
-      // Filter by type first: collectFirst across case alternatives would pick whichever
-      // dependent comes first in iteration order, not the highest-priority type
-      val partitionBy = wideOps.collectFirst { case op: PartitionByWideOp =>
-        DownstreamPartitionBy(op.meta.numPartitions)
+  ): ShuffleWriteReason =
+    distinctWrite(shuffleDependents).getOrElse {
+      val wideOps = shuffleDependents.flatMap(_.wideOp)
+      if (wideOps.exists(_.isInstanceOf[SortByWideOp[_, _]])) DownstreamSortBy
+      else {
+        // Filter by type first: collectFirst across case alternatives would pick whichever
+        // dependent comes first in iteration order, not the highest-priority type
+        val partitionBy = wideOps.collectFirst { case op: PartitionByWideOp =>
+          DownstreamPartitionBy(op.meta.numPartitions)
+        }
+        val repartition = wideOps.collectFirst {
+          case op: RepartitionWideOp => DownstreamRepartition(op.meta.numPartitions)
+          case op: CoalesceWideOp => DownstreamRepartition(op.meta.numPartitions)
+        }
+        partitionBy
+          .orElse(repartition)
+          .orElse(reduceByKeyCombine(shuffleDependents))
+          .getOrElse(DownstreamShuffle)
       }
-      val repartition = wideOps.collectFirst {
-        case op: RepartitionWideOp => DownstreamRepartition(op.meta.numPartitions)
-        case op: CoalesceWideOp => DownstreamRepartition(op.meta.numPartitions)
-      }
-      partitionBy
-        .orElse(repartition)
-        .orElse(reduceByKeyCombine(shuffleDependents))
-        .getOrElse(DownstreamShuffle)
     }
+
+  /**
+   * Element-hash write when every dependent is `distinct` at one width. A mixed diamond throws:
+   * the other dependent does not read `(element, ())` pairs.
+   */
+  private def distinctWrite(
+      shuffleDependents: Seq[StageBuilder.StageInfo],
+  ): Option[ShuffleWriteReason] = {
+    val distinctOps = shuffleDependents.flatMap(_.wideOp).collect { case op: DistinctWideOp =>
+      op
+    }
+    if distinctOps.isEmpty then None
+    else if shuffleDependents.forall(_.wideOp.exists(_.isInstanceOf[DistinctWideOp])) &&
+      distinctOps.map(_.meta.numPartitions).distinct.length == 1
+    then
+      // Non-empty: the width check above kept a single partition count.
+      Some(DownstreamDistinct(distinctOps.iterator.next().meta.numPartitions))
+    else
+      throw new IllegalStateException(
+        "a distinct shuffle cannot share its write with another shuffle dependent",
+      )
   }
 
   /**
@@ -108,6 +132,12 @@ object ShuffleWriteReason:
       reduceFunc: (Any, Any) => Any,
   ) extends ShuffleWriteReason
 
+  /**
+   * Every shuffle dependent is `distinct`. The writer hashes the element into this many
+   * partitions.
+   */
+  final case class DownstreamDistinct(numPartitions: Int) extends ShuffleWriteReason
+
 /**
  * Planner for coordinating stage execution.
  */
@@ -144,9 +174,9 @@ final class ExecutionPlanner(
 
   /**
    * Persists this stage's output to the shuffle service if any dependent stage is a shuffle stage.
-   * The write reason records which downstream requirement drove the write; when several dependents
-   * need differently-partitioned data, the sort requirement wins because it is the only one that
-   * changes the partitioning scheme (range instead of hash).
+   * [[ShuffleWriteReason.forDependents]] picks the write. A distinct dependent hashes the element
+   * and refuses to share that write. Sort wins among the remaining reasons because it is the only
+   * one that changes the partitioning scheme (range instead of hash).
    */
   private def writeShuffleIfNeeded(
       stageInfo: StageBuilder.StageInfo,
@@ -164,38 +194,36 @@ final class ExecutionPlanner(
 
     if (shuffleDependents.isEmpty) None
     else {
-      // A sortBy dependent is found first so the dispatch below is driven by the same value that
-      // produced the reason: no reason/dispatch agreement to maintain by hand.
-      val sortByDependent =
-        shuffleDependents.find(_.wideOp.exists(_.isInstanceOf[SortByWideOp[_, _]]))
-
-      val reason: ShuffleWriteReason =
-        sortByDependent.fold(ShuffleWriteReason.forDependents(shuffleDependents))(_ =>
-          ShuffleWriteReason.DownstreamSortBy,
-        )
-
+      val reason: ShuffleWriteReason = ShuffleWriteReason.forDependents(shuffleDependents)
       logger.debug(s"Shuffle write for stage ${stageInfo.id.toInt}: $reason")
-      val shuffleId: ShuffleId = sortByDependent match {
-        case Some(dep) =>
-          shuffleHandler.handleSortByRangePartitionedOutput(stageInfo, results, stageGraph, dep.id)
-        case None =>
-          reason match {
-            case ShuffleWriteReason.DownstreamPartitionBy(n) =>
-              // Key-value data: write key-hashed into the partitionBy target count so the
-              // partitionBy stage reads all of it and downstream bypasses stay correct
-              shuffleHandler.handleKeyedOutput(stageInfo, results, n)
-            case ShuffleWriteReason.DownstreamRepartition(n) =>
-              shuffleHandler.handleRepartitionOrCoalesceOutput(stageInfo, results, n)
-            case ShuffleWriteReason.DownstreamReduceByKey(n, reduceFunc) =>
-              shuffleHandler.handleCombinedKeyedOutput(stageInfo, results, n, reduceFunc)
-            case ShuffleWriteReason.DownstreamShuffle =>
-              shuffleHandler.handleShuffleOutput(stageInfo, results)
-            case ShuffleWriteReason.DownstreamSortBy =>
+      val shuffleId: ShuffleId = reason match {
+        case ShuffleWriteReason.DownstreamSortBy =>
+          val dep = shuffleDependents
+            .find(_.wideOp.exists(_.isInstanceOf[SortByWideOp[_, _]]))
+            .getOrElse(
               throw new IllegalStateException(
                 "sortBy write reason selected without a sortBy dependent; this is unreachable " +
                   "by construction of ShuffleWriteReason.forDependents",
-              )
-          }
+              ),
+            )
+          shuffleHandler.handleSortByRangePartitionedOutput(
+            stageInfo,
+            results,
+            stageGraph,
+            dep.id,
+          )
+        case ShuffleWriteReason.DownstreamPartitionBy(n) =>
+          // Key-value data: write key-hashed into the partitionBy target count so the
+          // partitionBy stage reads all of it and downstream bypasses stay correct
+          shuffleHandler.handleKeyedOutput(stageInfo, results, n)
+        case ShuffleWriteReason.DownstreamRepartition(n) =>
+          shuffleHandler.handleRepartitionOrCoalesceOutput(stageInfo, results, n)
+        case ShuffleWriteReason.DownstreamReduceByKey(n, reduceFunc) =>
+          shuffleHandler.handleCombinedKeyedOutput(stageInfo, results, n, reduceFunc)
+        case ShuffleWriteReason.DownstreamDistinct(n) =>
+          shuffleHandler.handleDistinctOutput(stageInfo, results, n)
+        case ShuffleWriteReason.DownstreamShuffle =>
+          shuffleHandler.handleShuffleOutput(stageInfo, results)
       }
       Some((shuffleId, reason))
     }

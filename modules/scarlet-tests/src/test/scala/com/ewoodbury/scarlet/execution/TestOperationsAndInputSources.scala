@@ -100,7 +100,8 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
     val kvSourcePlan: Plan[(String, Int)] = Plan.Source(Seq(kvPartition))
 
     // First partition by key, then groupByKey - should bypass shuffle in groupByKey
-    val partitionByPlan = Plan.PartitionByOp(kvSourcePlan, ScarletConf.get.defaultShufflePartitions)
+    val partitionByPlan =
+      Plan.PartitionByOp(kvSourcePlan, ScarletConf.get.defaultShufflePartitions)
     val gbkPlan = Plan.GroupByKeyOp(partitionByPlan)
 
     // The unified builder should handle this optimization internally
@@ -118,23 +119,24 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
     import WideOpKind.*
 
     // Test that WideOpKind enum has all expected values
-    WideOpKind.values should contain (GroupByKey)
-    WideOpKind.values should contain (ReduceByKey)
-    WideOpKind.values should contain (SortBy)
-    WideOpKind.values should contain (PartitionBy)
-    WideOpKind.values should contain (Repartition)
-    WideOpKind.values should contain (Coalesce)
-    WideOpKind.values should contain (Join)
-    WideOpKind.values should contain (LeftOuterJoin)
-    WideOpKind.values should contain (RightOuterJoin)
-    WideOpKind.values should contain (FullOuterJoin)
-    WideOpKind.values should contain (CoGroup)
+    WideOpKind.values should contain(GroupByKey)
+    WideOpKind.values should contain(ReduceByKey)
+    WideOpKind.values should contain(SortBy)
+    WideOpKind.values should contain(PartitionBy)
+    WideOpKind.values should contain(Repartition)
+    WideOpKind.values should contain(Coalesce)
+    WideOpKind.values should contain(Distinct)
+    WideOpKind.values should contain(Join)
+    WideOpKind.values should contain(LeftOuterJoin)
+    WideOpKind.values should contain(RightOuterJoin)
+    WideOpKind.values should contain(FullOuterJoin)
+    WideOpKind.values should contain(CoGroup)
 
     // Test WideOpMeta creation - GroupByKey doesn't need functions
     val meta = SimpleWideOpMeta(
       kind = GroupByKey,
       numPartitions = 16,
-      sides = Seq.empty[StageBuilder.Side]
+      sides = Seq.empty[StageBuilder.Side],
     )
     meta.kind shouldBe GroupByKey
     meta.numPartitions shouldBe 16
@@ -156,22 +158,37 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
   private def createPartitionedSource(numPartitions: Int): Plan.Source[Int] =
     Plan.Source((0 until numPartitions).map(i => Partition(Seq(i * 10, i * 10 + 1))))
 
-  it should "build pure narrow chain (map -> filter -> distinct)" in {
+  it should "shuffle distinct after a narrow map and filter" in {
     val plan = Plan.DistinctOp(
       Plan.FilterOp(
         Plan.MapOp(createSource(), (_: Int) * 2),
-        (_: Int) > 0
-      )
+        (_: Int) > 0,
+      ),
     )
 
     val stageGraph = StageBuilder.buildStageGraph(plan)
 
-    // Should have only one stage (all operations chained)
-    stageGraph.stages.size shouldBe 1
+    stageGraph.stages.size shouldBe 2
     val stage = stageGraph.stages(stageGraph.finalStageId)
-    stage.isShuffleStage shouldBe false
-    stage.inputSources shouldBe Seq(StageBuilder.SourceInput(createSource().partitions))
-    stage.outputPartitioning.map(_.distribution) shouldBe Some(Distribution.Unknown(1))
+    stage.isShuffleStage shouldBe true
+    stage.wideOp shouldBe Some(
+      DistinctWideOp(
+        SimpleWideOpMeta(kind = WideOpKind.Distinct, numPartitions = defaultPartitions),
+      ),
+    )
+    // Element hash is not pair-key hash, so a later groupByKey still shuffles.
+    stage.outputPartitioning.map(_.distribution) shouldBe Some(
+      Distribution.Unknown(defaultPartitions),
+    )
+    val grouped = StageBuilder.buildStageGraph(
+      Plan.GroupByKeyOp(Plan.MapOp(plan, (value: Int) => (value, value))),
+    )
+    val groupedFinal = grouped.stages(grouped.finalStageId)
+    groupedFinal.isShuffleStage shouldBe true
+    groupedFinal.wideOp match {
+      case Some(_: GroupByKeyWideOp) => succeed
+      case other => fail(s"expected a groupByKey shuffle, found $other")
+    }
   }
 
   it should "build narrow chain with partitioning metadata carry-over" in {
@@ -215,7 +232,7 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
     // Expected stages: source+map (1) + partitionBy shuffle (2) + local groupByKey (3)
     stageGraph.stages.size shouldBe 3
     val stage = stageGraph.stages(stageGraph.finalStageId)
-    stage.isShuffleStage shouldBe false  // Final stage should be narrow (bypass worked)
+    stage.isShuffleStage shouldBe false // Final stage should be narrow (bypass worked)
   }
 
   it should "build reduceByKey after groupByKey with shuffle bypassed" in {
@@ -224,7 +241,7 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
     val partitionedSource = Plan.PartitionByOp(kvSource, ScarletConf.get.defaultShufflePartitions)
     val plan = Plan.ReduceByKeyOp(
       partitionedSource,
-      (a: Int, b: Int) => a + b
+      (a: Int, b: Int) => a + b,
     )
 
     val stageGraph = StageBuilder.buildStageGraph(plan)
@@ -233,13 +250,13 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
     // Expected stages: source+map (1) + partitionBy shuffle (2) + local reduceByKey (3)
     stageGraph.stages.size shouldBe 3
     val stage = stageGraph.stages(stageGraph.finalStageId)
-    stage.isShuffleStage shouldBe false  // Final stage should be narrow (bypass worked)
+    stage.isShuffleStage shouldBe false // Final stage should be narrow (bypass worked)
   }
 
   it should "build repartition followed by map (new stage after shuffle)" in {
     val plan = Plan.MapOp(
       Plan.RepartitionOp(createSource(), 3),
-      (_: Int) * 2
+      (_: Int) * 2,
     )
 
     val stageGraph = StageBuilder.buildStageGraph(plan)
@@ -249,7 +266,9 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
     stageGraph.stages.size shouldBe 3
     val finalStage = stageGraph.stages(stageGraph.finalStageId)
     finalStage.isShuffleStage shouldBe false
-    finalStage.inputSources.collect { case StageBuilder.StageOutput(_) => true } should not be empty
+    finalStage.inputSources.collect { case StageBuilder.StageOutput(_) =>
+      true
+    } should not be empty
   }
 
   it should "build union of two independent narrow chains" in {
@@ -280,8 +299,13 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
     finalStage.isShuffleStage shouldBe true
     finalStage.inputSources.length shouldBe 2
     finalStage.inputSources.forall(_.isInstanceOf[StageBuilder.ShuffleInput]) shouldBe true
-    val shuffleInputs = finalStage.inputSources.collect { case si: StageBuilder.ShuffleInput => si }
-    shuffleInputs.map(_.side) shouldBe Seq(Some(StageBuilder.Side.Left), Some(StageBuilder.Side.Right))
+    val shuffleInputs = finalStage.inputSources.collect { case si: StageBuilder.ShuffleInput =>
+      si
+    }
+    shuffleInputs.map(_.side) shouldBe Seq(
+      Some(StageBuilder.Side.Left),
+      Some(StageBuilder.Side.Right),
+    )
   }
 
   it should "build cogroup with two ShuffleInputs with sides" in {
@@ -312,10 +336,15 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
 
     // Should have two ShuffleInput sources with correct sides
     finalStage.inputSources.length shouldBe 2
-    val shuffleInputs = finalStage.inputSources.collect { case si: StageBuilder.ShuffleInput => si }
+    val shuffleInputs = finalStage.inputSources.collect { case si: StageBuilder.ShuffleInput =>
+      si
+    }
 
     shuffleInputs.length shouldBe 2
-    shuffleInputs.map(_.side) should contain theSameElementsAs Seq(Some(StageBuilder.Side.Left), Some(StageBuilder.Side.Right))
+    shuffleInputs.map(_.side) should contain theSameElementsAs Seq(
+      Some(StageBuilder.Side.Left),
+      Some(StageBuilder.Side.Right),
+    )
   }
 
   it should "assign correct side markers for cogroup operations" in {
@@ -328,10 +357,15 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
 
     // Should have two ShuffleInput sources with correct sides
     finalStage.inputSources.length shouldBe 2
-    val shuffleInputs = finalStage.inputSources.collect { case si: StageBuilder.ShuffleInput => si }
+    val shuffleInputs = finalStage.inputSources.collect { case si: StageBuilder.ShuffleInput =>
+      si
+    }
 
     shuffleInputs.length shouldBe 2
-    shuffleInputs.map(_.side) should contain theSameElementsAs Seq(Some(StageBuilder.Side.Left), Some(StageBuilder.Side.Right))
+    shuffleInputs.map(_.side) should contain theSameElementsAs Seq(
+      Some(StageBuilder.Side.Left),
+      Some(StageBuilder.Side.Right),
+    )
   }
 
   it should "validate multi-input operation invariants" in {
@@ -361,11 +395,21 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
     cogroupFinal.inputSources.forall(_.isInstanceOf[StageBuilder.ShuffleInput]) shouldBe true
 
     // Verify side markers are present and correct
-    val joinSides = joinFinal.inputSources.collect { case si: StageBuilder.ShuffleInput => si.side }
-    val cogroupSides = cogroupFinal.inputSources.collect { case si: StageBuilder.ShuffleInput => si.side }
+    val joinSides = joinFinal.inputSources.collect { case si: StageBuilder.ShuffleInput =>
+      si.side
+    }
+    val cogroupSides = cogroupFinal.inputSources.collect { case si: StageBuilder.ShuffleInput =>
+      si.side
+    }
 
-    joinSides should contain theSameElementsAs Seq(Some(StageBuilder.Side.Left), Some(StageBuilder.Side.Right))
-    cogroupSides should contain theSameElementsAs Seq(Some(StageBuilder.Side.Left), Some(StageBuilder.Side.Right))
+    joinSides should contain theSameElementsAs Seq(
+      Some(StageBuilder.Side.Left),
+      Some(StageBuilder.Side.Right),
+    )
+    cogroupSides should contain theSameElementsAs Seq(
+      Some(StageBuilder.Side.Left),
+      Some(StageBuilder.Side.Right),
+    )
   }
 
   it should "build nested wide operations (map -> repartition -> reduceByKey)" in {
@@ -373,9 +417,9 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
     val plan = Plan.ReduceByKeyOp(
       Plan.RepartitionOp(
         Plan.MapOp(source, (x: Int) => (x % 10, x)),
-        5
+        5,
       ),
-      (a: Int, b: Int) => a + b
+      (a: Int, b: Int) => a + b,
     )
 
     val stageGraph = StageBuilder.buildStageGraph(plan)
@@ -429,18 +473,24 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
     stageGraph.dependencies(unionStageId).size shouldBe 2
 
     // Find the left and right stage IDs
-    val leftStageId = stageGraph.stages.find(_._2.inputSources.exists {
-      case StageBuilder.SourceInput(parts) => parts == createSource().partitions
-      case _ => false
-    }).get._1
+    val leftStageId = stageGraph.stages
+      .find(_._2.inputSources.exists {
+        case StageBuilder.SourceInput(parts) => parts == createSource().partitions
+        case _ => false
+      })
+      .get
+      ._1
 
-    val rightStageId = stageGraph.stages.find(_._2.inputSources.exists {
-      case StageBuilder.SourceInput(parts) => parts == createSource().partitions
-      case _ => false
-    }).get._1
+    val rightStageId = stageGraph.stages
+      .find(_._2.inputSources.exists {
+        case StageBuilder.SourceInput(parts) => parts == createSource().partitions
+        case _ => false
+      })
+      .get
+      ._1
 
-    stageGraph.dependencies(unionStageId) should contain (leftStageId)
-    stageGraph.dependencies(unionStageId) should contain (rightStageId)
+    stageGraph.dependencies(unionStageId) should contain(leftStageId)
+    stageGraph.dependencies(unionStageId) should contain(rightStageId)
   }
 
   // --- Union Semantics Tests ---
@@ -452,7 +502,7 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
     val source = createSource()
 
     // Create two different maps on the same source
-    val left = Plan.MapOp(source, (_: Int) * 2)  // Double each element
+    val left = Plan.MapOp(source, (_: Int) * 2) // Double each element
     val right = Plan.MapOp(source, (_: Int) * 3) // Triple each element
     val plan = Plan.UnionOp(left, right)
 
@@ -535,9 +585,11 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
     sourceStages.size shouldBe 2
 
     // Verify the source stages read from different partitions
-    val sourceInputs = sourceStages.values.flatMap(_.inputSources.collect {
-      case StageBuilder.SourceInput(parts) => parts
-    }).toSet
+    val sourceInputs = sourceStages.values
+      .flatMap(_.inputSources.collect { case StageBuilder.SourceInput(parts) =>
+        parts
+      })
+      .toSet
 
     sourceInputs.size shouldBe 2 // Two different partition sets
   }
@@ -545,8 +597,6 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
   // --- Stage.ChainedStage Nesting Tests ---
 
   behavior of "Stage.ChainedStage Nesting"
-
-
 
   it should "create single operation stages without chaining for efficiency" in {
     val plan = Plan.MapOp(createSource(), (_: Int) * 2)
@@ -565,11 +615,12 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
   }
 
   it should "create optimized chaining for multiple operations" in {
-    val plan = Plan.DistinctOp(
+    val plan = Plan.MapOp(
       Plan.FilterOp(
         Plan.MapOp(createSource(), (_: Int) * 2),
-        (_: Int) > 0
-      )
+        (_: Int) > 0,
+      ),
+      (_: Int) + 1,
     )
 
     val stageGraph = StageBuilder.buildStageGraph(plan)
@@ -602,11 +653,12 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
     }
 
     // Test that multiple operations create reasonable chaining
-    val multiOpPlan = Plan.DistinctOp(
+    val multiOpPlan = Plan.MapOp(
       Plan.FilterOp(
         Plan.MapOp(createSource(), (_: Int) * 2),
-        (_: Int) > 0
-      )
+        (_: Int) > 0,
+      ),
+      (_: Int) + 1,
     )
     val multiStageGraph = StageBuilder.buildStageGraph(multiOpPlan)
 
@@ -622,8 +674,8 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
 
   it should "verify stage execution correctness with different chaining strategies" in {
     val source = createSource()
-    val plan1 = Plan.MapOp(source, (_: Int) * 2)  // Single operation
-    val plan2 = Plan.FilterOp(Plan.MapOp(source, (_: Int) * 2), (_: Int) > 0)  // Two operations
+    val plan1 = Plan.MapOp(source, (_: Int) * 2) // Single operation
+    val plan2 = Plan.FilterOp(Plan.MapOp(source, (_: Int) * 2), (_: Int) > 0) // Two operations
 
     val stageGraph1 = StageBuilder.buildStageGraph(plan1)
     val stageGraph2 = StageBuilder.buildStageGraph(plan2)
@@ -636,12 +688,16 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
     val testPartition = Partition(Seq(1, 2, 3))
 
     // Execute stages and handle type casting
-    val result1 = stage1.stage.asInstanceOf[Stage[Any, Any]].execute(testPartition.asInstanceOf[Partition[Any]])
-    val result2 = stage2.stage.asInstanceOf[Stage[Any, Any]].execute(testPartition.asInstanceOf[Partition[Any]])
+    val result1 = stage1.stage
+      .asInstanceOf[Stage[Any, Any]]
+      .execute(testPartition.asInstanceOf[Partition[Any]])
+    val result2 = stage2.stage
+      .asInstanceOf[Stage[Any, Any]]
+      .execute(testPartition.asInstanceOf[Partition[Any]])
 
     // Results should be equivalent to manual computation
-    result1.data.toSeq shouldBe Seq(2, 4, 6)  // Map only
-    result2.data.toSeq shouldBe Seq(2, 4, 6)  // Map + Filter (all elements > 0)
+    result1.data.toSeq shouldBe Seq(2, 4, 6) // Map only
+    result2.data.toSeq shouldBe Seq(2, 4, 6) // Map + Filter (all elements > 0)
   }
 
   // --- Unified Builder Tests ---
@@ -658,11 +714,12 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
   }
 
   it should "build a one-stage graph for a multi-operation narrow chain" in {
-    val plan = Plan.DistinctOp(
+    val plan = Plan.MapOp(
       Plan.FilterOp(
         Plan.MapOp(createSource(), (_: Int) * 2),
-        (_: Int) > 0
-      )
+        (_: Int) > 0,
+      ),
+      (_: Int) + 1,
     )
 
     val stageGraph = StageBuilder.buildStageGraph(plan)
@@ -734,10 +791,15 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
 
     // Validation should ensure multi-input shuffle stages have proper side markers
     finalStage.inputSources.length shouldBe 2
-    val shuffleInputs = finalStage.inputSources.collect { case si: StageBuilder.ShuffleInput => si }
+    val shuffleInputs = finalStage.inputSources.collect { case si: StageBuilder.ShuffleInput =>
+      si
+    }
     shuffleInputs.length shouldBe 2
     shuffleInputs.forall(_.side.nonEmpty) shouldBe true
-    shuffleInputs.map(_.side.get).toSet shouldBe Set(StageBuilder.Side.Left, StageBuilder.Side.Right)
+    shuffleInputs.map(_.side.get).toSet shouldBe Set(
+      StageBuilder.Side.Left,
+      StageBuilder.Side.Right,
+    )
   }
 
 end TestOperationsAndInputSources
