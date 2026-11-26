@@ -35,7 +35,10 @@ object FoundationParents:
     "reduce-other",
   )
 
-  /** Checksums at `rows`. Throws when `kept` disagrees with `row`, or a parent already runs. */
+  /**
+   * Checksums at `rows`. `count-above` lowers. The other parents must not. A checksum mismatch
+   * throws.
+   */
   def check(rows: Int): Unit =
     observe(rows).foreach { one =>
       if !one.matched then
@@ -79,7 +82,8 @@ object FoundationParents:
         watched(name, sumOrdered(collect(data)), sumOrdered(keptFilter(rows)))
       case "count-above" =>
         val data = counted(rows)
-        refuse(name, data.plan)
+        if ColumnarPlanner.lower(data.plan).isEmpty then
+          throw new IllegalStateException(s"$name stayed on rows")
         watched(name, sumCounts(collect(data)), sumCounts(keptCount(rows)))
       case "key-above" =>
         val data = keyed(rows)

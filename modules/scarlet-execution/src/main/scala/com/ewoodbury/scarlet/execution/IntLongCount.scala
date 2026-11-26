@@ -40,6 +40,27 @@ private[execution] object IntLongCount:
       ordinals: Set[Int],
   ): Columns =
     require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
+    // The long value is unread, so this is the int-pair count of the child. The function does
+    // not run. A triple project stays on the match below.
+    widenedKeys(source, child) match
+      case Some((input, under)) =>
+        CountByKeyArms.columns(input, under, selectedPartition, preserveAbsence, ordinals)
+      case None =>
+        countedProject(source, child, selectedPartition, preserveAbsence, ordinals)
+
+  private def widenedKeys(source: Plan[_], child: PhysicalOp): Option[(Plan[_], PhysicalOp)] =
+    (source, child) match
+      case (Plan.MapValuesOp(input, _), PhysicalOp.IntLongMapValue(under)) =>
+        Some((input, under))
+      case _ => None
+
+  private def countedProject(
+      source: Plan[_],
+      child: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): Columns =
     matched(source, child) match
       case Some(found) =>
         val absence = preserveAbsence || found.project.requestsTripleAbsence
