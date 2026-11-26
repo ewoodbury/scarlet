@@ -64,3 +64,6 @@ final class LocalShuffleService extends ShuffleService:
       case None => throw new IllegalArgumentException(s"Shuffle ID ${id.toInt} not found")
 
   def clear(): Unit = storage.clear()
+
+  /** Shuffle datasets currently stored. A count of a width change leaves this at zero. */
+  def storedCount: Int = storage.size()
