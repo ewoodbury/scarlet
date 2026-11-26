@@ -14,8 +14,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * A numeric array child is kept without a second run. A boxed null still falls back.
  *
  * The fake this fails re-runs `ofIntPairs` under `mapValues` to string: the oracle counter moves.
- * Skipping that counter on a boxed null filter would make [[RowBoundary.mapValues]] return a
- * decode, and the null test still requires [[scala.None]].
+ * A silent row collect of the element map publishes no batch. Skipping the counter on a boxed null
+ * filter would make [[RowBoundary.mapValues]] return a decode, and the null test still requires
+ * [[scala.None]].
  */
 class TestBoundaryOracle extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -76,9 +77,7 @@ class TestBoundaryOracle extends AnyFlatSpec with Matchers with BeforeAndAfterEa
   "an int scan under map to long" should "skip the row child and stay unlowered" in {
     val mapped = DistCollection.ofInts(Array(1, 2, 3, 4), 2).map((value: Int) => value.toLong)
     ColumnarPlanner.lower(mapped.plan).isDefined shouldBe false
-    val found = mapped.collect().toSeq
-    RowBoundary.childOracleRunsForTest shouldBe 0L
-    matchesRow(mapped, found)
+    kept(mapped, 1L)
   }
 
   "an int mapValues to long" should "stay on its kernel and off the boundary" in {
