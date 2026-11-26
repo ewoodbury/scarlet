@@ -19,9 +19,10 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * decoder that rejects a null pair, runs that child on rows. A child the planner refuses publishes
  * nothing. A join with one lowered side decodes that side and runs the join on the row executor
  * when those rows match. `take` asks [[ColumnarPlanner.tryTake]] and `count` asks
- * [[ColumnarPlanner.tryCount]] before either splits the original plan. Neither wraps that plan in
- * `MapPartitionsOp` first. Every other refused plan is compiled into a stage graph and executed
- * through the DAGScheduler.
+ * [[ColumnarPlanner.tryCount]] before either splits the original plan. A miss on `count` of a
+ * `repartition`, `coalesce`, or `partitionBy` counts that child and does not shuffle. A `map`
+ * still runs once per row. Neither wraps that plan in `MapPartitionsOp` first. Every other refused
+ * plan is compiled into a stage graph and executed through the DAGScheduler.
  */
 class DefaultExecutionService extends ExecutionService {
 
@@ -63,9 +64,27 @@ class DefaultExecutionService extends ExecutionService {
   }
 
   def count[A](plan: Plan[A]): Long =
-    ColumnarPlanner.tryCount(plan).getOrElse {
-      MixedAction.partitions(plan).foldLeft(0L)((total, partition) => total + partition.data.size)
-    }
+    ColumnarPlanner.tryCount(plan).getOrElse(countAfterMiss(plan))
+
+  /**
+   * Count when no columnar count exists. `repartition`, `coalesce`, and `partitionBy` keep every
+   * row, including a null key, so the count is the child's count and no shuffle is written. A
+   * `map` is not peeled: a refused map runs once per row.
+   */
+  private def countAfterMiss[A](plan: Plan[A]): Long =
+    widthChild(plan) match
+      case Some(child) => count(child)
+      case None =>
+        MixedAction
+          .partitions(plan)
+          .foldLeft(0L)((total, partition) => total + partition.data.size)
+
+  private def widthChild(plan: Plan[_]): Option[Plan[_]] =
+    plan match
+      case Plan.RepartitionOp(source, _) => Some(source)
+      case Plan.CoalesceOp(source, _) => Some(source)
+      case Plan.PartitionByOp(source, _) => Some(source)
+      case _ => None
 
   def sumInt(plan: Plan[Int]): Long =
     ColumnarPlanner.trySumInt(plan).getOrElse {
