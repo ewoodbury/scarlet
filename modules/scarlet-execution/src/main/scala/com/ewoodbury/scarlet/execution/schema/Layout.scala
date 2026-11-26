@@ -33,12 +33,13 @@ private[execution] object Layout:
   /**
    * Grouped values, not a pair of columns.
    *
-   * [[PhysicalOp.Kind.GroupedInts]], [[PhysicalOp.Kind.GroupedLongs]], and
-   * [[PhysicalOp.Kind.GroupedStrings]] use the same two types as int, long, and string pairs.
-   * Reporting those columns aliases the pair layout, so a binder that reads [[known]] cannot tell
-   * a grouped child from a pair. [[PhysicalOp.GroupedDecode]] already uses this reason: the case
-   * class determines a grouped batch, and a parent cannot read it as columns. One opaque reason is
-   * that report. It does not invent a column vector.
+   * [[PhysicalOp.Kind.GroupedInts]], [[PhysicalOp.Kind.GroupedLongs]],
+   * [[PhysicalOp.Kind.GroupedStrings]], and [[PhysicalOp.Kind.GroupedIntLongs]] use the same two
+   * types as int, long, string, and int-long pairs. Reporting those columns aliases the pair
+   * layout, so a binder that reads [[known]] cannot tell a grouped child from a pair.
+   * [[PhysicalOp.GroupedDecode]] already uses this reason: the case class determines a grouped
+   * batch, and a parent cannot read it as columns. One opaque reason is that report. It does not
+   * invent a column vector.
    */
   val Grouped: Output = Output.Opaque("grouped values")
 

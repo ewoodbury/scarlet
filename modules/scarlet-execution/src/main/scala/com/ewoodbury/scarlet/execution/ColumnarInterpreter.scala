@@ -121,7 +121,8 @@ private[execution] object ColumnarInterpreter:
     case Columns.StringPairs(parts) => parts
     case Columns.StringTriples(parts) => parts
     case Columns.Outer(parts, _) => parts
-    case Columns.GroupedInts(_) | Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
+    case Columns.GroupedInts(_) | Columns.GroupedStrings(_) | Columns.GroupedLongs(_) |
+        Columns.GroupedIntLongs(_) =>
       throw new IllegalStateException("grouped batches are not column batches")
 
   /** Number of groups. Other columns are not a grouped result. */
@@ -131,6 +132,8 @@ private[execution] object ColumnarInterpreter:
     case Columns.GroupedStrings(parts) =>
       parts.foldLeft(0L)((total, batch) => total + batch.length.toLong)
     case Columns.GroupedLongs(parts) =>
+      parts.foldLeft(0L)((total, batch) => total + batch.length.toLong)
+    case Columns.GroupedIntLongs(parts) =>
       parts.foldLeft(0L)((total, batch) => total + batch.length.toLong)
     case _ =>
       throw new IllegalStateException("group count is only defined for a grouped batch")
@@ -182,6 +185,11 @@ private[execution] object ColumnarInterpreter:
     /** Long `groupByKey` batches. Not a [[ColumnBatch]]. Values are `Long`. */
     case GroupedLongs(parts: Vector[GroupedLongBatch])
 
+    /**
+     * Int-key, long-value `groupByKey`. Not a [[ColumnBatch]]. A clear value bit is a null `Long`.
+     */
+    case GroupedIntLongs(parts: Vector[GroupedIntLongBatch])
+
   private def selectPartition[A](
       partitions: Seq[Partition[A]],
       selectedPartition: Option[Int],
@@ -190,33 +198,12 @@ private[execution] object ColumnarInterpreter:
     case Some(index) => partitions.slice(index, index + 1)
 
   /**
-   * Decode `columns`. Int pairs use [[BatchCodec.decodeIntPairsPreservingAbsence]] for
-   * [[PhysicalOp.SortByIntKey]], [[PhysicalOp.SortByIntValueDesc]], [[PhysicalOp.MapKey]], and an
-   * int-pair [[PhysicalOp.Project]]. A key map and that project keep a null key. Every other
-   * int-pair op uses [[BatchCodec.decodeIntPairs]], which rejects a clear bit. Long pairs use
-   * [[BatchCodec.decodeLongPairs]], which already keeps a clear bit. [[PhysicalOp.SortByLongKey]]
-   * returns long pairs, so collect and take use that decoder and do not call the int-pair
-   * function. A long column projected from a long pair keeps a clear bit via
-   * [[BatchCodec.decodeLongsPreservingAbsence]]. An element long scan still uses
-   * [[BatchCodec.decodeLongs]], which rejects a clear bit. `keys` and `values` of one
-   * [[PhysicalOp.MapKey]], or of one key or value filter on it, keep a clear bit via
-   * [[BatchCodec.decodeIntsPreservingAbsence]]. Every other int column uses
-   * [[BatchCodec.decodeInts]], which rejects a clear bit. Int triples use
-   * [[BatchCodec.decodeIntTriplesPreservingAbsence]] for a triple [[PhysicalOp.Project]] and for
-   * an int inner join: [[PhysicalOp.HashJoin]], [[PhysicalOp.BroadcastJoin]], or
-   * [[PhysicalOp.SortMergeJoin]]. A map or that join may keep a null component. An int-pair
-   * project is not that decoder. A filter or other triple op uses [[BatchCodec.decodeIntTriples]],
-   * which rejects a clear bit. A whole-row filter drops those rows before decode. Outer joins are
-   * [[Columns.Outer]] and do not use this decoder. Long triples are a long inner hash, broadcast,
-   * or sort-merge join and use [[BatchCodec.decodeLongTriplesPreservingAbsence]]. A clear validity
-   * bit is a null value, not an absence bit. A fully present batch still decodes to the same
-   * longs. String triples are a string inner hash or broadcast join and use
-   * [[BatchCodec.decodeStringJoinKeepingNulls]]. A clear value bit is a null int, not an absence
-   * bit. A clear key bit is still an error. A fully present batch still decodes to the same
-   * strings and ints. [[ExecutionRoute]] sends [[KernelChoice.IntLongProjectSum]] through
-   * [[JoinProbeAggregate.decodeSums]]: both columns are present, and the sum is a long. Any other
-   * root, including [[PhysicalOp.JoinProbeSum]] and a key map of a triple project, keeps the
-   * decoders below. Those nodes can report `[Int32, Int64]` and still are not that sum.
+   * Decode `columns` for collect and take. [[decodeWith]] picks the pair, triple, and long
+   * decoders from the physical op. A key map and an int-pair project keep a null. Every other int
+   * pair rejects a clear bit. Outer joins are [[Columns.Outer]].
+   * [[KernelChoice.IntLongProjectSum]] is [[JoinProbeAggregate.decodeSums]], not the
+   * `[Int32, Int64]` schema of a triple project. A grouped batch decodes to `(K, Iterable[V])`. An
+   * int-long group keeps a null value.
    */
   private[execution] def decodeFor(columns: Columns, op: PhysicalOp): Seq[Partition[_]] =
     decodeRouted(columns, op, None)
@@ -314,7 +301,8 @@ private[execution] object ColumnarInterpreter:
           prefixRows(parts, limit, BatchCodec.decodeStringJoinKeepingNulls)
         case Columns.Bools(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeBools(batch, rows))
-        case Columns.GroupedInts(_) | Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
+        case Columns.GroupedInts(_) | Columns.GroupedStrings(_) | Columns.GroupedLongs(_) |
+            Columns.GroupedIntLongs(_) =>
           throw new IllegalStateException("take refuses a grouped batch")
 
   private def prefixRows[A](
@@ -400,7 +388,7 @@ private[execution] object ColumnarInterpreter:
             PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
             PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs |
             PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
-            PhysicalOp.Kind.IntLongSums =>
+            PhysicalOp.Kind.IntLongSums | PhysicalOp.Kind.GroupedIntLongs =>
           throw new IllegalStateException(
             s"physical tree does not match ${plan.getClass.getSimpleName}",
           )
@@ -519,7 +507,11 @@ private[execution] object ColumnarInterpreter:
         ) =>
       // Boundary guard: take refuses a group, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run an aggregate")
-      GroupByArms.columns(source, child, selectedPartition, preserveAbsence, ordinals)
+      child match
+        case _: PhysicalOp.IntLongMapValue =>
+          IntLongGroup.columns(source, child, preserveAbsence, ordinals)
+        case _ =>
+          GroupByArms.columns(source, child, selectedPartition, preserveAbsence, ordinals)
     case (
           Plan.CountByKeyOp(Plan.JoinOp(left, right, strategy)),
           PhysicalOp.CountByKey(
@@ -970,7 +962,8 @@ private[execution] object ColumnarInterpreter:
       case Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.LongCounts(_) |
           Columns.CountSums(_) | Columns.Triples(_) | Columns.LongTriples(_) |
           Columns.StringPairs(_) | Columns.StringTriples(_) | Columns.Outer(_, _) |
-          Columns.GroupedInts(_) | Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
+          Columns.GroupedInts(_) | Columns.GroupedStrings(_) | Columns.GroupedLongs(_) |
+          Columns.GroupedIntLongs(_) =>
         rejected
 
   private def project(columns: Columns, mapper: Any): Columns = columns match
@@ -1052,7 +1045,7 @@ private[execution] object ColumnarInterpreter:
     case Columns.StringPairs(parts) => StringPairWalk.project(parts, mapper)
     case Columns.Bools(_) | Columns.LongCounts(_) | Columns.CountSums(_) | Columns.LongTriples(_) |
         Columns.StringTriples(_) | Columns.Outer(_, _) | Columns.GroupedInts(_) |
-        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
+        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) | Columns.GroupedIntLongs(_) =>
       throw new IllegalStateException(
         s"columnar map expects ${elementColumnList(includeBooleans = false)}",
       )
@@ -1065,7 +1058,7 @@ private[execution] object ColumnarInterpreter:
         Columns.LongCounts(_) | Columns.CountSums(_) | Columns.Triples(_) |
         Columns.LongTriples(_) | Columns.Strings(_) | Columns.Bools(_) | Columns.StringPairs(_) |
         Columns.StringTriples(_) | Columns.Outer(_, _) | Columns.GroupedInts(_) |
-        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
+        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) | Columns.GroupedIntLongs(_) =>
       throw new IllegalStateException("columnar op expected int pairs")
 
   private[execution] def triplesOf(columns: Columns): Vector[ColumnBatch] = columns match
@@ -1076,7 +1069,7 @@ private[execution] object ColumnarInterpreter:
         Columns.LongPairs(_) | Columns.LongCounts(_) | Columns.CountSums(_) |
         Columns.LongTriples(_) | Columns.Strings(_) | Columns.Bools(_) | Columns.StringPairs(_) |
         Columns.StringTriples(_) | Columns.Outer(_, _) | Columns.GroupedInts(_) |
-        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
+        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) | Columns.GroupedIntLongs(_) =>
       throw new IllegalStateException("columnar op expected int triples")
 
   /**
@@ -1131,7 +1124,7 @@ private[execution] object ColumnarInterpreter:
         Columns.LongCounts(_) | Columns.CountSums(_) | Columns.Triples(_) |
         Columns.LongTriples(_) | Columns.Strings(_) | Columns.Bools(_) | Columns.StringPairs(_) |
         Columns.StringTriples(_) | Columns.Outer(_, _) | Columns.GroupedInts(_) |
-        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
+        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) | Columns.GroupedIntLongs(_) =>
       throw new IllegalStateException("columnar op expected long pairs")
 
   private def decodeOuterBatch(
@@ -1187,4 +1180,6 @@ private[execution] object ColumnarInterpreter:
     case Columns.GroupedStrings(parts) =>
       parts.map(batch => Partition(batch.rows))
     case Columns.GroupedLongs(parts) =>
+      parts.map(batch => Partition(batch.rows))
+    case Columns.GroupedIntLongs(parts) =>
       parts.map(batch => Partition(batch.rows))

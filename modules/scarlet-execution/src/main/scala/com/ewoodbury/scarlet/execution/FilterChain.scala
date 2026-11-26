@@ -61,7 +61,7 @@ private[execution] object FilterChain:
     columns match
       case Columns.LongCounts(_) | Columns.CountSums(_) | Columns.LongTriples(_) |
           Columns.StringTriples(_) | Columns.GroupedInts(_) | Columns.GroupedStrings(_) |
-          Columns.GroupedLongs(_) =>
+          Columns.GroupedLongs(_) | Columns.GroupedIntLongs(_) =>
         PredicatePlan.unsupported(opening(plan, op))
       // An outer batch is a triple with an absent side. This must stay an IllegalStateException:
       // the planner catches ClassCastException, including ColumnarFallback, and falls back to
@@ -317,7 +317,7 @@ private[execution] object FilterChain:
       ColumnarInterpreter.batchesOf(columns)
     case Columns.LongCounts(_) | Columns.CountSums(_) | Columns.LongTriples(_) |
         Columns.StringTriples(_) | Columns.Outer(_, _) | Columns.GroupedInts(_) |
-        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
+        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) | Columns.GroupedIntLongs(_) =>
       missing
 
   private def copy(columns: Columns, parts: Vector[ColumnBatch]): Columns = columns match
@@ -332,7 +332,7 @@ private[execution] object FilterChain:
     case Columns.StringPairs(_) => Columns.StringPairs(parts)
     case Columns.LongCounts(_) | Columns.CountSums(_) | Columns.LongTriples(_) |
         Columns.StringTriples(_) | Columns.Outer(_, _) | Columns.GroupedInts(_) |
-        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) =>
+        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) | Columns.GroupedIntLongs(_) =>
       missing
 
   /**

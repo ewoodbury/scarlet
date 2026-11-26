@@ -420,16 +420,17 @@ enum PhysicalOp:
 
   /**
    * `groupByKey`. The child is an [[PhysicalOp.Exchange]]. The kernel shuffles. A null key is
-   * dropped. A null value is kept, and a clear value bit is a planner bug. One grouped batch is
-   * published per shuffle partition, including an empty bucket. Output kind is
-   * [[PhysicalOp.Kind.GroupedInts]] for a [[PhysicalOp.Kind.Pairs]] child,
+   * dropped. One grouped batch is published per shuffle partition, including an empty bucket.
+   * Output kind is [[PhysicalOp.Kind.GroupedInts]] for a [[PhysicalOp.Kind.Pairs]] child,
    * [[PhysicalOp.Kind.GroupedStrings]] for a [[PhysicalOp.Kind.StringPairs]] child, and
-   * [[PhysicalOp.Kind.GroupedLongs]] for a [[PhysicalOp.Kind.LongPairs]] child. Any other child is
-   * a planner bug. There is no partial combine and no sort. Spill off keeps the in-memory groups
-   * and writes nothing. Spill on slices one over-budget post-exchange bucket in input order. A
-   * morsel whose group table does not fit throws
-   * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] before that table. The appended groups
-   * are not bounded by the budget.
+   * [[PhysicalOp.Kind.GroupedLongs]] for a [[PhysicalOp.Kind.LongPairs]] child. A clear value bit
+   * on those three is a planner bug. An int-to-long [[IntLongMapValue]] child publishes
+   * [[PhysicalOp.Kind.GroupedIntLongs]]: the key stays `Int32`, the values stay `Int64`, and a
+   * null value stays in the list. That group does not spill. Any other child is a planner bug.
+   * There is no partial combine and no sort. Spill off keeps the in-memory groups and writes
+   * nothing. Spill on slices one over-budget post-exchange bucket in input order. A morsel whose
+   * group table does not fit throws [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] before
+   * that table. The appended groups are not bounded by the budget.
    */
   case GroupByKey(child: PhysicalOp)
 
@@ -573,6 +574,9 @@ enum PhysicalOp:
     case HashAggregate(_, _) => PhysicalOp.Kind.Pairs
     case LongHashAggregate(_) => PhysicalOp.Kind.LongPairs
     case StringHashAggregate(_) => PhysicalOp.Kind.StringPairs
+    case GroupByKey(child)
+        if PhysicalSchema.isIntLong(child.schema) && (child.kind eq PhysicalOp.Kind.Pairs) =>
+      PhysicalOp.Kind.GroupedIntLongs
     case GroupByKey(child) =>
       child.kind match
         case PhysicalOp.Kind.Pairs => PhysicalOp.Kind.GroupedInts
@@ -765,7 +769,8 @@ object PhysicalOp:
       StringPairs, StringTriples, GroupedInts, GroupedStrings, GroupedLongs, LongOuter,
       StringOuter,
       CountSums,
-      IntLongSums
+      IntLongSums,
+      GroupedIntLongs
 
   /** Which value column [[JoinProbeSum]] adds. `Left` is the build side. */
   enum ProbeMeasure:

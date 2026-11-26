@@ -103,7 +103,7 @@ private[execution] object ColumnUse:
     case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs |
-        PhysicalOp.Kind.IntLongSums =>
+        PhysicalOp.Kind.IntLongSums | PhysicalOp.Kind.GroupedIntLongs =>
       Set(0, 1)
     case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
         PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums =>
@@ -129,7 +129,8 @@ private[execution] object ColumnUse:
         PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools |
         PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
-        PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.IntLongSums =>
+        PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.IntLongSums |
+        PhysicalOp.Kind.GroupedIntLongs =>
       Set(0, 1)
 
   private def planChild(plan: Plan[_]): Option[Plan[_]] = plan match

@@ -31,7 +31,15 @@ private[execution] object GroupByKeyCount:
     case _ =>
       throw new IllegalStateException("groupByKey count lost its exchange")
 
-  private def occupied(source: Plan[_], child: PhysicalOp): Long = child.kind match
+  private def occupied(source: Plan[_], child: PhysicalOp): Long = (source, child) match
+    case (Plan.MapValuesOp(input, _), PhysicalOp.IntLongMapValue(under)) =>
+      // The lists are not built. The int key under the map is the group count. The function
+      // does not run. A null key is dropped.
+      CountByKeyArms.groupRows(input, under, ordinals)
+    case _ =>
+      occupiedKind(source, child)
+
+  private def occupiedKind(source: Plan[_], child: PhysicalOp): Long = child.kind match
     case PhysicalOp.Kind.Pairs =>
       CountByKeyArms.groupRows(source, child, ordinals)
     case PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs =>
