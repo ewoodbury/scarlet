@@ -71,6 +71,7 @@ private[execution] object PhysicalSchema:
     case PhysicalOp.Kind.Ints => Vector(LogicalType.Int32)
     case PhysicalOp.Kind.Longs => Vector(LogicalType.Int64)
     case PhysicalOp.Kind.Floats => Vector(LogicalType.Float64)
+    case PhysicalOp.Kind.Float32s => Vector(LogicalType.Float32)
     case PhysicalOp.Kind.Bools => Vector(LogicalType.Bool)
     case PhysicalOp.Kind.Strings => Vector(LogicalType.Utf8Dict)
     case PhysicalOp.Kind.Pairs => Vector(LogicalType.Int32, LogicalType.Int32)

@@ -1,6 +1,11 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{ColumnBatch, ColumnarFallback, DistinctKernel}
+import com.ewoodbury.scarlet.columnar.{
+  ColumnBatch,
+  ColumnarFallback,
+  DistinctKernel,
+  Float32Distinct,
+}
 import com.ewoodbury.scarlet.core.Plan
 
 /**
@@ -31,6 +36,8 @@ private[execution] object DistinctColumns:
         ColumnarInterpreter.Columns.Longs(DistinctKernel.longs(batches, width))
       case ExecutionRoute.DistinctArm.Doubles =>
         ColumnarInterpreter.Columns.Floats(DistinctKernel.doubles(batches, width))
+      case ExecutionRoute.DistinctArm.Float32s =>
+        ColumnarInterpreter.Columns.Floats(Float32Distinct(batches, width))
       case ExecutionRoute.DistinctArm.Strings =>
         ColumnarInterpreter.Columns.Strings(DistinctKernel.strings(batches, width))
 
@@ -45,6 +52,8 @@ private[execution] object DistinctColumns:
         SourceEncode.encodeNullableLongs(partitions)
       case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Floats, _)) =>
         SourceEncode.encodeNullableDoubles(partitions)
+      case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Float32s, _)) =>
+        SourceEncode.encodeNullableFloat32s(partitions)
       case _ =>
         ColumnarInterpreter.batchesOf(
           ColumnarInterpreter.interpretAt(source, child, None, preserveAbsence, ordinals),

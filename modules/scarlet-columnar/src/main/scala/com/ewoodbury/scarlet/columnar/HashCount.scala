@@ -225,7 +225,8 @@ object HashCount:
     }
     keyType match
       case LogicalType.Int32 => ()
-      case LogicalType.Int64 | LogicalType.Float64 | LogicalType.Bool | LogicalType.Utf8Dict =>
+      case LogicalType.Int64 | LogicalType.Float64 | LogicalType.Float32 | LogicalType.Bool |
+          LogicalType.Utf8Dict =>
         throw new ColumnarFallback(
           s"countByKey expects an Int32 key column, found $keyType",
         )

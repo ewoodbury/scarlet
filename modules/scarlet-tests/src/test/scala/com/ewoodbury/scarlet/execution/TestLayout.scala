@@ -227,6 +227,7 @@ class TestLayout extends AnyFlatSpec with Matchers:
       case LogicalType.Float64 => ColumnType.Float64
       case LogicalType.Bool => ColumnType.Bool
       case LogicalType.Utf8Dict => ColumnType.Utf8Dict
+      case LogicalType.Float32 => ColumnType.Float32
     ColumnLayout(typed, NullPolicy.Nullable)
 
   private def absent(column: ColumnLayout): ColumnLayout =

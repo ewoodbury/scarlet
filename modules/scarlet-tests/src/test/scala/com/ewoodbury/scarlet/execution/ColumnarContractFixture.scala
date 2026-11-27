@@ -314,7 +314,7 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
         PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples |
-        PhysicalOp.Kind.IntLongOuter =>
+        PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Float32s =>
       false
 
   protected def sumsLongs(op: PhysicalOp): Boolean = op.kind match
@@ -327,7 +327,7 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
         PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples |
-        PhysicalOp.Kind.IntLongOuter =>
+        PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Float32s =>
       false
 
   protected def sumsFloats(op: PhysicalOp): Boolean = op.kind match
@@ -340,7 +340,7 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
         PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples |
-        PhysicalOp.Kind.IntLongOuter =>
+        PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Float32s =>
       false
 
   protected def preservesPartitions(op: PhysicalOp): Boolean = op match

@@ -51,6 +51,7 @@ private[execution] object ExecutionRoute:
     case Longs
     case Doubles
     case Strings
+    case Float32s
 
   /**
    * `mapValues`. A layout that is not a long pair or a string pair stays on the int kernel, which
@@ -141,10 +142,11 @@ private[execution] object ExecutionRoute:
       case Output.Columns(Vector(ColumnLayout(ColumnType.Int32, _))) => DistinctArm.Ints
       case Output.Columns(Vector(ColumnLayout(ColumnType.Int64, _))) => DistinctArm.Longs
       case Output.Columns(Vector(ColumnLayout(ColumnType.Float64, _))) => DistinctArm.Doubles
+      case Output.Columns(Vector(ColumnLayout(ColumnType.Float32, _))) => DistinctArm.Float32s
       case Output.Columns(Vector(ColumnLayout(ColumnType.Utf8Dict, _))) => DistinctArm.Strings
       case Output.Columns(_) | Output.IntLongPairs(_) | Output.Opaque(_) =>
         throw new IllegalStateException(
-          s"distinct column is $output, expected int, long, double, or string",
+          s"distinct column is $output, expected int, long, double, float, or string",
         )
 
   /** Long pairs and string pairs select their kernels. Every other layout stays on ints. */
@@ -165,6 +167,7 @@ private[execution] object ExecutionRoute:
       case (ColumnType.Int32, ColumnType.Int32) => Some(PairArm.IntPairs)
       case (ColumnType.Int64, ColumnType.Int64) => Some(PairArm.LongPairs)
       case (ColumnType.Utf8Dict, ColumnType.Int32) => Some(PairArm.StringPairs)
+      case (ColumnType.Float32, _) | (_, ColumnType.Float32) => None
       case (ColumnType.Int32, ColumnType.Int64) | (ColumnType.Int32, ColumnType.Float64) |
           (ColumnType.Int32, ColumnType.Bool) | (ColumnType.Int32, ColumnType.Utf8Dict) |
           (ColumnType.Int64, ColumnType.Int32) | (ColumnType.Int64, ColumnType.Float64) |

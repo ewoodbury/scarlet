@@ -246,6 +246,7 @@ private[execution] object ColumnarInterpreter:
     if (ExecutionRoute.decodesAsIntLongSum(plan, op)) then intLongSums(columns)
     else if (IntLongMapRun.decodes(op)) then IntLongMapRun.partitions(columns)
     else if (IntLongJoinColumns.decodes(op)) then IntLongJoinColumns.partitions(columns)
+    else if (op.kind eq PhysicalOp.Kind.Float32s) then Float32Decode.partitions(columns, op)
     else
       ColumnDecode.partitions(
         columns,
@@ -270,6 +271,7 @@ private[execution] object ColumnarInterpreter:
   private[execution] def decodePrefixFor(columns: Columns, limit: Int, op: PhysicalOp): Seq[Any] =
     if (IntLongMapRun.decodes(op)) then IntLongMapRun.prefix(columns, limit)
     else if (IntLongJoinColumns.decodes(op)) then IntLongJoinColumns.prefix(columns, limit)
+    else if (op.kind eq PhysicalOp.Kind.Float32s) then Float32Decode.prefix(columns, limit, op)
     else
       decodePrefixWith(
         columns,
@@ -390,6 +392,8 @@ private[execution] object ColumnarInterpreter:
         case PhysicalOp.Kind.Ints => Columns.Ints(SourceEncode.encodeInts(selected))
         case PhysicalOp.Kind.Longs => Columns.Longs(SourceEncode.encodeLongs(selected))
         case PhysicalOp.Kind.Floats => Columns.Floats(SourceEncode.encodeFloats(selected))
+        case PhysicalOp.Kind.Float32s =>
+          Columns.Floats(SourceEncode.encodeFloat32s(selected))
         case PhysicalOp.Kind.Pairs =>
           // A boxed pair keeps a null component absent. preserveAbsence still forces both columns.
           // A singleton demand encodes only the ordinal ColumnUse asked for.
@@ -1061,19 +1065,7 @@ private[execution] object ColumnarInterpreter:
           value => fn(value),
         )
       })
-    case Columns.Floats(parts) =>
-      // Named erasure boundary. Lowering already checked the declared `Double => Double` shape.
-      @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
-      val fn = mapper.asInstanceOf[Double => Double]
-      Columns.Floats(onEachMorsel(parts) { morsel =>
-        ColumnKernel.projectFloat64(
-          morsel.batch,
-          0,
-          morsel.start,
-          morsel.length,
-          value => fn(value),
-        )
-      })
+    case Columns.Floats(parts) => FloatProject.run(parts, mapper)(onEachMorsel)
     case Columns.Strings(parts) =>
       // Named erasure boundary. A declared string map may return another value; `stringResult`
       // turns that into `ColumnarFallback`, which is the named row-path fallback.

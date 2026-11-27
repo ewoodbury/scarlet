@@ -158,12 +158,12 @@ private[execution] object StringPairWalk:
   private def isStringRow(atom: PredicatePlan.Atom): Boolean = atom match
     case PredicatePlan.Atom.StringRow(_) => true
     case PredicatePlan.Atom.Int32(_, _) | PredicatePlan.Atom.Int64(_, _) |
-        PredicatePlan.Atom.Float64(_, _) | PredicatePlan.Atom.Bool(_, _) |
-        PredicatePlan.Atom.Utf8(_, _) | PredicatePlan.Atom.Utf8Literals(_, _) |
-        PredicatePlan.Atom.PairRow(_) | PredicatePlan.Atom.TripleRow(_) |
-        PredicatePlan.Atom.LongPairRow(_) | PredicatePlan.Atom.LongPairKey(_) |
-        PredicatePlan.Atom.LongPairValue(_, _) | PredicatePlan.Atom.PairKey(_) |
-        PredicatePlan.Atom.PairValue(_, _) =>
+        PredicatePlan.Atom.Float64(_, _) | PredicatePlan.Atom.Float32(_, _) |
+        PredicatePlan.Atom.Bool(_, _) | PredicatePlan.Atom.Utf8(_, _) |
+        PredicatePlan.Atom.Utf8Literals(_, _) | PredicatePlan.Atom.PairRow(_) |
+        PredicatePlan.Atom.TripleRow(_) | PredicatePlan.Atom.LongPairRow(_) |
+        PredicatePlan.Atom.LongPairKey(_) | PredicatePlan.Atom.LongPairValue(_, _) |
+        PredicatePlan.Atom.PairKey(_) | PredicatePlan.Atom.PairValue(_, _) =>
       false
 
   private def missingRows: Nothing =

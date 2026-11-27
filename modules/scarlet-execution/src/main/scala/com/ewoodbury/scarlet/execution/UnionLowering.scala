@@ -95,11 +95,12 @@ private[execution] object UnionLowering:
         PhysicalOp.Kind.IntLongOuter =>
       false
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
-        PhysicalOp.Kind.Bools | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Pairs |
-        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.Triples |
-        PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.LongCounts |
-        PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
-        PhysicalOp.Kind.LongCountSums | PhysicalOp.Kind.StringCountSums =>
+        PhysicalOp.Kind.Float32s | PhysicalOp.Kind.Bools | PhysicalOp.Kind.Strings |
+        PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs |
+        PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
+        PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter |
+        PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
+        PhysicalOp.Kind.StringCountSums =>
       true
 
   def info(

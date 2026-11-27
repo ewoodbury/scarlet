@@ -212,7 +212,8 @@ private[execution] object ColumnBinding:
     // unprojected join is not a pair slot. [[Layout.AssumedIntLong]] still goes to [[intLong]]
     // first, so a filter there is [[scala.None]]. The one slot above that project is kept
     // outside this match. A same-type element map is [[KernelChoice.Project]] or
-    // [[KernelChoice.Pipeline]] on one int, long, double, or string column. It is not a filter
+    // [[KernelChoice.Pipeline]] on one int, long, double, or string column. A float map is
+    // [[KernelChoice.Project]] on one float column. It is not a filter
     // and not a count through the probe.
     if assumedIntLong(layout) then intLong(operator, reducer)
     else if filterParent(operator) then filterChoice(layout, operator)
@@ -253,6 +254,7 @@ private[execution] object ColumnBinding:
     case Vector(ColumnType.Int32) => true
     case Vector(ColumnType.Int64) => true
     case Vector(ColumnType.Float64) => true
+    case Vector(ColumnType.Float32) => true
     case Vector(ColumnType.Utf8Dict) => true
     case Vector(ColumnType.Bool) => true
     case _ => false
@@ -284,6 +286,7 @@ private[execution] object ColumnBinding:
     case Vector(ColumnType.Int32) => true
     case Vector(ColumnType.Int64) => true
     case Vector(ColumnType.Float64) => true
+    case Vector(ColumnType.Float32) => true
     case Vector(ColumnType.Utf8Dict) => true
     case _ => false
 
@@ -308,8 +311,8 @@ private[execution] object ColumnBinding:
       case (ColumnType.Int32, NullPolicy.Present) => true
       case (ColumnType.Int32, NullPolicy.Nullable) => true
       case (ColumnType.Int32, NullPolicy.Absence) => false
-      case (ColumnType.Int64, _) | (ColumnType.Float64, _) | (ColumnType.Bool, _) |
-          (ColumnType.Utf8Dict, _) =>
+      case (ColumnType.Int64, _) | (ColumnType.Float64, _) | (ColumnType.Float32, _) |
+          (ColumnType.Bool, _) | (ColumnType.Utf8Dict, _) =>
         false
 
   /** `countByKey` of the three int columns. `reduceByKey` of a join is not a project sum. */
@@ -341,8 +344,8 @@ private[execution] object ColumnBinding:
 
   private def sameType(left: ColumnType, right: ColumnType): Boolean = (left, right) match
     case (ColumnType.Int32, ColumnType.Int32) | (ColumnType.Int64, ColumnType.Int64) |
-        (ColumnType.Float64, ColumnType.Float64) | (ColumnType.Bool, ColumnType.Bool) |
-        (ColumnType.Utf8Dict, ColumnType.Utf8Dict) =>
+        (ColumnType.Float64, ColumnType.Float64) | (ColumnType.Float32, ColumnType.Float32) |
+        (ColumnType.Bool, ColumnType.Bool) | (ColumnType.Utf8Dict, ColumnType.Utf8Dict) =>
       true
     case _ =>
       false
@@ -434,6 +437,8 @@ private[execution] object ColumnBinding:
       case (Vector(ColumnType.Int64), Operator.Distinct) =>
         Some(KernelChoice.Dedupe)
       case (Vector(ColumnType.Float64), Operator.Distinct) =>
+        Some(KernelChoice.Dedupe)
+      case (Vector(ColumnType.Float32), Operator.Distinct) =>
         Some(KernelChoice.Dedupe)
       case (Vector(ColumnType.Utf8Dict), Operator.Distinct) =>
         Some(KernelChoice.Dedupe)

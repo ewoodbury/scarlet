@@ -39,6 +39,7 @@ private[execution] object ScanLowering:
     case Plan.SourceDescriptor.Strings => Some(PhysicalOp.Kind.Strings)
     case Plan.SourceDescriptor.Bools => Some(PhysicalOp.Kind.Bools)
     case Plan.SourceDescriptor.LongPairs => Some(PhysicalOp.Kind.LongPairs)
+    case Plan.SourceDescriptor.Float32s => Some(PhysicalOp.Kind.Float32s)
 
   private def dataMatchesDescriptor(
       source: Plan.Source[_],
@@ -55,6 +56,7 @@ private[execution] object ScanLowering:
         case Plan.SourceDescriptor.Strings => rows.forall(isStringValue)
         case Plan.SourceDescriptor.Bools => rows.forall(isBoolValue)
         case Plan.SourceDescriptor.LongPairs => rows.forall(isLongPairValue)
+        case Plan.SourceDescriptor.Float32s => rows.forall(isFloatValue)
         // Boundary guard: classify does not call this with Unknown.
         case Plan.SourceDescriptor.Unknown => false
 
@@ -66,6 +68,7 @@ private[execution] object ScanLowering:
     import com.ewoodbury.scarlet.core.{
       BoolArrays,
       DoubleArrays,
+      FloatArrays,
       IntArrays,
       IntPairArrays,
       LongArrays,
@@ -88,6 +91,8 @@ private[execution] object ScanLowering:
         source.partitions.forall(partition => partition.data.isInstanceOf[StringArrays])
       case Plan.SourceDescriptor.LongPairs =>
         source.partitions.forall(partition => partition.data.isInstanceOf[LongPairArrays])
+      case Plan.SourceDescriptor.Float32s =>
+        source.partitions.forall(partition => partition.data.isInstanceOf[FloatArrays])
       // Boundary guard: classify does not call this with Unknown.
       case Plan.SourceDescriptor.Unknown => false
 
@@ -101,6 +106,10 @@ private[execution] object ScanLowering:
 
   private def isDoubleValue(value: Any): Boolean = value match
     case _: Double => true
+    case _ => false
+
+  private def isFloatValue(value: Any): Boolean = value match
+    case _: Float => true
     case _ => false
 
   private def isBoolValue(value: Any): Boolean = value match
@@ -140,6 +149,7 @@ private[execution] object ScanLowering:
       case Some(_: Int) => Some(PhysicalOp.Kind.Ints)
       case Some(_: Long) => Some(PhysicalOp.Kind.Longs)
       case Some(_: Double) => Some(PhysicalOp.Kind.Floats)
+      case Some(_: Float) => Some(PhysicalOp.Kind.Float32s)
       case Some((_: Int, _: Int)) => Some(PhysicalOp.Kind.Pairs)
       case Some((_: Long, _: Long)) => Some(PhysicalOp.Kind.LongPairs)
       case Some(value) if StringPairPlan.presentKey(value) => StringPairPlan.confirm(rest)

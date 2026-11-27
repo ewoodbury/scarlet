@@ -25,11 +25,11 @@ class TestColumnarContract
     val excluded = excludedCases
     val covered = accepted.map(_.plan) ++ excluded.map(_.plan)
 
-    accepted.size shouldBe 249
+    accepted.size shouldBe 251
     // A null key refuses the shape rather than excluding it. Outer joins are covered by execution
     // tests, not contract fixtures, because the contract does not track the int refusals either.
     // A type-changing pair map lowers and declines at tryRun, so it is in neither list.
-    excluded.size shouldBe 34
+    excluded.size shouldBe 32
     (accepted.size + excluded.size) shouldBe 283
     val mismatches = accepted.flatMap { expected =>
       expected.longProbe match
@@ -174,6 +174,18 @@ class TestColumnarContract
       AcceptedCase("double source", doubleSource, narrowInfo(2, layout), Some("Scan")),
       AcceptedCase("double filter", doubleFilter, narrowInfo(2, layout), Some("Filter(Scan)")),
       AcceptedCase("double map", doubleMap, narrowInfo(2, layout), Some("Project(Scan)")),
+      AcceptedCase(
+        "single-precision Float source",
+        floatSource,
+        narrowInfo(1, layout),
+        Some("Scan"),
+      ),
+      AcceptedCase(
+        "single-precision Float map",
+        Plan.MapOp(floatSource, (value: Float) => value + 1.0f),
+        narrowInfo(1, layout),
+        Some("Project(Scan)"),
+      ),
       AcceptedCase("string source", stringSource, narrowInfo(2, stringLayout), Some("Scan")),
       AcceptedCase(
         "string filter",
@@ -802,7 +814,6 @@ class TestColumnarContract
   private def excludedCases: Seq[ExcludedCase] =
     val doubleKeys = Plan.KeysOp(doubleKeySource)
     val doubleValues = Plan.ValuesOp(doubleKeySource)
-    val floatMap = Plan.MapOp(floatSource, (value: Float) => value + 1.0f)
     val reduceDoubleKeys = Plan.ReduceByKeyOp(
       doubleKeySource,
       (left: Int, right: Int) => left + right,
@@ -841,8 +852,6 @@ class TestColumnarContract
       ExcludedCase("reduceByKey with double keys", reduceDoubleKeys),
       ExcludedCase("groupByKey with double keys", groupDoubleKeys),
       ExcludedCase("join with double keys", doubleKeyJoin),
-      ExcludedCase("single-precision Float source", floatSource),
-      ExcludedCase("single-precision Float map", floatMap),
       ExcludedCase("all-null string source", allNullStringSource),
       ExcludedCase("empty int source without a witness", emptyIntSource),
       ExcludedCase("boolean map to boolean", Plan.MapOp(boolSource, (value: Boolean) => value)),

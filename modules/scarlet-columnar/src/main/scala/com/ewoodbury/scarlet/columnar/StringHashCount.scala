@@ -243,7 +243,8 @@ object StringHashCount:
     }
     keyType match
       case LogicalType.Utf8Dict => ()
-      case LogicalType.Int32 | LogicalType.Int64 | LogicalType.Float64 | LogicalType.Bool =>
+      case LogicalType.Int32 | LogicalType.Int64 | LogicalType.Float64 | LogicalType.Float32 |
+          LogicalType.Bool =>
         throw new ColumnarFallback(
           s"countByKey expects a Utf8Dict key column, found $keyType",
         )

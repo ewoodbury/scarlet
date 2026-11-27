@@ -107,6 +107,13 @@ class DefaultExecutionService extends ExecutionService {
       }
     }
 
+  def sumFloat(plan: Plan[Float]): Float =
+    ColumnarPlanner.trySumFloat(plan).getOrElse {
+      rowPartitions(plan).foldLeft(0.0f) { (total, partition) =>
+        partition.data.foldLeft(total)((acc, value) => acc + value)
+      }
+    }
+
   def groupedSum(plan: Plan[(Int, Int)]): Long =
     ColumnarPlanner.tryGroupedSum(plan).getOrElse(groupedSumOnRows(plan))
 

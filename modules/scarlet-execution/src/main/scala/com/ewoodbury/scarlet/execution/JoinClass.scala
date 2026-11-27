@@ -208,7 +208,7 @@ private[execution] object JoinClass:
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.CountSums |
         PhysicalOp.Kind.LongCountSums | PhysicalOp.Kind.StringCountSums |
         PhysicalOp.Kind.IntLongSums | PhysicalOp.Kind.GroupedIntLongs |
-        PhysicalOp.Kind.IntLongTriples | PhysicalOp.Kind.IntLongOuter =>
+        PhysicalOp.Kind.IntLongTriples | PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Float32s =>
       false
 
   private def agreed(left: ColumnType, right: ColumnType): Boolean = (left, right) match
@@ -223,7 +223,7 @@ private[execution] object JoinClass:
     case ColumnType.Int32 => Some(Family.IntKey)
     case ColumnType.Int64 => Some(Family.LongKey)
     case ColumnType.Utf8Dict => Some(Family.StringKey)
-    case ColumnType.Float64 | ColumnType.Bool => None
+    case ColumnType.Float64 | ColumnType.Bool | ColumnType.Float32 => None
 
   /** No hint and shuffle-hash are the hash class. Broadcast and sort-merge stay separate. */
   private def hint(strategy: Option[Plan.JoinStrategy]): Hint = strategy match

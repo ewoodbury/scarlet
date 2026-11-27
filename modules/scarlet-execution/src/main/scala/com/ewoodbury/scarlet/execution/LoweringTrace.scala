@@ -101,6 +101,7 @@ private[execution] object LoweringTrace:
     case PhysicalOp.Kind.GroupedIntLongs => "GroupedIntLongs"
     case PhysicalOp.Kind.IntLongTriples => "IntLongTriples"
     case PhysicalOp.Kind.IntLongOuter => "IntLongOuter"
+    case PhysicalOp.Kind.Float32s => "Float32s"
 
   private def nodeName(plan: Plan[_]): String = plan match
     case product: Product => product.productPrefix
