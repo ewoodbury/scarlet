@@ -14,9 +14,10 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * Int `reduceByKey` over a filter selection.
  *
- * A filter stack, including one filter, keeps the survivor index and the scan drops those rows. The exchange still
- * sees one dense partial per input batch. A null value is dropped, including on a selected row. A
- * null on a row outside the live prefix is not read.
+ * A filter stack, including one filter, keeps the survivor index and the scan drops those rows.
+ * The exchange still sees one dense partial per input batch. A lone null value stays null,
+ * including on a selected row. A null on a row outside the live prefix is not read. A null key is
+ * dropped.
  */
 class TestSelectionReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -150,7 +151,7 @@ class TestSelectionReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
     reduced.collect() shouldBe empty
   }
 
-  "int32Selected" should "ignore a null outside the prefix and drop a null it does scan" in {
+  "int32Selected" should "ignore a null outside the prefix and keep a null it does scan" in {
     val batch = BatchCodec.nullableIntPairs(
       Seq((Some(1), None), (Some(2), Some(5)), (None, Some(9))),
     )
@@ -160,9 +161,9 @@ class TestSelectionReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
     sums(Vector(kept)) shouldBe Map(2 -> 5)
 
     val nullValue = Selected(batch, Array(0), 1)
-    val droppedValue =
+    val keptValue =
       HashReduce.int32Selected(nullValue, 0, 1, keyOrdinal = 0, valueOrdinal = 1, plus)
-    droppedValue.length shouldBe 0
+    cells(Vector(keptValue)) shouldBe Seq((Some(1), None))
 
     val nullKey = Selected(batch, Array(2), 1)
     val droppedKey =
@@ -177,7 +178,7 @@ class TestSelectionReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
       batchSize = 1,
       plus,
     )
-    sums(reduced) shouldBe Map(2 -> 5)
+    cells(reduced).sortBy(_._1) shouldBe Seq((Some(1), None), (Some(2), Some(5)))
   }
 
   it should "scan only the requested prefix" in {
@@ -275,7 +276,7 @@ class TestSelectionReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
     reduced.map(_.length) shouldBe Seq(0, 0, 0)
   }
 
-  it should "drop a selection whose rows are all null" in {
+  it should "keep a lone null value and drop null keys" in {
     val batch = BatchCodec.nullableIntPairs(
       Seq((None, Some(4)), (Some(7), None), (None, None)),
     )
@@ -295,9 +296,9 @@ class TestSelectionReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
       plus,
     )
 
-    val emptySums = Map.empty[Int, Int]
-    sums(viaSelection) shouldBe emptySums
-    sums(viaSelection) shouldBe sums(viaDense)
+    val lone = Seq((Some(7), None))
+    cells(viaSelection) shouldBe lone
+    cells(viaDense) shouldBe lone
   }
 
   "perBatchSelected" should "merge chunks of one selection and keep selections apart" in {
@@ -346,6 +347,33 @@ class TestSelectionReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
   private def sums(batches: Vector[ColumnBatch]): Map[Int, Int] =
     batches.flatMap(batch => BatchCodec.decodeIntPairs(batch)).toMap
+
+  /** A clear value bit stays `None`. [[sums]] rejects that bit. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def cells(batches: Vector[ColumnBatch]): Seq[(Option[Int], Option[Int])] =
+    batches.flatMap { batch =>
+      BatchCodec.decodeIntPairsPreservingAbsence(batch, batch.length).map { pair =>
+        val raw = pair.asInstanceOf[Product]
+        (boxed(raw.productElement(0)), boxed(raw.productElement(1)))
+      }
+    }
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def boxed(cell: Any): Option[Int] = cell match
+    case null => None
+    case value: Int => Some(value)
+    case other => fail(s"expected an int cell, found $other")
 
   private def published[A](body: => A): Long =
     ColumnMetrics.withSink(new CountingSink) {

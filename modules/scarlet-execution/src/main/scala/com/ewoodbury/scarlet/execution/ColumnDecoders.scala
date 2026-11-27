@@ -42,14 +42,17 @@ private[execution] object ColumnDecoders:
    * their own arms. Those decoders do not call the returned function, and these arms must not fall
    * through to [[BatchCodec.decodeIntPairs]], which rejects a clear bit. [[MapIntKey.keepsNull]]
    * and an int-pair [[PhysicalOp.Project]] keep a null key or value, so they use the
-   * absence-preserving decoder. A triple [[PhysicalOp.Project]] does not: its kind is not
-   * [[PhysicalOp.Kind.Pairs]], and [[triples]] is the arm that runs.
+   * absence-preserving decoder. [[PhysicalOp.HashAggregate]] does too: a lone null value stays
+   * null. A triple [[PhysicalOp.Project]] does not: its kind is not [[PhysicalOp.Kind.Pairs]], and
+   * [[triples]] is the arm that runs.
    */
   def intPairs(op: PhysicalOp): (ColumnBatch, Int) => Seq[(Int, Int)] =
     op match
       case kept if MapIntKey.keepsNull(kept) =>
         (batch, rows) => BatchCodec.decodeIntPairsPreservingAbsence(batch, rows)
       case project: PhysicalOp.Project if intPairProject(project) =>
+        (batch, rows) => BatchCodec.decodeIntPairsPreservingAbsence(batch, rows)
+      case _: PhysicalOp.HashAggregate =>
         (batch, rows) => BatchCodec.decodeIntPairsPreservingAbsence(batch, rows)
       case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByIntValueDesc =>
         (batch, rows) =>

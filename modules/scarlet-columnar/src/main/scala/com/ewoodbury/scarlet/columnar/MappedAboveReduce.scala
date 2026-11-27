@@ -7,9 +7,9 @@ package com.ewoodbury.scarlet.columnar
  * `mapKey` once, then the slot sees that mapped key or the original value. A null input key is not
  * passed to `mapKey` or to a key predicate. A value predicate still sees that row, including a
  * null key, and is not called on a null value. A null mapped key is the null input key: it is
- * dropped and does not create a group. A null value is dropped after `mapKey` runs and does not
- * create a group. The pair batch is never published, and [[HashReduce.byKey]] does not see it.
- * Neither function is inspected.
+ * dropped and does not create a group. A null value on a kept key stays a null group. A value slot
+ * does not keep that null. The pair batch is never published, and [[HashReduce.byKey]] does not
+ * see it. Neither function is inspected.
  *
  * Partials are one reduce per morsel, merged per input batch, then exchanged like
  * [[MappedKeyReduce]]. Spill stays on the post-exchange bucket.
@@ -78,8 +78,9 @@ private[scarlet] object MappedAboveReduce:
 
   /**
    * Present keys are mapped, then the slot runs. A null key is not passed to `mapKey` or a key
-   * predicate. A value predicate still sees that row. A null value is not passed to a value
-   * predicate and is not inserted. An empty range does not call `mapKey`.
+   * predicate. A null value on a kept key stays a null group. A value predicate still sees that
+   * row. A null value is not passed to a value predicate, and a value slot does not keep it. An
+   * empty range does not call `mapKey`.
    */
   private def visit(
       batch: ColumnBatch,
@@ -165,7 +166,9 @@ private[scarlet] object MappedAboveReduce:
     while (row < end) {
       if (Validity.isSet(keyWords, row)) then
         val mapped = mapKey(keyArr(row))
-        if (keep(mapped) && Validity.isSet(valueWords, row)) then sink.add(mapped, valueArr(row))
+        if (keep(mapped)) then
+          if (Validity.isSet(valueWords, row)) then sink.add(mapped, valueArr(row))
+          else sink.addMissing(mapped)
       row += 1
     }
 

@@ -58,7 +58,7 @@ class TestHashReduceSpill extends AnyFlatSpec with Matchers with BeforeAndAfterE
     }
   }
 
-  it should "drop a null key and create no group for a null value" in {
+  it should "drop a null key, keep a lone null value, and unbox two nulls" in {
     val batches = Vector(
       BatchCodec.nullableIntPairs(
         Seq((None, Some(4)), (Some(7), None), (Some(8), Some(1)), (Some(0), None)),
@@ -70,8 +70,8 @@ class TestHashReduceSpill extends AnyFlatSpec with Matchers with BeforeAndAfterE
     withConf(1L) { dir =>
       val spilled = reduce(batches)
 
-      groups(spilled) shouldBe groups(memory)
-      groups(spilled) shouldBe Map(8 -> 3)
+      nullableGroups(spilled) shouldBe nullableGroups(memory)
+      nullableGroups(spilled) shouldBe Map(0 -> None, 7 -> Some(0), 8 -> Some(3))
       SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
     }
   }
@@ -179,7 +179,8 @@ class TestHashReduceSpill extends AnyFlatSpec with Matchers with BeforeAndAfterE
       ),
     )
     try
-      val reduced = HashReduceSpill.finish(bucket, parallelism = 1, batchSize = 16, ScarletConf.get, plus)
+      val reduced =
+        HashReduceSpill.finish(bucket, parallelism = 1, batchSize = 16, ScarletConf.get, plus)
       groups(Vector(reduced)).size shouldBe 64
       HashReduceSpill.filesWrittenForTest should be > cap.toLong
       SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
@@ -254,8 +255,24 @@ class TestHashReduceSpill extends AnyFlatSpec with Matchers with BeforeAndAfterE
     pairs.map(_._1) shouldBe pairs.map(_._1).distinct
     pairs.toMap
 
+  /** A clear value bit is `None`. A present value, including a combined `0`, is `Some`. */
+  private def nullableGroups(batches: Vector[ColumnBatch]): Map[Int, Option[Int]] =
+    val pairs = batches.flatMap { batch =>
+      val keys = int32(batch, 0)
+      val values = int32(batch, 1)
+      (0 until batch.length).map { row =>
+        keys.validity.isValid(row) shouldBe true
+        val value = if (values.validity.isValid(row)) Some(values.values(row)) else None
+        keys.values(row) -> value
+      }
+    }
+    pairs.map(_._1) shouldBe pairs.map(_._1).distinct
+    pairs.toMap
+
   /** Key values, value values, and both validity-word arrays, in batch order. */
-  private def payload(batches: Vector[ColumnBatch]): Seq[(Seq[Int], Seq[Int], Seq[Long], Seq[Long])] =
+  private def payload(
+      batches: Vector[ColumnBatch],
+  ): Seq[(Seq[Int], Seq[Int], Seq[Long], Seq[Long])] =
     batches.map { batch =>
       val keys = int32(batch, 0)
       val values = int32(batch, 1)

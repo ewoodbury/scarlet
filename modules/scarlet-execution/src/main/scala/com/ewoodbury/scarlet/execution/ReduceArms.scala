@@ -16,31 +16,32 @@ import ColumnarInterpreter.{Columns, interpretAt, longPairsOf, pairsOf}
  * that project's input morsels. The interpreter's adapter runs on every row, and a present
  * projected key and value are inserted into the [[HashReduce]] table. The pair batch is not
  * published, and [[HashReduce.byKey]] is not called. The function is not inspected. A null
- * projected key is dropped. A null projected value is dropped and does not create a group. One
- * [[Plan.FilterKeysOp]] or [[Plan.FilterValuesOp]] directly above that project applies the slot to
- * the projected pair and still does not publish. A key predicate is not called on a null projected
- * key. A value predicate is not called on a null projected value. A present partner on the other
- * column is still tested, and a null partner does not create a group. A second slot, a whole-row
+ * projected key is dropped. A null projected value stays a null group until another value arrives,
+ * and a later combine unboxes that null to `0`. One [[Plan.FilterKeysOp]] or
+ * [[Plan.FilterValuesOp]] directly above that project applies the slot to the projected pair and
+ * still does not publish. A key predicate is not called on a null projected key. A value predicate
+ * is not called on a null projected value. A key slot that keeps the key keeps a null value as a
+ * null group. A value slot does not create a group from that null. A second slot, a whole-row
  * filter, and a second map stay on the published selection path. A long slot above a long project
  * has its own arm. A string slot-above is [[stringByKey]]. An int [[PhysicalOp.MapKey]] is reduced
  * from that map's source morsels. Each present key is passed to the `Int => Int` witness. A null
- * key is not passed and is not inserted. A null value is dropped and does not create a group. That
- * pair batch is not published, and [[HashReduce.byKey]] is not called. One [[Plan.FilterKeysOp]]
- * or [[Plan.FilterValuesOp]] directly above that map applies the slot after the witness and still
+ * key is not passed and is not inserted. A null value stays a null group. That pair batch is not
+ * published, and [[HashReduce.byKey]] is not called. One [[Plan.FilterKeysOp]] or
+ * [[Plan.FilterValuesOp]] directly above that map applies the slot after the witness and still
  * does not publish. A null input key is not passed to the witness or to a key predicate. A value
- * predicate still sees that row. A null mapped key is dropped. A null value does not create a
- * group. A second slot, a whole-row filter, and a second map stay off this arm. A long-pair
- * [[PhysicalOp.Project]] is reduced from that project's input morsels. The interpreter's adapter
- * runs on every row, and a present projected key and value are inserted into the
- * [[LongHashReduce]] table. A null projected key is dropped. A null projected value stays a null
- * group until another value arrives, and a later combine unboxes that null to `0`. The pair batch
- * is not published, and [[LongHashReduce.byKey]] is not called. The function is not inspected. One
- * [[Plan.FilterKeysOp]] or [[Plan.FilterValuesOp]] directly above that project applies the slot to
- * the projected pair and still does not publish. A key predicate is not called on a null projected
- * key. A null projected value stays a null group, and a value predicate is not called on it. A
- * second slot, a whole-row filter, and a second map stay off this arm. A string project stays on
- * its own arm. A scan and a non-pair child stay on the dense reduce. The `None` path is the only
- * one that interprets a child the fold did not already scan.
+ * predicate still sees that row. A null mapped key is dropped. A null value on a kept key stays a
+ * null group. A value slot does not keep that null. A second slot, a whole-row filter, and a
+ * second map stay off this arm. A long-pair [[PhysicalOp.Project]] is reduced from that project's
+ * input morsels. The interpreter's adapter runs on every row, and a present projected key and
+ * value are inserted into the [[LongHashReduce]] table. A null projected key is dropped. A null
+ * projected value stays a null group until another value arrives, and a later combine unboxes that
+ * null to `0`. The pair batch is not published, and [[LongHashReduce.byKey]] is not called. The
+ * function is not inspected. One [[Plan.FilterKeysOp]] or [[Plan.FilterValuesOp]] directly above
+ * that project applies the slot to the projected pair and still does not publish. A key predicate
+ * is not called on a null projected key. A null projected value stays a null group, and a value
+ * predicate is not called on it. A second slot, a whole-row filter, and a second map stay off this
+ * arm. A string project stays on its own arm. A scan and a non-pair child stay on the dense
+ * reduce. The `None` path is the only one that interprets a child the fold did not already scan.
  */
 private[execution] object ReduceArms:
 
@@ -134,8 +135,8 @@ private[execution] object ReduceArms:
   /**
    * One [[Plan.MapIntKeyOp]]. The source under the key map is interpreted, then each morsel is
    * reduced through [[MappedKeyReduce]]. `None` when this child is not that map. A null key is not
-   * passed to the witness. A null value is dropped and does not create a group.
-   * [[HashReduce.byKey]] is not called. [[MapIntKey.columns]] is not called.
+   * passed to the witness. A null value stays a null group. [[HashReduce.byKey]] is not called.
+   * [[MapIntKey.columns]] is not called.
    */
   private def reduceMapped(
       source: Plan[_],
@@ -169,7 +170,7 @@ private[execution] object ReduceArms:
    * then each morsel is reduced through [[MappedAboveReduce]]. `None` when a second map sits under
    * the key map, or when the step is not one int key or value. A null input key is not passed to
    * the witness or to a key predicate. A value predicate still sees that row. A null mapped key is
-   * dropped. A null value does not create a group. [[HashReduce.byKey]] is not called.
+   * dropped. A null value on a kept key stays a null group. [[HashReduce.byKey]] is not called.
    * [[MapIntKey.columns]] is not called.
    */
   private def reduceAboveMapped(
@@ -218,7 +219,7 @@ private[execution] object ReduceArms:
    * One pair [[Plan.MapOp]]. The input of the project is interpreted, then each morsel is reduced
    * through [[IntPairProject.visitPairs]]. `None` when this child is not that project. A null key
    * and a null value are passed to the adapter. A null projected key is dropped. A null projected
-   * value is dropped and does not create a group. [[HashReduce.byKey]] is not called.
+   * value stays a null group until another value arrives. [[HashReduce.byKey]] is not called.
    */
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
   private def reduceProjected(
@@ -256,8 +257,8 @@ private[execution] object ReduceArms:
    * then each morsel is reduced through [[IntPairProject.visitFiltered]]. `None` when a second map
    * sits under the project, or when the step is not one int key or value. A null key and a null
    * value are passed to the adapter. A null projected key is dropped and the key predicate is not
-   * called. A null projected value is dropped and does not create a group, and the value predicate
-   * is not called. [[HashReduce.byKey]] is not called.
+   * called. A null projected value stays a null group, and the value predicate is not called.
+   * [[HashReduce.byKey]] is not called.
    */
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
   private def reduceAboveProject(

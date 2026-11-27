@@ -7,9 +7,8 @@ package com.ewoodbury.scarlet.columnar
  * `mapKey` once. A null key stays null and is not passed. `mapKey` returns `Int`, so a present
  * source key has a present mapped key. That key and the original value are inserted into the
  * [[HashReduce]] table. A null source key is the null mapped key: it is dropped and does not
- * create a group. A null value is dropped after `mapKey` runs and does not create a group. The
- * pair batch is never published, and [[HashReduce.byKey]] does not see it. The function is not
- * inspected.
+ * create a group. A null value stays a null group after `mapKey` runs. The pair batch is never
+ * published, and [[HashReduce.byKey]] does not see it. The function is not inspected.
  *
  * Partials are one reduce per morsel, merged per input batch, then exchanged like [[HashReduce]].
  * Spill stays on the post-exchange bucket.
@@ -54,7 +53,7 @@ private[scarlet] object MappedKeyReduce:
 
   /**
    * Present keys are mapped. A null key is not passed to `mapKey` and is not inserted. A null
-   * value is dropped and does not create a group. An empty range does not call `mapKey`.
+   * value stays a null group. An empty range does not call `mapKey`.
    */
   private def visit(
       batch: ColumnBatch,
@@ -114,5 +113,6 @@ private[scarlet] object MappedKeyReduce:
       if (Validity.isSet(keyWords, row)) then
         val mapped = mapKey(keyArr(row))
         if (Validity.isSet(valueWords, row)) then sink.add(mapped, valueArr(row))
+        else sink.addMissing(mapped)
       row += 1
     }

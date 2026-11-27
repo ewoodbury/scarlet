@@ -70,15 +70,17 @@ class TestNullPairScan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     clearBit(values.plan) shouldBe true
   }
 
-  "reduceByKey" should "drop a null value and keep the other value for that key" in {
+  "reduceByKey" should "unbox a null value when another value for that key arrives" in {
     val reduced = source.filterKeys((key: Int) => key > 0).reduceByKey[Int, Int] { (left, right) =>
       left + right + 1
     }
     val (rows, batches, _) = measured(reduced.collect().toMap)
+    val summed = Map(1 -> 10, 2 -> 8, 4 -> -1, 5 -> 0)
 
     ColumnarPlanner.tryRun(reduced.plan) shouldBe defined
     batches should be > 0L
-    rows shouldBe Map(1 -> 10, 2 -> 7, 4 -> -1, 5 -> 0)
+    rows shouldBe summed
+    row(reduced.collect().toMap) shouldBe summed
   }
 
   "countByKey" should "count a null value" in {
@@ -139,6 +141,16 @@ class TestNullPairScan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       ),
       1,
     )
+
+  private def row[A](body: => A): A =
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(saved.copy(columnarExecution = false))
+      ScarletRuntime.get.shuffle.clear()
+      body
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
 
   private def measured[A](body: => A): (A, Long, Long) =
     ColumnMetrics.withSink(new CountingSink) {
