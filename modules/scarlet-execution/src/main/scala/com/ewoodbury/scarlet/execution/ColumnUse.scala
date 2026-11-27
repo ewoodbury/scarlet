@@ -124,7 +124,7 @@ private[execution] object ColumnUse:
     case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
         PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
         PhysicalOp.Kind.LongCountSums | PhysicalOp.Kind.StringCountSums |
-        PhysicalOp.Kind.IntLongTriples =>
+        PhysicalOp.Kind.IntLongTriples | PhysicalOp.Kind.IntLongOuter =>
       Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools =>
@@ -143,7 +143,7 @@ private[execution] object ColumnUse:
     case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
         PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
         PhysicalOp.Kind.LongCountSums | PhysicalOp.Kind.StringCountSums |
-        PhysicalOp.Kind.IntLongTriples =>
+        PhysicalOp.Kind.IntLongTriples | PhysicalOp.Kind.IntLongOuter =>
       Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts |
@@ -203,6 +203,21 @@ private[execution] object ColumnUse:
       case (Plan.JoinOp(left, right, _), PhysicalOp.LongHashJoin(leftOp, rightOp)) =>
         pair(left, right, leftOp, rightOp)
       case (Plan.JoinOp(left, right, _), PhysicalOp.IntLongHashJoin(leftOp, rightOp)) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.LeftOuterJoinOp(left, right, _),
+            PhysicalOp.IntLongHashLeftOuter(leftOp, rightOp),
+          ) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.RightOuterJoinOp(left, right, _),
+            PhysicalOp.IntLongHashRightOuter(leftOp, rightOp),
+          ) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.FullOuterJoinOp(left, right, _),
+            PhysicalOp.IntLongHashFullOuter(leftOp, rightOp),
+          ) =>
         pair(left, right, leftOp, rightOp)
       case (Plan.JoinOp(left, right, _), PhysicalOp.LongSortMergeJoin(leftOp, rightOp)) =>
         pair(left, right, leftOp, rightOp)

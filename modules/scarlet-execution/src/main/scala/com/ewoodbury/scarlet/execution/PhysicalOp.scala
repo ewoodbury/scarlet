@@ -649,6 +649,8 @@ enum PhysicalOp:
     case IntLongCountSum(_) => PhysicalOp.Kind.CountSums
     case SortByIntLongKey(_) | SortByIntLongValueDesc(_) => PhysicalOp.Kind.Pairs
     case IntLongHashJoin(_, _) => PhysicalOp.Kind.IntLongTriples
+    case IntLongHashLeftOuter(_, _) | IntLongHashRightOuter(_, _) | IntLongHashFullOuter(_, _) =>
+      PhysicalOp.Kind.IntLongOuter
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
     case JoinProbeSum(_, _, _) => PhysicalOp.Kind.IntLongSums
     case LongHashJoin(_, _) | LongBroadcastJoin(_, _, _) | LongSortMergeJoin(_, _) =>
@@ -750,6 +752,12 @@ enum PhysicalOp:
     case SortByIntLongKey(child) => s"SortByIntLongKey(${child.shape})"
     case SortByIntLongValueDesc(child) => s"SortByIntLongValueDesc(${child.shape})"
     case IntLongHashJoin(left, right) => s"IntLongHashJoin(${left.shape}, ${right.shape})"
+    case IntLongHashLeftOuter(left, right) =>
+      s"IntLongHashLeftOuter(${left.shape}, ${right.shape})"
+    case IntLongHashRightOuter(left, right) =>
+      s"IntLongHashRightOuter(${left.shape}, ${right.shape})"
+    case IntLongHashFullOuter(left, right) =>
+      s"IntLongHashFullOuter(${left.shape}, ${right.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
     case JoinProbeSum(left, right, measure) =>
       val side = measure match
@@ -849,6 +857,30 @@ enum PhysicalOp:
    */
   case IntLongHashJoin(left: PhysicalOp, right: PhysicalOp)
 
+  /**
+   * Left hash outer join of two `(Int, Long)` sides. Each child is an [[Exchange]]. A null key
+   * does not match. A left null key is kept and the right value is absent. A right null key is
+   * dropped. A null long stays a clear validity bit and is not absence. Output kind is
+   * [[PhysicalOp.Kind.IntLongOuter]]. The schema is `[Int32, Int64, Int64]`. There is no spill.
+   */
+  case IntLongHashLeftOuter(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * Right hash outer join of two `(Int, Long)` sides. Each child is an [[Exchange]]. A null key
+   * does not match. A right null key is kept and the left value is absent. A left null key is
+   * dropped. A null long stays a clear validity bit and is not absence. Output kind is
+   * [[PhysicalOp.Kind.IntLongOuter]]. The schema is `[Int32, Int64, Int64]`. There is no spill.
+   */
+  case IntLongHashRightOuter(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * Full hash outer join of two `(Int, Long)` sides. Each child is an [[Exchange]]. A null key
+   * does not match and is kept on its own side with the other value absent. A null long stays a
+   * clear validity bit and is not absence. Output kind is [[PhysicalOp.Kind.IntLongOuter]]. The
+   * schema is `[Int32, Int64, Int64]`. There is no spill.
+   */
+  case IntLongHashFullOuter(left: PhysicalOp, right: PhysicalOp)
+
 object PhysicalOp:
 
   /**
@@ -871,7 +903,8 @@ object PhysicalOp:
       GroupedIntLongs,
       LongCountSums,
       StringCountSums,
-      IntLongTriples
+      IntLongTriples,
+      IntLongOuter
 
   /** Which value column [[JoinProbeSum]] adds. `Left` is the build side. */
   enum ProbeMeasure:

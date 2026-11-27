@@ -923,7 +923,8 @@ object ColumnarPlanner:
         PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter |
         PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
-        PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples =>
+        PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples |
+        PhysicalOp.Kind.IntLongOuter =>
       None
 
   /**
@@ -1147,7 +1148,7 @@ object ColumnarPlanner:
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
-        PhysicalOp.Kind.IntLongTriples =>
+        PhysicalOp.Kind.IntLongTriples | PhysicalOp.Kind.IntLongOuter =>
       Layout.Columnar(ScarletConf.get.columnarBatchSize)
 
   private[execution] def batchSize: Int =

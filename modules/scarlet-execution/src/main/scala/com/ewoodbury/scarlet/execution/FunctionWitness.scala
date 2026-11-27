@@ -64,7 +64,8 @@ private[execution] object FunctionWitness:
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
-        PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples =>
+        PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples |
+        PhysicalOp.Kind.IntLongOuter =>
       false
 
   /**

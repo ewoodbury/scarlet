@@ -124,6 +124,12 @@ private[execution] object JoinClass:
         Some(PhysicalOp.StringSortMergeFullOuter(leftExchange, rightExchange))
       case KernelChoice.IntLongHashJoin =>
         Some(PhysicalOp.IntLongHashJoin(leftExchange, rightExchange))
+      case KernelChoice.IntLongHashLeftOuter =>
+        Some(PhysicalOp.IntLongHashLeftOuter(leftExchange, rightExchange))
+      case KernelChoice.IntLongHashRightOuter =>
+        Some(PhysicalOp.IntLongHashRightOuter(leftExchange, rightExchange))
+      case KernelChoice.IntLongHashFullOuter =>
+        Some(PhysicalOp.IntLongHashFullOuter(leftExchange, rightExchange))
       case KernelChoice.IntHashAggregate | KernelChoice.LongHashAggregate |
           KernelChoice.StringHashAggregate | KernelChoice.IntLongProjectSum |
           KernelChoice.IntLongHashAggregate | KernelChoice.CountByKey |
@@ -139,10 +145,11 @@ private[execution] object JoinClass:
         None
 
   /**
-   * Hash inner of two int-long pairs. The caller already checked both children.
+   * Hash join of two int-long pairs. The caller already checked both children.
    *
-   * Broadcast, sort-merge, and the three outers stay empty. This is not [[choose]]: an `Int32` key
-   * on [[PhysicalOp.Kind.Pairs]] would build the int hash join and read the long as an int.
+   * Inner, left, right, and full use the int-long hash nodes. Broadcast and sort-merge stay empty.
+   * This is not [[choose]]: an `Int32` key on [[PhysicalOp.Kind.Pairs]] would build the int hash
+   * join and read the long as an int.
    */
   private[execution] def intLongInner(
       strategy: Option[Plan.JoinStrategy],
@@ -151,7 +158,13 @@ private[execution] object JoinClass:
     val hash = strategy match
       case None | Some(Plan.JoinStrategy.ShuffleHash) => true
       case Some(Plan.JoinStrategy.Broadcast) | Some(Plan.JoinStrategy.SortMerge) => false
-    if (place == Place.Inner && hash) then Some(KernelChoice.IntLongHashJoin) else None
+    if (!hash) then None
+    else
+      place match
+        case Place.Inner => Some(KernelChoice.IntLongHashJoin)
+        case Place.Left => Some(KernelChoice.IntLongHashLeftOuter)
+        case Place.Right => Some(KernelChoice.IntLongHashRightOuter)
+        case Place.Full => Some(KernelChoice.IntLongHashFullOuter)
 
   /** Pair kinds the int, long, and string joins already run. Outer kinds are not pairs. */
   private def pairKind(kind: PhysicalOp.Kind): Boolean = kind match
@@ -164,7 +177,7 @@ private[execution] object JoinClass:
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.CountSums |
         PhysicalOp.Kind.LongCountSums | PhysicalOp.Kind.StringCountSums |
         PhysicalOp.Kind.IntLongSums | PhysicalOp.Kind.GroupedIntLongs |
-        PhysicalOp.Kind.IntLongTriples =>
+        PhysicalOp.Kind.IntLongTriples | PhysicalOp.Kind.IntLongOuter =>
       false
 
   private def agreed(left: ColumnType, right: ColumnType): Boolean = (left, right) match

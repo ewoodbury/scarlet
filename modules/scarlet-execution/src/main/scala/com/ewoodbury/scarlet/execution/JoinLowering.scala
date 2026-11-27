@@ -15,7 +15,8 @@ import com.ewoodbury.scarlet.execution.schema.{
  * The class is the key [[ColumnType]] on the two children, plus the strategy hint those joins
  * already honor. Int, long, and string classes stay. [[PhysicalOp.Kind]] does not pick among them.
  * A pair kind whose key is [[ColumnType.Int64]] is the long class. An outer result and a source
- * [[ScanLowering]] refuses stay on the row path. No new outer or null shape is accepted.
+ * [[ScanLowering]] refuses stay on the row path. Broadcast and sort-merge of an int-long pair stay
+ * on the row path. Hash outers of that pair do not.
  */
 @SuppressWarnings(
   Array(
@@ -168,6 +169,9 @@ private[execution] object JoinLowering:
       hashed(PhysicalOp.Kind.StringTriples)
     case _: PhysicalOp.IntLongHashJoin =>
       hashed(PhysicalOp.Kind.IntLongTriples)
+    case _: PhysicalOp.IntLongHashLeftOuter | _: PhysicalOp.IntLongHashRightOuter |
+        _: PhysicalOp.IntLongHashFullOuter =>
+      hashed(PhysicalOp.Kind.IntLongOuter)
     case _: PhysicalOp.LongHashLeftOuter | _: PhysicalOp.LongHashRightOuter |
         _: PhysicalOp.LongHashFullOuter | _: PhysicalOp.LongSortMergeLeftOuter |
         _: PhysicalOp.LongSortMergeRightOuter | _: PhysicalOp.LongSortMergeFullOuter =>

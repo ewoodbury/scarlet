@@ -408,7 +408,7 @@ private[execution] object ColumnarInterpreter:
             PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
             PhysicalOp.Kind.LongCountSums | PhysicalOp.Kind.StringCountSums |
             PhysicalOp.Kind.IntLongSums | PhysicalOp.Kind.GroupedIntLongs |
-            PhysicalOp.Kind.IntLongTriples =>
+            PhysicalOp.Kind.IntLongTriples | PhysicalOp.Kind.IntLongOuter =>
           throw new IllegalStateException(
             s"physical tree does not match ${plan.getClass.getSimpleName}",
           )
