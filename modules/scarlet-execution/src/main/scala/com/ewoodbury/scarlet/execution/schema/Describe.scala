@@ -75,6 +75,9 @@ private[execution] object Describe:
     case _: PhysicalOp.SortMergeFullOuter => KernelChoice.SortMergeFullOuter
     case _: PhysicalOp.LongHashJoin => KernelChoice.LongHashJoin
     case _: PhysicalOp.IntLongHashJoin => KernelChoice.IntLongHashJoin
+    case _: PhysicalOp.IntLongHashLeftOuter => KernelChoice.IntLongHashLeftOuter
+    case _: PhysicalOp.IntLongHashRightOuter => KernelChoice.IntLongHashRightOuter
+    case _: PhysicalOp.IntLongHashFullOuter => KernelChoice.IntLongHashFullOuter
     case _: PhysicalOp.LongBroadcastJoin => KernelChoice.LongBroadcastJoin
     case _: PhysicalOp.LongSortMergeJoin => KernelChoice.LongSortMergeJoin
     case _: PhysicalOp.LongHashLeftOuter => KernelChoice.LongHashLeftOuter

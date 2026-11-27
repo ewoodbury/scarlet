@@ -5,14 +5,14 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.core.ScarletConf
+import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
  * Inner hash join of `mapValues` from `(Int, Int)` to `(Int, Long)` on both sides.
  *
- * A null key is dropped and does not match. A null long stays null and still matches. Broadcast,
- * sort-merge, and the three outers stay on rows. An int-pair join stays [[PhysicalOp.HashJoin]].
+ * A null key is dropped and does not match. A null long stays null and still matches. Broadcast
+ * and sort-merge stay on rows. An int-pair join stays [[PhysicalOp.HashJoin]].
  */
 @SuppressWarnings(
   Array(
@@ -90,11 +90,15 @@ class TestIntLongHashJoin extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
     ColumnarPlanner.lower(left.broadcastJoin(right).plan) shouldBe None
     ColumnarPlanner.lower(left.sortMergeJoin(right).plan) shouldBe None
-    ColumnarPlanner.lower(left.leftOuterJoin(right).plan) shouldBe None
-    ColumnarPlanner.lower(left.rightOuterJoin(right).plan) shouldBe None
-    ColumnarPlanner.lower(left.fullOuterJoin(right).plan) shouldBe None
+    ColumnarPlanner.lower(
+      Plan.LeftOuterJoinOp(left.plan, right.plan, Some(Plan.JoinStrategy.Broadcast)),
+    ) shouldBe None
+    ColumnarPlanner.lower(
+      Plan.FullOuterJoinOp(left.plan, right.plan, Some(Plan.JoinStrategy.SortMerge)),
+    ) shouldBe None
     ColumnarPlanner.lower(left.join(ints).plan) shouldBe None
     shape(ints.join(other)) shouldBe "HashJoin(Exchange(Scan), Exchange(Scan))"
+    shape(ints.leftOuterJoin(other)) shouldBe "HashLeftOuter(Exchange(Scan), Exchange(Scan))"
   }
 
   private val hashShape =

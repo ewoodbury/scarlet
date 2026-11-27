@@ -169,6 +169,12 @@ private[execution] object Layout:
       join(node.kind, OuterSide.Full)
     case node: PhysicalOp.IntLongHashJoin =>
       join(node.kind, OuterSide.Inner)
+    case node: PhysicalOp.IntLongHashLeftOuter =>
+      join(node.kind, OuterSide.Left)
+    case node: PhysicalOp.IntLongHashRightOuter =>
+      join(node.kind, OuterSide.Right)
+    case node: PhysicalOp.IntLongHashFullOuter =>
+      join(node.kind, OuterSide.Full)
 
   private def columns(kind: PhysicalOp.Kind): Output =
     Output.Columns(
@@ -303,3 +309,4 @@ private[execution] enum KernelChoice:
   case IntLongHashAggregate
   case SortByIntLongKey, SortByIntLongValueDesc
   case IntLongHashJoin
+  case IntLongHashLeftOuter, IntLongHashRightOuter, IntLongHashFullOuter

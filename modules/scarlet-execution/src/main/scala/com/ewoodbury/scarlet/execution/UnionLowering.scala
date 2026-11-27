@@ -91,7 +91,8 @@ private[execution] object UnionLowering:
   private def concatenable(kind: PhysicalOp.Kind): Boolean = kind match
     case PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
         PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.IntLongSums |
-        PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples =>
+        PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples |
+        PhysicalOp.Kind.IntLongOuter =>
       false
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Bools | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Pairs |

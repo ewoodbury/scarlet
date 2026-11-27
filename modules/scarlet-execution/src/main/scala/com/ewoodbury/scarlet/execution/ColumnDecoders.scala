@@ -94,10 +94,11 @@ private[execution] object ColumnDecoders:
       case _: PhysicalOp.Project | _: PhysicalOp.HashJoin | _: PhysicalOp.BroadcastJoin |
           _: PhysicalOp.SortMergeJoin =>
         BatchCodec.decodeIntTriplesPreservingAbsence
-      case _: PhysicalOp.IntLongHashJoin =>
+      case _: PhysicalOp.IntLongHashJoin | _: PhysicalOp.IntLongHashLeftOuter |
+          _: PhysicalOp.IntLongHashRightOuter | _: PhysicalOp.IntLongHashFullOuter =>
         (_, _) =>
           throw new IllegalStateException(
-            "int-long hash join is decoded as int-long triples, not int triples",
+            "int-long hash join is decoded as int-long columns, not int triples",
           )
       case _ => (batch, rows) => BatchCodec.decodeIntTriples(batch, rows)
 
@@ -129,5 +130,6 @@ private[execution] object ColumnDecoders:
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
-        PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples =>
+        PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples |
+        PhysicalOp.Kind.IntLongOuter =>
       false
