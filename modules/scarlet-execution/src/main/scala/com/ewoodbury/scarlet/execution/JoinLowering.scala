@@ -15,8 +15,8 @@ import com.ewoodbury.scarlet.execution.schema.{
  * The class is the key [[ColumnType]] on the two children, plus the strategy hint those joins
  * already honor. Int, long, and string classes stay. [[PhysicalOp.Kind]] does not pick among them.
  * A pair kind whose key is [[ColumnType.Int64]] is the long class. An outer result and a source
- * [[ScanLowering]] refuses stay on the row path. Broadcast and sort-merge of an int-long pair stay
- * on the row path. Hash outers of that pair do not.
+ * [[ScanLowering]] refuses stay on the row path. Hash, broadcast, and sort-merge of an int-long
+ * pair lower. An int-pair join stays in the int class.
  */
 @SuppressWarnings(
   Array(
@@ -134,6 +134,14 @@ private[execution] object JoinLowering:
       case None | Some(Plan.JoinStrategy.ShuffleHash) => true
       case Some(Plan.JoinStrategy.Broadcast) | Some(Plan.JoinStrategy.SortMerge) => false
 
+  /** Explicit broadcast hint. No hint stays on [[acceptsShuffleHash]]. */
+  private[execution] def acceptsBroadcast(strategy: Option[Plan.JoinStrategy]): Boolean =
+    strategy.contains(Plan.JoinStrategy.Broadcast)
+
+  /** Explicit sort-merge hint. No hint stays on [[acceptsShuffleHash]]. */
+  private[execution] def acceptsSortMerge(strategy: Option[Plan.JoinStrategy]): Boolean =
+    strategy.contains(Plan.JoinStrategy.SortMerge)
+
   /**
    * Sort-merge or broadcast on a [[PhysicalOp.HashJoin]] of two exchanges.
    *
@@ -167,11 +175,20 @@ private[execution] object JoinLowering:
       hashed(PhysicalOp.Kind.LongPairs)
     case _: PhysicalOp.StringHashJoin | _: PhysicalOp.StringSortMergeJoin =>
       hashed(PhysicalOp.Kind.StringTriples)
-    case _: PhysicalOp.IntLongHashJoin =>
+    case _: PhysicalOp.IntLongHashJoin | _: PhysicalOp.IntLongSortMergeJoin =>
       hashed(PhysicalOp.Kind.IntLongTriples)
     case _: PhysicalOp.IntLongHashLeftOuter | _: PhysicalOp.IntLongHashRightOuter |
-        _: PhysicalOp.IntLongHashFullOuter =>
+        _: PhysicalOp.IntLongHashFullOuter | _: PhysicalOp.IntLongSortMergeLeftOuter |
+        _: PhysicalOp.IntLongSortMergeRightOuter | _: PhysicalOp.IntLongSortMergeFullOuter =>
       hashed(PhysicalOp.Kind.IntLongOuter)
+    case PhysicalOp.IntLongBroadcastJoin(left, right, buildSide) =>
+      broadcastProbe(left, right, buildSide, PhysicalOp.Kind.IntLongTriples, child, layout)
+    case PhysicalOp.IntLongBroadcastLeftOuter(left, _) =>
+      child(left).copy(layout = layout(PhysicalOp.Kind.IntLongOuter))
+    case PhysicalOp.IntLongBroadcastRightOuter(_, right) =>
+      child(right).copy(layout = layout(PhysicalOp.Kind.IntLongOuter))
+    case PhysicalOp.IntLongBroadcastFullOuter(left, _) =>
+      child(left).copy(layout = layout(PhysicalOp.Kind.IntLongOuter))
     case _: PhysicalOp.LongHashLeftOuter | _: PhysicalOp.LongHashRightOuter |
         _: PhysicalOp.LongHashFullOuter | _: PhysicalOp.LongSortMergeLeftOuter |
         _: PhysicalOp.LongSortMergeRightOuter | _: PhysicalOp.LongSortMergeFullOuter =>

@@ -1,16 +1,17 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{AbsentSide, ColumnBatch, IntLongHashJoin, IntLongHashOuter}
+import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan}
 
 import ColumnarInterpreter.Columns
 
 /**
- * Runs hash joins of two `(Int, Long)` sides.
+ * Runs joins of two `(Int, Long)` sides.
  *
- * Both children are already lowered. A null key is dropped on an inner join. An outer join keeps a
- * null key on the preserved side and marks the missing partner absent. A null long stays a clear
- * bit and is not absence. Decode does not use the int-triple decoder. There is no spill.
+ * Hash and sort-merge children are exchanges. Broadcast children are the lowered sides. A null key
+ * is dropped on an inner join. An outer join keeps a null key on the preserved side and marks the
+ * missing partner absent. A null long stays a clear bit and is not absence. Decode does not use
+ * the int-triple decoder. There is no spill.
  */
 private[execution] object IntLongJoinColumns:
 
@@ -27,11 +28,39 @@ private[execution] object IntLongJoinColumns:
     case (Plan.FullOuterJoinOp(_, _, strategy), _: PhysicalOp.IntLongHashFullOuter)
         if JoinLowering.acceptsShuffleHash(strategy) =>
       true
+    case (Plan.JoinOp(_, _, strategy), _: PhysicalOp.IntLongBroadcastJoin)
+        if JoinLowering.acceptsBroadcast(strategy) =>
+      true
+    case (Plan.LeftOuterJoinOp(_, _, strategy), _: PhysicalOp.IntLongBroadcastLeftOuter)
+        if JoinLowering.acceptsBroadcast(strategy) =>
+      true
+    case (Plan.RightOuterJoinOp(_, _, strategy), _: PhysicalOp.IntLongBroadcastRightOuter)
+        if JoinLowering.acceptsBroadcast(strategy) =>
+      true
+    case (Plan.FullOuterJoinOp(_, _, strategy), _: PhysicalOp.IntLongBroadcastFullOuter)
+        if JoinLowering.acceptsBroadcast(strategy) =>
+      true
+    case (Plan.JoinOp(_, _, strategy), _: PhysicalOp.IntLongSortMergeJoin)
+        if JoinLowering.acceptsSortMerge(strategy) =>
+      true
+    case (Plan.LeftOuterJoinOp(_, _, strategy), _: PhysicalOp.IntLongSortMergeLeftOuter)
+        if JoinLowering.acceptsSortMerge(strategy) =>
+      true
+    case (Plan.RightOuterJoinOp(_, _, strategy), _: PhysicalOp.IntLongSortMergeRightOuter)
+        if JoinLowering.acceptsSortMerge(strategy) =>
+      true
+    case (Plan.FullOuterJoinOp(_, _, strategy), _: PhysicalOp.IntLongSortMergeFullOuter)
+        if JoinLowering.acceptsSortMerge(strategy) =>
+      true
     case _ => false
 
   def decodes(op: PhysicalOp): Boolean = op match
     case _: PhysicalOp.IntLongHashJoin | _: PhysicalOp.IntLongHashLeftOuter |
-        _: PhysicalOp.IntLongHashRightOuter | _: PhysicalOp.IntLongHashFullOuter =>
+        _: PhysicalOp.IntLongHashRightOuter | _: PhysicalOp.IntLongHashFullOuter |
+        _: PhysicalOp.IntLongBroadcastJoin | _: PhysicalOp.IntLongBroadcastLeftOuter |
+        _: PhysicalOp.IntLongBroadcastRightOuter | _: PhysicalOp.IntLongBroadcastFullOuter |
+        _: PhysicalOp.IntLongSortMergeJoin | _: PhysicalOp.IntLongSortMergeLeftOuter |
+        _: PhysicalOp.IntLongSortMergeRightOuter | _: PhysicalOp.IntLongSortMergeFullOuter =>
       true
     case _ => false
 
@@ -43,7 +72,7 @@ private[execution] object IntLongJoinColumns:
       ordinals: Set[Int],
   ): Columns =
     require(selectedPartition.isEmpty, "a partition selector cannot run a join")
-    val (left, right, leftOp, rightOp, side, kernel) = (plan, op) match
+    val (side, parts) = (plan, op) match
       case (
             Plan.JoinOp(left, right, _),
             PhysicalOp.IntLongHashJoin(
@@ -51,7 +80,18 @@ private[execution] object IntLongJoinColumns:
               PhysicalOp.Exchange(rightOp),
             ),
           ) =>
-        (left, right, leftOp, rightOp, None, IntLongHashJoin.shuffled)
+        (
+          None,
+          shuffled(
+            left,
+            leftOp,
+            right,
+            rightOp,
+            preserveAbsence,
+            ordinals,
+            IntLongHashJoin.shuffled,
+          ),
+        )
       case (
             Plan.LeftOuterJoinOp(left, right, _),
             PhysicalOp.IntLongHashLeftOuter(
@@ -59,7 +99,18 @@ private[execution] object IntLongJoinColumns:
               PhysicalOp.Exchange(rightOp),
             ),
           ) =>
-        (left, right, leftOp, rightOp, Some(AbsentSide.Right), IntLongHashOuter.hashLeft)
+        (
+          Some(AbsentSide.Right),
+          shuffled(
+            left,
+            leftOp,
+            right,
+            rightOp,
+            preserveAbsence,
+            ordinals,
+            IntLongHashOuter.hashLeft,
+          ),
+        )
       case (
             Plan.RightOuterJoinOp(left, right, _),
             PhysicalOp.IntLongHashRightOuter(
@@ -67,7 +118,18 @@ private[execution] object IntLongJoinColumns:
               PhysicalOp.Exchange(rightOp),
             ),
           ) =>
-        (left, right, leftOp, rightOp, Some(AbsentSide.Left), IntLongHashOuter.hashRight)
+        (
+          Some(AbsentSide.Left),
+          shuffled(
+            left,
+            leftOp,
+            right,
+            rightOp,
+            preserveAbsence,
+            ordinals,
+            IntLongHashOuter.hashRight,
+          ),
+        )
       case (
             Plan.FullOuterJoinOp(left, right, _),
             PhysicalOp.IntLongHashFullOuter(
@@ -75,20 +137,165 @@ private[execution] object IntLongJoinColumns:
               PhysicalOp.Exchange(rightOp),
             ),
           ) =>
-        (left, right, leftOp, rightOp, Some(AbsentSide.Both), IntLongHashOuter.hashFull)
+        (
+          Some(AbsentSide.Both),
+          shuffled(
+            left,
+            leftOp,
+            right,
+            rightOp,
+            preserveAbsence,
+            ordinals,
+            IntLongHashOuter.hashFull,
+          ),
+        )
+      case (
+            Plan.JoinOp(left, right, _),
+            PhysicalOp.IntLongBroadcastJoin(leftOp, rightOp, buildSide),
+          ) =>
+        require(
+          buildSide == PhysicalOp.BuildSide.Right,
+          "int-long broadcast builds the right side",
+        )
+        (
+          None,
+          broadcast(
+            left,
+            leftOp,
+            right,
+            rightOp,
+            preserveAbsence,
+            ordinals,
+            IntLongBroadcast.inner,
+          ),
+        )
+      case (
+            Plan.LeftOuterJoinOp(left, right, _),
+            PhysicalOp.IntLongBroadcastLeftOuter(leftOp, rightOp),
+          ) =>
+        (
+          Some(AbsentSide.Right),
+          broadcast(
+            left,
+            leftOp,
+            right,
+            rightOp,
+            preserveAbsence,
+            ordinals,
+            IntLongBroadcast.leftOuter,
+          ),
+        )
+      case (
+            Plan.RightOuterJoinOp(left, right, _),
+            PhysicalOp.IntLongBroadcastRightOuter(leftOp, rightOp),
+          ) =>
+        (
+          Some(AbsentSide.Left),
+          broadcast(
+            left,
+            leftOp,
+            right,
+            rightOp,
+            preserveAbsence,
+            ordinals,
+            IntLongBroadcast.rightOuter,
+          ),
+        )
+      case (
+            Plan.FullOuterJoinOp(left, right, _),
+            PhysicalOp.IntLongBroadcastFullOuter(leftOp, rightOp),
+          ) =>
+        (
+          Some(AbsentSide.Both),
+          broadcast(
+            left,
+            leftOp,
+            right,
+            rightOp,
+            preserveAbsence,
+            ordinals,
+            IntLongBroadcast.fullOuter,
+          ),
+        )
+      case (
+            Plan.JoinOp(left, right, _),
+            PhysicalOp.IntLongSortMergeJoin(
+              PhysicalOp.Exchange(leftOp),
+              PhysicalOp.Exchange(rightOp),
+            ),
+          ) =>
+        (
+          None,
+          shuffled(
+            left,
+            leftOp,
+            right,
+            rightOp,
+            preserveAbsence,
+            ordinals,
+            IntLongSortMerge.inner,
+          ),
+        )
+      case (
+            Plan.LeftOuterJoinOp(left, right, _),
+            PhysicalOp.IntLongSortMergeLeftOuter(
+              PhysicalOp.Exchange(leftOp),
+              PhysicalOp.Exchange(rightOp),
+            ),
+          ) =>
+        (
+          Some(AbsentSide.Right),
+          shuffled(
+            left,
+            leftOp,
+            right,
+            rightOp,
+            preserveAbsence,
+            ordinals,
+            IntLongSortMerge.leftOuter,
+          ),
+        )
+      case (
+            Plan.RightOuterJoinOp(left, right, _),
+            PhysicalOp.IntLongSortMergeRightOuter(
+              PhysicalOp.Exchange(leftOp),
+              PhysicalOp.Exchange(rightOp),
+            ),
+          ) =>
+        (
+          Some(AbsentSide.Left),
+          shuffled(
+            left,
+            leftOp,
+            right,
+            rightOp,
+            preserveAbsence,
+            ordinals,
+            IntLongSortMerge.rightOuter,
+          ),
+        )
+      case (
+            Plan.FullOuterJoinOp(left, right, _),
+            PhysicalOp.IntLongSortMergeFullOuter(
+              PhysicalOp.Exchange(leftOp),
+              PhysicalOp.Exchange(rightOp),
+            ),
+          ) =>
+        (
+          Some(AbsentSide.Both),
+          shuffled(
+            left,
+            leftOp,
+            right,
+            rightOp,
+            preserveAbsence,
+            ordinals,
+            IntLongSortMerge.fullOuter,
+          ),
+        )
       case _ =>
-        throw new IllegalStateException("int-long hash join expected two exchanges")
-    val leftBatches = pairs(left, leftOp, preserveAbsence, ordinals)
-    val rightBatches = pairs(right, rightOp, preserveAbsence, ordinals)
-    val parts = kernel(
-      leftBatches,
-      rightBatches,
-      ColumnarPlanner.shuffleWidth,
-      ColumnarPlanner.parallelism,
-    )
-    side match
-      case None => Columns.Triples(parts)
-      case Some(absent) => Columns.Outer(parts, absent)
+        throw new IllegalStateException("int-long join expected its lowered children")
+    packed(parts, side)
 
   def partitions(columns: Columns): Seq[Partition[_]] = columns match
     case Columns.Triples(parts) =>
@@ -100,7 +307,7 @@ private[execution] object IntLongJoinColumns:
     case Columns.Outer(parts, AbsentSide.Both) =>
       parts.map(batch => Partition(IntLongHashOuter.decodeFull(batch, batch.length)))
     case _ =>
-      throw new IllegalStateException("int-long hash join expected triple or outer batches")
+      throw new IllegalStateException("int-long join expected triple or outer batches")
 
   def prefix(columns: Columns, limit: Int): Seq[Any] =
     if (limit <= 0) then Seq.empty[Any]
@@ -135,7 +342,42 @@ private[execution] object IntLongJoinColumns:
             },
           )
         case _ =>
-          throw new IllegalStateException("int-long hash join expected triple or outer batches")
+          throw new IllegalStateException("int-long join expected triple or outer batches")
+
+  private def shuffled(
+      left: Plan[_],
+      leftOp: PhysicalOp,
+      right: Plan[_],
+      rightOp: PhysicalOp,
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      kernel: (Vector[ColumnBatch], Vector[ColumnBatch], Int, Int) => Vector[ColumnBatch],
+  ): Vector[ColumnBatch] =
+    kernel(
+      pairs(left, leftOp, preserveAbsence, ordinals),
+      pairs(right, rightOp, preserveAbsence, ordinals),
+      ColumnarPlanner.shuffleWidth,
+      ColumnarPlanner.parallelism,
+    )
+
+  private def broadcast(
+      left: Plan[_],
+      leftOp: PhysicalOp,
+      right: Plan[_],
+      rightOp: PhysicalOp,
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+      kernel: (Vector[ColumnBatch], Vector[ColumnBatch], Int) => Vector[ColumnBatch],
+  ): Vector[ColumnBatch] =
+    kernel(
+      pairs(left, leftOp, preserveAbsence, ordinals),
+      pairs(right, rightOp, preserveAbsence, ordinals),
+      ColumnarPlanner.parallelism,
+    )
+
+  private def packed(parts: Vector[ColumnBatch], side: Option[AbsentSide]): Columns = side match
+    case None => Columns.Triples(parts)
+    case Some(absent) => Columns.Outer(parts, absent)
 
   private def pairs(
       plan: Plan[_],
