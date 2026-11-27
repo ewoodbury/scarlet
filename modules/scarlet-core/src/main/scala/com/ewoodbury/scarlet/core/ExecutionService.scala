@@ -33,6 +33,12 @@ trait ExecutionService {
   def sumLong(plan: Plan[Long]): Long
 
   /**
+   * Sums one long column of a wide row. A null slot contributes nothing. The total wraps. Empty
+   * input returns zero.
+   */
+  def sumWideLong(plan: Plan[WideRow], ordinal: Int): Long
+
+  /**
    * Sums a `Double` plan. Empty input returns zero.
    */
   def sumDouble(plan: Plan[Double]): Double
@@ -87,6 +93,12 @@ object ExecutionService {
     }
 
     def sumLong(plan: Plan[Long]): Long = {
+      throw new UnsupportedOperationException(
+        "No execution service registered. Please ensure the execution module is properly initialized.",
+      )
+    }
+
+    def sumWideLong(plan: Plan[WideRow], ordinal: Int): Long = {
       throw new UnsupportedOperationException(
         "No execution service registered. Please ensure the execution module is properly initialized.",
       )

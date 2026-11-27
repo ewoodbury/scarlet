@@ -1,7 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
 import com.ewoodbury.scarlet.columnar.GroupByKey
-import com.ewoodbury.scarlet.core.{ColumnCompare, Partition, WideColumns, WideRow}
+import com.ewoodbury.scarlet.core.*
 
 /**
  * Represents a stage: a sequence of narrow transformations that can be executed together. Each
@@ -259,6 +259,17 @@ object Stage {
         case other =>
           throw new IllegalStateException(
             s"wide filter expected WideColumns, found ${other.getClass.getName}",
+          )
+    }
+
+  /** Appends one computed wide-row column. */
+  def wideCompute(expr: ColumnExpr, name: String): Stage[WideRow, WideRow] =
+    SingleOpStage { partition =>
+      partition.data match
+        case columns: WideColumns => Partition(columns.compute(expr, name))
+        case other =>
+          throw new IllegalStateException(
+            s"wide compute expected WideColumns, found ${other.getClass.getName}",
           )
     }
 

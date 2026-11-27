@@ -47,6 +47,14 @@ final class WideColumns private (private val buffers: Vector[WideColumn])
     val keep = select(column, compare)
     new WideColumns(buffers.map(_.copyRows(keep, keep.length)))
 
+  /**
+   * Appends one computed column. A null input yields null. An expression the closed set does not
+   * name throws.
+   */
+  def compute(expr: ColumnExpr, name: String): WideColumns =
+    val kind = ColumnExpr.checked(expr, fields, name)
+    new WideColumns(buffers :+ WideCompute.column(buffers, expr, ColumnField(name, kind)))
+
   /** `spec` is output order. Each pair is a source ordinal and the output name. */
   def project(spec: Vector[(Int, String)]): WideColumns =
     require(spec.nonEmpty, "project needs a column")

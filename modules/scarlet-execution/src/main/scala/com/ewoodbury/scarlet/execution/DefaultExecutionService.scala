@@ -1,7 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
 import com.ewoodbury.scarlet.columnar.PairStep
-import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan}
+import com.ewoodbury.scarlet.core.*
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
@@ -99,6 +99,20 @@ class DefaultExecutionService extends ExecutionService {
         partition.data.foldLeft(total)((acc, value) => acc + value)
       }
     }
+
+  def sumWideLong(plan: Plan[WideRow], ordinal: Int): Long =
+    WideSum.longColumn(plan, ordinal).getOrElse {
+      rowPartitions(plan).foldLeft(0L) { (total, partition) =>
+        partition.data.foldLeft(total)((acc, row) => addLongCell(acc, row, ordinal))
+      }
+    }
+
+  private def addLongCell(total: Long, row: WideRow, ordinal: Int): Long =
+    row.cells(ordinal) match
+      case Cell.Int64(value) => total + value
+      case Cell.Null => total
+      case other =>
+        throw new IllegalArgumentException(s"column $ordinal is $other, expected a long")
 
   def sumDouble(plan: Plan[Double]): Double =
     ColumnarPlanner.trySumDouble(plan).getOrElse {

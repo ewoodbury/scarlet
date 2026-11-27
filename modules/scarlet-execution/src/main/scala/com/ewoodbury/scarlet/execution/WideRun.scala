@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{ColumnBatch, WideBatch}
+import com.ewoodbury.scarlet.columnar.{ColumnBatch, WideBatch, WideExpr}
 import com.ewoodbury.scarlet.core.{ColumnField, Partition, WideColumns, WideRow}
 
 /**
@@ -23,6 +23,9 @@ private[execution] object WideRun:
     }
     Some(rows.take(n).toSeq)
 
+  def batches(op: PhysicalOp): Seq[ColumnBatch] =
+    run(op).map(_.batch)
+
   def rowCount(op: PhysicalOp): Long =
     run(op).foldLeft(0L)((total, table) => total + table.batch.length.toLong)
 
@@ -41,6 +44,11 @@ private[execution] object WideRun:
     case PhysicalOp.WideFilter(child, ordinal, compare) =>
       run(child).map { table =>
         Table(table.fields, WideBatch.filter(table.batch, ordinal, compare))
+      }
+    case PhysicalOp.WideCompute(child, expr, name) =>
+      run(child).map { table =>
+        val (fields, batch) = WideExpr.append(table.batch, table.fields, expr, name)
+        Table(fields, batch)
       }
     case PhysicalOp.WideProject(child, spec) =>
       run(child).map { table =>

@@ -73,6 +73,22 @@ final case class DistCollection[A](plan: Plan[A]):
     DistCollection(Plan.WideProjectOp(widePlan, spec))
 
   /**
+   * Appends one computed column. Arithmetic uses the wider input: double, then float, then long,
+   * then int. A compare yields bool. Null in an input yields null. Divide and strings are not in
+   * this set.
+   */
+  def compute(expr: ColumnExpr, name: String)(using ev: A =:= WideRow): DistCollection[WideRow] =
+    WideFields.known(widePlan).foreach(fields => ColumnExpr.checked(expr, fields, name))
+    DistCollection(Plan.WideComputeOp(widePlan, expr, name))
+
+  /**
+   * Sums one long column. A null slot contributes nothing. The total wraps. A columnar plan adds
+   * that column with the existing long sum and does not decode the row.
+   */
+  def sumLongColumn(ordinal: Int)(using ev: A =:= WideRow): Long =
+    DistCollection.service.sumWideLong(widePlan, ordinal)
+
+  /**
    * Filters strings equal to `value`. This explicit form is recognized by the columnar planner,
    * which compares dictionary codes. A null `value` is not recognized and stays on the scalar
    * predicate. A regular `filter(_ == value)` remains a scalar predicate.
