@@ -47,14 +47,15 @@ jobs:
           key: sbt-classes-${{ runner.os }}-${{ hashFiles('**/*.sbt', 'project/build.properties') }}
           restore-keys: sbt-classes-${{ runner.os }}-
 
-      # Checksum and a loose columnar-versus-row ratio, plus the ClickBench slice. Not a
-      # benchmark. The five-minute cap is the job timeout above. Compiling every test file does
-      # not fit in that cap. The filter is on unmanagedSources so log4j2-test.xml still lands on
-      # the classpath. A hyphenated project id is not valid in set.
+      # Checksum and a loose columnar-versus-row ratio, plus the ClickBench and TPC-H slices.
+      # Not a benchmark. The five-minute cap is the job timeout above. Compiling every test file
+      # does not fit in that cap. The filter is on unmanagedSources so log4j2-test.xml still lands
+      # on the classpath. A hyphenated project id is not valid in set.
       - name: Perf smoke
         run: |
           sbt -J-Xmx3g -batch \
             "project scarlet-tests" \
-            "set Test / unmanagedSources / includeFilter := new SimpleFileFilter(f => { val n = f.getName; n == \"PerfCheck.scala\" || n == \"SortChecksum.scala\" || n == \"ClickBenchSlice.scala\" })" \
+            "set Test / unmanagedSources / includeFilter := new SimpleFileFilter(f => { val n = f.getName; n == \"PerfCheck.scala\" || n == \"SortChecksum.scala\" || n == \"ClickBenchSlice.scala\" || n == \"TpchSlice.scala\" })" \
             "Test/runMain com.ewoodbury.scarlet.execution.PerfCheck" \
-            "Test/runMain com.ewoodbury.scarlet.execution.ClickBenchSlice"
+            "Test/runMain com.ewoodbury.scarlet.execution.ClickBenchSlice" \
+            "Test/runMain com.ewoodbury.scarlet.execution.TpchSlice"
