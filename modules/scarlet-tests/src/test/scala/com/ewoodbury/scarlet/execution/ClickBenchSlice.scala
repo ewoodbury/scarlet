@@ -6,7 +6,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
- * Eight ClickBench queries on 4096 generated rows. This is not the hits table.
+ * Nine ClickBench queries on 4096 generated rows. This is not the hits table.
  *
  * Numbers follow the 0-based order of `clickhouse/queries.sql`. An average is the long sum and the
  * count. Query 2's width average is 3679360 / 4096. Query 3's user average is 8386588672 / 4096.
@@ -24,6 +24,9 @@ object ClickBenchSlice:
   val minWidth: Int = 800
   val maxWidth: Int = 999
   val widthExtremum: Long = 800L * 31L + 999L
+
+  /** Rows whose generated phrase is present and not empty. */
+  val notEmpty: Long = 2457L
   val sumUser: Long = 8386588672L
   val mixedSums: Long = 17583232L
 
@@ -44,7 +47,7 @@ object ClickBenchSlice:
     "7 group by AdvEngineID. This file. The checker applies the order.",
     "8 distinct count by one int. Missing: distinct count.",
     "9 several aggregates and a distinct count. Missing: distinct count.",
-    "10 string not equal to empty. Missing: string predicate.",
+    "10 string not equal to empty. This file.",
     "11 two strings in the group key. Missing: multi-column group.",
     "12 group by a string. Missing: string group key.",
     "13 distinct count by a string. Missing: string group key.",
@@ -113,17 +116,31 @@ object ClickBenchSlice:
     finally ScarletConf.set(saved)
 
   def scan(): DistCollection[WideRow] =
-    DistCollection.ofColumns(
-      Vector(
-        WideInput.ints("AdvEngineID", Array.tabulate(rowCount)(index => index % 8)),
-        WideInput.ints("ResolutionWidth", Array.tabulate(rowCount)(index => 800 + (index % 200))),
-        WideInput.longs("UserID", Array.tabulate(rowCount)(index => index.toLong * 1000L + 7L)),
-      ),
-      partitions,
+    DistCollection.ofColumns(scanInputs(), partitions)
+
+  private def scanInputs(): Vector[WideInput] =
+    Vector(
+      WideInput.ints("AdvEngineID", Array.tabulate(rowCount)(index => index % 8)),
+      WideInput.ints("ResolutionWidth", Array.tabulate(rowCount)(index => 800 + (index % 200))),
+      WideInput.longs("UserID", Array.tabulate(rowCount)(index => index.toLong * 1000L + 7L)),
     )
 
   def filtered(): DistCollection[WideRow] =
     scan().filterColumn(0, ColumnCompare(CompareOp.Ne, ColumnLiteral.Int32(0)))
+
+  /** Query 10: `SearchPhrase <> ''`. A null phrase is dropped. The phrase is an extra column. */
+  def notEmptyPhrase(): DistCollection[WideRow] =
+    val phrase = WideInput.nullableStrings(
+      "SearchPhrase",
+      Array.tabulate(rowCount) { index =>
+        if (index % 5 == 0) then "" else "p" + (index % 7)
+      },
+      Array.tabulate(rowCount)(index => index % 5 != 1),
+    )
+    val columns = scanInputs() :+ phrase
+    DistCollection
+      .ofColumns(columns, partitions)
+      .filterColumn(3, ColumnCompare(CompareOp.Ne, ColumnLiteral.Utf8("")))
 
   def advAsLong(): DistCollection[WideRow] =
     scan().compute(ColumnExpr.Cast(0, ColumnKind.Int64), "adv64")
@@ -162,6 +179,8 @@ object ClickBenchSlice:
       summed("query 3", scan().plan, 2, sumUser),
       extremum("query 6 min", scan().plan, 1, minWidth, least = true),
       extremum("query 6 max", scan().plan, 1, maxWidth, least = false),
+      shaped("query 10", notEmptyPhrase().plan, "WideFilter3(Scan)"),
+      counted("query 10", notEmptyPhrase().plan, notEmpty),
       shaped("query 7", grouped().plan, "WideGroup(WideFilter0(Scan))"),
       counted("query 7", grouped().plan, groups),
       shaped("query 32", groupedTwo().plan, "WideGroup(Scan)"),
@@ -181,6 +200,7 @@ object ClickBenchSlice:
       both("query 2", mixedSums)(mixSums()),
       both("query 3", sumUser)(scan().sumLongColumn(2)),
       both("query 6", widthExtremum)(mixExtremum()),
+      both("query 10", notEmpty)(notEmptyPhrase().count()),
       both("query 7", groupedMix)(groupedChecksum(grouped().collect())),
       both("query 32", twoKeyMix)(twoKeyChecksum(groupedTwo().collect())),
       both("query 29", sumWidthPlus)(widthPlus().sumLongColumn(5)),

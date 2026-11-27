@@ -214,6 +214,8 @@ object WideExpr:
         BoolColumn.of(Array.tabulate(length)(_ => byte), present, length)
       case ColumnLiteral.Decimal(precision, scale, number) =>
         DecimalColumn.of(precision, scale, Array.tabulate(length)(_ => number), present, length)
+      case ColumnLiteral.Utf8(_) =>
+        throw new IllegalArgumentException("a string literal is not a computed column")
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def compare(

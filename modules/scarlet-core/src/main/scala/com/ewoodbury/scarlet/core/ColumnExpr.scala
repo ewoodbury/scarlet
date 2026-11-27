@@ -28,6 +28,7 @@ object ColumnExpr:
     case ColumnExpr.Sub(left, right) => arithmetic(fields, left, right, DecimalRules.addKind)
     case ColumnExpr.Mul(left, right) => arithmetic(fields, left, right, DecimalRules.mulKind)
     case ColumnExpr.Div(left, right) => numeric(fields, left, right)
+    case ColumnExpr.Lit(_: ColumnLiteral.Utf8) => None
     case ColumnExpr.Lit(value) => Some(value.kind)
     case ColumnExpr.Compare(_, left, right) =>
       compared(fields, left, right)

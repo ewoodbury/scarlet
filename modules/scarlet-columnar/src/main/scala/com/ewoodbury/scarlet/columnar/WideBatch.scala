@@ -7,8 +7,9 @@ import com.ewoodbury.scarlet.core.*
  *
  * Filter uses the existing per-column kernels. A null in the predicate column is dropped and the
  * predicate is not called. A null in another column stays null. Project drops or reorders columns
- * and does not compute. Float32 and string compares are not in the closed set:
- * [[ColumnCompare.allows]] is false for them, and this object refuses the call.
+ * and does not compute. Float32 compares and string ordering are not in the closed set:
+ * [[ColumnCompare.allows]] is false for them, and this object refuses the call. String equality
+ * compares dictionary codes.
  */
 object WideBatch:
 
@@ -33,6 +34,9 @@ object WideBatch:
         ColumnKernel.filterBool(batch, ordinal, boolPredicate(compare.op, constant))
       case (ColumnKind.Decimal(_, _), ColumnLiteral.Decimal(precision, scale, constant)) =>
         WideDecimal.filter(batch, ordinal, compare.op, precision, scale, constant)
+      case (ColumnKind.Utf8, ColumnLiteral.Utf8(constant)) =>
+        val equal = compare.op == CompareOp.Eq
+        ColumnKernel.filterUtf8Compare(batch, ordinal, constant, equal)
       case _ =>
         throw new IllegalArgumentException(s"no columnar compare for $kind column $ordinal")
 

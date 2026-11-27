@@ -323,6 +323,8 @@ private[scarlet] object WideCompute:
     case ColumnLiteral.Bool(number) => Cell.Bool(number)
     case ColumnLiteral.Decimal(precision, scale, number) =>
       Cell.Decimal(precision, scale, number)
+    case ColumnLiteral.Utf8(_) =>
+      throw new IllegalArgumentException("a string literal is not a computed column")
 
   private def decimalCell(
       columns: Vector[WideColumn],
