@@ -122,6 +122,8 @@ private[execution] object JoinClass:
         Some(PhysicalOp.StringSortMergeRightOuter(leftExchange, rightExchange))
       case KernelChoice.StringSortMergeFullOuter =>
         Some(PhysicalOp.StringSortMergeFullOuter(leftExchange, rightExchange))
+      case KernelChoice.IntLongHashJoin =>
+        Some(PhysicalOp.IntLongHashJoin(leftExchange, rightExchange))
       case KernelChoice.IntHashAggregate | KernelChoice.LongHashAggregate |
           KernelChoice.StringHashAggregate | KernelChoice.IntLongProjectSum |
           KernelChoice.IntLongHashAggregate | KernelChoice.CountByKey |
@@ -136,6 +138,21 @@ private[execution] object JoinClass:
           KernelChoice.Pipeline | KernelChoice.Union | KernelChoice.Exchange =>
         None
 
+  /**
+   * Hash inner of two int-long pairs. The caller already checked both children.
+   *
+   * Broadcast, sort-merge, and the three outers stay empty. This is not [[choose]]: an `Int32` key
+   * on [[PhysicalOp.Kind.Pairs]] would build the int hash join and read the long as an int.
+   */
+  private[execution] def intLongInner(
+      strategy: Option[Plan.JoinStrategy],
+      place: Place,
+  ): Option[KernelChoice] =
+    val hash = strategy match
+      case None | Some(Plan.JoinStrategy.ShuffleHash) => true
+      case Some(Plan.JoinStrategy.Broadcast) | Some(Plan.JoinStrategy.SortMerge) => false
+    if (place == Place.Inner && hash) then Some(KernelChoice.IntLongHashJoin) else None
+
   /** Pair kinds the int, long, and string joins already run. Outer kinds are not pairs. */
   private def pairKind(kind: PhysicalOp.Kind): Boolean = kind match
     case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs =>
@@ -146,7 +163,8 @@ private[execution] object JoinClass:
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.CountSums |
         PhysicalOp.Kind.LongCountSums | PhysicalOp.Kind.StringCountSums |
-        PhysicalOp.Kind.IntLongSums | PhysicalOp.Kind.GroupedIntLongs =>
+        PhysicalOp.Kind.IntLongSums | PhysicalOp.Kind.GroupedIntLongs |
+        PhysicalOp.Kind.IntLongTriples =>
       false
 
   private def agreed(left: ColumnType, right: ColumnType): Boolean = (left, right) match

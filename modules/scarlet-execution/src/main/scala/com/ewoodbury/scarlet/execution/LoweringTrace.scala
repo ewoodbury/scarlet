@@ -99,6 +99,7 @@ private[execution] object LoweringTrace:
     case PhysicalOp.Kind.StringCountSums => "StringCountSums"
     case PhysicalOp.Kind.IntLongSums => "IntLongSums"
     case PhysicalOp.Kind.GroupedIntLongs => "GroupedIntLongs"
+    case PhysicalOp.Kind.IntLongTriples => "IntLongTriples"
 
   private def nodeName(plan: Plan[_]): String = plan match
     case product: Product => product.productPrefix

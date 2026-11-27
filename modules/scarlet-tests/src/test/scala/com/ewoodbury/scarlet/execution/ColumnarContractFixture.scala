@@ -313,7 +313,7 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
-        PhysicalOp.Kind.GroupedIntLongs =>
+        PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples =>
       false
 
   protected def sumsLongs(op: PhysicalOp): Boolean = op.kind match
@@ -325,7 +325,7 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
-        PhysicalOp.Kind.GroupedIntLongs =>
+        PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples =>
       false
 
   protected def sumsFloats(op: PhysicalOp): Boolean = op.kind match
@@ -337,7 +337,7 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
-        PhysicalOp.Kind.GroupedIntLongs =>
+        PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples =>
       false
 
   protected def preservesPartitions(op: PhysicalOp): Boolean = op match
@@ -355,28 +355,29 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.CountSum(_) | PhysicalOp.LongCountSum(_) | PhysicalOp.StringCountSum(_) |
         PhysicalOp.IntLongHashAggregate(_) | PhysicalOp.IntLongCountSum(_) |
         PhysicalOp.JoinProbeSum(_, _, _) | PhysicalOp.HashJoin(_, _) |
-        PhysicalOp.LongHashJoin(_, _) | PhysicalOp.LongSortMergeJoin(_, _) |
-        PhysicalOp.StringHashJoin(_, _) | PhysicalOp.StringSortMergeJoin(_, _) |
-        PhysicalOp.SortMergeJoin(_, _) | PhysicalOp.SortMergeLeftOuter(_, _) |
-        PhysicalOp.SortMergeRightOuter(_, _) | PhysicalOp.SortMergeFullOuter(_, _) |
-        PhysicalOp.HashLeftOuter(_, _) | PhysicalOp.HashRightOuter(_, _) |
-        PhysicalOp.HashFullOuter(_, _) | PhysicalOp.BroadcastJoin(_, _, _) |
-        PhysicalOp.LongBroadcastJoin(_, _, _) | PhysicalOp.StringBroadcastJoin(_, _, _) |
-        PhysicalOp.BroadcastLeftOuter(_, _) | PhysicalOp.BroadcastRightOuter(_, _) |
-        PhysicalOp.BroadcastFullOuter(_, _) | PhysicalOp.SortByIntKey(_) |
-        PhysicalOp.SortByIntValueDesc(_) | PhysicalOp.SortByLongKey(_) |
-        PhysicalOp.SortByStringKey(_) | PhysicalOp.SortByLongValueDesc(_) |
-        PhysicalOp.SortByStringValueDesc(_) | PhysicalOp.SortByIntLongKey(_) |
-        PhysicalOp.SortByIntLongValueDesc(_) | PhysicalOp.Union(_, _) | PhysicalOp.Dedupe(_) |
-        PhysicalOp.LongHashLeftOuter(_, _) | PhysicalOp.LongHashRightOuter(_, _) |
-        PhysicalOp.LongHashFullOuter(_, _) | PhysicalOp.LongBroadcastLeftOuter(_, _) |
-        PhysicalOp.LongBroadcastRightOuter(_, _) | PhysicalOp.LongBroadcastFullOuter(_, _) |
-        PhysicalOp.LongSortMergeLeftOuter(_, _) | PhysicalOp.LongSortMergeRightOuter(_, _) |
-        PhysicalOp.LongSortMergeFullOuter(_, _) | PhysicalOp.StringHashLeftOuter(_, _) |
-        PhysicalOp.StringHashRightOuter(_, _) | PhysicalOp.StringHashFullOuter(_, _) |
-        PhysicalOp.StringBroadcastLeftOuter(_, _) | PhysicalOp.StringBroadcastRightOuter(_, _) |
-        PhysicalOp.StringBroadcastFullOuter(_, _) | PhysicalOp.StringSortMergeLeftOuter(_, _) |
-        PhysicalOp.StringSortMergeRightOuter(_, _) | PhysicalOp.StringSortMergeFullOuter(_, _) =>
+        PhysicalOp.LongHashJoin(_, _) | PhysicalOp.IntLongHashJoin(_, _) |
+        PhysicalOp.LongSortMergeJoin(_, _) | PhysicalOp.StringHashJoin(_, _) |
+        PhysicalOp.StringSortMergeJoin(_, _) | PhysicalOp.SortMergeJoin(_, _) |
+        PhysicalOp.SortMergeLeftOuter(_, _) | PhysicalOp.SortMergeRightOuter(_, _) |
+        PhysicalOp.SortMergeFullOuter(_, _) | PhysicalOp.HashLeftOuter(_, _) |
+        PhysicalOp.HashRightOuter(_, _) | PhysicalOp.HashFullOuter(_, _) |
+        PhysicalOp.BroadcastJoin(_, _, _) | PhysicalOp.LongBroadcastJoin(_, _, _) |
+        PhysicalOp.StringBroadcastJoin(_, _, _) | PhysicalOp.BroadcastLeftOuter(_, _) |
+        PhysicalOp.BroadcastRightOuter(_, _) | PhysicalOp.BroadcastFullOuter(_, _) |
+        PhysicalOp.SortByIntKey(_) | PhysicalOp.SortByIntValueDesc(_) |
+        PhysicalOp.SortByLongKey(_) | PhysicalOp.SortByStringKey(_) |
+        PhysicalOp.SortByLongValueDesc(_) | PhysicalOp.SortByStringValueDesc(_) |
+        PhysicalOp.SortByIntLongKey(_) | PhysicalOp.SortByIntLongValueDesc(_) |
+        PhysicalOp.Union(_, _) | PhysicalOp.Dedupe(_) | PhysicalOp.LongHashLeftOuter(_, _) |
+        PhysicalOp.LongHashRightOuter(_, _) | PhysicalOp.LongHashFullOuter(_, _) |
+        PhysicalOp.LongBroadcastLeftOuter(_, _) | PhysicalOp.LongBroadcastRightOuter(_, _) |
+        PhysicalOp.LongBroadcastFullOuter(_, _) | PhysicalOp.LongSortMergeLeftOuter(_, _) |
+        PhysicalOp.LongSortMergeRightOuter(_, _) | PhysicalOp.LongSortMergeFullOuter(_, _) |
+        PhysicalOp.StringHashLeftOuter(_, _) | PhysicalOp.StringHashRightOuter(_, _) |
+        PhysicalOp.StringHashFullOuter(_, _) | PhysicalOp.StringBroadcastLeftOuter(_, _) |
+        PhysicalOp.StringBroadcastRightOuter(_, _) | PhysicalOp.StringBroadcastFullOuter(_, _) |
+        PhysicalOp.StringSortMergeLeftOuter(_, _) | PhysicalOp.StringSortMergeRightOuter(_, _) |
+        PhysicalOp.StringSortMergeFullOuter(_, _) =>
       false
 
   /** A key sort is not partition-preserving, and `tryTake` still runs it. */

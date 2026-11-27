@@ -245,6 +245,7 @@ private[execution] object ColumnarInterpreter:
   ): Seq[Partition[_]] =
     if (ExecutionRoute.decodesAsIntLongSum(plan, op)) then intLongSums(columns)
     else if (IntLongMapRun.decodes(op)) then IntLongMapRun.partitions(columns)
+    else if (IntLongJoinColumns.decodes(op)) then IntLongJoinColumns.partitions(columns)
     else
       ColumnDecode.partitions(
         columns,
@@ -268,6 +269,7 @@ private[execution] object ColumnarInterpreter:
    */
   private[execution] def decodePrefixFor(columns: Columns, limit: Int, op: PhysicalOp): Seq[Any] =
     if (IntLongMapRun.decodes(op)) then IntLongMapRun.prefix(columns, limit)
+    else if (IntLongJoinColumns.decodes(op)) then IntLongJoinColumns.prefix(columns, limit)
     else
       decodePrefixWith(
         columns,
@@ -405,7 +407,8 @@ private[execution] object ColumnarInterpreter:
             PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs |
             PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
             PhysicalOp.Kind.LongCountSums | PhysicalOp.Kind.StringCountSums |
-            PhysicalOp.Kind.IntLongSums | PhysicalOp.Kind.GroupedIntLongs =>
+            PhysicalOp.Kind.IntLongSums | PhysicalOp.Kind.GroupedIntLongs |
+            PhysicalOp.Kind.IntLongTriples =>
           throw new IllegalStateException(
             s"physical tree does not match ${plan.getClass.getSimpleName}",
           )
@@ -585,6 +588,8 @@ private[execution] object ColumnarInterpreter:
           PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
         ) if JoinLowering.hintedInnerHashed(strategy) =>
       hashJoinTriples(left, right, leftOp, rightOp, selectedPartition, preserveAbsence, ordinals)
+    case (plan, op) if IntLongJoinColumns.accepts(plan, op) =>
+      IntLongJoinColumns.inner(plan, op, selectedPartition, preserveAbsence, ordinals)
     case (
           Plan.JoinOp(left, right, strategy),
           PhysicalOp.LongHashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),

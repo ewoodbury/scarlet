@@ -123,7 +123,8 @@ private[execution] object ColumnUse:
       Set(0, 1)
     case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
         PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
-        PhysicalOp.Kind.LongCountSums | PhysicalOp.Kind.StringCountSums =>
+        PhysicalOp.Kind.LongCountSums | PhysicalOp.Kind.StringCountSums |
+        PhysicalOp.Kind.IntLongTriples =>
       Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools =>
@@ -141,7 +142,8 @@ private[execution] object ColumnUse:
   private def fullWidth(op: PhysicalOp): Set[Int] = op.kind match
     case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
         PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
-        PhysicalOp.Kind.LongCountSums | PhysicalOp.Kind.StringCountSums =>
+        PhysicalOp.Kind.LongCountSums | PhysicalOp.Kind.StringCountSums |
+        PhysicalOp.Kind.IntLongTriples =>
       Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts |
@@ -199,6 +201,8 @@ private[execution] object ColumnUse:
       case (Plan.JoinOp(left, right, _), PhysicalOp.HashJoin(leftOp, rightOp)) =>
         pair(left, right, leftOp, rightOp)
       case (Plan.JoinOp(left, right, _), PhysicalOp.LongHashJoin(leftOp, rightOp)) =>
+        pair(left, right, leftOp, rightOp)
+      case (Plan.JoinOp(left, right, _), PhysicalOp.IntLongHashJoin(leftOp, rightOp)) =>
         pair(left, right, leftOp, rightOp)
       case (Plan.JoinOp(left, right, _), PhysicalOp.LongSortMergeJoin(leftOp, rightOp)) =>
         pair(left, right, leftOp, rightOp)

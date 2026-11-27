@@ -648,6 +648,7 @@ enum PhysicalOp:
     case IntLongHashAggregate(_) => PhysicalOp.Kind.Pairs
     case IntLongCountSum(_) => PhysicalOp.Kind.CountSums
     case SortByIntLongKey(_) | SortByIntLongValueDesc(_) => PhysicalOp.Kind.Pairs
+    case IntLongHashJoin(_, _) => PhysicalOp.Kind.IntLongTriples
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
     case JoinProbeSum(_, _, _) => PhysicalOp.Kind.IntLongSums
     case LongHashJoin(_, _) | LongBroadcastJoin(_, _, _) | LongSortMergeJoin(_, _) =>
@@ -748,6 +749,7 @@ enum PhysicalOp:
     case IntLongCountSum(child) => s"IntLongCountSum(${child.shape})"
     case SortByIntLongKey(child) => s"SortByIntLongKey(${child.shape})"
     case SortByIntLongValueDesc(child) => s"SortByIntLongValueDesc(${child.shape})"
+    case IntLongHashJoin(left, right) => s"IntLongHashJoin(${left.shape}, ${right.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
     case JoinProbeSum(left, right, measure) =>
       val side = measure match
@@ -839,6 +841,14 @@ enum PhysicalOp:
    */
   case SortByIntLongValueDesc(child: PhysicalOp)
 
+  /**
+   * Inner hash join of two `(Int, Long)` sides. Each child is an [[Exchange]]. The kernel shuffles
+   * on the int key. A null key is dropped. A null long stays null and still matches. Output kind
+   * is [[PhysicalOp.Kind.IntLongTriples]]. The schema is `[Int32, Int64, Int64]`. Broadcast,
+   * sort-merge, and outer joins are not this node. There is no spill.
+   */
+  case IntLongHashJoin(left: PhysicalOp, right: PhysicalOp)
+
 object PhysicalOp:
 
   /**
@@ -860,7 +870,8 @@ object PhysicalOp:
       IntLongSums,
       GroupedIntLongs,
       LongCountSums,
-      StringCountSums
+      StringCountSums,
+      IntLongTriples
 
   /** Which value column [[JoinProbeSum]] adds. `Left` is the build side. */
   enum ProbeMeasure:
