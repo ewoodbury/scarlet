@@ -389,6 +389,22 @@ final case class DistCollection[A](plan: Plan[A]):
     DistCollection(Plan.SortByStringValueDescOp(kvPlan))
 
   /**
+   * Sorts `(Int, Long)` ascending by the int key. A null key orders as zero and stays null. A null
+   * long stays null. The widening, or filters of it, lowers. A second map stays on the row path.
+   * Generic [[sortBy]] stays on the row path.
+   */
+  def sortByIntLongKey(using ev: A =:= (Int, Long)): DistCollection[(Int, Long)] =
+    DistCollection(Plan.SortByIntLongKeyOp(kvPlan))
+
+  /**
+   * Sorts `(Int, Long)` by the long value descending, then the int key ascending. A null long
+   * orders as zero and stays null. One `Long => Long` map of the widening lowers. A filter above
+   * that map stays on the row path. Generic [[sortBy]] stays on the row path.
+   */
+  def sortByIntLongValueDesc(using ev: A =:= (Int, Long)): DistCollection[(Int, Long)] =
+    DistCollection(Plan.SortByIntLongValueDescOp(kvPlan))
+
+  /**
    * Transformation: Joins this collection with another collection by key, requiring a shuffle
    * operation. A null key is dropped on both sides and does not match, for every strategy. Returns
    * a new DistCollection representing the joined data. Does not trigger computation.

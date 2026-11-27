@@ -439,6 +439,26 @@ object Plan {
   case class SortByStringValueDescOp(source: Plan[(String, Int)]) extends Plan[(String, Int)]
 
   /**
+   * Sorts `(Int, Long)` ascending by the int key. A null key orders as zero and stays null. A null
+   * long stays null. The widening, or one filter stack on it, lowers. A second map stays on the
+   * row path.
+   *
+   * @param source
+   *   The preceding plan node.
+   */
+  case class SortByIntLongKeyOp(source: Plan[(Int, Long)]) extends Plan[(Int, Long)]
+
+  /**
+   * Sorts `(Int, Long)` by the long value descending, then the int key ascending. A null orders as
+   * zero and stays null. The widening, a filter stack on it, or one `Long => Long` map of that
+   * child lowers. A filter above that map stays on the row path. Ties keep input order.
+   *
+   * @param source
+   *   The preceding plan node.
+   */
+  case class SortByIntLongValueDescOp(source: Plan[(Int, Long)]) extends Plan[(Int, Long)]
+
+  /**
    * Join execution strategies for physical planning.
    */
   enum JoinStrategy {

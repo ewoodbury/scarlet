@@ -366,7 +366,8 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.BroadcastFullOuter(_, _) | PhysicalOp.SortByIntKey(_) |
         PhysicalOp.SortByIntValueDesc(_) | PhysicalOp.SortByLongKey(_) |
         PhysicalOp.SortByStringKey(_) | PhysicalOp.SortByLongValueDesc(_) |
-        PhysicalOp.SortByStringValueDesc(_) | PhysicalOp.Union(_, _) | PhysicalOp.Dedupe(_) |
+        PhysicalOp.SortByStringValueDesc(_) | PhysicalOp.SortByIntLongKey(_) |
+        PhysicalOp.SortByIntLongValueDesc(_) | PhysicalOp.Union(_, _) | PhysicalOp.Dedupe(_) |
         PhysicalOp.LongHashLeftOuter(_, _) | PhysicalOp.LongHashRightOuter(_, _) |
         PhysicalOp.LongHashFullOuter(_, _) | PhysicalOp.LongBroadcastLeftOuter(_, _) |
         PhysicalOp.LongBroadcastRightOuter(_, _) | PhysicalOp.LongBroadcastFullOuter(_, _) |
@@ -527,6 +528,7 @@ trait ColumnarContractFixture extends Matchers:
     case Plan.SortByStringKeyOp(_) => PlanNode.SortBy
     case Plan.SortByLongValueDescOp(_) => PlanNode.SortBy
     case Plan.SortByStringValueDescOp(_) => PlanNode.SortBy
+    case Plan.SortByIntLongKeyOp(_) | Plan.SortByIntLongValueDescOp(_) => PlanNode.SortBy
     case Plan.JoinOp(_, _, _) => PlanNode.Join
     case Plan.LeftOuterJoinOp(_, _, _) => PlanNode.Join
     case Plan.RightOuterJoinOp(_, _, _) => PlanNode.Join

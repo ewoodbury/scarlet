@@ -284,6 +284,8 @@ private[execution] object RowBoundary:
       case Plan.SortByStringKeyOp(source) => trusted(source)
       case Plan.SortByLongValueDescOp(source) => trusted(source)
       case Plan.SortByStringValueDescOp(source) => trusted(source)
+      case Plan.SortByIntLongKeyOp(source) => trusted(source)
+      case Plan.SortByIntLongValueDescOp(source) => trusted(source)
 
   private def numeric(descriptor: Plan.SourceDescriptor): Boolean =
     descriptor match

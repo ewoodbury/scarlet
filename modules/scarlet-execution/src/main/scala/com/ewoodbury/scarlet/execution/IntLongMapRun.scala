@@ -20,7 +20,9 @@ private[execution] object IntLongMapRun:
    */
   def decodes(op: PhysicalOp): Boolean =
     IntLongParents.widened(op) || (op match
-      case _: PhysicalOp.IntLongHashAggregate => true
+      case _: PhysicalOp.IntLongHashAggregate | _: PhysicalOp.SortByIntLongKey |
+          _: PhysicalOp.SortByIntLongValueDesc =>
+        true
       case _ => false)
 
   def columns(input: Columns, mapper: Any): Columns =

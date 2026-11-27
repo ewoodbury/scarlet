@@ -77,6 +77,11 @@ private[execution] object ColumnDecoders:
           throw new IllegalStateException(
             "SortByStringValueDesc is decoded as string pairs, not int pairs",
           )
+      case _: PhysicalOp.SortByIntLongKey | _: PhysicalOp.SortByIntLongValueDesc =>
+        (_, _) =>
+          throw new IllegalStateException(
+            "int-long sort is decoded as int-long pairs, not int pairs",
+          )
       case _ => (batch, rows) => BatchCodec.decodeIntPairs(batch, rows)
 
   /**

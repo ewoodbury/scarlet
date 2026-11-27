@@ -872,6 +872,10 @@ object ColumnarPlanner:
       SortLowering.lowerLongValue(source, lowerPlan)
     case Plan.SortByStringValueDescOp(source) =>
       SortLowering.lowerStringValue(source, lowerPlan)
+    case Plan.SortByIntLongKeyOp(source) =>
+      SortLowering.lowerIntLongKey(source, lowerPlan)
+    case Plan.SortByIntLongValueDescOp(source) =>
+      SortLowering.lowerIntLongValue(source, lowerPlan)
     case _ => None
 
   private[execution] def elementSteps(
@@ -1074,6 +1078,10 @@ object ColumnarPlanner:
       SortLowering.infoValueDesc(shuffleWidth, layoutOf(PhysicalOp.Kind.LongPairs))
     case _: PhysicalOp.SortByStringValueDesc =>
       SortLowering.infoValueDesc(shuffleWidth, layoutOf(PhysicalOp.Kind.StringPairs))
+    case _: PhysicalOp.SortByIntLongKey =>
+      SortLowering.info(shuffleWidth, layoutOf(PhysicalOp.Kind.Pairs))
+    case _: PhysicalOp.SortByIntLongValueDesc =>
+      SortLowering.infoValueDesc(shuffleWidth, layoutOf(PhysicalOp.Kind.Pairs))
     case _: PhysicalOp.HashAggregate | _: PhysicalOp.LongHashAggregate =>
       hashed(PhysicalOp.Kind.Pairs)
     case _: PhysicalOp.StringHashAggregate =>

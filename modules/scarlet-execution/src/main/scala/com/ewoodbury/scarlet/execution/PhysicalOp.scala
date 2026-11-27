@@ -647,6 +647,7 @@ enum PhysicalOp:
     case StringCountSum(_) => PhysicalOp.Kind.StringCountSums
     case IntLongHashAggregate(_) => PhysicalOp.Kind.Pairs
     case IntLongCountSum(_) => PhysicalOp.Kind.CountSums
+    case SortByIntLongKey(_) | SortByIntLongValueDesc(_) => PhysicalOp.Kind.Pairs
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
     case JoinProbeSum(_, _, _) => PhysicalOp.Kind.IntLongSums
     case LongHashJoin(_, _) | LongBroadcastJoin(_, _, _) | LongSortMergeJoin(_, _) =>
@@ -745,6 +746,8 @@ enum PhysicalOp:
     case StringCountSum(child) => s"StringCountSum(${child.shape})"
     case IntLongHashAggregate(child) => s"IntLongHashAggregate(${child.shape})"
     case IntLongCountSum(child) => s"IntLongCountSum(${child.shape})"
+    case SortByIntLongKey(child) => s"SortByIntLongKey(${child.shape})"
+    case SortByIntLongValueDesc(child) => s"SortByIntLongValueDesc(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
     case JoinProbeSum(left, right, measure) =>
       val side = measure match
@@ -819,6 +822,22 @@ enum PhysicalOp:
    * [[PhysicalOp.Kind.CountSums]]. The schema is `[Int32, Int64, Int64]`. There is no spill path.
    */
   case IntLongCountSum(child: PhysicalOp)
+
+  /**
+   * Global sort of `(Int, Long)` by the int key ascending. A null key orders as zero and stays
+   * null. A null long stays null. One filter of the widening lowers. A second map stays on the row
+   * path. Output kind is [[PhysicalOp.Kind.Pairs]]. The schema is `[Int32, Int64]`. There is no
+   * spill. The ordering tag is ascending on column 0.
+   */
+  case SortByIntLongKey(child: PhysicalOp)
+
+  /**
+   * Global sort of `(Int, Long)` by the long value descending, then the int key ascending. A null
+   * long orders as zero and stays null. A null key orders as zero and stays null. Ties keep input
+   * order. Output kind is [[PhysicalOp.Kind.Pairs]]. The schema is `[Int32, Int64]`. There is no
+   * spill. `take` is not a separate heap.
+   */
+  case SortByIntLongValueDesc(child: PhysicalOp)
 
 object PhysicalOp:
 

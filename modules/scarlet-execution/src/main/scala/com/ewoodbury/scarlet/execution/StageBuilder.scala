@@ -747,6 +747,28 @@ object StageBuilder:
           dependencies,
         )
 
+      case intLongKey: Plan.SortByIntLongKeyOp =>
+        SortStages.shuffle(
+          ctx,
+          intLongKey.source,
+          SortStages.intLongKey,
+          Ordering.Int,
+          intLongKey,
+          builderMap,
+          dependencies,
+        )
+
+      case intLongValue: Plan.SortByIntLongValueDescOp =>
+        SortStages.shuffle(
+          ctx,
+          intLongValue.source,
+          SortStages.intLongValueKey,
+          Ordering.Tuple2(Ordering.Long.reverse, Ordering.Int),
+          intLongValue,
+          builderMap,
+          dependencies,
+        )
+
       case pby: Plan.PartitionByOp[_, _] =>
         val (sourceStageId, _) = buildStagesFromPlan(ctx, pby.source, builderMap, dependencies)
         val src = builderMap(sourceStageId)

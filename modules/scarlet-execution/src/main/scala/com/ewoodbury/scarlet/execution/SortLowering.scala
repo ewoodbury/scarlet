@@ -71,7 +71,8 @@ private[execution] object SortLowering:
   def acceptsAsChild(op: PhysicalOp): Boolean = op match
     case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByIntValueDesc |
         _: PhysicalOp.SortByLongKey | _: PhysicalOp.SortByStringKey |
-        _: PhysicalOp.SortByLongValueDesc | _: PhysicalOp.SortByStringValueDesc =>
+        _: PhysicalOp.SortByLongValueDesc | _: PhysicalOp.SortByStringValueDesc |
+        _: PhysicalOp.SortByIntLongKey | _: PhysicalOp.SortByIntLongValueDesc =>
       false
     case _ => true
 
@@ -146,6 +147,61 @@ private[execution] object SortLowering:
       acceptsStringValueChild,
       PhysicalOp.SortByStringValueDesc(_),
     )
+
+  /**
+   * Bare widening, or filters of it. A second map stays on the row path. `choose` is not called.
+   */
+  def lowerIntLongKey(
+      source: Plan[(Int, Long)],
+      lowerPlan: Plan[_] => Option[PhysicalOp],
+  ): Option[PhysicalOp] =
+    lowerWidened(
+      lowerPlan(source),
+      "SortByIntLongKeyOp",
+      intLongKeyChild,
+      PhysicalOp.SortByIntLongKey(_),
+    )
+
+  /** The key-sort child, or one `Long => Long` map of it. A filter above that map stays empty. */
+  def lowerIntLongValue(
+      source: Plan[(Int, Long)],
+      lowerPlan: Plan[_] => Option[PhysicalOp],
+  ): Option[PhysicalOp] =
+    lowerWidened(
+      lowerPlan(source),
+      "SortByIntLongValueDescOp",
+      intLongValueChild,
+      PhysicalOp.SortByIntLongValueDesc(_),
+    )
+
+  /** Shape check only. [[Output.IntLongPairs]] is not fed to [[ColumnBinding.choose]]. */
+  private def lowerWidened(
+      lowered: Option[PhysicalOp],
+      node: String,
+      accepts: PhysicalOp => Boolean,
+      build: PhysicalOp => PhysicalOp,
+  ): Option[PhysicalOp] =
+    lowered match
+      case Some(child) if accepts(child) => Some(build(child))
+      case Some(child) =>
+        LoweringTrace.note(node, child.kind, "SortLowering")
+        None
+      case None =>
+        LoweringTrace.noteIfEmpty(node, "SortLowering")
+        None
+
+  /**
+   * [[PhysicalOp.IntLongMapValue]], or a filter stack on it. A map of that widening is refused.
+   */
+  private def intLongKeyChild(op: PhysicalOp): Boolean = op match
+    case _: PhysicalOp.IntLongMapValue => true
+    case PhysicalOp.Filter(child, _) => intLongKeyChild(child)
+    case _ => false
+
+  /** [[intLongKeyChild]], or one [[PhysicalOp.MapValue]] of that child. */
+  private def intLongValueChild(op: PhysicalOp): Boolean = op match
+    case PhysicalOp.MapValue(child) => intLongKeyChild(child)
+    case other => intLongKeyChild(other)
 
   /**
    * Ask [[ColumnBinding]] before building. [[scala.None]] from the binder stays [[scala.None]]. A

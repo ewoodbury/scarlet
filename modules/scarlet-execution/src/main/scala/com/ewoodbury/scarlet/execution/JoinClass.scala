@@ -129,6 +129,7 @@ private[execution] object JoinClass:
           KernelChoice.SortByIntKey | KernelChoice.SortByIntValueDesc |
           KernelChoice.SortByLongKey | KernelChoice.SortByStringKey |
           KernelChoice.SortByLongValueDesc | KernelChoice.SortByStringValueDesc |
+          KernelChoice.SortByIntLongKey | KernelChoice.SortByIntLongValueDesc |
           KernelChoice.GroupByKey | KernelChoice.GroupedDecode | KernelChoice.Dedupe |
           KernelChoice.Scan | KernelChoice.Filter | KernelChoice.Project | KernelChoice.Column |
           KernelChoice.MapValue | KernelChoice.IntLongMapValue | KernelChoice.MapKey |
