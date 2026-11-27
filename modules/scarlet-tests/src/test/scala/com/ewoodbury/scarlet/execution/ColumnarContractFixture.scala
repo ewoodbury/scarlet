@@ -356,36 +356,37 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.LongHashAggregate(_) | PhysicalOp.StringHashAggregate(_) |
         PhysicalOp.GroupByKey(_) | PhysicalOp.GroupedDecode(_) | PhysicalOp.CountByKey(_) |
         PhysicalOp.CountSum(_) | PhysicalOp.LongCountSum(_) | PhysicalOp.StringCountSum(_) |
-        PhysicalOp.IntLongHashAggregate(_) | PhysicalOp.IntLongCountSum(_) |
-        PhysicalOp.JoinProbeSum(_, _, _) | PhysicalOp.HashJoin(_, _) |
-        PhysicalOp.LongHashJoin(_, _) | PhysicalOp.IntLongHashJoin(_, _) |
-        PhysicalOp.IntLongHashLeftOuter(_, _) | PhysicalOp.IntLongHashRightOuter(_, _) |
-        PhysicalOp.IntLongHashFullOuter(_, _) | PhysicalOp.IntLongBroadcastJoin(_, _, _) |
-        PhysicalOp.IntLongBroadcastLeftOuter(_, _) | PhysicalOp.IntLongBroadcastRightOuter(_, _) |
-        PhysicalOp.IntLongBroadcastFullOuter(_, _) | PhysicalOp.IntLongSortMergeJoin(_, _) |
-        PhysicalOp.IntLongSortMergeLeftOuter(_, _) | PhysicalOp.IntLongSortMergeRightOuter(_, _) |
-        PhysicalOp.IntLongSortMergeFullOuter(_, _) | PhysicalOp.LongSortMergeJoin(_, _) |
-        PhysicalOp.StringHashJoin(_, _) | PhysicalOp.StringSortMergeJoin(_, _) |
-        PhysicalOp.SortMergeJoin(_, _) | PhysicalOp.SortMergeLeftOuter(_, _) |
-        PhysicalOp.SortMergeRightOuter(_, _) | PhysicalOp.SortMergeFullOuter(_, _) |
-        PhysicalOp.HashLeftOuter(_, _) | PhysicalOp.HashRightOuter(_, _) |
-        PhysicalOp.HashFullOuter(_, _) | PhysicalOp.BroadcastJoin(_, _, _) |
-        PhysicalOp.LongBroadcastJoin(_, _, _) | PhysicalOp.StringBroadcastJoin(_, _, _) |
-        PhysicalOp.BroadcastLeftOuter(_, _) | PhysicalOp.BroadcastRightOuter(_, _) |
-        PhysicalOp.BroadcastFullOuter(_, _) | PhysicalOp.SortByIntKey(_) |
-        PhysicalOp.SortByIntValueDesc(_) | PhysicalOp.SortByLongKey(_) |
-        PhysicalOp.SortByStringKey(_) | PhysicalOp.SortByLongValueDesc(_) |
-        PhysicalOp.SortByStringValueDesc(_) | PhysicalOp.SortByIntLongKey(_) |
-        PhysicalOp.SortByIntLongValueDesc(_) | PhysicalOp.Union(_, _) | PhysicalOp.Dedupe(_) |
-        PhysicalOp.LongHashLeftOuter(_, _) | PhysicalOp.LongHashRightOuter(_, _) |
-        PhysicalOp.LongHashFullOuter(_, _) | PhysicalOp.LongBroadcastLeftOuter(_, _) |
-        PhysicalOp.LongBroadcastRightOuter(_, _) | PhysicalOp.LongBroadcastFullOuter(_, _) |
-        PhysicalOp.LongSortMergeLeftOuter(_, _) | PhysicalOp.LongSortMergeRightOuter(_, _) |
-        PhysicalOp.LongSortMergeFullOuter(_, _) | PhysicalOp.StringHashLeftOuter(_, _) |
-        PhysicalOp.StringHashRightOuter(_, _) | PhysicalOp.StringHashFullOuter(_, _) |
-        PhysicalOp.StringBroadcastLeftOuter(_, _) | PhysicalOp.StringBroadcastRightOuter(_, _) |
-        PhysicalOp.StringBroadcastFullOuter(_, _) | PhysicalOp.StringSortMergeLeftOuter(_, _) |
-        PhysicalOp.StringSortMergeRightOuter(_, _) | PhysicalOp.StringSortMergeFullOuter(_, _) =>
+        PhysicalOp.IntExtremum(_, _) | PhysicalOp.IntLongHashAggregate(_) |
+        PhysicalOp.IntLongCountSum(_) | PhysicalOp.JoinProbeSum(_, _, _) |
+        PhysicalOp.HashJoin(_, _) | PhysicalOp.LongHashJoin(_, _) |
+        PhysicalOp.IntLongHashJoin(_, _) | PhysicalOp.IntLongHashLeftOuter(_, _) |
+        PhysicalOp.IntLongHashRightOuter(_, _) | PhysicalOp.IntLongHashFullOuter(_, _) |
+        PhysicalOp.IntLongBroadcastJoin(_, _, _) | PhysicalOp.IntLongBroadcastLeftOuter(_, _) |
+        PhysicalOp.IntLongBroadcastRightOuter(_, _) | PhysicalOp.IntLongBroadcastFullOuter(_, _) |
+        PhysicalOp.IntLongSortMergeJoin(_, _) | PhysicalOp.IntLongSortMergeLeftOuter(_, _) |
+        PhysicalOp.IntLongSortMergeRightOuter(_, _) | PhysicalOp.IntLongSortMergeFullOuter(_, _) |
+        PhysicalOp.LongSortMergeJoin(_, _) | PhysicalOp.StringHashJoin(_, _) |
+        PhysicalOp.StringSortMergeJoin(_, _) | PhysicalOp.SortMergeJoin(_, _) |
+        PhysicalOp.SortMergeLeftOuter(_, _) | PhysicalOp.SortMergeRightOuter(_, _) |
+        PhysicalOp.SortMergeFullOuter(_, _) | PhysicalOp.HashLeftOuter(_, _) |
+        PhysicalOp.HashRightOuter(_, _) | PhysicalOp.HashFullOuter(_, _) |
+        PhysicalOp.BroadcastJoin(_, _, _) | PhysicalOp.LongBroadcastJoin(_, _, _) |
+        PhysicalOp.StringBroadcastJoin(_, _, _) | PhysicalOp.BroadcastLeftOuter(_, _) |
+        PhysicalOp.BroadcastRightOuter(_, _) | PhysicalOp.BroadcastFullOuter(_, _) |
+        PhysicalOp.SortByIntKey(_) | PhysicalOp.SortByIntValueDesc(_) |
+        PhysicalOp.SortByLongKey(_) | PhysicalOp.SortByStringKey(_) |
+        PhysicalOp.SortByLongValueDesc(_) | PhysicalOp.SortByStringValueDesc(_) |
+        PhysicalOp.SortByIntLongKey(_) | PhysicalOp.SortByIntLongValueDesc(_) |
+        PhysicalOp.Union(_, _) | PhysicalOp.Dedupe(_) | PhysicalOp.LongHashLeftOuter(_, _) |
+        PhysicalOp.LongHashRightOuter(_, _) | PhysicalOp.LongHashFullOuter(_, _) |
+        PhysicalOp.LongBroadcastLeftOuter(_, _) | PhysicalOp.LongBroadcastRightOuter(_, _) |
+        PhysicalOp.LongBroadcastFullOuter(_, _) | PhysicalOp.LongSortMergeLeftOuter(_, _) |
+        PhysicalOp.LongSortMergeRightOuter(_, _) | PhysicalOp.LongSortMergeFullOuter(_, _) |
+        PhysicalOp.StringHashLeftOuter(_, _) | PhysicalOp.StringHashRightOuter(_, _) |
+        PhysicalOp.StringHashFullOuter(_, _) | PhysicalOp.StringBroadcastLeftOuter(_, _) |
+        PhysicalOp.StringBroadcastRightOuter(_, _) | PhysicalOp.StringBroadcastFullOuter(_, _) |
+        PhysicalOp.StringSortMergeLeftOuter(_, _) | PhysicalOp.StringSortMergeRightOuter(_, _) |
+        PhysicalOp.StringSortMergeFullOuter(_, _) =>
       false
 
   /** A key sort is not partition-preserving, and `tryTake` still runs it. */
@@ -526,7 +527,7 @@ trait ColumnarContractFixture extends Matchers:
     case Plan.GroupByKeyOp(_) => PlanNode.GroupByKey
     case Plan.CountByKeyOp(_) => PlanNode.CountByKey
     case Plan.CountSumByKeyOp(_) | Plan.CountSumByLongKeyOp(_) | Plan.CountSumByStringKeyOp(_) |
-        Plan.CountSumByIntLongKeyOp(_) =>
+        Plan.CountSumByIntLongKeyOp(_) | Plan.ExtremumByKeyOp(_, _) =>
       PlanNode.CountSumByKey
     case Plan.ReduceByKeyOp(_, _) => PlanNode.ReduceByKey
     case Plan.SortByOp(_, _, _) => PlanNode.SortBy

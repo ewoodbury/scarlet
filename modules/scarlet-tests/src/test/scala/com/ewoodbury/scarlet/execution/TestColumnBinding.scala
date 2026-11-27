@@ -171,6 +171,7 @@ class TestColumnBinding extends AnyFlatSpec with Matchers:
     case Operator.Project => "project"
     case Operator.Pipeline => "pipeline"
     case Operator.Union => "union"
+    case Operator.ExtremumByKey => "extremumByKey"
 
   private val table: Vector[Cell] = Vector(
     accepted(

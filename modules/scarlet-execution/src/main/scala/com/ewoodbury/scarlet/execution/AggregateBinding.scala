@@ -65,6 +65,16 @@ private[execution] object AggregateBinding:
       CountSumLowering.apply,
     )
 
+  /** Int min or max. `minimum` selects the min. Long and string keys are not this method. */
+  def extremum(
+      source: Plan[_],
+      minimum: Boolean,
+      lowerChild: Plan[_] => Option[PhysicalOp],
+  ): Option[PhysicalOp] =
+    kept(source, lowerChild, Operator.ExtremumByKey, ReducerWitness.NotApplicable) { child =>
+      ExtremumLowering(child, minimum)
+    }
+
   /**
    * Tag [[ColumnBinding]] returns for `source` after the selection peel.
    *

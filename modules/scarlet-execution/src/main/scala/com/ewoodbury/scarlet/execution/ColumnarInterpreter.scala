@@ -570,6 +570,8 @@ private[execution] object ColumnarInterpreter:
           CountByKeyArms.columns(source, child, selectedPartition, preserveAbsence, ordinals)
     case (plan, op) if CountSumColumns.accepts(plan, op) =>
       CountSumColumns.dispatch(plan, op, selectedPartition, preserveAbsence, ordinals)
+    case (plan, op) if ExtremumColumns.accepts(plan, op) =>
+      ExtremumColumns.dispatch(plan, op, selectedPartition, preserveAbsence, ordinals)
     case (
           Plan.ReduceByKeyOp(source, reduceFunc),
           PhysicalOp.IntLongHashAggregate(PhysicalOp.Exchange(child)),

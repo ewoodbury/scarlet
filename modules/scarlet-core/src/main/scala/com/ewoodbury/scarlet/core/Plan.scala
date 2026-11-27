@@ -599,4 +599,19 @@ object Plan {
    */
   case class CoGroupOp[K, V, W](left: Plan[(K, V)], right: Plan[(K, W)])
       extends Plan[(K, (Iterable[V], Iterable[W]))]
+
+  /**
+   * Min or max of `(Int, Int)` pairs by key.
+   *
+   * A null key is dropped. A null value is skipped. A key whose values are all null emits no row.
+   * `minimum` selects the min. One `(key, value)` row is published per distinct key that has a
+   * present value. This is a typed witness. A generic `groupByKey` followed by `map` stays
+   * [[GroupByKeyOp]] and does not become this node.
+   *
+   * @param source
+   *   The preceding plan node, producing `(Int, Int)` pairs.
+   * @param minimum
+   *   True for the minimum value, false for the maximum.
+   */
+  case class ExtremumByKeyOp(source: Plan[(Int, Int)], minimum: Boolean) extends Plan[(Int, Int)]
 }

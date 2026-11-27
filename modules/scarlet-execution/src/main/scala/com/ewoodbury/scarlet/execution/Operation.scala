@@ -90,6 +90,12 @@ final case class CountSumByStringKeyWideOp(meta: SimpleWideOpMeta) extends WideO
 
 /** Keyed count and sum of `(Int, Long)`. The writer hashes by the int key. */
 final case class CountSumByIntLongKeyWideOp(meta: SimpleWideOpMeta) extends WideOp
+
+/**
+ * Keyed min or max of `(Int, Int)`. The metadata reuses [[WideOpKind.GroupByKey]] so the writer
+ * hashes by key. `minimum` selects the min.
+ */
+final case class ExtremumByKeyWideOp(meta: SimpleWideOpMeta, minimum: Boolean) extends WideOp
 final case class ReduceByKeyWideOp[V](meta: ReduceWideOpMeta[V]) extends WideOp
 final case class SortByWideOp[A, B](meta: SortWideOpMeta[A, B]) extends WideOp
 final case class PartitionByWideOp(meta: SimpleWideOpMeta) extends WideOp
@@ -146,6 +152,12 @@ final case class CountSumByStringKeyLocalOp() extends Operation[(String, Int), (
 
 /** Local count and sum of an already key-hashed `(Int, Long)` partition. */
 final case class CountSumByIntLongKeyLocalOp() extends Operation[(Int, Long), (Int, Int, Long)]
+
+/**
+ * Local min or max of an already key-hashed `(Int, Int)` partition. A null key is dropped. A null
+ * value is skipped. A key whose values are all null emits no row.
+ */
+final case class ExtremumByKeyLocalOp(minimum: Boolean) extends Operation[(Int, Int), (Int, Int)]
 final case class ReduceByKeyLocalOp[K, V](reduceFunc: (V, V) => V)
     extends Operation[(K, V), (K, V)]
 final case class PartitionByLocalOp[K, V](numPartitions: Int) extends Operation[(K, V), (K, V)]
@@ -200,7 +212,7 @@ object Operation {
     plan match {
       case _: Plan.GroupByKeyOp[_, _] | _: Plan.CountByKeyOp[_, _] | _: Plan.ReduceByKeyOp[_, _] |
           _: Plan.CountSumByKeyOp | _: Plan.CountSumByLongKeyOp | _: Plan.CountSumByStringKeyOp |
-          _: Plan.CountSumByIntLongKeyOp =>
+          _: Plan.CountSumByIntLongKeyOp | _: Plan.ExtremumByKeyOp =>
         // Already hash-partitioned at the default shuffle width.
         upstreamPartitioning.exists(_.isHashPartitioned(conf.defaultShufflePartitions))
 

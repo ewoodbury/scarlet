@@ -25,10 +25,11 @@ object PlanWide {
     // Direct wide operations - all operations that require shuffle boundaries
     case _: Plan.GroupByKeyOp[_, _] | _: Plan.CountByKeyOp[_, _] | _: Plan.ReduceByKeyOp[_, _] |
         _: Plan.CountSumByKeyOp | _: Plan.CountSumByLongKeyOp | _: Plan.CountSumByStringKeyOp |
-        _: Plan.CountSumByIntLongKeyOp | _: Plan.SortByOp[_, _] | _: Plan.SortByIntKeyOp |
-        _: Plan.SortByIntValueDescOp | _: Plan.SortByLongKeyOp | _: Plan.SortByStringKeyOp |
-        _: Plan.SortByLongValueDescOp | _: Plan.SortByStringValueDescOp |
-        _: Plan.SortByIntLongKeyOp | _: Plan.SortByIntLongValueDescOp | _: Plan.JoinOp[_, _, _] |
+        _: Plan.CountSumByIntLongKeyOp | _: Plan.ExtremumByKeyOp | _: Plan.SortByOp[_, _] |
+        _: Plan.SortByIntKeyOp | _: Plan.SortByIntValueDescOp | _: Plan.SortByLongKeyOp |
+        _: Plan.SortByStringKeyOp | _: Plan.SortByLongValueDescOp |
+        _: Plan.SortByStringValueDescOp | _: Plan.SortByIntLongKeyOp |
+        _: Plan.SortByIntLongValueDescOp | _: Plan.JoinOp[_, _, _] |
         _: Plan.LeftOuterJoinOp[_, _, _] | _: Plan.RightOuterJoinOp[_, _, _] |
         _: Plan.FullOuterJoinOp[_, _, _] | _: Plan.CoGroupOp[_, _, _] | _: Plan.RepartitionOp[_] |
         _: Plan.CoalesceOp[_] | _: Plan.PartitionByOp[_, _] | _: Plan.DistinctOp[_] =>
@@ -67,10 +68,11 @@ object PlanWide {
   def isDirectlyWide(plan: Plan[_]): Boolean = plan match {
     case _: Plan.GroupByKeyOp[_, _] | _: Plan.CountByKeyOp[_, _] | _: Plan.ReduceByKeyOp[_, _] |
         _: Plan.CountSumByKeyOp | _: Plan.CountSumByLongKeyOp | _: Plan.CountSumByStringKeyOp |
-        _: Plan.CountSumByIntLongKeyOp | _: Plan.SortByOp[_, _] | _: Plan.SortByIntKeyOp |
-        _: Plan.SortByIntValueDescOp | _: Plan.SortByLongKeyOp | _: Plan.SortByStringKeyOp |
-        _: Plan.SortByLongValueDescOp | _: Plan.SortByStringValueDescOp |
-        _: Plan.SortByIntLongKeyOp | _: Plan.SortByIntLongValueDescOp | _: Plan.JoinOp[_, _, _] |
+        _: Plan.CountSumByIntLongKeyOp | _: Plan.ExtremumByKeyOp | _: Plan.SortByOp[_, _] |
+        _: Plan.SortByIntKeyOp | _: Plan.SortByIntValueDescOp | _: Plan.SortByLongKeyOp |
+        _: Plan.SortByStringKeyOp | _: Plan.SortByLongValueDescOp |
+        _: Plan.SortByStringValueDescOp | _: Plan.SortByIntLongKeyOp |
+        _: Plan.SortByIntLongValueDescOp | _: Plan.JoinOp[_, _, _] |
         _: Plan.LeftOuterJoinOp[_, _, _] | _: Plan.RightOuterJoinOp[_, _, _] |
         _: Plan.FullOuterJoinOp[_, _, _] | _: Plan.CoGroupOp[_, _, _] | _: Plan.RepartitionOp[_] |
         _: Plan.CoalesceOp[_] | _: Plan.PartitionByOp[_, _] | _: Plan.DistinctOp[_] =>
