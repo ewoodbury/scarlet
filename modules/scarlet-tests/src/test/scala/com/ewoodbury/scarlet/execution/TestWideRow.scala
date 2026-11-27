@@ -5,18 +5,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
-import com.ewoodbury.scarlet.core.{
-  Cell,
-  ColumnCompare,
-  ColumnField,
-  ColumnKind,
-  ColumnLiteral,
-  CompareOp,
-  Plan,
-  ScarletConf,
-  WideInput,
-  WideRow,
-}
+import com.ewoodbury.scarlet.core.*
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**

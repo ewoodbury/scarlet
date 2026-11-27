@@ -2,14 +2,7 @@ package com.ewoodbury.scarlet.api
 
 import java.lang.reflect.InvocationTargetException
 
-import com.ewoodbury.scarlet.core.{
-  ColumnCompare,
-  ExecutionService,
-  Partition,
-  Plan,
-  WideInput,
-  WideRow,
-}
+import com.ewoodbury.scarlet.core.*
 
 /**
  * A lazy, immutable representation of a "distributed" collection. Operations build up a Plan,

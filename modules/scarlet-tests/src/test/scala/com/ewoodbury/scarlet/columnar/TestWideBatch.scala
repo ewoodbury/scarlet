@@ -3,15 +3,7 @@ package com.ewoodbury.scarlet.columnar
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import com.ewoodbury.scarlet.core.{
-  Cell,
-  ColumnCompare,
-  ColumnLiteral,
-  CompareOp,
-  WideColumns,
-  WideInput,
-  WideRow,
-}
+import com.ewoodbury.scarlet.core.*
 
 /**
  * Wide-row filter and project against the row fold.

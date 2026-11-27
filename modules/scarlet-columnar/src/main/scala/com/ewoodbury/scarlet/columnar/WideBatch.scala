@@ -1,22 +1,6 @@
 package com.ewoodbury.scarlet.columnar
 
-import com.ewoodbury.scarlet.core.{
-  Cell,
-  ColumnCompare,
-  ColumnField,
-  ColumnKind,
-  ColumnLiteral,
-  CompareOp,
-  WideBool,
-  WideColumn,
-  WideColumns,
-  WideFloat32,
-  WideFloat64,
-  WideInt32,
-  WideInt64,
-  WideRow,
-  WideUtf8,
-}
+import com.ewoodbury.scarlet.core.*
 
 /**
  * Scan, filter, and project of a wide row.
