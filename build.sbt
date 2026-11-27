@@ -126,6 +126,15 @@ lazy val `scarlet-columnar` = (project in file("modules/scarlet-columnar"))
   )
   .dependsOn(`scarlet-core`)
 
+// SQL frontend. scarlet-core and scarlet-api do not depend on the parser.
+lazy val `scarlet-sql` = (project in file("modules/scarlet-sql"))
+  .settings(
+    name := "scarlet-sql",
+    commonSettings,
+    libraryDependencies += "com.github.jsqlparser" % "jsqlparser" % "5.3",
+  )
+  .dependsOn(`scarlet-api`)
+
 // Test module aggregating all tests
 lazy val `scarlet-tests` = (project in file("modules/scarlet-tests"))
   .settings(
@@ -133,7 +142,7 @@ lazy val `scarlet-tests` = (project in file("modules/scarlet-tests"))
     commonSettings,
     libraryDependencies ++= Seq(scalatest % Test)
   )
-  .dependsOn(`scarlet-api`, `scarlet-execution`, `scarlet-runtime`, `scarlet-columnar`)
+  .dependsOn(`scarlet-api`, `scarlet-execution`, `scarlet-runtime`, `scarlet-columnar`, `scarlet-sql`)
 
 // Root aggregator
 lazy val root = (project in file("."))
@@ -143,6 +152,7 @@ lazy val root = (project in file("."))
     `scarlet-runtime`,
     `scarlet-execution`,
     `scarlet-columnar`,
+    `scarlet-sql`,
     `scarlet-tests`
   )
   .settings(
