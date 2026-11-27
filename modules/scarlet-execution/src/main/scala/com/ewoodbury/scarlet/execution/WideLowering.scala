@@ -70,6 +70,24 @@ private[execution] object WideLowering:
       case _ =>
         None
 
+  def group(
+      source: com.ewoodbury.scarlet.core.Plan[WideRow],
+      key: Int,
+      measure: Int,
+      lowerChild: com.ewoodbury.scarlet.core.Plan[_] => Option[PhysicalOp],
+  ): Option[PhysicalOp] =
+    lowerChild(source).flatMap { child =>
+      fieldsOf(child) match
+        case Some(fields)
+            if com.ewoodbury.scarlet.core.WideAggregate.output(fields, key, measure).isDefined =>
+          Some(PhysicalOp.WideGroup(child, key, measure))
+        case Some(_) =>
+          LoweringTrace.note("WideGroupOp", child.kind, "WideLowering")
+          None
+        case None =>
+          None
+    }
+
   def project(
       source: com.ewoodbury.scarlet.core.Plan[WideRow],
       spec: Vector[(Int, String)],
@@ -112,6 +130,10 @@ private[execution] object WideLowering:
       joinedFields(left, right, rightKey)
     case PhysicalOp.WideBroadcastJoin(left, right, _, rightKey) =>
       joinedFields(left, right, rightKey)
+    case PhysicalOp.WideGroup(child, key, measure) =>
+      fieldsOf(child).flatMap { fields =>
+        com.ewoodbury.scarlet.core.WideAggregate.output(fields, key, measure)
+      }
     case _ =>
       None
 

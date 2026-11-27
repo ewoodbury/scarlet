@@ -111,6 +111,14 @@ final case class DistCollection[A](plan: Plan[A]):
     )
 
   /**
+   * Groups by one int or long column and computes count, sum, min, and max of one numeric column.
+   * A null key is dropped. A null measure is counted and skipped by sum, min, and max. One pass.
+   * This does not build value lists.
+   */
+  def groupColumns(key: Int, measure: Int)(using ev: A =:= WideRow): DistCollection[WideRow] =
+    DistCollection(Plan.WideGroupOp(widePlan, key, measure))
+
+  /**
    * Sums one long column. A null slot contributes nothing. The total wraps. A columnar plan adds
    * that column with the existing long sum and does not decode the row.
    */

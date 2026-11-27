@@ -858,6 +858,8 @@ object ColumnarPlanner:
       WideLowering.compute(source, expr, name, lowerChild)
     case Plan.WideJoinOp(left, right, leftKey, rightKey, broadcast) =>
       WideLowering.join(left, right, leftKey, rightKey, broadcast, lowerChild)
+    case Plan.WideGroupOp(source, key, measure) =>
+      WideLowering.group(source, key, measure, lowerChild)
     case plan if JoinLowering.isJoin(plan) => JoinLowering.lower(plan, lowerChild)
     case Plan.SortByIntKeyOp(source) =>
       SortLowering.lowerInt(source, lowerPlan)
@@ -1108,7 +1110,7 @@ object ColumnarPlanner:
     case PhysicalOp.WideFilter(child, _, _) => infoOf(child)
     case PhysicalOp.WideProject(child, _) => infoOf(child)
     case PhysicalOp.WideCompute(child, _, _) => infoOf(child)
-    case _: PhysicalOp.WideHashJoin | _: PhysicalOp.WideBroadcastJoin =>
+    case _: PhysicalOp.WideHashJoin | _: PhysicalOp.WideBroadcastJoin | _: PhysicalOp.WideGroup =>
       hashed(PhysicalOp.Kind.Columns)
     case _: PhysicalOp.JoinProbeSum =>
       hashed(PhysicalOp.Kind.IntLongSums)

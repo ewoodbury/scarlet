@@ -41,6 +41,13 @@ private[execution] object MixedAction:
           .getOrElse(WideJoinRows.partitions(join))
           .asInstanceOf[Seq[Partition[A]]],
       )
+    case group: Plan.WideGroupOp =>
+      freeze(
+        ColumnarPlanner
+          .tryRun(group)
+          .getOrElse(WideGroupRows.partitions(group))
+          .asInstanceOf[Seq[Partition[A]]],
+      )
     case other =>
       freeze(MixedJoin.partitions(other).getOrElse(runRow(other)))
 
