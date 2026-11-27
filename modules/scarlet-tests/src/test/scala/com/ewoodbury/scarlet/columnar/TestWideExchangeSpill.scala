@@ -12,8 +12,7 @@ import com.ewoodbury.scarlet.core.*
  * A wide scan exchanged through the existing spill store.
  *
  * Spill on writes each over-budget bucket and reads it back, including a clear validity bit. The
- * default configuration writes nothing. A float column stays in memory because the store refuses
- * it.
+ * default configuration writes nothing. Float, float32, and bool columns use the same store.
  */
 class TestWideExchangeSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -125,11 +124,11 @@ class TestWideExchangeSpill extends AnyFlatSpec with Matchers with BeforeAndAfte
     }
   }
 
-  "a float payload" should "stay in memory when the store cannot write it" in {
+  "a float payload" should "spill when the exchange is over budget" in {
     val table = WideColumns(
       Vector(
         WideInput.ints("k", Array(1, 2)),
-        WideInput.doubles("v", Array(1.5, 2.5)),
+        WideInput.nullableDoubles("v", Array(1.5, 0.0), Array(true, false)),
       ),
     )
     withConf(1L, enabled = true) { dir =>
@@ -137,9 +136,48 @@ class TestWideExchangeSpill extends AnyFlatSpec with Matchers with BeforeAndAfte
         WideExchange.exchange(Vector(WideBatch.encode(table)), 0, false, 1, 1, ScarletConf.get)
       rows(exchanged, table.fields) shouldBe Vector(
         Vector(Cell.Int32(1), Cell.Float64(1.5)),
+        Vector(Cell.Int32(2), Cell.Null),
+      )
+      WideExchange.filesWrittenForTest shouldBe 1L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+  }
+
+  "a float payload" should "stay in memory when spill is off" in {
+    val table = WideColumns(
+      Vector(
+        WideInput.ints("k", Array(1, 2)),
+        WideInput.doubles("v", Array(1.5, 2.5)),
+      ),
+    )
+    withConf(1L, enabled = false) { dir =>
+      val exchanged =
+        WideExchange.exchange(Vector(WideBatch.encode(table)), 0, false, 1, 1, ScarletConf.get)
+      rows(exchanged, table.fields) shouldBe Vector(
+        Vector(Cell.Int32(1), Cell.Float64(1.5)),
         Vector(Cell.Int32(2), Cell.Float64(2.5)),
       )
       WideExchange.filesWrittenForTest shouldBe 0L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+  }
+
+  "a float32 and a bool payload" should "spill when the exchange is over budget" in {
+    val table = WideColumns(
+      Vector(
+        WideInput.ints("k", Array(1, 2)),
+        WideInput.nullableFloats("n", Array(1.25f, 0.0f), Array(true, false)),
+        WideInput.bools("b", Array(true, false)),
+      ),
+    )
+    withConf(1L, enabled = true) { dir =>
+      val exchanged =
+        WideExchange.exchange(Vector(WideBatch.encode(table)), 0, false, 1, 1, ScarletConf.get)
+      rows(exchanged, table.fields) shouldBe Vector(
+        Vector(Cell.Int32(1), Cell.Float32(1.25f), Cell.Bool(true)),
+        Vector(Cell.Int32(2), Cell.Null, Cell.Bool(false)),
+      )
+      WideExchange.filesWrittenForTest shouldBe 1L
       SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
     }
   }

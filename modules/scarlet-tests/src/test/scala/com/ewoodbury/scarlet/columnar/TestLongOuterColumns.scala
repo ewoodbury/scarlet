@@ -77,7 +77,7 @@ class TestLongOuterColumns extends AnyFlatSpec with Matchers:
         int64(plainRead.head).absence shouldBe None
       }
     }
-    SpillLayout.Version shouldBe 2
+    SpillLayout.Version shouldBe 3
   }
 
   it should "write a zero absence bitmap for a plain batch in a tag 4 file" in {

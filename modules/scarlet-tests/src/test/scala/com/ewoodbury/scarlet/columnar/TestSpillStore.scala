@@ -22,6 +22,13 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
     bytes(at) = (bytes(at) ^ 0xff).toByte
     Files.write(location, bytes)
 
+  private def patchVersion(location: Path, version: Int): Unit =
+    val bytes = Files.readAllBytes(location)
+    val header = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    header.position(8)
+    header.putInt(version)
+    Files.write(location, bytes)
+
   private def tempDir(): Path =
     Files.createTempDirectory("scarlet-spill-test")
 
@@ -38,8 +45,13 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
 
   private def intPairBatch(rows: Seq[(Int, Int)]): ColumnBatch =
     val keys = Int32Column.of(rows.map(_._1).toArray, Validity.allValid(rows.length), rows.length)
-    val values = Int64Column.of(rows.map(_._2.toLong).toArray, Validity.allValid(rows.length), rows.length)
-    new ColumnBatch(Vector(LogicalType.Int32, LogicalType.Int64), Vector(keys, values), rows.length)
+    val values =
+      Int64Column.of(rows.map(_._2.toLong).toArray, Validity.allValid(rows.length), rows.length)
+    new ColumnBatch(
+      Vector(LogicalType.Int32, LogicalType.Int64),
+      Vector(keys, values),
+      rows.length,
+    )
 
   private def nullableIntBatch(rows: Seq[Option[Int]]): ColumnBatch =
     val words = Validity.allocate(rows.length)
@@ -53,7 +65,6 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
     }
     val column = Int32Column.of(values, Validity.fromWords(words, rows.length), rows.length)
     new ColumnBatch(Vector(LogicalType.Int32), Vector(column), rows.length)
-
 
   private def stringPair(keys: Seq[Option[String]], values: Seq[Int]): ColumnBatch =
     val column = DictUtf8Column.fromNullable(keys)
@@ -87,7 +98,9 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
         (0 until right.length).map(rightKeys.isValid)
       val leftValues = int32(left)
       val rightValues = int32(right)
-      leftValues.values.take(left.length).toSeq shouldBe rightValues.values.take(right.length).toSeq
+      leftValues.values
+        .take(left.length)
+        .toSeq shouldBe rightValues.values.take(right.length).toSeq
       (0 until left.length).map(leftValues.isValid) shouldBe
         (0 until right.length).map(rightValues.isValid)
     }
@@ -130,10 +143,14 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
     crc.update(bytes, offset, length)
     crc.getValue.toInt
 
-  private def fingerprint(batch: ColumnBatch): (Vector[LogicalType], Int, Vector[Vector[(Long, Boolean)]]) =
+  private def fingerprint(
+      batch: ColumnBatch,
+  ): (Vector[LogicalType], Int, Vector[Vector[(Long, Boolean)]]) =
     val columns = batch.columns.map {
       case column: Int32Column =>
-        (0 until batch.length).map(row => (column.values(row).toLong, column.isValid(row))).toVector
+        (0 until batch.length)
+          .map(row => (column.values(row).toLong, column.isValid(row)))
+          .toVector
       case column: Int64Column =>
         (0 until batch.length).map(row => (column.values(row), column.isValid(row))).toVector
       case other => fail(s"unexpected column ${other.logicalType}")
@@ -273,7 +290,7 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
         val file = store.write(batches)
         val raw = Files.readAllBytes(file.location)
         val header = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
-        SpillLayout.Version shouldBe 2
+        SpillLayout.Version shouldBe 3
         SpillLayout.Utf8Tag shouldBe 3
         header.position(8)
         header.getInt shouldBe SpillLayout.Version
@@ -322,22 +339,65 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
     }
   }
 
-  test("refuses Float64 and Bool columns") {
+  test("round-trips Float64, Float32, and Bool, including a clear bit") {
     withDir { dir =>
-      val floats = Float64Column.of(Array(1.0), Validity.allValid(1), 1)
-      val floatBatch = new ColumnBatch(Vector(LogicalType.Float64), Vector(floats), 1)
-      val flags = BoolColumn.of(Array(1.toByte), Validity.allValid(1), 1)
-      val boolBatch = new ColumnBatch(Vector(LogicalType.Bool), Vector(flags), 1)
+      val present = Validity.pack(2, row => row == 0)
+      val floats = Float64Column.of(Array(1.5, 0.0), present, 2)
+      val narrow = Float32Column.of(Array(1.25f, 0.0f), present, 2)
+      val flags = BoolColumn.of(Array(1.toByte, 0.toByte), present, 2)
+      val batch = new ColumnBatch(
+        Vector(LogicalType.Float64, LogicalType.Float32, LogicalType.Bool),
+        Vector(floats, narrow, flags),
+        2,
+      )
       val store = SpillStore.open(dir)
       try
-        val floatRefusal = intercept[IllegalArgumentException] {
-          val _ = store.write(Vector(floatBatch))
+        val read = store.write(Vector(batch)).read()
+        read should have length 1
+        val columns = read.head.columns
+        columns.length shouldBe 3
+        columns(0) match
+          case column: Float64Column =>
+            column.values(0) shouldBe 1.5
+            column.isValid(1) shouldBe false
+          case other => fail(s"expected Float64, got ${other.logicalType}")
+        columns(1) match
+          case column: Float32Column =>
+            column.values(0) shouldBe 1.25f
+            column.isValid(0) shouldBe true
+          case other => fail(s"expected Float32, got ${other.logicalType}")
+        columns(2) match
+          case column: BoolColumn =>
+            column.values(0) shouldBe 1.toByte
+            column.isValid(1) shouldBe false
+          case other => fail(s"expected Bool, got ${other.logicalType}")
+      finally store.close()
+    }
+  }
+
+  test("a version-2 int file still reads") {
+    withDir { dir =>
+      val store = SpillStore.open(dir)
+      try
+        val file = store.write(Vector(intBatch(Seq(1, 2))))
+        patchVersion(file.location, 2)
+        file.read().map(_.length) shouldBe Vector(2)
+      finally store.close()
+    }
+  }
+
+  test("a version-2 file refuses a float tag") {
+    withDir { dir =>
+      val floats = Float64Column.of(Array(1.0), Validity.allValid(1), 1)
+      val batch = new ColumnBatch(Vector(LogicalType.Float64), Vector(floats), 1)
+      val store = SpillStore.open(dir)
+      try
+        val file = store.write(Vector(batch))
+        patchVersion(file.location, 2)
+        val refused = intercept[IllegalArgumentException] {
+          val _ = file.read()
         }
-        val boolRefusal = intercept[IllegalArgumentException] {
-          val _ = store.write(Vector(boolBatch))
-        }
-        floatRefusal.getMessage should include("Float64")
-        boolRefusal.getMessage should include("Bool")
+        refused.getMessage should include("unknown spill column tag")
       finally store.close()
     }
   }

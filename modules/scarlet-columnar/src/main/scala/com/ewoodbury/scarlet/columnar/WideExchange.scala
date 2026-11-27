@@ -11,9 +11,8 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * [[HashJoin.retainedBuildBytes]] prices an int key. [[LongHashJoin.retainedBuildBytes]] prices a
  * long key. Spill is off unless [[ScarletConf.spillEnabled]] is set. A bucket at or under
  * [[ScarletConf.spillBudgetBytes]], an empty bucket, and every bucket while spill is off, stays in
- * memory and opens no store. Float64, Float32, and Bool stay in memory too: the store refuses
- * them, and this path does not add a codec. Int32, Int64, and dictionary strings are written with
- * their validity words.
+ * memory and opens no store. Int32, Int64, Float64, Float32, Bool, and dictionary strings are
+ * written with their validity words. Any other column stays in memory.
  *
  * [[exchange]] partitions with [[HashExchange.partitionAll]] or
  * [[HashExchange.partitionAllInt64]]. A null key is dropped. A null in another column is copied.
@@ -128,6 +127,8 @@ private[scarlet] object WideExchange:
 
   private def spillable(batch: ColumnBatch): Boolean =
     batch.schema.forall {
-      case LogicalType.Int32 | LogicalType.Int64 | LogicalType.Utf8Dict => true
+      case LogicalType.Int32 | LogicalType.Int64 | LogicalType.Utf8Dict | LogicalType.Float64 |
+          LogicalType.Float32 | LogicalType.Bool =>
+        true
       case _ => false
     }

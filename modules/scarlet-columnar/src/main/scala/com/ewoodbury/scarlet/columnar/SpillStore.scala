@@ -18,12 +18,12 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * A spill file is a header, a payload, a footer, and a CRC32 of the footer. The header holds the
  * magic `SCRSPILL`, the version, the schema, the batch count, and the footer offset and length.
  * Each footer record holds the batch's file offset, byte length, row count, and a CRC32 of that
- * batch's bytes. Int32 and Int64 columns are stored with their validity words. A dictionary string
- * column stores its validity words, then the dictionary, then the codes. The dictionary is an int
- * count followed by each entry's UTF-16 code-unit count and code units. A zero-row batch is legal.
- * Float64, Bool, and any other column type are refused. The version is 2; the Utf8 tag is new to
- * that version, so a version-2 reader from before this change refuses these files by tag, not by
- * version.
+ * batch's bytes. Int32, Int64, Float64, Float32, and Bool columns are stored with their validity
+ * words, then the values. A dictionary string column stores its validity words, then the
+ * dictionary, then the codes. The dictionary is an int count followed by each entry's UTF-16
+ * code-unit count and code units. A zero-row batch is legal. Any other column type is refused. The
+ * writer uses version 3. A version-2 file still reads Int32, Int64, and Utf8Dict. A Float64,
+ * Float32, or Bool tag in a version-2 file is refused by tag.
  *
  * The bytes are written to `<id>.<pid>.tmp`, fsynced, then moved into `<id>.<pid>.spill` with an
  * atomic move. `maxFiles` and `maxBytes` are exclusive upper bounds on the files this store has
@@ -83,7 +83,7 @@ final class SpillStore private (
     synchronized {
       if (closed.get()) then throw new IllegalStateException("spill store is closed")
       tags.foreach { tag =>
-        val _ = SpillLayout.logicalType(tag)
+        val _ = SpillLayout.logicalType(tag, SpillLayout.Version)
       }
       val records = published.get
       if (records.length + 1 >= maxFiles) then
@@ -269,6 +269,9 @@ object SpillStore:
     case _: Int32Column => ()
     case _: Int64Column => ()
     case _: DictUtf8Column => ()
+    case _: Float64Column => ()
+    case _: Float32Column => ()
+    case _: BoolColumn => ()
     case other =>
       throw new IllegalArgumentException(s"${other.logicalType} columns cannot be spilled")
 
@@ -344,13 +347,18 @@ private[columnar] trait SpillBatchWriter:
 private[columnar] object SpillLayout:
 
   val MagicText: String = "SCRSPILL"
-  val Version: Int = 2
+
+  /** Writer version. Readers also accept version 2, which has no float or bool tags. */
+  val Version: Int = 3
   val Int32Tag: Int = 1
   val Int64Tag: Int = 2
   val Utf8Tag: Int = 3
 
-  /** An `Int64` column that also stores an outer-join absence bitmap. Version stays 2. */
+  /** An `Int64` column that also stores an outer-join absence bitmap. Present since version 2. */
   val Int64AbsentTag: Int = 4
+  val Float64Tag: Int = 5
+  val Float32Tag: Int = 6
+  val BoolTag: Int = 7
 
   /** Offset, length, row count, and the CRC32 of that batch. */
   val FooterEntryBytes: Int = 24
@@ -369,13 +377,24 @@ private[columnar] object SpillLayout:
     case LogicalType.Int32 => Int32Tag
     case LogicalType.Int64 => Int64Tag
     case LogicalType.Utf8Dict => Utf8Tag
-    case other => throw new IllegalArgumentException(s"$other columns cannot be spilled")
+    case LogicalType.Float64 => Float64Tag
+    case LogicalType.Float32 => Float32Tag
+    case LogicalType.Bool => BoolTag
 
-  def logicalType(tag: Int): LogicalType = tag match
+  /**
+   * Column type of `tag` in a file of `version`. Float and bool tags exist only in version 3, so a
+   * version-2 file that carries one is refused here.
+   */
+  def logicalType(tag: Int, version: Int): LogicalType = tag match
     case Int32Tag => LogicalType.Int32
     case Int64Tag | Int64AbsentTag => LogicalType.Int64
     case Utf8Tag => LogicalType.Utf8Dict
+    case Float64Tag if version >= Version => LogicalType.Float64
+    case Float32Tag if version >= Version => LogicalType.Float32
+    case BoolTag if version >= Version => LogicalType.Bool
     case other => throw new IllegalArgumentException(s"unknown spill column tag $other")
+
+  def accepts(version: Int): Boolean = version == 2 || version == Version
 
 private object SpillCodec:
 
@@ -456,6 +475,15 @@ private object SpillCodec:
         writeValidity(channel, crc, utf8.validity, utf8.length) +
           writeDictionary(channel, crc, utf8.dictionary) +
           writeInts(channel, crc, utf8.codes, utf8.length)
+      case float64: Float64Column =>
+        writeValidity(channel, crc, float64.validity, float64.length) +
+          writeDoubles(channel, crc, float64.values, float64.length)
+      case float32: Float32Column =>
+        writeValidity(channel, crc, float32.validity, float32.length) +
+          writeFloats(channel, crc, float32.values, float32.length)
+      case bools: BoolColumn =>
+        writeValidity(channel, crc, bools.validity, bools.length) +
+          writeBytes(channel, crc, bools.values, bools.length)
       case other =>
         throw new IllegalArgumentException(s"${other.logicalType} columns cannot be spilled")
 
@@ -518,6 +546,36 @@ private object SpillCodec:
   ): Long =
     val buffer = ByteBuffer.allocate(length * 8).order(ByteOrder.LITTLE_ENDIAN)
     (0 until length).foreach(row => buffer.putLong(values(row)))
+    writeFully(channel, crc, buffer.array(), checksum = true)
+
+  private def writeDoubles(
+      channel: FileChannel,
+      crc: CRC32,
+      values: Array[Double],
+      length: Int,
+  ): Long =
+    val buffer = ByteBuffer.allocate(length * 8).order(ByteOrder.LITTLE_ENDIAN)
+    (0 until length).foreach(row => buffer.putDouble(values(row)))
+    writeFully(channel, crc, buffer.array(), checksum = true)
+
+  private def writeFloats(
+      channel: FileChannel,
+      crc: CRC32,
+      values: Array[Float],
+      length: Int,
+  ): Long =
+    val buffer = ByteBuffer.allocate(length * 4).order(ByteOrder.LITTLE_ENDIAN)
+    (0 until length).foreach(row => buffer.putFloat(values(row)))
+    writeFully(channel, crc, buffer.array(), checksum = true)
+
+  private def writeBytes(
+      channel: FileChannel,
+      crc: CRC32,
+      values: Array[Byte],
+      length: Int,
+  ): Long =
+    val buffer = ByteBuffer.allocate(length)
+    buffer.put(values, 0, length)
     writeFully(channel, crc, buffer.array(), checksum = true)
 
   private def writeAbsence(channel: FileChannel, crc: CRC32, column: Int64Column): Long =
@@ -611,19 +669,20 @@ private object SpillCodec:
     header.get(magic)
     require(Arrays.equals(magic, SpillLayout.magic), "spill magic mismatch")
     val version = header.getInt
-    require(version == SpillLayout.Version, s"spill version $version is not supported")
+    require(SpillLayout.accepts(version), s"spill version $version is not supported")
     val columnCount = header.getInt
     require(columnCount >= 0, s"column count must be >= 0, got $columnCount")
     require(columnCount <= (Int.MaxValue - 32) / 4, "spill schema is too wide")
     columnCount
 
   private final case class ParsedHeader(
+      version: Int,
       tags: Vector[Int],
       batchCount: Int,
       footerOffset: Long,
       footerLength: Int,
   ):
-    def schema: Vector[LogicalType] = tags.map(SpillLayout.logicalType)
+    def schema: Vector[LogicalType] = tags.map(tag => SpillLayout.logicalType(tag, version))
 
   private def parseHeader(bytes: Array[Byte]): ParsedHeader =
     val header = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
@@ -631,13 +690,13 @@ private object SpillCodec:
     header.get(magic)
     require(Arrays.equals(magic, SpillLayout.magic), "spill magic mismatch")
     val version = header.getInt
-    require(version == SpillLayout.Version, s"spill version $version is not supported")
+    require(SpillLayout.accepts(version), s"spill version $version is not supported")
     val columnCount = header.getInt
     require(columnCount >= 0, s"column count must be >= 0, got $columnCount")
     require(bytes.length >= SpillLayout.headerSize(columnCount), "truncated spill file")
     val tags = (0 until columnCount).iterator.map(_ => header.getInt).toVector
     tags.foreach { tag =>
-      val _ = SpillLayout.logicalType(tag)
+      val _ = SpillLayout.logicalType(tag, version)
     }
     val batchCount = header.getInt
     require(batchCount >= 0, s"batch count must be >= 0, got $batchCount")
@@ -656,7 +715,7 @@ private object SpillCodec:
       footerOffset >= SpillLayout.headerSize(columnCount).toLong,
       "spill footer starts inside the header",
     )
-    ParsedHeader(tags, batchCount, footerOffset, footerLength)
+    ParsedHeader(version, tags, batchCount, footerOffset, footerLength)
 
   private def verifyFooter(footer: Array[Byte], storedBytes: Array[Byte]): Unit =
     val crc = new CRC32
@@ -690,7 +749,11 @@ private object SpillCodec:
     val cursor = new Cursor(bytes)
     val columns = tags.map(tag => readColumn(cursor, tag, rows))
     require(cursor.remaining == 0, "spill batch length does not match its columns")
-    new ColumnBatch(tags.map(SpillLayout.logicalType), columns, rows)
+    new ColumnBatch(
+      tags.map(tag => SpillLayout.logicalType(tag, SpillLayout.Version)),
+      columns,
+      rows,
+    )
 
   private def concat(prefix: Array[Byte], rest: Array[Byte]): Array[Byte] =
     val all = new Array[Byte](prefix.length + rest.length)
@@ -716,7 +779,7 @@ private object SpillCodec:
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private final class Writer(channel: FileChannel, tags: Vector[Int]) extends SpillBatchWriter:
 
-    private val schema = tags.map(SpillLayout.logicalType)
+    private val schema = tags.map(tag => SpillLayout.logicalType(tag, SpillLayout.Version))
     private var spans = Vector.empty[BatchSpan]
 
     def write(batch: ColumnBatch): Unit =
@@ -786,6 +849,12 @@ private object SpillCodec:
       case SpillLayout.Utf8Tag =>
         val dictionary = readDictionary(cursor)
         DictUtf8Column.of(dictionary, readInts(cursor, rows), validity, rows)
+      case SpillLayout.Float64Tag =>
+        Float64Column.of(readDoubles(cursor, rows), validity, rows)
+      case SpillLayout.Float32Tag =>
+        Float32Column.of(readFloats(cursor, rows), validity, rows)
+      case SpillLayout.BoolTag =>
+        BoolColumn.of(readBytes(cursor, rows), validity, rows)
       case other =>
         throw new IllegalArgumentException(s"unknown spill column tag $other")
 
@@ -824,6 +893,19 @@ private object SpillCodec:
     (0 until rows).foreach(row => values(row) = cursor.getLong)
     values
 
+  private def readDoubles(cursor: Cursor, rows: Int): Array[Double] =
+    val values = new Array[Double](rows)
+    (0 until rows).foreach(row => values(row) = cursor.getDouble)
+    values
+
+  private def readFloats(cursor: Cursor, rows: Int): Array[Float] =
+    val values = new Array[Float](rows)
+    (0 until rows).foreach(row => values(row) = cursor.getFloat)
+    values
+
+  private def readBytes(cursor: Cursor, rows: Int): Array[Byte] =
+    cursor.getBytes(rows)
+
   private final class Cursor(bytes: Array[Byte]):
     private val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
 
@@ -836,6 +918,14 @@ private object SpillCodec:
     def getLong: Long =
       require(buffer.remaining >= 8, "truncated spill file")
       buffer.getLong
+
+    def getDouble: Double =
+      require(buffer.remaining >= 8, "truncated spill file")
+      buffer.getDouble
+
+    def getFloat: Float =
+      require(buffer.remaining >= 4, "truncated spill file")
+      buffer.getFloat
 
     def getChar: Char =
       require(buffer.remaining >= 2, "truncated spill file")
