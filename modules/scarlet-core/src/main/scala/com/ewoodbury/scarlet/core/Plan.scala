@@ -658,15 +658,16 @@ object Plan {
       extends Plan[WideRow]
 
   /**
-   * Inner join of two wide rows on one int or long column. `broadcast` names the build. A null key
-   * is dropped. A null payload stays. Output is every left column, then every right column except
-   * the key.
+   * Inner join of two wide rows on one int or long column. The right side is the build. An empty
+   * `broadcast` lets the cost rule choose. `Some(true)` broadcasts and `Some(false)` hashes. A
+   * null key is dropped. A null payload stays. Output is every left column, then every right
+   * column except the key.
    */
   case class WideJoinOp(
       left: Plan[WideRow],
       right: Plan[WideRow],
       leftKey: Int,
       rightKey: Int,
-      broadcast: Boolean,
+      broadcast: Option[Boolean],
   ) extends Plan[WideRow]
 }

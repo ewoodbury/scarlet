@@ -127,8 +127,10 @@ class TestJoinClass extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   }
 
   "a real join" should "lower int pairs to the int class and long pairs to the long class" in {
-    shape(ints.join(ints).plan, "HashJoin(Exchange(Scan), Exchange(Scan))")
-    shape(longs.join(longs).plan, "LongHashJoin(Exchange(Scan), Exchange(Scan))")
+    shape(ints.join(ints).plan, "BroadcastJoin(Scan, Scan)")
+    shape(longs.join(longs).plan, "LongBroadcastJoin(Scan, Scan)")
+    shape(ints.shuffleHashJoin(ints).plan, "HashJoin(Exchange(Scan), Exchange(Scan))")
+    shape(longs.shuffleHashJoin(longs).plan, "LongHashJoin(Exchange(Scan), Exchange(Scan))")
     shape(
       Plan.JoinOp(strings, strings, None),
       "StringHashJoin(Exchange(Scan), Exchange(Scan))",

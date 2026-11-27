@@ -320,7 +320,7 @@ class TestPhysicalPlan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val probe = DistCollection(Seq(1 -> 10), 1)
     val joined = build.join(probe)
     shape(joined) shouldBe
-      "HashJoin(Exchange(HashAggregate(Exchange(Scan))), Exchange(Scan))"
+      "BroadcastJoin(HashAggregate(Exchange(Scan)), Scan)"
     joined.collect().toMap shouldBe Map(1 -> ((3, 10)))
   }
 

@@ -15,8 +15,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Plan-level proof of where a stack of unfused filters compacts. Counts are
  * [[ColumnMetrics.batchCount]], not wall time. Collect and take of a two-filter int-pair or
  * int-triple stack decode the survivor index and do not publish the compact. Interpreting that
- * stack still compacts. A single-column chain publishes one batch per filter. One pair slot
- * filter decodes a survivor index. Its interpret still chains the existing kernel.
+ * stack still compacts. A single-column chain publishes one batch per filter. One pair slot filter
+ * decodes a survivor index. Its interpret still chains the existing kernel.
  */
 class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -298,8 +298,8 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
   "triple filters" should "decode two column filters without publishing the compact" in {
     val build = DistCollection.ofIntPairs(Array(1, 2, 3, 4), Array(10, 20, 30, 40), 1)
     val probe = DistCollection.ofIntPairs(Array(1, 2, 4), Array(7, 8, 9), 1)
-    val stacked = build.join(probe).filterJoinKey(_ % 2 == 0).filterJoinLeft(_ >= 20)
-    val joined = build.join(probe)
+    val stacked = build.shuffleHashJoin(probe).filterJoinKey(_ % 2 == 0).filterJoinLeft(_ >= 20)
+    val joined = build.shuffleHashJoin(probe)
 
     shape(stacked.plan) shouldBe
       "FilterTripleLeftValue(FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan))))"

@@ -97,7 +97,7 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       (-1L, (3L, 30L)),
     )
 
-    val joined = left.join(right)
+    val joined = left.shuffleHashJoin(right)
     agree(joined, expected)
     val parts = longTripleBatches(joined.plan)
     parts.length shouldBe 4
@@ -121,7 +121,7 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       (wide, (11L, 201L)),
     )
 
-    val joined = left.join(right)
+    val joined = left.shuffleHashJoin(right)
     agree(joined, expected)
     val parts = longTripleBatches(joined.plan)
     parts.length shouldBe 4
@@ -145,10 +145,9 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       layout,
     )
 
-    ColumnarPlanner.partitioning(joined.plan) shouldBe Some(info)
     ColumnarPlanner.partitioning(hinted.plan) shouldBe Some(info)
     ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
-      "LongHashJoin(Exchange(Scan), Exchange(Scan))",
+      "LongBroadcastJoin(Scan, Scan)",
     )
     ColumnarPlanner.lower(hinted.plan).map(_.shape) shouldBe Some(
       "LongHashJoin(Exchange(Scan), Exchange(Scan))",
@@ -184,7 +183,7 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
         rightDescriptor shouldBe Plan.SourceDescriptor.Unknown
       case other => fail(s"expected an unknown-descriptor join, got $other")
     ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
-      "LongHashJoin(Exchange(Scan), Exchange(Scan))",
+      "LongBroadcastJoin(Scan, Scan)",
     )
     ColumnarPlanner.tryRun(joined.plan).isDefined shouldBe true
     val expected = Seq(
@@ -274,7 +273,7 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       "LongBroadcastJoin(Scan, Scan)",
     )
     ColumnarPlanner.lower(plain.plan).map(_.shape) shouldBe Some(
-      "LongHashJoin(Exchange(Scan), Exchange(Scan))",
+      "LongBroadcastJoin(Scan, Scan)",
     )
     val lowered =
       ColumnarPlanner.lower(broadcast.plan).getOrElse(fail("broadcast was refused"))
@@ -298,7 +297,7 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     thrown should not be a[ColumnarFallback]
     thrown.getMessage shouldBe
       s"broadcast build table retains about $estimate bytes for $rows rows, " +
-        s"above the budget of ${estimate - 1L} bytes"
+      s"above the budget of ${estimate - 1L} bytes"
     LongHashJoinSpill.filesWrittenForTest shouldBe 0L
     an[IllegalStateException] should be thrownBy left.broadcastJoin(right).collect()
     LongHashJoinSpill.filesWrittenForTest shouldBe 0L
@@ -332,7 +331,7 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       "LongSortMergeJoin(Exchange(Scan), Exchange(Scan))",
     )
     ColumnarPlanner.lower(left.join(right).plan).map(_.shape) shouldBe Some(
-      "LongHashJoin(Exchange(Scan), Exchange(Scan))",
+      "LongBroadcastJoin(Scan, Scan)",
     )
     ColumnarPlanner.lower(left.broadcastJoin(right).plan).map(_.shape) shouldBe Some(
       "LongBroadcastJoin(Scan, Scan)",

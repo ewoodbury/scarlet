@@ -144,7 +144,7 @@ class TestStringSortMergeJoin extends AnyFlatSpec with Matchers with BeforeAndAf
       PhysicalOp.Kind.StringTriples,
     )
     ColumnarPlanner.lower(left.join(right).plan).map(_.shape) shouldBe Some(
-      "StringHashJoin(Exchange(Scan), Exchange(Scan))",
+      "StringBroadcastJoin(Scan, Scan)",
     )
     ColumnarPlanner.lower(left.shuffleHashJoin(right).plan).map(_.shape) shouldBe Some(
       "StringHashJoin(Exchange(Scan), Exchange(Scan))",

@@ -43,7 +43,7 @@ class TestIntPairFilterJoin extends AnyFlatSpec with Matchers with BeforeAndAfte
     val probeValues = Array(10, 11, 12, 13)
     val left = filtered(keys, values)
     val right = DistCollection.ofIntPairs(probeKeys, probeValues, 2)
-    val joined = left.join(right)
+    val joined = left.shuffleHashJoin(right)
     val (plan, op, leftPlan, leftOp, rightPlan, rightOp) = lowered(joined.plan)
     val ordinals = ColumnUse.ordinals(plan, op)
 
@@ -73,10 +73,10 @@ class TestIntPairFilterJoin extends AnyFlatSpec with Matchers with BeforeAndAfte
     val miss = DistCollection.ofIntPairs(Array(8, 9), Array(1, 2), 2)
     val duplicated = DistCollection.ofIntPairs(Array(1, 1), Array(100, 101), 1)
 
-    agree(empty.join(present))
-    agree(present.join(empty))
-    agree(present.join(miss))
-    agree(present.join(duplicated))
+    agree(empty.shuffleHashJoin(present))
+    agree(present.shuffleHashJoin(empty))
+    agree(present.shuffleHashJoin(miss))
+    agree(present.shuffleHashJoin(duplicated))
     empty.join(present).count() shouldBe 0L
     present.join(empty).count() shouldBe 0L
     present.join(miss).count() shouldBe 0L
@@ -116,7 +116,7 @@ class TestIntPairFilterJoin extends AnyFlatSpec with Matchers with BeforeAndAfte
       .filterKeys((key: Int) => key % 3 != 0)
       .filterValues((value: Int) => value >= 0)
     val right = DistCollection.ofIntPairs(Array(1, 1), Array(10, 11), 1)
-    val joined = left.join(right)
+    val joined = left.shuffleHashJoin(right)
     val (plan, op, leftPlan, leftOp, rightPlan, rightOp) = lowered(joined.plan)
     val ordinals = ColumnUse.ordinals(plan, op)
 

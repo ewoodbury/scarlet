@@ -14,10 +14,10 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * One map directly above `groupByKey` decodes the grouped batch once.
  *
- * The function still sees `(K, Iterable[V])`. `values` and `take` stay on the row path. Int,
- * long, and string `keys` stay `Key(CountByKey(Exchange(Scan)))`. A second map stays on the row
- * path. A map above a sort stays on the row path. A map above a long join stays on the row path.
- * A map above an int inner join stays the triple project it already was.
+ * The function still sees `(K, Iterable[V])`. `values` and `take` stay on the row path. Int, long,
+ * and string `keys` stay `Key(CountByKey(Exchange(Scan)))`. A second map stays on the row path. A
+ * map above a sort stays on the row path. A map above a long join stays on the row path. A map
+ * above an int inner join stays the triple project it already was.
  */
 class TestGroupedDecode extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -89,12 +89,10 @@ class TestGroupedDecode extends AnyFlatSpec with Matchers with BeforeAndAfterEac
   it should "scan the group once" in {
     val calls = new AtomicInteger
     val source = DistCollection.ofIntPairs(Array(1, 1, 2, 3), Array(10, 11, 20, 30), 2)
-    val grouped = source
-      .filterKeys { (_: Int) =>
-        val _ = calls.incrementAndGet()
-        true
-      }
-      .groupByKey
+    val grouped = source.filterKeys { (_: Int) =>
+      val _ = calls.incrementAndGet()
+      true
+    }.groupByKey
     val mapped = grouped.map { case (key, values) => (key, values.toSeq) }
 
     ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some(
@@ -188,7 +186,7 @@ class TestGroupedDecode extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val mapped = left.join(right).map { case (key, pair) => (key, (pair._1, pair._2)) }
 
     ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some(
-      "Project(HashJoin(Exchange(Scan), Exchange(Scan)))",
+      "Project(BroadcastJoin(Scan, Scan))",
     )
     mapped.collect().toMap shouldBe row(mapped.collect().toMap)
   }

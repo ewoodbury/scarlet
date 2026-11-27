@@ -90,7 +90,10 @@ class TestSortMergeJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       nullable(Seq((None, Some(99)), (Some(0), Some(1)), (Some(4), Some(8)))),
       nullable(Seq((None, Some(7)), (Some(0), Some(5)), (Some(3), Some(3)))),
     )
-    BatchCodec.decodeIntTriples(keyOnly) should contain theSameElementsAs rowPairs(leftKeys, rightKeys)
+    BatchCodec.decodeIntTriples(keyOnly) should contain theSameElementsAs rowPairs(
+      leftKeys,
+      rightKeys,
+    )
     rowPairs(leftKeys, rightKeys) should contain theSameElementsAs Seq(0 -> ((1, 5)))
   }
 
@@ -243,16 +246,18 @@ class TestSortMergeJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(shape)
     }
     ColumnarPlanner.tryTake(strings.plan, 1) shouldBe None
-    val hinted = DistCollection.ofIntPairs(Array(1), Array(2), 1)
+    val hinted = DistCollection
+      .ofIntPairs(Array(1), Array(2), 1)
       .sortMergeJoin(DistCollection.ofIntPairs(Array(1), Array(3), 1))
     ColumnarPlanner.tryTake(hinted.plan, 1) shouldBe None
     ColumnarPlanner.lower(hinted.plan).map(_.shape) shouldBe Some(
       "SortMergeJoin(Exchange(Scan), Exchange(Scan))",
     )
-    val plain = DistCollection.ofIntPairs(Array(1), Array(2), 1)
+    val plain = DistCollection
+      .ofIntPairs(Array(1), Array(2), 1)
       .join(DistCollection.ofIntPairs(Array(1), Array(3), 1))
     ColumnarPlanner.lower(plain.plan).map(_.shape) shouldBe Some(
-      "HashJoin(Exchange(Scan), Exchange(Scan))",
+      "BroadcastJoin(Scan, Scan)",
     )
   }
 

@@ -111,7 +111,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     val joinedInfo = infoOf(joined).getOrElse(fail("string join stayed on the row path"))
     joinedInfo.layout shouldBe Layout.StringTriple(ScarletConf.get.columnarBatchSize)
     ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
-      "StringHashJoin(Exchange(Scan), Exchange(Scan))",
+      "StringBroadcastJoin(Scan, Scan)",
     )
   }
 
@@ -529,7 +529,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     ScarletConf.set(ScarletConf.get.copy(columnarBatchSize = 2, threadPoolSize = 4))
     val build = DistCollection(Seq(1 -> 10, 1 -> 11, 2 -> 20, 4 -> 40), 2)
     val probe = DistCollection(Seq(1 -> 100, 2 -> 200, 1 -> 101, 3 -> 30), 2)
-    val joined = build.join(probe)
+    val joined = build.shuffleHashJoin(probe)
     val triples = joined.collect().map { case (key, (left, right)) => (key, left, right) }.toSeq
 
     triples should contain theSameElementsAs Seq(
@@ -548,7 +548,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
   it should "filter a later join result columnarly and preserve duplicate rows" in {
     val build = DistCollection(Seq(1 -> 10, 2 -> 20, 1 -> 10, 1 -> 11), 1)
     val probe = DistCollection(Seq(1 -> 7, 1 -> 8, 3 -> 9), 1)
-    val filtered = build.join(probe).filterJoinLeft(_ == 10)
+    val filtered = build.shuffleHashJoin(probe).filterJoinLeft(_ == 10)
     val actual = columnar(filtered.collect()).toSeq
 
     actual should contain theSameElementsAs row {
@@ -569,7 +569,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
   it should "filter each supported join column" in {
     val build = DistCollection(Seq(1 -> 10, 2 -> 20, 1 -> 11), 1)
     val probe = DistCollection(Seq(1 -> 7, 2 -> 8, 1 -> 9), 1)
-    val joined = build.join(probe)
+    val joined = build.shuffleHashJoin(probe)
 
     columnar(joined.filterJoinKey(_ == 1).collect()).toSeq should contain theSameElementsAs row {
       build.join(probe).filter { case (key, _) => key == 1 }.collect().toSeq
@@ -584,7 +584,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
   }
 
   it should "keep empty and all-surviving join filters columnar" in {
-    val joined = DistCollection(Seq(1 -> 10, 2 -> 20), 1).join(
+    val joined = DistCollection(Seq(1 -> 10, 2 -> 20), 1).shuffleHashJoin(
       DistCollection(Seq(1 -> 7, 2 -> 8), 1),
     )
     val emptyFilter = joined.filterJoinRight(_ < 0)
@@ -621,9 +621,9 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     ScarletConf.set(conf)
     val build = DistCollection(Seq.fill(4)(1 -> 10), 1)
     val probe = DistCollection(Seq.fill(3)(1 -> 20), 1)
-    val baseline = measuredJoin(build.join(probe))
+    val baseline = measuredJoin(build.shuffleHashJoin(probe))
     val predicateCalls = new java.util.concurrent.atomic.AtomicInteger(0)
-    val filtered = build.join(probe).filterJoinKey { key =>
+    val filtered = build.shuffleHashJoin(probe).filterJoinKey { key =>
       predicateCalls.incrementAndGet()
       key == 1
     }

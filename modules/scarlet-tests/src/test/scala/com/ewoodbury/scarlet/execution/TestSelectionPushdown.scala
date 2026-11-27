@@ -26,7 +26,8 @@ class TestSelectionPushdown extends AnyFlatSpec with Matchers with BeforeAndAfte
 
   "key filters then keys" should "encode one column and match the row path" in {
     val source = pairs()
-    val queried = source.filterKeys((key: Int) => key % 2 == 1).filterKeys((key: Int) => key > 0).keys
+    val queried =
+      source.filterKeys((key: Int) => key % 2 == 1).filterKeys((key: Int) => key > 0).keys
 
     shape(queried.plan) shouldBe "Key(FilterKey(FilterKey(Scan)))"
     val ordinals = demanded(queried.plan)
@@ -34,7 +35,10 @@ class TestSelectionPushdown extends AnyFlatSpec with Matchers with BeforeAndAfte
     val encoded = encodedPairs(source, ordinals)
     encoded.map(_.columns.length) shouldBe Vector(1, 1)
     encoded.length shouldBe parts
-    encodeFootprint(source, ordinals) shouldBe EncodeFootprint(batches = parts.toLong, encodes = parts.toLong)
+    encodeFootprint(source, ordinals) shouldBe EncodeFootprint(
+      batches = parts.toLong,
+      encodes = parts.toLong,
+    )
 
     val expected = row(queried.collect().toList)
     val (collected, batches) = footprint(queried.collect().toList)
@@ -130,7 +134,7 @@ class TestSelectionPushdown extends AnyFlatSpec with Matchers with BeforeAndAfte
     val right = DistCollection.ofIntPairs(Array(2, 4), Array(7, 8), parts)
     val joined = left.join(right)
 
-    shape(joined.plan) shouldBe "HashJoin(Exchange(FilterKey(Scan)), Exchange(Scan))"
+    shape(joined.plan) shouldBe "BroadcastJoin(FilterKey(Scan), Scan)"
     val ordinals = demanded(joined.plan)
     ordinals shouldBe Set(0, 1)
     encodedPairs(source, ordinals).map(_.columns.length) shouldBe Vector(2, 2)
@@ -261,9 +265,12 @@ class TestSelectionPushdown extends AnyFlatSpec with Matchers with BeforeAndAfte
     }
 
   private def decodedPairs(columns: ColumnarInterpreter.Columns): List[(Int, Int)] =
-    ColumnarInterpreter.batchesOf(columns).flatMap { batch =>
-      BatchCodec.decodeIntPairs(batch).toList
-    }.toList
+    ColumnarInterpreter
+      .batchesOf(columns)
+      .flatMap { batch =>
+        BatchCodec.decodeIntPairs(batch).toList
+      }
+      .toList
 
   private def shape(plan: Plan[_]): String =
     arm()

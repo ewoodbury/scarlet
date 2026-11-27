@@ -534,8 +534,8 @@ class TestColumnarContract
       AcceptedCase(
         "long inner join",
         DistCollection(longPairSource).join(DistCollection(longPairSource)).plan,
-        hashedInfo(layout),
-        Some("LongHashJoin(Exchange(Scan), Exchange(Scan))"),
+        narrowInfo(2, layout),
+        Some("LongBroadcastJoin(Scan, Scan)"),
       ),
       AcceptedCase(
         "explicit shuffle-hash long join",

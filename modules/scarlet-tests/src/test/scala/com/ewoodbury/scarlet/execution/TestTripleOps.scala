@@ -17,9 +17,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * The row path calls the function on every row. Reading a null `Int` unboxes it to 0, so a
  * predicate that accepts 0 keeps the row. The columnar path follows the int-pair row filter: a
  * null component drops the row and the predicate is not called. A map is not called on that row
- * either. The stored values and validity bits are copied, so absence stays absence. A present 0
- * is a real value. Those null rules are checked on their own. Present rows, including a present
- * 0, match the row path.
+ * either. The stored values and validity bits are copied, so absence stays absence. A present 0 is
+ * a real value. Those null rules are checked on their own. Present rows, including a present 0,
+ * match the row path.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Any"))
 class TestTripleOps extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
@@ -42,7 +42,7 @@ class TestTripleOps extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
     shows(columnar(filtered)) shouldBe shows(row(filtered.collect().toList))
     ColumnarPlanner.lower(filtered.plan).map(_.shape) shouldBe Some(
-      "FilterTripleRow(HashJoin(Exchange(Scan), Exchange(Scan)))",
+      "FilterTripleRow(BroadcastJoin(Scan, Scan))",
     )
   }
 
@@ -59,7 +59,9 @@ class TestTripleOps extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     // on key 4: it never reads the null right, so left 8 keeps that row.
     calls.get() shouldBe 3
     got shouldBe Seq("1,10,100", "5,4,0")
-    shows(row(nullableJoin.filter((row: (Int, (Int, Int))) => row._2._1 > 0).collect().toList)) shouldBe Seq(
+    shows(
+      row(nullableJoin.filter((row: (Int, (Int, Int))) => row._2._1 > 0).collect().toList),
+    ) shouldBe Seq(
       "1,10,100",
       "4,8,null",
       "5,4,0",
@@ -105,7 +107,7 @@ class TestTripleOps extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     calls.get() shouldBe 8
     got shouldBe shows(row(mapped.collect().toList))
     ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some(
-      "Project(HashJoin(Exchange(Scan), Exchange(Scan)))",
+      "Project(BroadcastJoin(Scan, Scan))",
     )
   }
 
@@ -205,8 +207,9 @@ class TestTripleOps extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       (row: (Int, (Int, Int))) => (row._1.toLong, (row._2._1, row._2._2)),
     )
     val expected = row(DistCollection(plan).collect().toList)
-    val lowered = ColumnarPlanner.lower(plan).getOrElse(fail("type-changing map was refused by lower"))
-    lowered.shape shouldBe "Project(HashJoin(Exchange(Scan), Exchange(Scan)))"
+    val lowered =
+      ColumnarPlanner.lower(plan).getOrElse(fail("type-changing map was refused by lower"))
+    lowered.shape shouldBe "Project(BroadcastJoin(Scan, Scan))"
 
     val input = denseRow
     val sink = new CountingSink
@@ -235,7 +238,7 @@ class TestTripleOps extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       .filter((row: (Int, (Int, Int))) => row._2._2 < 700)
 
     ColumnarPlanner.lower(filtered.plan).map(_.shape) shouldBe Some(
-      "FilterTripleRow(FilterTripleRow(HashJoin(Exchange(Scan), Exchange(Scan))))",
+      "FilterTripleRow(FilterTripleRow(BroadcastJoin(Scan, Scan)))",
     )
     shows(columnar(filtered)) shouldBe shows(row(filtered.collect().toList))
   }
@@ -289,7 +292,7 @@ class TestTripleOps extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val keyed = nullableJoin.filterJoinKey(_ >= 0)
 
     ColumnarPlanner.lower(keyed.plan).map(_.shape) shouldBe Some(
-      "FilterTripleKey(HashJoin(Exchange(Scan), Exchange(Scan)))",
+      "FilterTripleKey(BroadcastJoin(Scan, Scan))",
     )
     val got = shows(columnar(keyed))
     got.exists(_.contains("null")) shouldBe false

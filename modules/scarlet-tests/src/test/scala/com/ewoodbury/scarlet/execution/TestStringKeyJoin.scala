@@ -13,10 +13,10 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Columnar inner shuffle-hash join of `(String, Int)` with `(String, Int)`.
  *
  * The row path is the oracle. The two sides keep independent dictionaries and match by string
- * equality. A null key is dropped. `""` matches `""`. A null value stays a clear validity bit.
- * An explicit broadcast hint lowers to `StringBroadcastJoin`. An explicit sort-merge hint lowers
- * to `StringSortMergeJoin`. Outer joins lower. A key or value filter is applied before the probe,
- * so this hint reads dense batches.
+ * equality. A null key is dropped. `""` matches `""`. A null value stays a clear validity bit. An
+ * explicit broadcast hint lowers to `StringBroadcastJoin`. An explicit sort-merge hint lowers to
+ * `StringSortMergeJoin`. Outer joins lower. A key or value filter is applied before the probe, so
+ * this hint reads dense batches.
  */
 class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -135,7 +135,7 @@ class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val unmatched = present.join(DistCollection(Seq("c" -> 3, "d" -> 4), 2))
 
     ColumnarPlanner.lower(emptyBuild.plan).map(_.shape) shouldBe Some(
-      "StringHashJoin(Exchange(FilterKey(Scan)), Exchange(Scan))",
+      "StringBroadcastJoin(FilterKey(Scan), Scan)",
     )
     ColumnarPlanner.lower(emptyProbe.plan).map(_.shape) shouldBe Some(
       "StringHashJoin(Exchange(Scan), Exchange(FilterKey(Scan)))",
@@ -181,7 +181,7 @@ class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       "StringHashJoin(Exchange(FilterKey(Scan)), Exchange(MapValue(Scan)))",
     )
     ColumnarPlanner.lower(byValue.plan).map(_.shape) shouldBe Some(
-      "StringHashJoin(Exchange(FilterValue(Scan)), Exchange(Scan))",
+      "StringBroadcastJoin(FilterValue(Scan), Scan)",
     )
     agree(joined, Seq("a" -> ((1, 11)), "a" -> ((3, 11))))
     agree(byValue, Seq("a" -> ((1, 5))))
@@ -264,7 +264,7 @@ class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       "StringBroadcastJoin(Scan, Scan)",
     )
     ColumnarPlanner.lower(plain.plan).map(_.shape) shouldBe Some(
-      "StringHashJoin(Exchange(Scan), Exchange(Scan))",
+      "StringBroadcastJoin(Scan, Scan)",
     )
     val lowered =
       ColumnarPlanner.lower(broadcast.plan).getOrElse(fail("broadcast was refused"))
@@ -298,7 +298,7 @@ class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     thrown should not be a[ColumnarFallback]
     thrown.getMessage shouldBe
       s"broadcast build table retains about $estimate bytes for $rows rows, " +
-        s"above the budget of ${estimate - 1L} bytes"
+      s"above the budget of ${estimate - 1L} bytes"
     StringHashJoinSpill.filesWrittenForTest shouldBe 0L
     an[IllegalStateException] should be thrownBy left.broadcastJoin(right).collect()
     StringHashJoinSpill.filesWrittenForTest shouldBe 0L
@@ -333,7 +333,7 @@ class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       "StringSortMergeJoin(Exchange(Scan), Exchange(Scan))",
     )
     ColumnarPlanner.lower(left.join(right).plan).map(_.shape) shouldBe Some(
-      "StringHashJoin(Exchange(Scan), Exchange(Scan))",
+      "StringBroadcastJoin(Scan, Scan)",
     )
     ColumnarPlanner.lower(left.shuffleHashJoin(right).plan).map(_.shape) shouldBe Some(
       "StringHashJoin(Exchange(Scan), Exchange(Scan))",
@@ -383,7 +383,7 @@ class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     )
     val joined = source.join(DistCollection(Seq("red" -> 2), 1))
     ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
-      "StringHashJoin(Exchange(Scan), Exchange(Scan))",
+      "StringBroadcastJoin(Scan, Scan)",
     )
     ColumnarPlanner.tryRun(joined.plan).isDefined shouldBe true
     val collected = joined.collect().toList
@@ -423,14 +423,19 @@ class TestStringKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val columnar = joined.collect().toList
     columnar should contain theSameElementsAs expected
     columnar should contain theSameElementsAs row(joined.collect().toList)
-    val parts = stringTripleBatches(joined.plan)
-    parts.length shouldBe ScarletConf.get.defaultShufflePartitions
-    parts.zipWithIndex.foreach { (batch, index) =>
-      assertPresent(batch, index, parts.length)
-    }
+    ColumnarPlanner.lower(joined.plan) match
+      case Some(_: PhysicalOp.StringHashJoin) =>
+        val parts = stringTripleBatches(joined.plan)
+        parts.length shouldBe ScarletConf.get.defaultShufflePartitions
+        parts.zipWithIndex.foreach { (batch, index) =>
+          assertPresent(batch, index, parts.length)
+        }
+      case Some(_: PhysicalOp.StringBroadcastJoin) => ()
+      case other => fail(s"expected a string join, got $other")
 
   private def stringTripleBatches(plan: Plan[_]): Vector[ColumnBatch] =
-    val lowered = ColumnarPlanner.lower(plan).getOrElse(fail(s"expected a lowered plan, got $plan"))
+    val lowered =
+      ColumnarPlanner.lower(plan).getOrElse(fail(s"expected a lowered plan, got $plan"))
     ColumnarInterpreter.interpret(plan, lowered) match
       case ColumnarInterpreter.Columns.StringTriples(parts) => parts
       case other => fail(s"expected string triples, got $other")
