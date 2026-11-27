@@ -98,6 +98,42 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     result shouldBe 4L
   }
 
+  "a literal on the left" should "compare the column" in {
+    val (atLeast, shape) = value(
+      "select count(*) from tiny where 2 <= id",
+      Map("tiny" -> tiny()),
+    )
+    atLeast shouldBe 3L
+    shape shouldBe "WideFilter0(Scan)"
+    val (atMost, _) = value(
+      "select count(*) from tiny where 2 >= id",
+      Map("tiny" -> tiny()),
+    )
+    atMost shouldBe 2L
+  }
+
+  "a union" should "name the node" in {
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(
+        "select count(*) from tiny union select count(*) from tiny",
+        Map("tiny" -> tiny()),
+      )
+    }
+    thrown.getMessage should include("SetOperationList")
+  }
+
+  "an offset" should "name the node" in {
+    named("select count(*) from tiny offset 1", "Offset")
+  }
+
+  "a fetch" should "name the node" in {
+    named("select count(*) from tiny fetch first 1 row only", "Fetch")
+  }
+
+  "a top" should "name the node" in {
+    named("select top 1 count(*) from tiny", "Top")
+  }
+
   "a join" should "name the node" in {
     val thrown = the[IllegalArgumentException] thrownBy {
       val _ = Sql.run(
@@ -154,6 +190,12 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val rows = read(false)
     columnar._1 shouldBe rows._1
     columnar
+
+  private def named(sql: String, node: String): Unit =
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(sql, Map("tiny" -> tiny()))
+    }
+    thrown.getMessage should include(node)
 
   private def lineitem(): DistCollection[WideRow] =
     val rows = TpchSlice.lineitemRows

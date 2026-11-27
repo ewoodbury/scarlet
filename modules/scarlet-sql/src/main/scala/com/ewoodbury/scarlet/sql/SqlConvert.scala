@@ -13,7 +13,7 @@ import net.sf.jsqlparser.expression.operators.conditional.{AndExpression, OrExpr
 import net.sf.jsqlparser.expression.operators.relational.*
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
 import net.sf.jsqlparser.schema.{Column, Table}
-import net.sf.jsqlparser.statement.select.{AllColumns, FromItem, PlainSelect, Select, SelectItem}
+import net.sf.jsqlparser.statement.select.{AllColumns, FromItem, PlainSelect, SelectItem}
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
@@ -30,12 +30,9 @@ private object SqlConvert:
       catch
         case failed: net.sf.jsqlparser.JSQLParserException =>
           throw new IllegalArgumentException(failed.getMessage, failed)
-    val plain = parsed match
-      case select: Select =>
-        val body = select.getPlainSelect
-        if body == null then unsupported(select) else body
+    parsed match
+      case plain: PlainSelect => convert(plain, tables)
       case other => unsupported(other)
-    convert(plain, tables)
 
   private def convert(
       plain: PlainSelect,
@@ -44,6 +41,9 @@ private object SqlConvert:
     if plain.getDistinct != null then unsupported(plain.getDistinct)
     if plain.getJoins != null && !plain.getJoins.isEmpty then unsupported(plain.getJoins.get(0))
     if plain.getLimit != null then unsupported(plain.getLimit)
+    if plain.getOffset != null then unsupported(plain.getOffset)
+    if plain.getFetch != null then unsupported(plain.getFetch)
+    if plain.getTop != null then unsupported(plain.getTop)
     if plain.getOrderByElements != null && !plain.getOrderByElements.isEmpty then
       unsupported(plain.getOrderByElements.get(0))
     if plain.getHaving != null then unsupported(plain.getHaving)
@@ -228,9 +228,18 @@ private object SqlConvert:
       case None =>
         plainColumn(right, frame).flatMap { ordinal =>
           typedLiteral(left, kindAt(frame, ordinal)).map { literal =>
-            frame.filter(ordinal, ColumnCompare(op, literal))
+            frame.filter(ordinal, ColumnCompare(reflect(op), literal))
           }
         }
+
+  /** A constant on the left is the same compare with the column on the left. */
+  private def reflect(op: CompareOp): CompareOp = op match
+    case CompareOp.Gt => CompareOp.Lt
+    case CompareOp.Ge => CompareOp.Le
+    case CompareOp.Lt => CompareOp.Gt
+    case CompareOp.Le => CompareOp.Ge
+    case CompareOp.Eq => CompareOp.Eq
+    case CompareOp.Ne => CompareOp.Ne
 
   private def boolExpr(expr: Expression, frame: Frame): (Frame, Int) = unwrap(expr) match
     case and: AndExpression =>
