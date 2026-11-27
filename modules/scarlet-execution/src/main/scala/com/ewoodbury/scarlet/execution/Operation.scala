@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.core.Plan
+import com.ewoodbury.scarlet.core.{ColumnCompare, Plan, WideRow}
 
 /**
  * Planner IR for the steps applied inside a stage. [[Stage]] is what runs. [[StageBuilder]] builds
@@ -163,6 +163,13 @@ final case class ReduceByKeyLocalOp[K, V](reduceFunc: (V, V) => V)
 final case class PartitionByLocalOp[K, V](numPartitions: Int) extends Operation[(K, V), (K, V)]
 final case class RepartitionOp[A](numPartitions: Int) extends Operation[A, A]
 final case class CoalesceOp[A](numPartitions: Int) extends Operation[A, A]
+
+/** Filter one wide-row column. A null in that column is dropped. */
+final case class WideFilterOp(ordinal: Int, compare: ColumnCompare)
+    extends Operation[WideRow, WideRow]
+
+/** Drop, reorder, or rename wide-row columns. Does not compute. */
+final case class WideProjectOp(spec: Vector[(Int, String)]) extends Operation[WideRow, WideRow]
 
 object Operation {
 

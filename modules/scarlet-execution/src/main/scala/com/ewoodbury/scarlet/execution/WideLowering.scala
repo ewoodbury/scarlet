@@ -1,0 +1,114 @@
+package com.ewoodbury.scarlet.execution
+
+import com.ewoodbury.scarlet.core.{ColumnCompare, ColumnField, WideColumns, WideRow}
+
+/**
+ * Lowers a wide-row filter or project when the child is already a wide scan, filter, or project
+ * and the compare is one the closed set allows. A refused compare returns [[None]] so the action
+ * reruns on rows.
+ */
+private[execution] object WideLowering:
+
+  def filter(
+      source: PlanNode,
+      ordinal: Int,
+      compare: ColumnCompare,
+      lowerChild: com.ewoodbury.scarlet.core.Plan[_] => Option[PhysicalOp],
+  ): Option[PhysicalOp] =
+    lowerChild(source).flatMap { child =>
+      column(child, ordinal) match
+        case Some(field) if compare.allows(field.kind) =>
+          Some(PhysicalOp.WideFilter(child, ordinal, compare))
+        case _ =>
+          LoweringTrace.note("WideFilterOp", child.kind, "WideLowering")
+          None
+    }
+
+  def project(
+      source: com.ewoodbury.scarlet.core.Plan[WideRow],
+      spec: Vector[(Int, String)],
+      lowerChild: com.ewoodbury.scarlet.core.Plan[_] => Option[PhysicalOp],
+  ): Option[PhysicalOp] =
+    lowerChild(source).flatMap { child =>
+      fieldsOf(child) match
+        case Some(fields) if legal(spec, fields) =>
+          Some(PhysicalOp.WideProject(child, spec))
+        case _ =>
+          LoweringTrace.note("WideProjectOp", child.kind, "WideLowering")
+          None
+    }
+
+  private def column(op: PhysicalOp, ordinal: Int): Option[ColumnField] =
+    fieldsOf(op).filter(fields => ordinal >= 0 && ordinal < fields.size).map(_(ordinal))
+
+  private def legal(spec: Vector[(Int, String)], fields: Vector[ColumnField]): Boolean =
+    spec.nonEmpty &&
+      spec.forall { (ordinal, name) =>
+        name.nonEmpty && ordinal >= 0 && ordinal < fields.size
+      } &&
+      spec.map(_._1).distinct.size == spec.size &&
+      spec.map(_._2).distinct.size == spec.size
+
+  private def fieldsOf(op: PhysicalOp): Option[Vector[ColumnField]] = op match
+    case PhysicalOp.Scan(PhysicalOp.Kind.Columns, partitions) =>
+      schema(partitions)
+    case PhysicalOp.WideFilter(child, _, _) =>
+      fieldsOf(child)
+    case PhysicalOp.WideProject(child, spec) =>
+      fieldsOf(child).map(fields => spec.map((ordinal, name) => fields(ordinal).copy(name = name)))
+    case _ =>
+      None
+
+  private def schema(
+      partitions: Seq[com.ewoodbury.scarlet.core.Partition[_]],
+  ): Option[Vector[ColumnField]] =
+    val tables = partitions.map(_.data).collect { case columns: WideColumns => columns }
+    if (tables.size != partitions.size || tables.isEmpty) then None
+    else
+      val fields = tables.head.fields
+      if (tables.forall(table => same(table.fields, fields))) then Some(fields) else None
+
+  private def same(left: Vector[ColumnField], right: Vector[ColumnField]): Boolean =
+    left.size == right.size && left.zip(right).forall { (a, b) =>
+      a.name.equals(b.name) && sameKind(a.kind, b.kind)
+    }
+
+  private def sameKind(
+      left: com.ewoodbury.scarlet.core.ColumnKind,
+      right: com.ewoodbury.scarlet.core.ColumnKind,
+  ): Boolean =
+    (left, right) match
+      case (
+            com.ewoodbury.scarlet.core.ColumnKind.Int32,
+            com.ewoodbury.scarlet.core.ColumnKind.Int32,
+          ) =>
+        true
+      case (
+            com.ewoodbury.scarlet.core.ColumnKind.Int64,
+            com.ewoodbury.scarlet.core.ColumnKind.Int64,
+          ) =>
+        true
+      case (
+            com.ewoodbury.scarlet.core.ColumnKind.Float64,
+            com.ewoodbury.scarlet.core.ColumnKind.Float64,
+          ) =>
+        true
+      case (
+            com.ewoodbury.scarlet.core.ColumnKind.Bool,
+            com.ewoodbury.scarlet.core.ColumnKind.Bool,
+          ) =>
+        true
+      case (
+            com.ewoodbury.scarlet.core.ColumnKind.Utf8,
+            com.ewoodbury.scarlet.core.ColumnKind.Utf8,
+          ) =>
+        true
+      case (
+            com.ewoodbury.scarlet.core.ColumnKind.Float32,
+            com.ewoodbury.scarlet.core.ColumnKind.Float32,
+          ) =>
+        true
+      case _ =>
+        false
+
+  private type PlanNode = com.ewoodbury.scarlet.core.Plan[WideRow]

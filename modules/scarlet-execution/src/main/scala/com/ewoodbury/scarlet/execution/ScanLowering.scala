@@ -2,7 +2,7 @@ package com.ewoodbury.scarlet.execution
 
 import scala.annotation.tailrec
 
-import com.ewoodbury.scarlet.core.{Partition, Plan}
+import com.ewoodbury.scarlet.core.{ColumnField, ColumnKind, Partition, Plan, WideColumns}
 
 /**
  * Kind of a [[Plan.Source]] that lowers to [[PhysicalOp.Scan]].
@@ -15,10 +15,21 @@ import com.ewoodbury.scarlet.core.{Partition, Plan}
 private[execution] object ScanLowering:
 
   def classify(source: Plan.Source[_]): Option[PhysicalOp.Kind] =
-    val inferred = classifyData(source.partitions)
     source.descriptor match
-      case Plan.SourceDescriptor.Unknown => inferred
+      case Plan.SourceDescriptor.Columns => classifyColumns(source)
+      case Plan.SourceDescriptor.Unknown => classifyData(source.partitions)
       case descriptor =>
+        val inferred = classifyData(source.partitions)
+        classifyDescribed(source, descriptor, inferred)
+
+  private def classifyDescribed(
+      source: Plan.Source[_],
+      descriptor: Plan.SourceDescriptor,
+      inferred: Option[PhysicalOp.Kind],
+  ): Option[PhysicalOp.Kind] =
+    descriptor match
+      case Plan.SourceDescriptor.Columns | Plan.SourceDescriptor.Unknown => None
+      case _ =>
         val describedKind = kindOf(descriptor)
         inferred match
           case Some(kind)
@@ -28,6 +39,34 @@ private[execution] object ScanLowering:
           case _ =>
             LoweringTrace.note(source, "ScanLowering")
             None
+
+  private def classifyColumns(source: Plan.Source[_]): Option[PhysicalOp.Kind] =
+    val tables = source.partitions.map(_.data).collect { case columns: WideColumns => columns }
+    if (tables.size != source.partitions.size) then
+      LoweringTrace.note(source, "ScanLowering")
+      None
+    else
+      val agreed = tables.headOption match
+        case Some(head) => tables.forall(table => sameFields(table.fields, head.fields))
+        case None => false
+      if (agreed) then Some(PhysicalOp.Kind.Columns)
+      else
+        LoweringTrace.note(source, "ScanLowering")
+        None
+
+  private def sameFields(left: Vector[ColumnField], right: Vector[ColumnField]): Boolean =
+    left.size == right.size && left.zip(right).forall { (a, b) =>
+      a.name.equals(b.name) && sameKind(a.kind, b.kind)
+    }
+
+  private def sameKind(left: ColumnKind, right: ColumnKind): Boolean = (left, right) match
+    case (ColumnKind.Int32, ColumnKind.Int32) => true
+    case (ColumnKind.Int64, ColumnKind.Int64) => true
+    case (ColumnKind.Float64, ColumnKind.Float64) => true
+    case (ColumnKind.Bool, ColumnKind.Bool) => true
+    case (ColumnKind.Utf8, ColumnKind.Utf8) => true
+    case (ColumnKind.Float32, ColumnKind.Float32) => true
+    case _ => false
 
   private def kindOf(descriptor: Plan.SourceDescriptor): Option[PhysicalOp.Kind] = descriptor match
     // Boundary guard: classify returns on Unknown before this match.
@@ -40,6 +79,7 @@ private[execution] object ScanLowering:
     case Plan.SourceDescriptor.Bools => Some(PhysicalOp.Kind.Bools)
     case Plan.SourceDescriptor.LongPairs => Some(PhysicalOp.Kind.LongPairs)
     case Plan.SourceDescriptor.Float32s => Some(PhysicalOp.Kind.Float32s)
+    case Plan.SourceDescriptor.Columns => Some(PhysicalOp.Kind.Columns)
 
   private def dataMatchesDescriptor(
       source: Plan.Source[_],
@@ -57,6 +97,7 @@ private[execution] object ScanLowering:
         case Plan.SourceDescriptor.Bools => rows.forall(isBoolValue)
         case Plan.SourceDescriptor.LongPairs => rows.forall(isLongPairValue)
         case Plan.SourceDescriptor.Float32s => rows.forall(isFloatValue)
+        case Plan.SourceDescriptor.Columns => false
         // Boundary guard: classify does not call this with Unknown.
         case Plan.SourceDescriptor.Unknown => false
 
@@ -93,6 +134,8 @@ private[execution] object ScanLowering:
         source.partitions.forall(partition => partition.data.isInstanceOf[LongPairArrays])
       case Plan.SourceDescriptor.Float32s =>
         source.partitions.forall(partition => partition.data.isInstanceOf[FloatArrays])
+      case Plan.SourceDescriptor.Columns =>
+        source.partitions.forall(partition => partition.data.isInstanceOf[WideColumns])
       // Boundary guard: classify does not call this with Unknown.
       case Plan.SourceDescriptor.Unknown => false
 

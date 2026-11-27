@@ -47,6 +47,8 @@ object PlanWide {
     case Plan.FilterKeysOp(source, _) => isWide(source)
     case Plan.FilterValuesOp(source, _) => isWide(source)
     case Plan.FlatMapValuesOp(source, _) => isWide(source)
+    case Plan.WideFilterOp(source, _, _) => isWide(source)
+    case Plan.WideProjectOp(source, _) => isWide(source)
     case Plan.UnionOp(left, right) => isWide(left) || isWide(right)
 
     // Base cases - sources are not wide

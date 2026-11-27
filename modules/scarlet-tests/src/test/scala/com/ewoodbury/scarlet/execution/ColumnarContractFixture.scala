@@ -314,7 +314,7 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
         PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples |
-        PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Float32s =>
+        PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Float32s | PhysicalOp.Kind.Columns =>
       false
 
   protected def sumsLongs(op: PhysicalOp): Boolean = op.kind match
@@ -327,7 +327,7 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
         PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples |
-        PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Float32s =>
+        PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Float32s | PhysicalOp.Kind.Columns =>
       false
 
   protected def sumsFloats(op: PhysicalOp): Boolean = op.kind match
@@ -340,13 +340,15 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
         PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples |
-        PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Float32s =>
+        PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Float32s | PhysicalOp.Kind.Columns =>
       false
 
   protected def preservesPartitions(op: PhysicalOp): Boolean = op match
     case PhysicalOp.Scan(_, _) => true
     case PhysicalOp.Filter(child, _) => preservesPartitions(child)
     case PhysicalOp.Project(child) => preservesPartitions(child)
+    case PhysicalOp.WideFilter(child, _, _) => preservesPartitions(child)
+    case PhysicalOp.WideProject(child, _) => preservesPartitions(child)
     case PhysicalOp.Pipeline(child, _) => preservesPartitions(child)
     case PhysicalOp.Column(child, _) => preservesPartitions(child)
     case PhysicalOp.MapValue(child) => preservesPartitions(child)
@@ -515,6 +517,8 @@ trait ColumnarContractFixture extends Matchers:
     // The typed key map shares the generic map label. The physical shape is MapKey.
     case Plan.MapIntKeyOp(_, _) => PlanNode.Map
     case Plan.FilterOp(_, _) => PlanNode.Filter
+    case Plan.WideFilterOp(_, _, _) => PlanNode.Filter
+    case Plan.WideProjectOp(_, _) => PlanNode.Map
     case Plan.FlatMapOp(_, _) => PlanNode.FlatMap
     case Plan.DistinctOp(_) => PlanNode.Distinct
     case Plan.UnionOp(_, _) => PlanNode.Union

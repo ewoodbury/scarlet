@@ -2,7 +2,7 @@ package com.ewoodbury.scarlet.api
 
 import java.lang.reflect.InvocationTargetException
 
-import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan}
+import com.ewoodbury.scarlet.core.*
 
 /**
  * A lazy, immutable representation of a "distributed" collection. Operations build up a Plan,
@@ -30,6 +30,14 @@ final case class DistCollection[A](plan: Plan[A]):
   private def kvPlan[K, V](using ev: A =:= (K, V)): Plan[(K, V)] =
     this.plan.asInstanceOf[Plan[(K, V)]]
 
+  /**
+   * The erasure point for a wide-row plan. `Plan` is invariant, so `A =:= WideRow` cannot be
+   * applied substitutionally. The cast is safe because every caller provides that evidence.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+  private def widePlan(using ev: A =:= WideRow): Plan[WideRow] =
+    this.plan.asInstanceOf[Plan[WideRow]]
+
   // --- Basic Transformations ---
 
   /**
@@ -45,6 +53,24 @@ final case class DistCollection[A](plan: Plan[A]):
    */
   def filter(p: A => Boolean): DistCollection[A] =
     DistCollection(Plan.FilterOp(this.plan, p))
+
+  /**
+   * Filters one wide-row column against a constant. A null in that column is dropped. A compare
+   * the closed set does not name stays on the row path.
+   */
+  def filterColumn(ordinal: Int, compare: ColumnCompare)(using
+      ev: A =:= WideRow,
+  ): DistCollection[WideRow] =
+    DistCollection(Plan.WideFilterOp(widePlan, ordinal, compare))
+
+  /**
+   * Drops, reorders, or renames wide-row columns. This does not compute a new column. `spec` is
+   * output order: each pair is a source ordinal and the output name.
+   */
+  def projectColumns(spec: Vector[(Int, String)])(using
+      ev: A =:= WideRow,
+  ): DistCollection[WideRow] =
+    DistCollection(Plan.WideProjectOp(widePlan, spec))
 
   /**
    * Filters strings equal to `value`. This explicit form is recognized by the columnar planner,
@@ -844,6 +870,19 @@ object DistCollection:
     IntPairArrays.requireSameLength(keys, values)
     splitSource(keys.length, numPartitions, Plan.SourceDescriptor.Pairs) { (start, end) =>
       IntPairArrays.fromOwned(keys.slice(start, end), values.slice(start, end))
+    }
+
+  /**
+   * Partitions owned wide-row columns. Each partition is a
+   * [[com.ewoodbury.scarlet.core.WideColumns]] slice of the same schema, including an empty slice.
+   * The caller's arrays are copied by [[WideInput]] and are not retained.
+   */
+  def ofColumns(inputs: Vector[WideInput], numPartitions: Int): DistCollection[WideRow] =
+    import com.ewoodbury.scarlet.core.WideColumns
+
+    val table = WideColumns(inputs)
+    splitSource(table.length, numPartitions, Plan.SourceDescriptor.Columns) { (start, end) =>
+      table.slice(start, end)
     }
 
   /**

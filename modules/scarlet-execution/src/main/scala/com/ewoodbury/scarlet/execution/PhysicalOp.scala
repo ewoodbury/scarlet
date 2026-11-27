@@ -1,7 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
 import com.ewoodbury.scarlet.columnar.LogicalType
-import com.ewoodbury.scarlet.core.Partition
+import com.ewoodbury.scarlet.core.{ColumnCompare, Partition}
 
 /**
  * One columnar operator, lowered from a logical [[com.ewoodbury.scarlet.core.Plan]].
@@ -684,6 +684,8 @@ enum PhysicalOp:
         StringBroadcastFullOuter(_, _) | StringSortMergeLeftOuter(_, _) |
         StringSortMergeRightOuter(_, _) | StringSortMergeFullOuter(_, _) =>
       PhysicalOp.Kind.StringOuter
+    case WideFilter(child, _, _) => child.kind
+    case WideProject(child, _) => child.kind
 
   /**
    * Output columns. [[kind]] stays the admission enum. A [[Project]] whose child kind is
@@ -841,6 +843,8 @@ enum PhysicalOp:
       s"StringSortMergeRightOuter(${left.shape}, ${right.shape})"
     case StringSortMergeFullOuter(left, right) =>
       s"StringSortMergeFullOuter(${left.shape}, ${right.shape})"
+    case WideFilter(child, columnOrdinal, _) => s"WideFilter$columnOrdinal(${child.shape})"
+    case WideProject(child, _) => s"WideProject(${child.shape})"
 
   /**
    * Non-adding `reduceByKey` of an int key and a long value. The child is an [[Exchange]]. The
@@ -981,6 +985,19 @@ enum PhysicalOp:
    */
   case IntExtremum(child: PhysicalOp, minimum: Boolean)
 
+  /**
+   * Filter one column of a wide row. The child is a wide scan, filter, or project. A null in the
+   * predicate column is dropped. A null in another column stays. Output kind is the child's kind.
+   * There is no spill.
+   */
+  case WideFilter(child: PhysicalOp, columnOrdinal: Int, compare: ColumnCompare)
+
+  /**
+   * Drop, reorder, or rename columns of a wide row. This does not compute. Output kind is the
+   * child's kind. There is no spill.
+   */
+  case WideProject(child: PhysicalOp, spec: Vector[(Int, String)])
+
 object PhysicalOp:
 
   /**
@@ -1005,7 +1022,8 @@ object PhysicalOp:
       StringCountSums,
       IntLongTriples,
       IntLongOuter,
-      Float32s
+      Float32s,
+      Columns
 
   /** Which value column [[JoinProbeSum]] adds. `Left` is the build side. */
   enum ProbeMeasure:

@@ -208,7 +208,8 @@ private[execution] object JoinClass:
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.CountSums |
         PhysicalOp.Kind.LongCountSums | PhysicalOp.Kind.StringCountSums |
         PhysicalOp.Kind.IntLongSums | PhysicalOp.Kind.GroupedIntLongs |
-        PhysicalOp.Kind.IntLongTriples | PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Float32s =>
+        PhysicalOp.Kind.IntLongTriples | PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Float32s |
+        PhysicalOp.Kind.Columns =>
       false
 
   private def agreed(left: ColumnType, right: ColumnType): Boolean = (left, right) match

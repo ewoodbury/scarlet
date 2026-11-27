@@ -23,6 +23,7 @@ class TestColumnarKinds extends AnyFlatSpec with Matchers:
     descriptorOrdinal(Plan.SourceDescriptor.Bools) shouldBe 6
     descriptorOrdinal(Plan.SourceDescriptor.LongPairs) shouldBe 7
     descriptorOrdinal(Plan.SourceDescriptor.Float32s) shouldBe 8
+    descriptorOrdinal(Plan.SourceDescriptor.Columns) shouldBe 9
     kindOrdinal(PhysicalOp.Kind.Ints) shouldBe 0
     kindOrdinal(PhysicalOp.Kind.Longs) shouldBe 1
     kindOrdinal(PhysicalOp.Kind.Floats) shouldBe 2
@@ -48,8 +49,9 @@ class TestColumnarKinds extends AnyFlatSpec with Matchers:
     kindOrdinal(PhysicalOp.Kind.IntLongTriples) shouldBe 22
     kindOrdinal(PhysicalOp.Kind.IntLongOuter) shouldBe 23
     kindOrdinal(PhysicalOp.Kind.Float32s) shouldBe 24
-    Plan.SourceDescriptor.values.length shouldBe 9
-    PhysicalOp.Kind.values.length shouldBe 25
+    kindOrdinal(PhysicalOp.Kind.Columns) shouldBe 25
+    Plan.SourceDescriptor.values.length shouldBe 10
+    PhysicalOp.Kind.values.length shouldBe 26
   }
 
 inline def descriptorOrdinal(inline descriptor: Plan.SourceDescriptor): Int =
@@ -63,6 +65,7 @@ inline def descriptorOrdinal(inline descriptor: Plan.SourceDescriptor): Int =
     case Plan.SourceDescriptor.Bools => 6
     case Plan.SourceDescriptor.LongPairs => 7
     case Plan.SourceDescriptor.Float32s => 8
+    case Plan.SourceDescriptor.Columns => 9
 
 inline def kindOrdinal(inline kind: PhysicalOp.Kind): Int =
   inline kind match
@@ -91,3 +94,4 @@ inline def kindOrdinal(inline kind: PhysicalOp.Kind): Int =
     case PhysicalOp.Kind.IntLongTriples => 22
     case PhysicalOp.Kind.IntLongOuter => 23
     case PhysicalOp.Kind.Float32s => 24
+    case PhysicalOp.Kind.Columns => 25

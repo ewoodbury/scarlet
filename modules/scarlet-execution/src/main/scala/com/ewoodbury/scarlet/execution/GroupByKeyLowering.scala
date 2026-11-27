@@ -64,5 +64,5 @@ private[execution] object GroupByKeyLowering:
         PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
         PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples |
-        PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Float32s =>
+        PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Float32s | PhysicalOp.Kind.Columns =>
       false

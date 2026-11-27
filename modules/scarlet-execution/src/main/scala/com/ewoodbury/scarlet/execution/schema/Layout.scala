@@ -63,6 +63,8 @@ private[execution] object Layout:
 
   /** What `op` already determines. Does not call [[ColumnarPlanner.lower]]. */
   def known(op: PhysicalOp): Output = op match
+    case PhysicalOp.Scan(PhysicalOp.Kind.Columns, _) =>
+      Output.Opaque("wide row")
     case PhysicalOp.Scan(kind, _) =>
       columns(kind)
     case PhysicalOp.Filter(child, _) =>
@@ -181,6 +183,8 @@ private[execution] object Layout:
       join(node.kind, OuterSide.Full)
     case node: PhysicalOp.IntExtremum =>
       columns(node.kind)
+    case _: PhysicalOp.WideFilter | _: PhysicalOp.WideProject =>
+      Output.Opaque("wide row")
 
   private def columns(kind: PhysicalOp.Kind): Output =
     Output.Columns(

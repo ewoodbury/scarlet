@@ -1,7 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
 import com.ewoodbury.scarlet.columnar.GroupByKey
-import com.ewoodbury.scarlet.core.Partition
+import com.ewoodbury.scarlet.core.{ColumnCompare, Partition, WideColumns, WideRow}
 
 /**
  * Represents a stage: a sequence of narrow transformations that can be executed together. Each
@@ -243,4 +243,40 @@ object Stage {
   def identity[A]: Stage[A, A] = {
     SingleOpStage { p => p }
   }
+
+  /** Filter one wide-row column. A compare the set does not name keeps no mismatched cell. */
+  def wideFilter(ordinal: Int, compare: ColumnCompare): Stage[WideRow, WideRow] =
+    SingleOpStage { partition =>
+      partition.data match
+        case columns: WideColumns =>
+          require(
+            ordinal >= 0 && ordinal < columns.fields.size,
+            s"column $ordinal outside width ${columns.fields.size}",
+          )
+          if (compare.allows(columns.fields(ordinal).kind)) then
+            Partition(columns.filter(ordinal, compare))
+          else Partition(refusedCompare(columns, ordinal, compare))
+        case other =>
+          throw new IllegalStateException(
+            s"wide filter expected WideColumns, found ${other.getClass.getName}",
+          )
+    }
+
+  /** Drop, reorder, or rename wide-row columns. */
+  def wideProject(spec: Vector[(Int, String)]): Stage[WideRow, WideRow] =
+    SingleOpStage { partition =>
+      partition.data match
+        case columns: WideColumns => Partition(columns.project(spec))
+        case other =>
+          throw new IllegalStateException(
+            s"wide project expected WideColumns, found ${other.getClass.getName}",
+          )
+    }
+
+  private def refusedCompare(
+      columns: WideColumns,
+      ordinal: Int,
+      compare: ColumnCompare,
+  ): Vector[WideRow] =
+    columns.iterator.filter(row => compare.matches(row.cells(ordinal))).toVector
 }
