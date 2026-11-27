@@ -88,7 +88,10 @@ class TestIntLongGroup extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     show(kept) shouldBe Seq((1, List("4", "null")))
 
     val widened = rows.mapValues(widen)
-    assert(ColumnarPlanner.lower(widened.filterValues((value: Long) => value > 0L).plan).isEmpty)
+    ColumnarPlanner
+      .lower(widened.filterValues((value: Long) => value > 0L).plan)
+      .map(_.shape) shouldBe
+      Some("FilterValue(IntLongMapValue(Scan))")
     assert(
       ColumnarPlanner
         .lower(widened.reduceByKey[Int, Long]((left: Long, _: Long) => left).plan)

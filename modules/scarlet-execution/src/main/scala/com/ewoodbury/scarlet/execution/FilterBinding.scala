@@ -23,12 +23,14 @@ private[execution] object FilterBinding:
 
   /** Key or value slot after the slot-above guards. */
   def slot(child: PhysicalOp, which: PhysicalOp.Slot): Option[PhysicalOp] =
-    if (PhysicalSchema.isIntLongProject(child)) then Some(PhysicalOp.Filter(child, which))
+    if (PhysicalSchema.isIntLongProject(child) || IntLongParents.widened(child)) then
+      Some(PhysicalOp.Filter(child, which))
     else build(child, parent(which), Some(which))
 
   /** Whole-row filter. The slot is the one this child already uses. */
   def row(child: PhysicalOp, predicate: Any): Option[PhysicalOp] =
-    build(child, Operator.Filter, rowSlot(child, predicate))
+    if (IntLongParents.widened(child)) then Some(PhysicalOp.Filter(child, PhysicalOp.Slot.Row))
+    else build(child, Operator.Filter, rowSlot(child, predicate))
 
   /** A filter whose slot is already chosen. A sort row filter and a string row filter use this. */
   def fixed(child: PhysicalOp, which: PhysicalOp.Slot): Option[PhysicalOp] =

@@ -64,7 +64,9 @@ class TestAggregateAdmission extends AnyFlatSpec with Matchers with BeforeAndAft
       "HashAggregate(Exchange(IntLongMapValue(Scan)))",
     )
     reduced.collect().toMap shouldBe row(reduced.collect().toMap)
-    ColumnarPlanner.lower(stacked) shouldBe None
+    ColumnarPlanner.lower(stacked).map(_.shape) shouldBe Some(
+      "FilterKey(FilterValue(IntLongMapValue(Scan)))",
+    )
     ColumnarPlanner.lower(Plan.CountByKeyOp(widened.plan)).map(_.shape) shouldBe Some(
       "CountByKey(Exchange(IntLongMapValue(Scan)))",
     )

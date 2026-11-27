@@ -86,7 +86,9 @@ private[execution] object Layout:
     case node: PhysicalOp.Column =>
       columns(node.kind)
     case node: PhysicalOp.MapValue =>
-      columns(node.kind)
+      known(node.child) match
+        case kept: Output.IntLongPairs => kept
+        case _ => columns(node.kind)
     case PhysicalOp.IntLongMapValue(child) =>
       intLongPairs(child)
     case _: PhysicalOp.GroupByKey =>

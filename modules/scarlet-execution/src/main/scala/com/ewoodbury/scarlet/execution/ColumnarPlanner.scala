@@ -986,10 +986,12 @@ object ColumnarPlanner:
           case _ => None
     }
 
-  /** The widened map. A parent that matches [[PhysicalOp.Kind.Pairs]] must not build on it. */
-  private def intLongMapped(op: PhysicalOp): Boolean = op match
-    case _: PhysicalOp.IntLongMapValue => true
-    case _ => false
+  /**
+   * The widened map, or a filter or long `mapValues` on it. A parent that matches
+   * [[PhysicalOp.Kind.Pairs]] must not build an int-pair project or a key map on it.
+   */
+  private def intLongMapped(op: PhysicalOp): Boolean =
+    IntLongParents.widened(op)
 
   private def mapValue(source: Plan[_], kind: PhysicalOp.Kind): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
@@ -1003,6 +1005,10 @@ object ColumnarPlanner:
             MapValueBinding.value(child)
           case (PhysicalOp.Kind.LongPairs, PhysicalOp.Kind.LongPairs) =>
             MapValueBinding.value(child)
+          // [[ColumnBinding.asked]] stays [[scala.None]] for this layout, so the long map is not
+          // a binder tag. The value column is already `Int64`.
+          case (_, PhysicalOp.Kind.LongPairs) if IntLongParents.widened(child) =>
+            Some(PhysicalOp.MapValue(child))
           case _ => None
     }
 

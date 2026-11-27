@@ -48,9 +48,12 @@ private[execution] object ColumnarInterpreter:
       preserveAbsence: Boolean,
       ordinals: Set[Int],
   ): Columns =
-    val projected = interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)
-    val columns = projectColumn(pairBatches(child, projected), ordinal)
-    StringPairWalk.wrapColumn(child.kind, columns, ordinal)
+    if (IntLongParents.widened(child)) then
+      IntLongParents.project(source, child, ordinal, selectedPartition, preserveAbsence, ordinals)
+    else
+      val projected = interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)
+      val columns = projectColumn(pairBatches(child, projected), ordinal)
+      StringPairWalk.wrapColumn(child.kind, columns, ordinal)
 
   /** The pair batches `child` produced. A wrong column type is a planner bug, not a fallback. */
   private def pairBatches(child: PhysicalOp, columns: Columns): Vector[ColumnBatch] =
@@ -454,10 +457,12 @@ private[execution] object ColumnarInterpreter:
       )
     case (Plan.MapValuesOp(source, mapper), PhysicalOp.MapValue(child)) =>
       val input = interpretAt(source, child, selectedPartition, preserveAbsence, ordinals)
-      ExecutionRoute.mapValueArm(child) match
-        case ExecutionRoute.MapValueArm.LongValues => mapLongValues(input, mapper)
-        case ExecutionRoute.MapValueArm.StringValues => StringPairWalk.mapValues(input, mapper)
-        case ExecutionRoute.MapValueArm.IntValues => mapIntValues(input, mapper)
+      if (IntLongParents.widened(child)) then IntLongParents.mapLong(input, mapper)
+      else
+        ExecutionRoute.mapValueArm(child) match
+          case ExecutionRoute.MapValueArm.LongValues => mapLongValues(input, mapper)
+          case ExecutionRoute.MapValueArm.StringValues => StringPairWalk.mapValues(input, mapper)
+          case ExecutionRoute.MapValueArm.IntValues => mapIntValues(input, mapper)
     case (Plan.MapValuesOp(source, mapper), PhysicalOp.IntLongMapValue(child)) =>
       IntLongMapRun.columns(
         interpretAt(source, child, selectedPartition, preserveAbsence, ordinals),

@@ -58,7 +58,10 @@ class TestIntLongCount extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     calls.get() shouldBe 0
 
     val widened = rows.mapValues(widen)
-    assert(ColumnarPlanner.lower(widened.filterValues((value: Long) => value > 0L).plan).isEmpty)
+    ColumnarPlanner
+      .lower(widened.filterValues((value: Long) => value > 0L).plan)
+      .map(_.shape) shouldBe
+      Some("FilterValue(IntLongMapValue(Scan))")
     ColumnarPlanner.lower(widened.groupByKey.plan).map(_.shape) shouldBe Some(
       "GroupByKey(Exchange(IntLongMapValue(Scan)))",
     )
