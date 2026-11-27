@@ -62,7 +62,9 @@ final case class ScarletConf(
      * budget spills when this flag is on: the post-exchange bucket is sliced in input order and
      * grouped one morsel at a time. Spill off keeps the in-memory groups and writes nothing. A
      * morsel whose group table does not fit throws `ClosedKernelRefusal`. The appended groups are
-     * not bounded by the budget.
+     * not bounded by the budget. A wide-batch exchange over the budget spills when this flag is
+     * on. An int key uses the int build estimate and a long key uses the long build estimate.
+     * Float, bool, and float32 columns stay in memory. Spill off writes no wide-exchange file.
      */
     spillEnabled: Boolean = false,
     /**
@@ -92,7 +94,10 @@ final case class ScarletConf(
      * over it spills when spill is on, sliced in input order. Spill off stays in memory. A morsel
      * whose group table does not fit throws `ClosedKernelRefusal`. The appended groups are not
      * bounded by this budget. The long group estimate charges 8-byte keys. The string group
-     * estimate charges dictionary bytes, including an entry no row uses.
+     * estimate charges dictionary bytes, including an entry no row uses. A wide-batch exchange
+     * bucket over this budget is written and read back when spill is on. An int key uses the int
+     * build estimate and a long key uses the long build estimate. Float, bool, and float32 columns
+     * are not written.
      */
     spillBudgetBytes: Long = 64L * 1024L * 1024L,
     /**

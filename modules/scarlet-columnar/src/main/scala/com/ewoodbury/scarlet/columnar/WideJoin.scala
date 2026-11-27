@@ -9,8 +9,11 @@ import com.ewoodbury.scarlet.core.{ColumnField, ColumnKind, ScarletConf}
  * the hash table stays the one those kernels already build. Payload columns are copied by that
  * index. A null key is not inserted and is not probed. A null payload is copied.
  *
- * Hash mode joins each shuffle bucket with itself. Broadcast mode hashes the right side once and
- * probes every left batch. Output is every left column, then every right column except the key.
+ * Hash mode joins each shuffle bucket with itself. When spill is on, a hash bucket whose int or
+ * long build estimate is over the spill budget is written with the existing spill store and read
+ * back. Float, bool, and float32 columns stay in memory. Spill off writes nothing. Broadcast mode
+ * hashes the right side once and probes every left batch. Output is every left column, then every
+ * right column except the key.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object WideJoin:
@@ -24,9 +27,10 @@ object WideJoin:
       rightKey: Int,
   ): (Vector[ColumnField], ColumnBatch) =
     val kind = keyKind(leftFields, rightFields, leftKey, rightKey)
+    val longKey = kind == ColumnKind.Int64
     val width = math.max(ScarletConf.get.defaultShufflePartitions, 1)
-    val leftParts = split(left, leftKey, kind, width)
-    val rightParts = split(right, rightKey, kind, width)
+    val leftParts = WideExchange.hold(split(left, leftKey, kind, width), longKey)
+    val rightParts = WideExchange.hold(split(right, rightKey, kind, width), longKey)
     val matched = (0 until width).iterator.flatMap { part =>
       local(leftParts(part), rightParts(part), leftKey, rightKey, kind)
     }.toSeq
