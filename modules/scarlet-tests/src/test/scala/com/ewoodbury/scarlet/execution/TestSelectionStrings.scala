@@ -161,7 +161,7 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
     (dense - selected) shouldBe compactPublishes
   }
 
-  it should "keep an empty string, drop a null key, and refuse only a selected null value" in {
+  it should "keep an empty string, drop a null key, and keep a selected null value" in {
     val present = BatchCodec.stringIntPairs(Seq(nullKey(4), "" -> 1, "red" -> 99, "blue" -> 6))
     // Row 2 sits past the live prefix. A scan of the whole array would keep 99.
     val selected = Selected(present, Array(0, 1, 3, 2), 3)
