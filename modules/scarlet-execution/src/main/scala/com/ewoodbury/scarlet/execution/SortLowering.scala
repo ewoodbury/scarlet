@@ -70,7 +70,8 @@ private[execution] object SortLowering:
   /** A parent cannot wrap a sort. The sort itself is lowered by [[ColumnarPlanner.lower]]. */
   def acceptsAsChild(op: PhysicalOp): Boolean = op match
     case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByIntValueDesc |
-        _: PhysicalOp.SortByLongKey | _: PhysicalOp.SortByStringKey =>
+        _: PhysicalOp.SortByLongKey | _: PhysicalOp.SortByStringKey |
+        _: PhysicalOp.SortByLongValueDesc | _: PhysicalOp.SortByStringValueDesc =>
       false
     case _ => true
 
@@ -120,6 +121,30 @@ private[execution] object SortLowering:
       "SortByStringKeyOp",
       acceptsStringKeyChild,
       PhysicalOp.SortByStringKey(_),
+    )
+
+  def lowerLongValue(
+      source: Plan[(Long, Long)],
+      lowerPlan: Plan[_] => Option[PhysicalOp],
+  ): Option[PhysicalOp] =
+    lowerKeyed(
+      lowerPlan(source),
+      Operator.SortByLongValueDesc,
+      "SortByLongValueDescOp",
+      acceptsLongValueChild,
+      PhysicalOp.SortByLongValueDesc(_),
+    )
+
+  def lowerStringValue(
+      source: Plan[(String, Int)],
+      lowerPlan: Plan[_] => Option[PhysicalOp],
+  ): Option[PhysicalOp] =
+    lowerKeyed(
+      lowerPlan(source),
+      Operator.SortByStringValueDesc,
+      "SortByStringValueDescOp",
+      acceptsStringValueChild,
+      PhysicalOp.SortByStringValueDesc(_),
     )
 
   /**
@@ -174,6 +199,8 @@ private[execution] object SortLowering:
       case (Operator.SortByIntValueDesc, KernelChoice.SortByIntValueDesc) => true
       case (Operator.SortByLongKey, KernelChoice.SortByLongKey) => true
       case (Operator.SortByStringKey, KernelChoice.SortByStringKey) => true
+      case (Operator.SortByLongValueDesc, KernelChoice.SortByLongValueDesc) => true
+      case (Operator.SortByStringValueDesc, KernelChoice.SortByStringValueDesc) => true
       case _ => false
 
   /**
@@ -273,6 +300,24 @@ private[execution] object SortLowering:
       longSlotAboveProject(op)
 
   /**
+   * A scan of long pairs, filters over that scan, one long-pair project, one key or value filter
+   * above that project, or one long [[PhysicalOp.MapValue]] on that scan or filter stack. A slot
+   * above the value map, a second map, and a whole-row filter above the project are not this
+   * shape.
+   */
+  private def acceptsLongValueChild(op: PhysicalOp): Boolean =
+    acceptsScanOrFilters(op, PhysicalOp.Kind.LongPairs) || LongPairSlot.oneProject(op) ||
+      longSlotAboveProject(op) || longMapValueOnScan(op)
+
+  /** One long [[PhysicalOp.MapValue]] on a scan or a long-pair filter stack. */
+  private def longMapValueOnScan(op: PhysicalOp): Boolean = op match
+    case PhysicalOp.MapValue(child)
+        if (op.kind eq PhysicalOp.Kind.LongPairs) &&
+          acceptsScanOrFilters(child, PhysicalOp.Kind.LongPairs) =>
+      true
+    case _ => false
+
+  /**
    * One key or value slot whose child is [[LongPairSlot.oneProject]]. The predicate is not read.
    */
   private def longSlotAboveProject(op: PhysicalOp): Boolean = op match
@@ -289,6 +334,24 @@ private[execution] object SortLowering:
   private def acceptsStringKeyChild(op: PhysicalOp): Boolean =
     acceptsScanOrFilters(op, PhysicalOp.Kind.StringPairs) || StringPairSlot.oneProject(op) ||
       slotFilterAboveProject(op)
+
+  /**
+   * A scan of string pairs, filters over that scan, one string-pair project, one key or value
+   * filter above that project, or one string [[PhysicalOp.MapValue]] on that scan or filter stack.
+   * A slot above the value map, a second map, and a whole-row filter above the project are not
+   * this shape.
+   */
+  private def acceptsStringValueChild(op: PhysicalOp): Boolean =
+    acceptsScanOrFilters(op, PhysicalOp.Kind.StringPairs) || StringPairSlot.oneProject(op) ||
+      slotFilterAboveProject(op) || stringMapValueOnScan(op)
+
+  /** One string [[PhysicalOp.MapValue]] on a scan or a string-pair filter stack. */
+  private def stringMapValueOnScan(op: PhysicalOp): Boolean = op match
+    case PhysicalOp.MapValue(child)
+        if (op.kind eq PhysicalOp.Kind.StringPairs) &&
+          acceptsScanOrFilters(child, PhysicalOp.Kind.StringPairs) =>
+      true
+    case _ => false
 
   /**
    * One key or value slot whose child is [[StringPairSlot.oneProject]]. The predicate is not read.

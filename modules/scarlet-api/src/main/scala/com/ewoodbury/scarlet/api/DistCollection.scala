@@ -355,6 +355,29 @@ final case class DistCollection[A](plan: Plan[A]):
     DistCollection(Plan.SortByStringKeyOp(kvPlan))
 
   /**
+   * Sorts `(Long, Long)` pairs by column 1 descending, then column 0 ascending. Builds
+   * [[Plan.SortByLongValueDescOp]]. Generic [[sortBy]] stays on the row path. A scan, filters over
+   * that scan, one long-pair project, one key or value filter above that project, or one
+   * `mapValues` on that scan or filter stack lowers. Neither function is read. A second map, a
+   * slot above `mapValues`, a second slot, and a whole-row filter above the project stay on the
+   * row path. A null orders as zero and stays null. Ties keep input order.
+   */
+  def sortByLongValueDesc(using ev: A =:= (Long, Long)): DistCollection[(Long, Long)] =
+    DistCollection(Plan.SortByLongValueDescOp(kvPlan))
+
+  /**
+   * Sorts `(String, Int)` pairs by the int value descending, then the string key ascending. Builds
+   * [[Plan.SortByStringValueDescOp]]. Generic [[sortBy]] stays on the row path. A scan, filters
+   * over that scan, one string-pair project, one key or value filter above that project, or one
+   * `mapValues` on that scan or filter stack lowers. Neither function is read. A second map, a
+   * slot above `mapValues`, a second slot, and a whole-row filter above the project stay on the
+   * row path. A present key orders by `String.compareTo`. A null key orders as `""` and stays
+   * null. A null value orders as zero and stays null. Ties keep input order.
+   */
+  def sortByStringValueDesc(using ev: A =:= (String, Int)): DistCollection[(String, Int)] =
+    DistCollection(Plan.SortByStringValueDescOp(kvPlan))
+
+  /**
    * Transformation: Joins this collection with another collection by key, requiring a shuffle
    * operation. A null key is dropped on both sides and does not match, for every strategy. Returns
    * a new DistCollection representing the joined data. Does not trigger computation.

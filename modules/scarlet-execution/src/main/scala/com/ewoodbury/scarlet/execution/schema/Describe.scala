@@ -52,6 +52,8 @@ private[execution] object Describe:
     case _: PhysicalOp.SortByIntValueDesc => KernelChoice.SortByIntValueDesc
     case _: PhysicalOp.SortByLongKey => KernelChoice.SortByLongKey
     case _: PhysicalOp.SortByStringKey => KernelChoice.SortByStringKey
+    case _: PhysicalOp.SortByLongValueDesc => KernelChoice.SortByLongValueDesc
+    case _: PhysicalOp.SortByStringValueDesc => KernelChoice.SortByStringValueDesc
     case _: PhysicalOp.GroupByKey => KernelChoice.GroupByKey
     case _: PhysicalOp.GroupedDecode => KernelChoice.GroupedDecode
     case _: PhysicalOp.Dedupe => KernelChoice.Dedupe

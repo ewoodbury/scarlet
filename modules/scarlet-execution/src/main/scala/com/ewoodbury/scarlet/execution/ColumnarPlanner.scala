@@ -180,7 +180,8 @@ object ColumnarPlanner:
   private def takeAccepted(plan: Plan[_], op: PhysicalOp, n: Int): Option[Seq[Any]] =
     op match
       case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey |
-          _: PhysicalOp.SortByStringKey =>
+          _: PhysicalOp.SortByStringKey | _: PhysicalOp.SortByLongValueDesc |
+          _: PhysicalOp.SortByStringValueDesc =>
         Some(
           ColumnarInterpreter.decodePrefixFor(ColumnarInterpreter.interpret(plan, op), n, op),
         )
@@ -865,6 +866,10 @@ object ColumnarPlanner:
       SortLowering.lowerLong(source, lowerPlan)
     case Plan.SortByStringKeyOp(source) =>
       SortLowering.lowerString(source, lowerPlan)
+    case Plan.SortByLongValueDescOp(source) =>
+      SortLowering.lowerLongValue(source, lowerPlan)
+    case Plan.SortByStringValueDescOp(source) =>
+      SortLowering.lowerStringValue(source, lowerPlan)
     case _ => None
 
   private[execution] def elementSteps(
@@ -1057,6 +1062,10 @@ object ColumnarPlanner:
       SortLowering.infoValueDesc(shuffleWidth, layoutOf(PhysicalOp.Kind.Pairs))
     case _: PhysicalOp.SortByStringKey =>
       SortLowering.info(shuffleWidth, layoutOf(PhysicalOp.Kind.StringPairs))
+    case _: PhysicalOp.SortByLongValueDesc =>
+      SortLowering.infoValueDesc(shuffleWidth, layoutOf(PhysicalOp.Kind.LongPairs))
+    case _: PhysicalOp.SortByStringValueDesc =>
+      SortLowering.infoValueDesc(shuffleWidth, layoutOf(PhysicalOp.Kind.StringPairs))
     case _: PhysicalOp.HashAggregate | _: PhysicalOp.LongHashAggregate =>
       hashed(PhysicalOp.Kind.Pairs)
     case _: PhysicalOp.StringHashAggregate =>

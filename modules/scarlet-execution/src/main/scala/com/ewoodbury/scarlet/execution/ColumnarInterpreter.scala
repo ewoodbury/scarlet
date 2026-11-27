@@ -918,6 +918,38 @@ private[execution] object ColumnarInterpreter:
           )
           StringRankSplitRuns.sortAndSplit(batches, width, workers, ScarletConf.get)
       Columns.StringPairs(sorted)
+    case (Plan.SortByLongValueDescOp(source), PhysicalOp.SortByLongValueDesc(child)) =>
+      require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
+      Columns.LongPairs(
+        ValueSort.longPairs(
+          longPairsOf(
+            interpretAt(
+              source,
+              child,
+              selectedPartition = None,
+              preserveAbsence = true,
+              ordinals,
+            ),
+          ),
+          ColumnarPlanner.shuffleWidth,
+        ),
+      )
+    case (Plan.SortByStringValueDescOp(source), PhysicalOp.SortByStringValueDesc(child)) =>
+      require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
+      Columns.StringPairs(
+        ValueSort.stringPairs(
+          StringPairWalk.batches(
+            interpretAt(
+              source,
+              child,
+              selectedPartition = None,
+              preserveAbsence = true,
+              ordinals,
+            ),
+          ),
+          ColumnarPlanner.shuffleWidth,
+        ),
+      )
     case (plan, op) if LongOuterArms.accepts(plan, op) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")

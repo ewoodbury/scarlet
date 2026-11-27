@@ -353,7 +353,8 @@ object StageBuilder:
    *      - GroupByKeyOp, CountByKeyOp, ReduceByKeyOp: Supports shuffle bypass optimization when
    *        already partitioned correctly
    *      - SortByOp, SortByIntKeyOp, SortByIntValueDescOp, SortByLongKeyOp, SortByStringKeyOp,
-   *        PartitionByOp, RepartitionOp, CoalesceOp, DistinctOp: Always creates shuffle boundaries
+   *        SortByLongValueDescOp, SortByStringValueDescOp, PartitionByOp, RepartitionOp,
+   *        CoalesceOp, DistinctOp: Always creates shuffle boundaries
    *      - JoinOp, LeftOuterJoinOp, RightOuterJoinOp, FullOuterJoinOp, CoGroupOp: Multi-input wide
    *        operations with side tagging for disambiguation
    *      - Uses WideOp metadata structures for shuffle execution planning
@@ -665,7 +666,7 @@ object StageBuilder:
         }
 
       case sortBy: Plan.SortByOp[_, _] =>
-        sortByShuffle(
+        SortStages.shuffle(
           ctx,
           sortBy.source,
           sortBy.keyFunc,
@@ -676,7 +677,7 @@ object StageBuilder:
         )
 
       case intSort: Plan.SortByIntKeyOp =>
-        sortByShuffle(
+        SortStages.shuffle(
           ctx,
           intSort.source,
           (pair: (Int, Int)) => pair._1,
@@ -687,7 +688,7 @@ object StageBuilder:
         )
 
       case valueSort: Plan.SortByIntValueDescOp =>
-        sortByShuffle(
+        SortStages.shuffle(
           ctx,
           valueSort.source,
           (pair: (Int, Int)) => (pair._2, pair._1),
@@ -698,7 +699,7 @@ object StageBuilder:
         )
 
       case longSort: Plan.SortByLongKeyOp =>
-        sortByShuffle(
+        SortStages.shuffle(
           ctx,
           longSort.source,
           (pair: (Long, Long)) => pair._1,
@@ -709,12 +710,34 @@ object StageBuilder:
         )
 
       case stringSort: Plan.SortByStringKeyOp =>
-        sortByShuffle(
+        SortStages.shuffle(
           ctx,
           stringSort.source,
-          (pair: (String, Int)) => stringSortKey(pair),
+          (pair: (String, Int)) => SortStages.stringKey(pair),
           Ordering.String,
           stringSort,
+          builderMap,
+          dependencies,
+        )
+
+      case longValue: Plan.SortByLongValueDescOp =>
+        SortStages.shuffle(
+          ctx,
+          longValue.source,
+          SortStages.longValueKey,
+          Ordering.Tuple2(Ordering.Long.reverse, Ordering.Long),
+          longValue,
+          builderMap,
+          dependencies,
+        )
+
+      case stringValue: Plan.SortByStringValueDescOp =>
+        SortStages.shuffle(
+          ctx,
+          stringValue.source,
+          SortStages.stringValueKey,
+          Ordering.Tuple2(Ordering.Int.reverse, Ordering.String),
+          stringValue,
           builderMap,
           dependencies,
         )
@@ -982,45 +1005,6 @@ object StageBuilder:
           // Recorded for the plan. The row executor does not read it.
           joinStrategy = joinStrategy,
           sides = Seq(Side.Left, Side.Right),
-        ),
-      ),
-      builderMap,
-      dependencies,
-    )
-    (shuffleId, Some(plan))
-  }
-
-  /** Effective string sort key. A null key orders as `""` and the original row stays null. */
-  @SuppressWarnings(Array("org.wartremover.warts.Null"))
-  private def stringSortKey(pair: (String, Int)): String =
-    pair._1 match
-      case null => ""
-      case key => key
-
-  /**
-   * Range-partitions and locally sorts. `SortByOp`, `SortByIntKeyOp`, `SortByIntValueDescOp`,
-   * `SortByLongKeyOp`, and `SortByStringKeyOp` share this shuffle. The caller supplies the key
-   * function and the ordering. A null string key orders as `""` and the original row stays null.
-   */
-  private def sortByShuffle[A, B](
-      ctx: BuildContext,
-      source: Plan[A],
-      keyFunc: A => B,
-      ordering: Ordering[B],
-      plan: Plan[_],
-      builderMap: mutable.Map[StageId, StageDraft],
-      dependencies: mutable.Map[StageId, mutable.Set[StageId]],
-  ): (StageId, Option[Plan[_]]) = {
-    val (sourceStageId, _) = buildStagesFromPlan(ctx, source, builderMap, dependencies)
-    val numPartitions = ScarletConf.get.defaultShufflePartitions
-    val shuffleId = createShuffleStageUnified(
-      ctx,
-      Seq(sourceStageId),
-      SortByWideOp(
-        SortWideOpMeta(
-          numPartitions = numPartitions,
-          keyFunc = keyFunc,
-          ordering = ordering,
         ),
       ),
       builderMap,

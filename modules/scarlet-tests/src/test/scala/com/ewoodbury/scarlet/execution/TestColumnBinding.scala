@@ -159,6 +159,8 @@ class TestColumnBinding extends AnyFlatSpec with Matchers:
     case Operator.SortByIntValueDesc => "sortByIntValueDesc"
     case Operator.SortByLongKey => "sortByLongKey"
     case Operator.SortByStringKey => "sortByStringKey"
+    case Operator.SortByLongValueDesc => "sortByLongValueDesc"
+    case Operator.SortByStringValueDesc => "sortByStringValueDesc"
     case Operator.GroupByKey => "groupByKey"
     case Operator.Distinct => "distinct"
     case Operator.Keys => "keys"

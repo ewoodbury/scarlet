@@ -126,9 +126,10 @@ private[execution] object JoinClass:
           KernelChoice.StringHashAggregate | KernelChoice.IntLongProjectSum |
           KernelChoice.CountByKey | KernelChoice.CountThroughProbe | KernelChoice.CountSum |
           KernelChoice.JoinProbeSum | KernelChoice.SortByIntKey | KernelChoice.SortByIntValueDesc |
-          KernelChoice.SortByLongKey | KernelChoice.SortByStringKey | KernelChoice.GroupByKey |
-          KernelChoice.GroupedDecode | KernelChoice.Dedupe | KernelChoice.Scan |
-          KernelChoice.Filter | KernelChoice.Project | KernelChoice.Column |
+          KernelChoice.SortByLongKey | KernelChoice.SortByStringKey |
+          KernelChoice.SortByLongValueDesc | KernelChoice.SortByStringValueDesc |
+          KernelChoice.GroupByKey | KernelChoice.GroupedDecode | KernelChoice.Dedupe |
+          KernelChoice.Scan | KernelChoice.Filter | KernelChoice.Project | KernelChoice.Column |
           KernelChoice.MapValue | KernelChoice.IntLongMapValue | KernelChoice.MapKey |
           KernelChoice.Pipeline | KernelChoice.Union | KernelChoice.Exchange =>
         None
