@@ -45,11 +45,14 @@ object IntPairProject:
     def applyNulls(): Any
 
   /**
-   * One present projected pair. A null key or a null value is not passed. The caller owns the
-   * group.
+   * One projected pair. A null key is not passed. A null value is [[addMissing]]. The caller owns
+   * the group.
    */
   private[scarlet] trait IntPairSink:
     def add(key: Int, value: Int): Unit
+
+    /** A present key whose value is null. The reduce keeps that group. */
+    def addMissing(key: Int): Unit
 
   /**
    * One present projected key for count and sum. A null value is counted and not added. A null key
@@ -240,9 +243,10 @@ object IntPairProject:
    * Runs `mapper` on `[start, start + length)` and passes each present projected pair to `sink`.
    *
    * The calls match [[project]]: a null key and a null value are passed in, and an empty range
-   * does not call `mapper`. A null projected key is dropped. A null projected value is dropped and
-   * does not create a group. A result that is not a pair of ints throws [[ColumnarFallback]] and
-   * publishes nothing. This does not allocate an output column. [[visitKeys]] stays count-only.
+   * does not call `mapper`. A null projected key is dropped. A null projected value stays a null
+   * group until another value arrives. A result that is not a pair of ints throws
+   * [[ColumnarFallback]] and publishes nothing. This does not allocate an output column.
+   * [[visitKeys]] stays count-only.
    */
   private[scarlet] def visitPairs(
       batch: ColumnBatch,
@@ -314,12 +318,13 @@ object IntPairProject:
    * [[visitPairs]] for one int slot above the project.
    *
    * The adapter calls match [[project]], including a null key and a null value. A null projected
-   * key is dropped, and a key predicate is not called. A null projected value is dropped and does
-   * not create a group, and a value predicate is not called. The other column is still tested when
-   * it is present: a key predicate runs on a null value, and a value predicate runs on a null key.
-   * A row the slot keeps is passed to `sink` only when both projected cells are present. A result
-   * that is not a pair of ints throws [[ColumnarFallback]] and publishes nothing. This does not
-   * allocate an output column. `column` is `0` for the key and `1` for the value.
+   * key is dropped, and a key predicate is not called. A null projected value stays a null group,
+   * and a value predicate is not called. The other column is still tested when it is present: a
+   * key predicate runs on a null value, and a value predicate runs on a null key. A kept key is
+   * passed to `sink`, including a null value. A value slot passes a row only when the value is
+   * present. A result that is not a pair of ints throws [[ColumnarFallback]] and publishes
+   * nothing. This does not allocate an output column. `column` is `0` for the key and `1` for the
+   * value.
    */
   private[scarlet] def visitFiltered(
       batch: ColumnBatch,
@@ -401,7 +406,7 @@ object IntPairProject:
    * does not call `mapper`. A null projected key is not passed to `sink`. A null projected value
    * is [[IntPairCountSink.countNull]], counted and not added. A result that is not a pair of ints
    * throws [[ColumnarFallback]] and publishes nothing. This does not allocate an output column.
-   * [[visitPairs]] stays reduce-only: a null projected value there does not create a group.
+   * [[visitPairs]] stays reduce-only: a null projected value there is a null group, not a count.
    */
   private[scarlet] def visitCountSums(
       batch: ColumnBatch,
@@ -554,8 +559,8 @@ object IntPairProject:
     }
 
   /**
-   * Keeps a present key and a present value. A null key is dropped. A null value is dropped and
-   * does not create a group. A cell that is not an int declines, and the value is checked first.
+   * Keeps a present key. A null key is dropped. A null value is [[IntPairSink.addMissing]]. A cell
+   * that is not an int declines, and the value is checked first.
    */
   private def offerPair(projected: Any, sink: IntPairSink): Unit =
     projected match
@@ -570,6 +575,7 @@ object IntPairProject:
           case key: Int =>
             valueCell match
               case value: Int => sink.add(key, value)
+              case null => sink.addMissing(key)
               case _ => ()
           case other => decline(foundName(other))
       case other => decline(foundName(other))
@@ -577,7 +583,8 @@ object IntPairProject:
   /**
    * [[offerPair]] plus one int slot. The value cell is checked first, matching [[offerPair]]. A
    * null slot cell is dropped and `keep` is not called. `keep` sees a present partner even when
-   * the other cell is null. Both cells have to be present before `sink` is called.
+   * the other cell is null. A kept key with a null value calls [[IntPairSink.addMissing]]. A value
+   * slot still requires a present value before `sink.add`.
    */
   private def offerFiltered(
       projected: Any,
@@ -610,6 +617,7 @@ object IntPairProject:
       case key: Int if keep(key) =>
         valueCell match
           case value: Int => sink.add(key, value)
+          case null => sink.addMissing(key)
           case _ => ()
       case _ => ()
 

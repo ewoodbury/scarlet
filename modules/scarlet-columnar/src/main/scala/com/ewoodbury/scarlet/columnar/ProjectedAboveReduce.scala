@@ -7,9 +7,9 @@ package com.ewoodbury.scarlet.columnar
  * interpreter uses, including a null key and a null value. The slot then sees the projected pair:
  * a key predicate is not called on a null projected key, and a value predicate is not called on a
  * null projected value. A present projected key and value that the slot keeps are inserted into
- * the [[HashReduce]] table. A null projected key is dropped. A null projected value is dropped and
- * does not create a group. The pair batch is never published, and [[HashReduce.byKey]] does not
- * see it. Neither function is inspected.
+ * the [[HashReduce]] table. A null projected key is dropped. A null projected value on a kept key
+ * stays a null group. A value slot does not keep that null. The pair batch is never published, and
+ * [[HashReduce.byKey]] does not see it. Neither function is inspected.
  *
  * Partials are one reduce per morsel, merged per input batch, then exchanged like
  * [[ProjectedPairReduce]]. Spill stays on the post-exchange bucket.

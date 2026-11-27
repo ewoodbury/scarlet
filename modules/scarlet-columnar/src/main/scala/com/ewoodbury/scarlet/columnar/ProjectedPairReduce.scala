@@ -6,7 +6,7 @@ package com.ewoodbury.scarlet.columnar
  * The project's input morsels are already filtered. Each row is handed to the same adapter the
  * interpreter uses, including a null key and a null value. A present projected key and value are
  * inserted into the [[HashReduce]] table. A null projected key is dropped. A null projected value
- * is dropped and does not create a group. The pair batch is never published, and
+ * stays a null group until another value arrives. The pair batch is never published, and
  * [[HashReduce.byKey]] does not see it. The function is not inspected.
  *
  * Partials are one reduce per morsel, merged per input batch, then exchanged like [[HashReduce]].

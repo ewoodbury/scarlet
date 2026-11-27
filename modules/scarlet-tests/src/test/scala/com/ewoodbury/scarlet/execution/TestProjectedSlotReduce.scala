@@ -16,9 +16,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  *
  * The adapter runs on every input row, including a null key and a null value. The slot then sees
  * the projected pair. A null projected key is dropped and the key predicate is not called. A null
- * projected value is dropped and does not create a group, and the value predicate is not called.
- * [[HashReduce.byKey]] does not see the projected columns. Collect of the filtered map still
- * writes them.
+ * projected value stays a null group, and the value predicate is not called. [[HashReduce.byKey]]
+ * does not see the projected columns. Collect of the filtered map still writes them.
  *
  * `filterValues(_ >= 20)` on `(k + 1, v)` keeps `(2, 30)`, so the groups are
  * `{2 -> 30, 3 -> 20, 4 -> 40}`.
@@ -119,7 +118,7 @@ class TestProjectedSlotReduce extends AnyFlatSpec with Matchers with BeforeAndAf
     calls.get shouldBe seen
   }
 
-  it should "drop a null projected value and still call the key predicate" in {
+  it should "keep a null projected value under a key filter and still call the key predicate" in {
     val calls = new AtomicInteger
     val preds = new AtomicInteger
     val reduced = nullIntValueSource()
@@ -137,22 +136,19 @@ class TestProjectedSlotReduce extends AnyFlatSpec with Matchers with BeforeAndAf
       preds.set(0)
       IntPairProject.resetPublishedForTest()
       HashReduce.resetByKeyForTest()
-      val found = reduced.collect().toMap
+      val found = show(reduced.collect())
       IntPairProject.publishedForTest shouldBe 0
       HashReduce.byKeyCallsForTest shouldBe 0
       (found, calls.get, preds.get)
     }
-    val (sums, seen, kept) = atBatch(8192)
-    sums shouldBe Map(5 -> 4)
+    val (groups, seen, kept) = atBatch(8192)
+    groups shouldBe Seq((2, "null"), (5, "4"))
     seen shouldBe 2
     kept shouldBe 2
-    atBatch(1) shouldBe (sums, seen, kept)
-    // The row path keeps the null value as a group. This arm matches the unpublished project
-    // reduce: the value is dropped and key 2 is not created. Both paths still call the map and
-    // the key predicate.
+    atBatch(1) shouldBe (groups, seen, kept)
     calls.set(0)
     preds.set(0)
-    val _ = row(reduced.collect())
+    show(row(reduced.collect())) shouldBe groups
     calls.get shouldBe seen
     preds.get shouldBe kept
   }
@@ -404,17 +400,15 @@ class TestProjectedSlotReduce extends AnyFlatSpec with Matchers with BeforeAndAf
     keyCalls.set(0)
     MapIntKey.resetPublishedForTest()
     HashReduce.resetByKeyForTest()
-    val dropped = nullValues.collect().toMap
+    val nullKept = show(nullValues.collect())
     mapCalls.get shouldBe 2
     keyCalls.get shouldBe 2
     MapIntKey.publishedForTest shouldBe 0
     HashReduce.byKeyCallsForTest shouldBe 0
-    dropped shouldBe Map(8 -> 4)
-    /* The row reduce keeps a lone null value. This arm drops it, as the unfiltered map reduce
-     * does. */
+    nullKept shouldBe Seq((2, "null"), (8, "4"))
     mapCalls.set(0)
     keyCalls.set(0)
-    val _ = row(nullValues.collect())
+    show(row(nullValues.collect())) shouldBe nullKept
     mapCalls.get shouldBe 2
     keyCalls.get shouldBe 2
 
@@ -550,6 +544,28 @@ class TestProjectedSlotReduce extends AnyFlatSpec with Matchers with BeforeAndAf
       val key = if (pair._1 == dropped) null else Int.box(pair._1)
       Tuple2(key, Int.box(pair._2)).asInstanceOf[(Int, Int)]
     }
+
+  /**
+   * Key order is sorted. A null int is the text `null`. The iterable is read as references so a
+   * lone null value is not unboxed to `0`.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def show(rows: Iterable[(Int, Int)]): Seq[(Int, String)] =
+    rows.iterator
+      .map { pair =>
+        val raw = pair.asInstanceOf[Product]
+        val value = raw.productElement(1)
+        val text = if (value == null) "null" else value.toString
+        (raw.productElement(0).asInstanceOf[Int], text)
+      }
+      .toSeq
+      .sortBy(_._1)
 
   @SuppressWarnings(
     Array(

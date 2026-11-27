@@ -360,9 +360,11 @@ class TestPhysicalPlan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     projected.toList.sorted shouldBe List((2, 10), (2, 30), (3, 20), (4, 40))
 
     val calls = new AtomicInteger
-    val nullable = nullIntKeySource().map(shiftNullKey(calls, nullKey = 7)).reduceByKey[Int, Int](
-      _ + _,
-    )
+    val nullable = nullIntKeySource()
+      .map(shiftNullKey(calls, nullKey = 7))
+      .reduceByKey[Int, Int](
+        _ + _,
+      )
     val nullAt = (size: Int) => {
       ScarletConf.set(ScarletConf.get.copy(columnarExecution = true, columnarBatchSize = size))
       ScarletRuntime.get.shuffle.clear()
@@ -388,10 +390,11 @@ class TestPhysicalPlan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       (found, valueCalls.get)
     }
     val (valueSums, valueCount) = valueAt(8192)
-    valueSums shouldBe Map(5 -> 4)
+    // A lone null value stays null. toMap keeps that null on both paths.
+    valueSums shouldBe loneNullSums
     valueAt(1) shouldBe (valueSums, valueCount)
     valueCalls.set(0)
-    val _ = row(values.collect())
+    row(values.collect().toMap) shouldBe valueSums
     valueCalls.get shouldBe valueCount
   }
 
@@ -543,6 +546,19 @@ class TestPhysicalPlan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
         case other => throw new IllegalArgumentException(s"pair map saw $other")
       Tuple2(Int.box(key), value).asInstanceOf[(Int, Int)]
     }
+
+  /** Key 5 keeps 4. Key 2 is a lone null, stored as a null reference rather than `0`. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def loneNullSums: Map[Int, Int] =
+    Seq(
+      Tuple2(Int.box(5), Int.box(4)).asInstanceOf[(Int, Int)],
+      Tuple2(Int.box(2), null).asInstanceOf[(Int, Int)],
+    ).toMap
 
   /** A present pair witnesses the scan, then a null value. The key stays present. */
   @SuppressWarnings(

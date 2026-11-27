@@ -559,7 +559,7 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     fingerprint(projected) shouldBe Seq("2:10", "2:30", "3:20", "4:40")
   }
 
-  it should "call the key function on a null value and drop that group" in {
+  it should "call the key function on a null value and keep that group" in {
     val calls = new AtomicInteger
     val reduced = nullThenValue
       .mapIntKey { key =>
@@ -570,14 +570,15 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     calls.set(0)
     MapIntKey.resetPublishedForTest()
     HashReduce.resetByKeyForTest()
-    val columnar = counts(run(columnar = true)(reduced.collect()))
+    val columnar = fingerprint(run(columnar = true)(reduced.collect()))
     calls.get() shouldBe 2
     MapIntKey.publishedForTest shouldBe 0
     HashReduce.byKeyCallsForTest shouldBe 0
-    columnar shouldBe Map(8 -> 4)
+    columnar shouldBe Seq("2:null", "8:4")
     calls.set(0)
-    val _ = run(columnar = false)(reduced.collect())
+    val rows = fingerprint(run(columnar = false)(reduced.collect()))
     calls.get() shouldBe 2
+    columnar shouldBe rows
   }
 
   it should "reduce filtered owned pairs by the mapped key and skip dropped rows" in {

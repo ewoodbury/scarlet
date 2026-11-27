@@ -12,9 +12,10 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * `Int`. This is the `DistCollection.reduceByKey` kernel. Grouped sums that must not wrap use
  * [[HashAggregate.sumInt32]] and [[HashAggregate.sumInt64]] instead.
  *
- * Null keys are dropped. A null value is dropped and does not create a group. Output order is
- * first-seen order inside the batch. The table is at least twice the row count, so one batch does
- * not rehash.
+ * Null keys are dropped. A lone null value stays null and does not call the operator. A null that
+ * meets a present value, and two nulls, call the operator with that null unboxed to `0`. Output
+ * order is first-seen order inside the batch. The table is at least twice the row count, so one
+ * batch does not rehash.
  *
  * [[int32Selected]] scans a survivor index. [[byKeySelected]] partial-reduces that index, then
  * exchanges and spills the dense partials the same way [[byKey]] does. The exchange does not see
@@ -39,9 +40,9 @@ object HashReduce:
     else reduce(keys, values, op)
 
   /**
-   * [[int32]] over `rows(from until until)`. A null key is dropped. A null value is dropped and
-   * does not create a group. Slots at `count` and beyond are not read. An empty range publishes an
-   * empty pair batch.
+   * [[int32]] over `rows(from until until)`. A null key is dropped. A lone null value stays null.
+   * A null that meets a present value calls the operator with `0`. Slots at `count` and beyond are
+   * not read. An empty range publishes an empty pair batch.
    */
   def int32Selected(
       selected: Selected,
@@ -135,8 +136,9 @@ object HashReduce:
    *
    * `rows` sizes the table the way [[int32]] sizes one morsel. A zero estimate publishes an empty
    * pair batch and does not call `supply`. `supply` receives `add` and calls it once per present
-   * pair. A null key or a null value is the caller's to skip. This is not [[byKey]]: nothing here
-   * is a published pair project.
+   * pair. A null key is the caller's to skip. A null value is
+   * [[IntPairProject.IntPairSink.addMissing]]. This is not [[byKey]]: nothing here is a published
+   * pair project.
    */
   private[scarlet] def partialPairs(
       rows: Int,
@@ -189,6 +191,11 @@ object HashReduce:
     else table.scanSparse(keys, values)
     table.compact()
 
+  /** Empty slot, a present value, or a null value that has not yet met another value. */
+  private val empty: Byte = 0
+  private val present: Byte = 1
+  private val missing: Byte = 2
+
   private final class Table(capacity: Int, op: IntBinOp):
     private val mask: Int = capacity - 1
     private val limit: Int = capacity >>> 1
@@ -204,7 +211,7 @@ object HashReduce:
       val rows = keyColumn.length
       var row = 0
       while (row < rows) {
-        add(keyValues(row), valueValues(row))
+        addPresent(keyValues(row), valueValues(row))
         row += 1
       }
 
@@ -216,8 +223,9 @@ object HashReduce:
       val rows = keyColumn.length
       var row = 0
       while (row < rows) {
-        if (Validity.isSet(keyWords, row) && Validity.isSet(valueWords, row)) then
-          add(keyValues(row), valueValues(row))
+        if (Validity.isSet(keyWords, row)) then
+          if (Validity.isSet(valueWords, row)) then addPresent(keyValues(row), valueValues(row))
+          else addMissing(keyValues(row))
         row += 1
       }
 
@@ -233,7 +241,7 @@ object HashReduce:
       var slot = from
       while (slot < until) {
         val row = ids(slot)
-        add(keyValues(row), valueValues(row))
+        addPresent(keyValues(row), valueValues(row))
         slot += 1
       }
 
@@ -251,8 +259,9 @@ object HashReduce:
       var slot = from
       while (slot < until) {
         val row = ids(slot)
-        if (Validity.isSet(keyWords, row) && Validity.isSet(valueWords, row)) then
-          add(keyValues(row), valueValues(row))
+        if (Validity.isSet(keyWords, row)) then
+          if (Validity.isSet(valueWords, row)) then addPresent(keyValues(row), valueValues(row))
+          else addMissing(keyValues(row))
         slot += 1
       }
 
@@ -261,43 +270,84 @@ object HashReduce:
       val outKeys = new Array[Int](rows)
       val outValues = new Array[Int](rows)
       var cursor = 0
-      while (cursor < rows) {
-        val slot = slots(cursor)
-        outKeys(cursor) = keys(slot)
-        outValues(cursor) = values(slot)
+      var hole = false
+      while (cursor < rows && !hole) {
+        if (state(slots(cursor)) != present) then hole = true
         cursor += 1
       }
-      val present = Validity.allValid(rows)
+      val valueValidity =
+        if (!hole) then Validity.allValid(rows)
+        else
+          val words = Validity.allocate(rows)
+          cursor = 0
+          while (cursor < rows) {
+            val slot = slots(cursor)
+            if (state(slot) == present) then
+              outValues(cursor) = values(slot)
+              Validity.setBit(words, cursor)
+            cursor += 1
+          }
+          Validity.fromWords(words, rows)
+      if (!hole) then
+        cursor = 0
+        while (cursor < rows) {
+          val slot = slots(cursor)
+          outKeys(cursor) = keys(slot)
+          outValues(cursor) = values(slot)
+          cursor += 1
+        }
+      else
+        cursor = 0
+        while (cursor < rows) {
+          outKeys(cursor) = keys(slots(cursor))
+          cursor += 1
+        }
+      val keyValidity = Validity.allValid(rows)
       new ColumnBatch(
         Vector(LogicalType.Int32, LogicalType.Int32),
         Vector(
-          Int32Column.of(outKeys, present, rows),
-          Int32Column.of(outValues, present, rows),
+          Int32Column.of(outKeys, keyValidity, rows),
+          Int32Column.of(outValues, valueValidity, rows),
         ),
         rows,
       )
 
-    /** Hands `add` to `supply`. The lambda stays inside [[Table]] so `add` stays private. */
+    /** Hands `add` and `addMissing` to `supply`. The lambda stays inside [[Table]]. */
     def supplyPairs(supply: IntPairProject.IntPairSink => Unit): Unit =
       val sink = new IntPairProject.IntPairSink:
-        def add(key: Int, value: Int): Unit = Table.this.add(key, value)
+        def add(key: Int, value: Int): Unit = addPresent(key, value)
+        def addMissing(key: Int): Unit = Table.this.addMissing(key)
       supply(sink)
 
-    private def add(key: Int, value: Int): Unit =
+    private def addPresent(key: Int, value: Int): Unit =
       val slot = locate(key)
-      if (state(slot) == 0) then
-        if (occupied >= limit) then
-          throw new IllegalStateException(s"hash reduce table is full at $occupied groups")
-        state(slot) = 1
-        keys(slot) = key
-        values(slot) = value
-        slots(occupied) = slot
-        occupied += 1
-      else values(slot) = op(values(slot), value)
+      if (state(slot) == empty) then occupy(slot, key, value, present)
+      else if (state(slot) == present) then values(slot) = op(values(slot), value)
+      else
+        values(slot) = op(0, value)
+        state(slot) = present
+
+    /** A null value. A lone null stays missing. Meeting a value unboxes the null to `0`. */
+    private def addMissing(key: Int): Unit =
+      val slot = locate(key)
+      if (state(slot) == empty) then occupy(slot, key, 0, missing)
+      else if (state(slot) == present) then values(slot) = op(values(slot), 0)
+      else
+        values(slot) = op(0, 0)
+        state(slot) = present
+
+    private def occupy(slot: Int, key: Int, value: Int, mark: Byte): Unit =
+      if (occupied >= limit) then
+        throw new IllegalStateException(s"hash reduce table is full at $occupied groups")
+      state(slot) = mark
+      keys(slot) = key
+      values(slot) = value
+      slots(occupied) = slot
+      occupied += 1
 
     private def locate(key: Int): Int =
       var slot = ColumnHash.mix(key) & mask
-      while (state(slot) != 0 && keys(slot) != key) slot = (slot + 1) & mask
+      while (state(slot) != empty && keys(slot) != key) slot = (slot + 1) & mask
       slot
 
   private val byKeyCalls = new AtomicInteger

@@ -15,8 +15,9 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * key. Each piece is cut into morsels, and each morsel is written to its own spill file. The
  * morsels are not kept. Each file is read back and reduced alone, then [[HashReduce.int32]] on
  * [[ColumnBatches.concat]] of the running partial and the new partial folds them. Null rules stay
- * in the kernel: a null key is dropped, and a null value is dropped and creates no group. The
- * merged batch is the only result, so a failure during the fold publishes nothing.
+ * in the kernel: a null key is dropped. A lone null value stays null. Two nulls, or a null that
+ * meets a present value, call the operator with that null unboxed to `0`. The merged batch is the
+ * only result, so a failure during the fold publishes nothing.
  *
  * Only the post-exchange bucket of [[HashReduce.byKey]], [[HashReduce.byKeySelected]], and a
  * projected pair reduce calls this. The partial combine before the exchange stays in memory. The
