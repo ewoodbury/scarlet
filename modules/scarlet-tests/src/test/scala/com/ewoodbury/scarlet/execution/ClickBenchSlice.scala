@@ -6,7 +6,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
- * Five ClickBench queries on 4096 generated rows. This is not the hits table.
+ * Six ClickBench queries on 4096 generated rows. This is not the hits table.
  *
  * Numbers follow the 0-based order of `clickhouse/queries.sql`. An average is the long sum and the
  * count. Query 2's width average is 3679360 / 4096. Query 3's user average is 8386588672 / 4096.
@@ -20,6 +20,7 @@ object ClickBenchSlice:
   val countAdv: Long = 3584L
   val sumAdv: Long = 14336L
   val sumWidth: Long = 3679360L
+  val sumWidthPlus: Long = 3724416L
   val sumUser: Long = 8386588672L
   val mixedSums: Long = 17583232L
 
@@ -57,7 +58,7 @@ object ClickBenchSlice:
     "26 sort by a time and a string. Missing: string predicate.",
     "27 length of a string. Missing: string length.",
     "28 regular expression replace. Missing: regex.",
-    "29 add a literal to a column. Missing: literal in an expression.",
+    "29 add a literal to a column. This file.",
     "30 two-column group and a string filter. Missing: multi-column group.",
     "31 two-column group. Missing: multi-column group.",
     "32 two-column group. Missing: multi-column group.",
@@ -125,6 +126,13 @@ object ClickBenchSlice:
   def widthAsLong(): DistCollection[WideRow] =
     scan().compute(ColumnExpr.Cast(1, ColumnKind.Int64), "width64")
 
+  /** Query 29: `ResolutionWidth + 11`, then a long cast. Columns land at ordinals 3, 4, and 5. */
+  def widthPlus(): DistCollection[WideRow] =
+    scan()
+      .compute(ColumnExpr.Lit(ColumnLiteral.Int32(11)), "eleven")
+      .compute(ColumnExpr.Add(1, 3), "widthPlus")
+      .compute(ColumnExpr.Cast(4, ColumnKind.Int64), "widthPlus64")
+
   def grouped(): DistCollection[WideRow] =
     filtered().groupColumns(0, 0)
 
@@ -142,6 +150,12 @@ object ClickBenchSlice:
       summed("query 3", scan().plan, 2, sumUser),
       shaped("query 7", grouped().plan, "WideGroup(WideFilter0(Scan))"),
       counted("query 7", grouped().plan, groups),
+      shaped(
+        "query 29",
+        widthPlus().plan,
+        "WideCompute(WideCompute(WideCompute(Scan)))",
+      ),
+      summed("query 29", widthPlus().plan, 5, sumWidthPlus),
     ).flatten
 
   private def bothPaths(): List[String] =
@@ -151,6 +165,7 @@ object ClickBenchSlice:
       both("query 2", mixedSums)(mixSums()),
       both("query 3", sumUser)(scan().sumLongColumn(2)),
       both("query 7", groupedMix)(groupedChecksum(grouped().collect())),
+      both("query 29", sumWidthPlus)(widthPlus().sumLongColumn(5)),
     ).flatten
 
   private def mixSums(): Long =

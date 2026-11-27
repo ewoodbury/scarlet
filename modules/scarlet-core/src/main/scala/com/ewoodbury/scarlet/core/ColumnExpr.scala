@@ -4,13 +4,15 @@ package com.ewoodbury.scarlet.core
  * One new column computed from columns already in the row.
  *
  * Arithmetic uses the wider input: double, then float, then long, then int. A compare yields bool.
- * Null in an input yields null, including `true OR null`. Divide and strings are not in this set.
- * A date compare is a long compare.
+ * Null in an input yields null, including `true OR null`. Divide uses that same widening and
+ * refuses a present zero divisor. Strings are not in this set. A date compare is a long compare.
  */
 enum ColumnExpr:
   case Add(left: Int, right: Int)
   case Sub(left: Int, right: Int)
   case Mul(left: Int, right: Int)
+  case Div(left: Int, right: Int)
+  case Lit(value: ColumnLiteral)
   case Compare(op: CompareOp, left: Int, right: Int)
   case And(left: Int, right: Int)
   case Or(left: Int, right: Int)
@@ -24,6 +26,8 @@ object ColumnExpr:
     case ColumnExpr.Add(left, right) => numeric(fields, left, right)
     case ColumnExpr.Sub(left, right) => numeric(fields, left, right)
     case ColumnExpr.Mul(left, right) => numeric(fields, left, right)
+    case ColumnExpr.Div(left, right) => numeric(fields, left, right)
+    case ColumnExpr.Lit(value) => Some(value.kind)
     case ColumnExpr.Compare(_, left, right) =>
       numeric(fields, left, right).map(_ => ColumnKind.Bool)
     case ColumnExpr.And(left, right) => bools(fields, left, right)
