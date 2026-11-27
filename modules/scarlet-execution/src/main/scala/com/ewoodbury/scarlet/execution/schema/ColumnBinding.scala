@@ -384,12 +384,16 @@ private[execution] object ColumnBinding:
         Some(KernelChoice.CountByKey)
       case (Vector(ColumnType.Int64, ColumnType.Int64), Operator.ReduceByKey) =>
         Some(KernelChoice.LongHashAggregate)
+      case (Vector(ColumnType.Int64, ColumnType.Int64), Operator.CountSumByKey) =>
+        Some(KernelChoice.CountSum)
       case (Vector(ColumnType.Int64, ColumnType.Int64), Operator.SortByLongKey) =>
         Some(KernelChoice.SortByLongKey)
       case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.CountByKey) =>
         Some(KernelChoice.CountByKey)
       case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.ReduceByKey) =>
         Some(KernelChoice.StringHashAggregate)
+      case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.CountSumByKey) =>
+        Some(KernelChoice.CountSum)
       case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.SortByStringKey) =>
         Some(KernelChoice.SortByStringKey)
       case (Vector(ColumnType.Int32, ColumnType.Int32), Operator.GroupByKey) =>

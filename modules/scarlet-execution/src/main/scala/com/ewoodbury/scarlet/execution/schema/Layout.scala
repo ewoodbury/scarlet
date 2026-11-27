@@ -95,6 +95,10 @@ private[execution] object Layout:
       columns(node.kind)
     case node: PhysicalOp.CountSum =>
       columns(node.kind)
+    case node: PhysicalOp.LongCountSum =>
+      columns(node.kind)
+    case node: PhysicalOp.StringCountSum =>
+      columns(node.kind)
     case node: PhysicalOp.HashAggregate =>
       columns(node.kind)
     case node: PhysicalOp.LongHashAggregate =>

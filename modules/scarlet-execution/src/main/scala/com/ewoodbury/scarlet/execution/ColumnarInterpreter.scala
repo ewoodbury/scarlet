@@ -114,6 +114,8 @@ private[execution] object ColumnarInterpreter:
     case Columns.LongPairs(parts) => parts
     case Columns.LongCounts(parts) => parts
     case Columns.CountSums(parts) => parts
+    case Columns.LongCountSums(parts) => parts
+    case Columns.StringCountSums(parts) => parts
     case Columns.Triples(parts) => parts
     case Columns.LongTriples(parts) => parts
     case Columns.Strings(parts) => parts
@@ -153,6 +155,19 @@ private[execution] object ColumnarInterpreter:
      * key was already dropped. A null value was counted and not added.
      */
     case CountSums(parts: Vector[ColumnBatch])
+
+    /**
+     * `(Long, Int, Long)` count and sum. Schema is `[Int64, Int64, Int64]`: key, count, sum. A
+     * null key was already dropped. A null value was counted and not added. The count narrows to
+     * `Int` at decode.
+     */
+    case LongCountSums(parts: Vector[ColumnBatch])
+
+    /**
+     * `(String, Int, Long)` count and sum. Schema is `[Utf8Dict, Int64, Int64]`. An empty string
+     * is a present key. A null key was already dropped. A null value was counted and not added.
+     */
+    case StringCountSums(parts: Vector[ColumnBatch])
     case Triples(parts: Vector[ColumnBatch])
     case LongTriples(parts: Vector[ColumnBatch])
     case Strings(parts: Vector[ColumnBatch])
@@ -228,7 +243,7 @@ private[execution] object ColumnarInterpreter:
     if (ExecutionRoute.decodesAsIntLongSum(plan, op)) then intLongSums(columns)
     else if (IntLongMapRun.decodes(op)) then IntLongMapRun.partitions(columns)
     else
-      decodeWith(
+      ColumnDecode.partitions(
         columns,
         ColumnDecoders.ints(op),
         ColumnDecoders.intPairs(op),
@@ -285,6 +300,10 @@ private[execution] object ColumnarInterpreter:
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeLongCounts(batch, rows))
         case Columns.CountSums(parts) =>
           prefixRows(parts, limit, CountSum.rows)
+        case Columns.LongCountSums(parts) =>
+          prefixRows(parts, limit, LongCountSum.rows)
+        case Columns.StringCountSums(parts) =>
+          prefixRows(parts, limit, StringCountSum.rows)
         case Columns.LongPairs(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeLongPairs(batch, rows))
         case Columns.Triples(parts) =>
@@ -294,7 +313,7 @@ private[execution] object ColumnarInterpreter:
           // Joins are not partition-preserving, so `take` does not reach this arm.
           prefixRows(parts, limit, BatchCodec.decodeLongTriplesPreservingAbsence)
         case Columns.Outer(parts, absent) =>
-          prefixRows(parts, limit, (batch, rows) => decodeOuterBatch(batch, absent, rows))
+          prefixRows(parts, limit, (batch, rows) => ColumnDecode.outer(batch, absent, rows))
         case Columns.Strings(parts) =>
           prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeStrings(batch, rows))
         case Columns.StringPairs(parts) =>
@@ -382,6 +401,7 @@ private[execution] object ColumnarInterpreter:
             PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
             PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs |
             PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
+            PhysicalOp.Kind.LongCountSums | PhysicalOp.Kind.StringCountSums |
             PhysicalOp.Kind.IntLongSums | PhysicalOp.Kind.GroupedIntLongs =>
           throw new IllegalStateException(
             s"physical tree does not match ${plan.getClass.getSimpleName}",
@@ -541,6 +561,16 @@ private[execution] object ColumnarInterpreter:
           PhysicalOp.CountSum(PhysicalOp.Exchange(child)),
         ) =>
       CountSumArms.columns(source, child, selectedPartition, preserveAbsence, ordinals)
+    case (
+          Plan.CountSumByLongKeyOp(source),
+          PhysicalOp.LongCountSum(PhysicalOp.Exchange(child)),
+        ) =>
+      CountSumColumns.longs(source, child, selectedPartition, preserveAbsence, ordinals)
+    case (
+          Plan.CountSumByStringKeyOp(source),
+          PhysicalOp.StringCountSum(PhysicalOp.Exchange(child)),
+        ) =>
+      CountSumColumns.strings(source, child, selectedPartition, preserveAbsence, ordinals)
     case (
           Plan.JoinOp(left, right, strategy),
           PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),
@@ -954,10 +984,10 @@ private[execution] object ColumnarInterpreter:
       case Columns.Strings(parts) =>
         Columns.Strings(onEachMorsel(parts)(morsel => ElementPipeline.strings(morsel, steps)))
       case Columns.Bools(_) | Columns.Pairs(_) | Columns.LongPairs(_) | Columns.LongCounts(_) |
-          Columns.CountSums(_) | Columns.Triples(_) | Columns.LongTriples(_) |
-          Columns.StringPairs(_) | Columns.StringTriples(_) | Columns.Outer(_, _) |
-          Columns.GroupedInts(_) | Columns.GroupedStrings(_) | Columns.GroupedLongs(_) |
-          Columns.GroupedIntLongs(_) =>
+          Columns.CountSums(_) | Columns.LongCountSums(_) | Columns.StringCountSums(_) |
+          Columns.Triples(_) | Columns.LongTriples(_) | Columns.StringPairs(_) |
+          Columns.StringTriples(_) | Columns.Outer(_, _) | Columns.GroupedInts(_) |
+          Columns.GroupedStrings(_) | Columns.GroupedLongs(_) | Columns.GroupedIntLongs(_) =>
         rejected
 
   private def project(columns: Columns, mapper: Any): Columns = columns match
@@ -1037,7 +1067,8 @@ private[execution] object ColumnarInterpreter:
         LongPairProject.project(morsel.batch, morsel.start, morsel.length, adapted)
       })
     case Columns.StringPairs(parts) => StringPairWalk.project(parts, mapper)
-    case Columns.Bools(_) | Columns.LongCounts(_) | Columns.CountSums(_) | Columns.LongTriples(_) |
+    case Columns.Bools(_) | Columns.LongCounts(_) | Columns.CountSums(_) |
+        Columns.LongCountSums(_) | Columns.StringCountSums(_) | Columns.LongTriples(_) |
         Columns.StringTriples(_) | Columns.Outer(_, _) | Columns.GroupedInts(_) |
         Columns.GroupedStrings(_) | Columns.GroupedLongs(_) | Columns.GroupedIntLongs(_) =>
       throw new IllegalStateException(
@@ -1049,10 +1080,11 @@ private[execution] object ColumnarInterpreter:
     case Columns.Pairs(_) =>
       throw new IllegalStateException("columnar pairs have no partitions")
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.LongPairs(_) |
-        Columns.LongCounts(_) | Columns.CountSums(_) | Columns.Triples(_) |
-        Columns.LongTriples(_) | Columns.Strings(_) | Columns.Bools(_) | Columns.StringPairs(_) |
-        Columns.StringTriples(_) | Columns.Outer(_, _) | Columns.GroupedInts(_) |
-        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) | Columns.GroupedIntLongs(_) =>
+        Columns.LongCounts(_) | Columns.CountSums(_) | Columns.LongCountSums(_) |
+        Columns.StringCountSums(_) | Columns.Triples(_) | Columns.LongTriples(_) |
+        Columns.Strings(_) | Columns.Bools(_) | Columns.StringPairs(_) | Columns.StringTriples(_) |
+        Columns.Outer(_, _) | Columns.GroupedInts(_) | Columns.GroupedStrings(_) |
+        Columns.GroupedLongs(_) | Columns.GroupedIntLongs(_) =>
       throw new IllegalStateException("columnar op expected int pairs")
 
   private[execution] def triplesOf(columns: Columns): Vector[ColumnBatch] = columns match
@@ -1061,9 +1093,10 @@ private[execution] object ColumnarInterpreter:
       throw new IllegalStateException("columnar triples have no partitions")
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Pairs(_) |
         Columns.LongPairs(_) | Columns.LongCounts(_) | Columns.CountSums(_) |
-        Columns.LongTriples(_) | Columns.Strings(_) | Columns.Bools(_) | Columns.StringPairs(_) |
-        Columns.StringTriples(_) | Columns.Outer(_, _) | Columns.GroupedInts(_) |
-        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) | Columns.GroupedIntLongs(_) =>
+        Columns.LongCountSums(_) | Columns.StringCountSums(_) | Columns.LongTriples(_) |
+        Columns.Strings(_) | Columns.Bools(_) | Columns.StringPairs(_) | Columns.StringTriples(_) |
+        Columns.Outer(_, _) | Columns.GroupedInts(_) | Columns.GroupedStrings(_) |
+        Columns.GroupedLongs(_) | Columns.GroupedIntLongs(_) =>
       throw new IllegalStateException("columnar op expected int triples")
 
   /**
@@ -1115,66 +1148,9 @@ private[execution] object ColumnarInterpreter:
     case Columns.LongPairs(_) =>
       throw new IllegalStateException("columnar long pairs have no partitions")
     case Columns.Ints(_) | Columns.Longs(_) | Columns.Floats(_) | Columns.Pairs(_) |
-        Columns.LongCounts(_) | Columns.CountSums(_) | Columns.Triples(_) |
-        Columns.LongTriples(_) | Columns.Strings(_) | Columns.Bools(_) | Columns.StringPairs(_) |
-        Columns.StringTriples(_) | Columns.Outer(_, _) | Columns.GroupedInts(_) |
-        Columns.GroupedStrings(_) | Columns.GroupedLongs(_) | Columns.GroupedIntLongs(_) =>
+        Columns.LongCounts(_) | Columns.CountSums(_) | Columns.LongCountSums(_) |
+        Columns.StringCountSums(_) | Columns.Triples(_) | Columns.LongTriples(_) |
+        Columns.Strings(_) | Columns.Bools(_) | Columns.StringPairs(_) | Columns.StringTriples(_) |
+        Columns.Outer(_, _) | Columns.GroupedInts(_) | Columns.GroupedStrings(_) |
+        Columns.GroupedLongs(_) | Columns.GroupedIntLongs(_) =>
       throw new IllegalStateException("columnar op expected long pairs")
-
-  private def decodeOuterBatch(
-      batch: ColumnBatch,
-      absent: AbsentSide,
-      maxRows: Int,
-  ): Seq[Any] =
-    if (StringOuterDecode.isStringOuter(batch)) then
-      StringOuterDecode.decode(batch, absent, maxRows)
-    else LongOuterDecode.decode(batch, absent, maxRows)
-
-  private def decodeWith(
-      columns: Columns,
-      decodeInts: (ColumnBatch, Int) => Seq[Int],
-      decodePairs: (ColumnBatch, Int) => Seq[(Int, Int)],
-      decodeLongs: (ColumnBatch, Int) => Seq[Long],
-      decodeTriples: (ColumnBatch, Int) => Seq[(Int, (Int, Int))],
-      decodeFloats: (ColumnBatch, Int) => Seq[Double],
-  ): Seq[Partition[_]] = columns match
-    case Columns.Ints(parts) =>
-      parts.map(batch => Partition(decodeInts(batch, batch.length)))
-    case Columns.Longs(parts) =>
-      parts.map(batch => Partition(decodeLongs(batch, batch.length)))
-    case Columns.Floats(parts) =>
-      parts.map(batch => Partition(decodeFloats(batch, batch.length)))
-    case Columns.Pairs(parts) =>
-      parts.map(batch => Partition(decodePairs(batch, batch.length)))
-    case Columns.LongCounts(parts) =>
-      parts.map(batch => Partition(BatchCodec.decodeLongCounts(batch)))
-    case Columns.CountSums(parts) =>
-      parts.map(batch => Partition(CountSum.rows(batch, batch.length)))
-    case Columns.LongPairs(parts) =>
-      parts.map(batch => Partition(BatchCodec.decodeLongPairs(batch)))
-    case Columns.Triples(parts) =>
-      parts.map(batch => Partition(decodeTriples(batch, batch.length)))
-    case Columns.LongTriples(parts) =>
-      // Named erasure boundary for the long join. The decoded rows are `(Long, (Long, Long))`.
-      // [[ColumnarPlanner.runLowered]] casts the partition sequence to the plan's element type.
-      parts.map(batch => Partition(BatchCodec.decodeLongTriplesPreservingAbsence(batch)))
-    case Columns.Outer(parts, absent) =>
-      parts.map(batch => Partition(decodeOuterBatch(batch, absent, batch.length)))
-    case Columns.Strings(parts) =>
-      parts.map(batch => Partition(BatchCodec.decodeStrings(batch)))
-    case Columns.StringPairs(parts) =>
-      parts.map(batch => Partition(BatchCodec.decodeStringPairs(batch)))
-    case Columns.StringTriples(parts) =>
-      // Named erasure boundary for the string join. The decoded rows are `(String, (Int, Int))`.
-      // [[ColumnarPlanner.runLowered]] casts the partition sequence to the plan's element type.
-      parts.map(batch => Partition(BatchCodec.decodeStringJoinKeepingNulls(batch, batch.length)))
-    case Columns.Bools(parts) =>
-      parts.map(batch => Partition(BatchCodec.decodeBools(batch)))
-    case Columns.GroupedInts(parts) =>
-      parts.map(batch => Partition(batch.rows))
-    case Columns.GroupedStrings(parts) =>
-      parts.map(batch => Partition(batch.rows))
-    case Columns.GroupedLongs(parts) =>
-      parts.map(batch => Partition(batch.rows))
-    case Columns.GroupedIntLongs(parts) =>
-      parts.map(batch => Partition(batch.rows))

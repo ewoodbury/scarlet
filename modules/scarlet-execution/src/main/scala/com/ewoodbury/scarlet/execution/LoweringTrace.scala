@@ -95,6 +95,8 @@ private[execution] object LoweringTrace:
     case PhysicalOp.Kind.LongOuter => "LongOuter"
     case PhysicalOp.Kind.StringOuter => "StringOuter"
     case PhysicalOp.Kind.CountSums => "CountSums"
+    case PhysicalOp.Kind.LongCountSums => "LongCountSums"
+    case PhysicalOp.Kind.StringCountSums => "StringCountSums"
     case PhysicalOp.Kind.IntLongSums => "IntLongSums"
     case PhysicalOp.Kind.GroupedIntLongs => "GroupedIntLongs"
 

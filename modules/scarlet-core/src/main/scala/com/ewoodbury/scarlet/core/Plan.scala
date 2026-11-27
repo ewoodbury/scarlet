@@ -259,6 +259,32 @@ object Plan {
   case class CountSumByKeyOp(source: Plan[(Int, Int)]) extends Plan[(Int, Int, Long)]
 
   /**
+   * Counts and sums `(Long, Long)` pairs by key.
+   *
+   * A null key is dropped. A null value increments the count and is not added to the sum. The
+   * count is an `Int` and wraps. The sum is a `Long`. One `(key, count, sum)` row is published per
+   * distinct key. This is a typed witness. A generic `groupByKey` followed by `map` stays
+   * [[GroupByKeyOp]] and does not become this node.
+   *
+   * @param source
+   *   The preceding plan node, producing `(Long, Long)` pairs.
+   */
+  case class CountSumByLongKeyOp(source: Plan[(Long, Long)]) extends Plan[(Long, Int, Long)]
+
+  /**
+   * Counts and sums `(String, Int)` pairs by key.
+   *
+   * A null key is dropped. An empty string is a present key. A null value increments the count and
+   * is not added to the sum. The count is an `Int` and wraps. The sum is a `Long`. One
+   * `(key, count, sum)` row is published per distinct key. This is a typed witness. A generic
+   * `groupByKey` followed by `map` stays [[GroupByKeyOp]] and does not become this node.
+   *
+   * @param source
+   *   The preceding plan node, producing `(String, Int)` pairs.
+   */
+  case class CountSumByStringKeyOp(source: Plan[(String, Int)]) extends Plan[(String, Int, Long)]
+
+  /**
    * Represents a reduceByKey transformation that requires shuffling data by key.
    * @param source
    *   The preceding plan node (producing elements of type (K, V)).

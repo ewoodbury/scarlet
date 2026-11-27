@@ -132,6 +132,10 @@ final class StageExecutor(
         executeCountByKeyOperation(inputPartitions)
       case Some(_: CountSumByKeyWideOp) =>
         executeCountSumByKeyOperation(inputPartitions)
+      case Some(_: CountSumByLongKeyWideOp) =>
+        executeCountSumByLongKeyOperation(inputPartitions)
+      case Some(_: CountSumByStringKeyWideOp) =>
+        executeCountSumByStringKeyOperation(inputPartitions)
       case Some(op: ReduceByKeyWideOp[_]) =>
         executeReduceByKeyOperation(op, inputPartitions)
       case Some(_: CoGroupWideOp) =>
@@ -282,6 +286,22 @@ final class StageExecutor(
   ): Seq[Partition[_]] = {
     val typedPartitions = inputPartitions.asInstanceOf[Seq[Partition[(Any, Any)]]]
     executePerPartition(typedPartitions, Stage.countSumByKeyLocal)
+  }
+
+  /** Per-partition count and sum of `(Long, Long)`. Input partitions are already key-hashed. */
+  private def executeCountSumByLongKeyOperation(
+      inputPartitions: Seq[Partition[_]],
+  ): Seq[Partition[_]] = {
+    val typedPartitions = inputPartitions.asInstanceOf[Seq[Partition[(Any, Any)]]]
+    executePerPartition(typedPartitions, Stage.countSumByLongKeyLocal)
+  }
+
+  /** Per-partition count and sum of `(String, Int)`. Input partitions are already key-hashed. */
+  private def executeCountSumByStringKeyOperation(
+      inputPartitions: Seq[Partition[_]],
+  ): Seq[Partition[_]] = {
+    val typedPartitions = inputPartitions.asInstanceOf[Seq[Partition[(Any, Any)]]]
+    executePerPartition(typedPartitions, Stage.countSumByStringKeyLocal)
   }
 
   /**

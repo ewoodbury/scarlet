@@ -311,7 +311,8 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
-        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums |
+        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
+        PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
         PhysicalOp.Kind.GroupedIntLongs =>
       false
 
@@ -322,7 +323,8 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
-        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums |
+        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
+        PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
         PhysicalOp.Kind.GroupedIntLongs =>
       false
 
@@ -333,7 +335,8 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
-        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums |
+        PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
+        PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
         PhysicalOp.Kind.GroupedIntLongs =>
       false
 
@@ -349,7 +352,8 @@ trait ColumnarContractFixture extends Matchers:
     case PhysicalOp.Exchange(_) | PhysicalOp.HashAggregate(_, _) |
         PhysicalOp.LongHashAggregate(_) | PhysicalOp.StringHashAggregate(_) |
         PhysicalOp.GroupByKey(_) | PhysicalOp.GroupedDecode(_) | PhysicalOp.CountByKey(_) |
-        PhysicalOp.CountSum(_) | PhysicalOp.JoinProbeSum(_, _, _) | PhysicalOp.HashJoin(_, _) |
+        PhysicalOp.CountSum(_) | PhysicalOp.LongCountSum(_) | PhysicalOp.StringCountSum(_) |
+        PhysicalOp.JoinProbeSum(_, _, _) | PhysicalOp.HashJoin(_, _) |
         PhysicalOp.LongHashJoin(_, _) | PhysicalOp.LongSortMergeJoin(_, _) |
         PhysicalOp.StringHashJoin(_, _) | PhysicalOp.StringSortMergeJoin(_, _) |
         PhysicalOp.SortMergeJoin(_, _) | PhysicalOp.SortMergeLeftOuter(_, _) |
@@ -508,7 +512,8 @@ trait ColumnarContractFixture extends Matchers:
     case Plan.FlatMapValuesOp(_, _) => PlanNode.FlatMapValues
     case Plan.GroupByKeyOp(_) => PlanNode.GroupByKey
     case Plan.CountByKeyOp(_) => PlanNode.CountByKey
-    case Plan.CountSumByKeyOp(_) => PlanNode.CountSumByKey
+    case Plan.CountSumByKeyOp(_) | Plan.CountSumByLongKeyOp(_) | Plan.CountSumByStringKeyOp(_) =>
+      PlanNode.CountSumByKey
     case Plan.ReduceByKeyOp(_, _) => PlanNode.ReduceByKey
     case Plan.SortByOp(_, _, _) => PlanNode.SortBy
     // Typed key nodes deliberately share the generic PlanNode.SortBy label.

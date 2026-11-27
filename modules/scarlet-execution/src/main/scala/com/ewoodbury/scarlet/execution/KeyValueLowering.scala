@@ -96,6 +96,7 @@ private[execution] object KeyValueLowering:
         PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
         PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
         PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter |
-        PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums |
+        PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
+        PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
         PhysicalOp.Kind.GroupedIntLongs =>
       false
