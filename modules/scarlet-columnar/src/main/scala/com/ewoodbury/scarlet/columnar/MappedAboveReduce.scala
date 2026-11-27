@@ -78,8 +78,9 @@ private[scarlet] object MappedAboveReduce:
 
   /**
    * Present keys are mapped, then the slot runs. A null key is not passed to `mapKey` or a key
-   * predicate. A value predicate still sees that row. A null value is not passed to a value
-   * predicate and is not inserted. An empty range does not call `mapKey`.
+   * predicate. A null value on a kept key stays a null group. A value predicate still sees that
+   * row. A null value is not passed to a value predicate, and a value slot does not keep it. An
+   * empty range does not call `mapKey`.
    */
   private def visit(
       batch: ColumnBatch,
