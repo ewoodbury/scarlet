@@ -45,9 +45,11 @@ private[execution] object ExecutionRoute:
     case LongPairs
     case StringPairs
 
-  /** `distinct` of one column. A long column is not an arm. */
+  /** `distinct` of one column. A pair or a bool is not an arm. */
   enum DistinctArm:
     case Ints
+    case Longs
+    case Doubles
     case Strings
 
   /**
@@ -132,15 +134,17 @@ private[execution] object ExecutionRoute:
         case PairArm.LongPairs => CountArm.LongPairs
         case PairArm.StringPairs => CountArm.StringPairs
 
-  /** Int column or string column. Any other layout fails the action. */
+  /** Int, long, double, or string column. Any other layout fails the action. */
   def distinctArm(child: PhysicalOp): DistinctArm =
     val output = Layout.known(child)
     output match
       case Output.Columns(Vector(ColumnLayout(ColumnType.Int32, _))) => DistinctArm.Ints
+      case Output.Columns(Vector(ColumnLayout(ColumnType.Int64, _))) => DistinctArm.Longs
+      case Output.Columns(Vector(ColumnLayout(ColumnType.Float64, _))) => DistinctArm.Doubles
       case Output.Columns(Vector(ColumnLayout(ColumnType.Utf8Dict, _))) => DistinctArm.Strings
       case Output.Columns(_) | Output.IntLongPairs(_) | Output.Opaque(_) =>
         throw new IllegalStateException(
-          s"distinct column is $output, expected int or string",
+          s"distinct column is $output, expected int, long, double, or string",
         )
 
   /** Long pairs and string pairs select their kernels. Every other layout stays on ints. */

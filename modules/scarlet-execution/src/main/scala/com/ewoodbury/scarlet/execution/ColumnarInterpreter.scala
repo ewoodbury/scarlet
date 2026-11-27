@@ -234,6 +234,7 @@ private[execution] object ColumnarInterpreter:
         ColumnDecoders.intPairs(op),
         ColumnDecoders.longs(op),
         ColumnDecoders.triples(op),
+        ColumnDecoders.floats(op),
       )
 
   /** Groups of an int-long reduce. A non-pair batch is a bug in the arm, not a row fallback. */
@@ -257,6 +258,7 @@ private[execution] object ColumnarInterpreter:
         ColumnDecoders.intPairs(op),
         ColumnDecoders.longs(op),
         ColumnDecoders.triples(op),
+        ColumnDecoders.floats(op),
       )
 
   private def decodePrefixWith(
@@ -266,6 +268,7 @@ private[execution] object ColumnarInterpreter:
       decodePairs: (ColumnBatch, Int) => Seq[(Int, Int)],
       decodeLongs: (ColumnBatch, Int) => Seq[Long],
       decodeTriples: (ColumnBatch, Int) => Seq[(Int, (Int, Int))],
+      decodeFloats: (ColumnBatch, Int) => Seq[Double],
   ): Seq[Any] =
     if (limit <= 0) then Seq.empty
     else
@@ -275,7 +278,7 @@ private[execution] object ColumnarInterpreter:
         case Columns.Longs(parts) =>
           prefixRows(parts, limit, decodeLongs)
         case Columns.Floats(parts) =>
-          prefixRows(parts, limit, (batch, rows) => BatchCodec.decodeFloat64s(batch, rows))
+          prefixRows(parts, limit, decodeFloats)
         case Columns.Pairs(parts) =>
           prefixRows(parts, limit, decodePairs)
         case Columns.LongCounts(parts) =>
@@ -354,16 +357,7 @@ private[execution] object ColumnarInterpreter:
         interpretAt(rightPlan, rightOp, selectedPartition, preserveAbsence, ordinals),
       )
     case (Plan.DistinctOp(source), PhysicalOp.Dedupe(PhysicalOp.Exchange(child))) =>
-      if (selectedPartition.nonEmpty) then
-        throw new ColumnarFallback("a partition selector cannot run a distinct")
-      val batches =
-        batchesOf(interpretAt(source, child, selectedPartition, preserveAbsence, ordinals))
-      val width = ColumnarPlanner.shuffleWidth
-      ExecutionRoute.distinctArm(child) match
-        case ExecutionRoute.DistinctArm.Ints =>
-          Columns.Ints(DistinctKernel.ints(batches, width))
-        case ExecutionRoute.DistinctArm.Strings =>
-          Columns.Strings(DistinctKernel.strings(batches, width))
+      DistinctColumns.run(source, child, selectedPartition, preserveAbsence, ordinals)
     case (_: Plan.DistinctOp[_], _: PhysicalOp.Dedupe) =>
       throw new ColumnarFallback("distinct needs an exchange")
     case (Plan.Source(partitions, _), PhysicalOp.Scan(kind, _)) =>
@@ -1142,13 +1136,14 @@ private[execution] object ColumnarInterpreter:
       decodePairs: (ColumnBatch, Int) => Seq[(Int, Int)],
       decodeLongs: (ColumnBatch, Int) => Seq[Long],
       decodeTriples: (ColumnBatch, Int) => Seq[(Int, (Int, Int))],
+      decodeFloats: (ColumnBatch, Int) => Seq[Double],
   ): Seq[Partition[_]] = columns match
     case Columns.Ints(parts) =>
       parts.map(batch => Partition(decodeInts(batch, batch.length)))
     case Columns.Longs(parts) =>
       parts.map(batch => Partition(decodeLongs(batch, batch.length)))
     case Columns.Floats(parts) =>
-      parts.map(batch => Partition(BatchCodec.decodeFloat64s(batch)))
+      parts.map(batch => Partition(decodeFloats(batch, batch.length)))
     case Columns.Pairs(parts) =>
       parts.map(batch => Partition(decodePairs(batch, batch.length)))
     case Columns.LongCounts(parts) =>

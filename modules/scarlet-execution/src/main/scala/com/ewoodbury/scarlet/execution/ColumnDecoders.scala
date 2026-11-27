@@ -16,10 +16,26 @@ private[execution] object ColumnDecoders:
     if (mappedIntKey(op)) then BatchCodec.decodeIntsPreservingAbsence
     else (batch, rows) => BatchCodec.decodeInts(batch, rows)
 
-  /** A key or value column of a long pair keeps a null. Every other long column rejects one. */
+  /**
+   * A key or value column of a long pair keeps a null. `distinct` keeps one null long. Every other
+   * long column rejects a clear bit.
+   */
   def longs(op: PhysicalOp): (ColumnBatch, Int) => Seq[Long] =
-    if (absentLongColumn(op)) then BatchCodec.decodeLongsPreservingAbsence
+    if (absentLongColumn(op) || deduped(op)) then BatchCodec.decodeLongsPreservingAbsence
     else (batch, rows) => BatchCodec.decodeLongs(batch, rows)
+
+  /**
+   * A double `distinct` keeps one null. Every other double column rejects a clear bit. `NaN` is a
+   * present value and is not this null.
+   */
+  def floats(op: PhysicalOp): (ColumnBatch, Int) => Seq[Double] =
+    if (deduped(op)) then BatchCodec.decodeFloat64Elements
+    else (batch, rows) => BatchCodec.decodeFloat64s(batch, rows)
+
+  /** `distinct` publishes a null element. Other ops do not ask this decoder for that bit. */
+  private def deduped(op: PhysicalOp): Boolean = op match
+    case _: PhysicalOp.Dedupe => true
+    case _ => false
 
   /**
    * Int-pair decoder for `op`. [[PhysicalOp.SortByLongKey]] and [[PhysicalOp.SortByStringKey]] are

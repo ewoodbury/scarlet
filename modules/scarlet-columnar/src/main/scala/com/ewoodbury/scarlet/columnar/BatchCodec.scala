@@ -365,6 +365,32 @@ object BatchCodec:
       column.values(row)
     }
 
+  /**
+   * Reads one `Float64` column and keeps a clear bit as a null `Double`. A fully present column
+   * still decodes through [[decodeFloat64s]]. `distinct` is the caller that keeps that null.
+   *
+   * Named erasure boundary. The cells are `java.lang.Double` references in an `Array[AnyRef]`. A
+   * `scala.Double` cell would unbox a null to `0.0`.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private[scarlet] def decodeFloat64Elements(batch: ColumnBatch, maxRows: Int): Seq[Double] =
+    val column = float64(batch)
+    val rows = decodedLength(batch, maxRows)
+    if (Validity.livePresent(column.validity, rows)) then decodeFloat64s(batch, maxRows)
+    else
+      ColumnMetrics.decoded(rows)
+      val boxed = Array.tabulate[AnyRef](rows)(row => doubleRef(column, row))
+      ArraySeq.unsafeWrapArray(boxed).asInstanceOf[Seq[Double]]
+
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
+  private def doubleRef(column: Float64Column, row: Int): java.lang.Double =
+    if (column.isValid(row)) java.lang.Double.valueOf(column.values(row)) else null
+
   def decodeNullableFloat64s(batch: ColumnBatch): Seq[Option[Double]] =
     val column = float64(batch)
     Seq.tabulate(column.length) { row =>

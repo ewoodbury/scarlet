@@ -4,11 +4,11 @@ import com.ewoodbury.scarlet.execution.schema.ColumnBinding.Operator
 import com.ewoodbury.scarlet.execution.schema.{ColumnBinding, KernelChoice}
 
 /**
- * Lowers `distinct` of an int column or a string column.
+ * Lowers `distinct` of an int, long, double, or string column.
  *
- * The child is an exchange, and the kernel performs the shuffle. [[PhysicalOp.Kind.Ints]] and
- * [[PhysicalOp.Kind.Strings]] lower to [[PhysicalOp.Dedupe]]. Every other kind stays on the row
- * path.
+ * The child is an exchange, and the kernel performs the shuffle. [[PhysicalOp.Kind.Ints]],
+ * [[PhysicalOp.Kind.Longs]], [[PhysicalOp.Kind.Floats]], and [[PhysicalOp.Kind.Strings]] lower to
+ * [[PhysicalOp.Dedupe]]. Every other kind stays on the row path.
  *
  * [[apply]] asks [[ColumnBinding]] before it builds. [[scala.None]] from the binder stays
  * [[scala.None]]. The kind check stays, so a column type the binder does not tag is not the only
@@ -29,14 +29,14 @@ private[execution] object DistinctLowering:
       case Some(KernelChoice.Dedupe) => true
       case _ => false
 
-  /** An int column or a string column. A long column is not this shape. */
+  /** An int, long, double, or string column. A pair or a bool is not this shape. */
   private def acceptedKind(child: PhysicalOp): Boolean = child.kind match
-    case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Strings =>
+    case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
+        PhysicalOp.Kind.Strings =>
       true
-    case PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats | PhysicalOp.Kind.Pairs |
-        PhysicalOp.Kind.Triples | PhysicalOp.Kind.Bools | PhysicalOp.Kind.LongPairs |
-        PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringPairs |
-        PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
+    case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples | PhysicalOp.Kind.Bools |
+        PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
+        PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.GroupedInts |
         PhysicalOp.Kind.GroupedStrings | PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter |
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums |
         PhysicalOp.Kind.GroupedIntLongs =>

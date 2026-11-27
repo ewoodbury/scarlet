@@ -364,9 +364,9 @@ private[execution] object ColumnBinding:
    * `(Int32, Int32)`, `(Int64, Int64)`, and `(Utf8Dict, Int32)` under `Present` or `Nullable`.
    * Those are the policies the count, reduce, typed-sort, group, key, value, and same-type
    * `mapValues` kernels already accept. A sort, group, key, value, or `mapValues` on another pair
-   * is [[scala.None]]. `distinct` is one [[ColumnType.Int32]] column or one
-   * [[ColumnType.Utf8Dict]] column. [[NullPolicy.Absence]] never reaches this match.
-   * [[Layout.AssumedIntLong]] does not reach this match.
+   * is [[scala.None]]. `distinct` is one [[ColumnType.Int32]], [[ColumnType.Int64]],
+   * [[ColumnType.Float64]], or [[ColumnType.Utf8Dict]] column. [[NullPolicy.Absence]] never
+   * reaches this match. [[Layout.AssumedIntLong]] does not reach this match.
    */
   private def pair(types: Vector[ColumnType], operator: Operator): Option[KernelChoice] =
     (types, operator) match
@@ -411,6 +411,10 @@ private[execution] object ColumnBinding:
       case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.Values) =>
         Some(KernelChoice.Column)
       case (Vector(ColumnType.Int32), Operator.Distinct) =>
+        Some(KernelChoice.Dedupe)
+      case (Vector(ColumnType.Int64), Operator.Distinct) =>
+        Some(KernelChoice.Dedupe)
+      case (Vector(ColumnType.Float64), Operator.Distinct) =>
         Some(KernelChoice.Dedupe)
       case (Vector(ColumnType.Utf8Dict), Operator.Distinct) =>
         Some(KernelChoice.Dedupe)

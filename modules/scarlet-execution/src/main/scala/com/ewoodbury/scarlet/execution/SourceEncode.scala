@@ -37,6 +37,77 @@ private[execution] object SourceEncode:
           BatchCodec.longs(rows)
     }.toVector
 
+  /**
+   * Long scan under `distinct`. An owned array has no null. A boxed cell keeps a null as a clear
+   * bit, so `0L` stays a value. Other operators still use [[encodeLongs]], which unboxes.
+   */
+  private[execution] def encodeNullableLongs(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+    import com.ewoodbury.scarlet.core.LongArrays
+
+    partitions.map { partition =>
+      partition.data match
+        case owned: LongArrays => BatchCodec.copiedLongs(owned.values)
+        case other => nullableLongs(other)
+    }.toVector
+
+  /**
+   * Double scan under `distinct`. An owned array has no null. A boxed cell keeps a null as a clear
+   * bit. `-0.0` stays `-0.0` in the column; the kernel canonicalises it. Other operators still use
+   * [[encodeFloats]], which unboxes.
+   */
+  private[execution] def encodeNullableDoubles(
+      partitions: Seq[Partition[_]],
+  ): Vector[ColumnBatch] =
+    import com.ewoodbury.scarlet.core.DoubleArrays
+
+    partitions.map { partition =>
+      partition.data match
+        case owned: DoubleArrays => BatchCodec.copiedFloat64s(owned.values)
+        case other => nullableDoubles(other)
+    }.toVector
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def nullableLongs(values: Iterable[Any]): ColumnBatch =
+    val cells = Vector.newBuilder[Option[Long]]
+    values.iterator.foreach { cell =>
+      cell match
+        case null => cells += None
+        case value: Long => cells += Some(value)
+        case other =>
+          val found = other.asInstanceOf[AnyRef].getClass.getName
+          throw new ColumnarFallback(s"columnar long expected a Long, found $found")
+    }
+    val built = cells.result()
+    if (built.forall(_.isDefined)) then BatchCodec.longs(built.flatten)
+    else BatchCodec.nullableLongs(built)
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def nullableDoubles(values: Iterable[Any]): ColumnBatch =
+    val cells = Vector.newBuilder[Option[Double]]
+    values.iterator.foreach { cell =>
+      cell match
+        case null => cells += None
+        case value: Double => cells += Some(value)
+        case other =>
+          val found = other.asInstanceOf[AnyRef].getClass.getName
+          throw new ColumnarFallback(s"columnar double expected a Double, found $found")
+    }
+    val built = cells.result()
+    if (built.forall(_.isDefined)) then BatchCodec.float64s(built.flatten)
+    else BatchCodec.nullableFloat64s(built)
+
   private[execution] def encodeBools(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
     import com.ewoodbury.scarlet.core.BoolArrays
 
