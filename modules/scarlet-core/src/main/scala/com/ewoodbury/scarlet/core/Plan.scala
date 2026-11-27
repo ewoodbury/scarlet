@@ -656,4 +656,17 @@ object Plan {
    */
   case class WideComputeOp(source: Plan[WideRow], expr: ColumnExpr, name: String)
       extends Plan[WideRow]
+
+  /**
+   * Inner join of two wide rows on one int or long column. `broadcast` names the build. A null key
+   * is dropped. A null payload stays. Output is every left column, then every right column except
+   * the key.
+   */
+  case class WideJoinOp(
+      left: Plan[WideRow],
+      right: Plan[WideRow],
+      leftKey: Int,
+      rightKey: Int,
+      broadcast: Boolean,
+  ) extends Plan[WideRow]
 }

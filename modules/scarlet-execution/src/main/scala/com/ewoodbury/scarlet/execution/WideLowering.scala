@@ -45,6 +45,29 @@ private[execution] object WideLowering:
             None
       }
 
+  def join(
+      left: PlanNode,
+      right: PlanNode,
+      leftKey: Int,
+      rightKey: Int,
+      broadcast: Boolean,
+      lowerChild: com.ewoodbury.scarlet.core.Plan[_] => Option[PhysicalOp],
+  ): Option[PhysicalOp] =
+    (lowerChild(left), lowerChild(right)) match
+      case (Some(leftOp), Some(rightOp)) =>
+        (fieldsOf(leftOp), fieldsOf(rightOp)) match
+          case (Some(leftFields), Some(rightFields))
+              if keysMatch(leftFields, rightFields, leftKey, rightKey) =>
+            val joined =
+              if (broadcast) then PhysicalOp.WideBroadcastJoin(leftOp, rightOp, leftKey, rightKey)
+              else PhysicalOp.WideHashJoin(leftOp, rightOp, leftKey, rightKey)
+            Some(joined)
+          case _ =>
+            LoweringTrace.note("WideJoinOp", PhysicalOp.Kind.Columns, "WideLowering")
+            None
+      case _ =>
+        None
+
   def project(
       source: com.ewoodbury.scarlet.core.Plan[WideRow],
       spec: Vector[(Int, String)],
@@ -83,8 +106,43 @@ private[execution] object WideLowering:
           fields :+ com.ewoodbury.scarlet.core.ColumnField(name, kind)
         }
       }
+    case PhysicalOp.WideHashJoin(left, right, _, rightKey) =>
+      joinedFields(left, right, rightKey)
+    case PhysicalOp.WideBroadcastJoin(left, right, _, rightKey) =>
+      joinedFields(left, right, rightKey)
     case _ =>
       None
+
+  private def joinedFields(
+      left: PhysicalOp,
+      right: PhysicalOp,
+      rightKey: Int,
+  ): Option[Vector[ColumnField]] =
+    (fieldsOf(left), fieldsOf(right)) match
+      case (Some(leftFields), Some(rightFields)) if rightKey >= 0 && rightKey < rightFields.size =>
+        Some(leftFields ++ rightFields.zipWithIndex.collect {
+          case (field, ordinal) if ordinal != rightKey => field
+        })
+      case _ =>
+        None
+
+  private def keysMatch(
+      left: Vector[ColumnField],
+      right: Vector[ColumnField],
+      leftKey: Int,
+      rightKey: Int,
+  ): Boolean =
+    columnKind(left, leftKey).exists { kind =>
+      columnKind(right, rightKey).exists { other =>
+        sameKind(kind, other) && (sameKind(kind, com.ewoodbury.scarlet.core.ColumnKind.Int32) ||
+          sameKind(kind, com.ewoodbury.scarlet.core.ColumnKind.Int64))
+      }
+    }
+
+  private def columnKind(fields: Vector[ColumnField], ordinal: Int): Option[
+    com.ewoodbury.scarlet.core.ColumnKind,
+  ] =
+    if (ordinal >= 0 && ordinal < fields.size) then Some(fields(ordinal).kind) else None
 
   private def schema(
       partitions: Seq[com.ewoodbury.scarlet.core.Partition[_]],

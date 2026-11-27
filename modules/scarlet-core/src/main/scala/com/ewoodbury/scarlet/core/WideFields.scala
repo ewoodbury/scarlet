@@ -30,6 +30,15 @@ private[scarlet] object WideFields:
       known(source).flatMap { fields =>
         ColumnExpr.resultKind(expr, fields).map(kind => fields :+ ColumnField(name, kind))
       }
+    case Plan.WideJoinOp(left, right, _, rightKey, _) =>
+      (known(left), known(right)) match
+        case (Some(leftFields), Some(rightFields))
+            if rightKey >= 0 && rightKey < rightFields.size =>
+          Some(leftFields ++ rightFields.zipWithIndex.collect {
+            case (field, ordinal) if ordinal != rightKey => field
+          })
+        case _ =>
+          None
     case _ =>
       None
 

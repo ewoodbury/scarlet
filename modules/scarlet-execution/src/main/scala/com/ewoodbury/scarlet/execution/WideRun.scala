@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{ColumnBatch, WideBatch, WideExpr}
+import com.ewoodbury.scarlet.columnar.{ColumnBatch, WideBatch, WideExpr, WideJoin}
 import com.ewoodbury.scarlet.core.{ColumnField, Partition, WideColumns, WideRow}
 
 /**
@@ -57,5 +57,34 @@ private[execution] object WideRun:
         }
         Table(fields, WideBatch.project(table.batch, spec.map(_._1)))
       }
+    case PhysicalOp.WideHashJoin(left, right, leftKey, rightKey) =>
+      Seq(join(left, right, leftKey, rightKey, broadcast = false))
+    case PhysicalOp.WideBroadcastJoin(left, right, leftKey, rightKey) =>
+      Seq(join(left, right, leftKey, rightKey, broadcast = true))
     case other =>
       throw new IllegalStateException(s"wide run does not accept ${other.shape}")
+
+  private def join(
+      left: PhysicalOp,
+      right: PhysicalOp,
+      leftKey: Int,
+      rightKey: Int,
+      broadcast: Boolean,
+  ): Table =
+    val (leftFields, leftBatches) = side(left)
+    val (rightFields, rightBatches) = side(right)
+    val (fields, batch) =
+      if (broadcast) then
+        WideJoin.broadcast(leftBatches, rightBatches, leftFields, rightFields, leftKey, rightKey)
+      else WideJoin.hash(leftBatches, rightBatches, leftFields, rightFields, leftKey, rightKey)
+    Table(fields, batch)
+
+  private def side(op: PhysicalOp): (Vector[ColumnField], Seq[ColumnBatch]) =
+    val tables = run(op)
+    val fields = tables.headOption
+      .map(_.fields)
+      .orElse(WideLowering.fieldsOf(op))
+      .getOrElse(
+        throw new IllegalStateException(s"wide join child ${op.shape} has no schema"),
+      )
+    (fields, tables.map(_.batch))

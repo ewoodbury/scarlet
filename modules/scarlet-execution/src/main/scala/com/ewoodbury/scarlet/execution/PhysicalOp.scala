@@ -687,6 +687,7 @@ enum PhysicalOp:
     case WideFilter(child, _, _) => child.kind
     case WideProject(child, _) => child.kind
     case WideCompute(child, _, _) => child.kind
+    case WideHashJoin(_, _, _, _) | WideBroadcastJoin(_, _, _, _) => PhysicalOp.Kind.Columns
 
   /**
    * Output columns. [[kind]] stays the admission enum. A [[Project]] whose child kind is
@@ -847,6 +848,9 @@ enum PhysicalOp:
     case WideFilter(child, columnOrdinal, _) => s"WideFilter$columnOrdinal(${child.shape})"
     case WideProject(child, _) => s"WideProject(${child.shape})"
     case WideCompute(child, _, _) => s"WideCompute(${child.shape})"
+    case WideHashJoin(left, right, _, _) => s"WideHashJoin(${left.shape},${right.shape})"
+    case WideBroadcastJoin(left, right, _, _) =>
+      s"WideBroadcastJoin(${left.shape},${right.shape})"
 
   /**
    * Non-adding `reduceByKey` of an int key and a long value. The child is an [[Exchange]]. The
@@ -1005,6 +1009,20 @@ enum PhysicalOp:
    * input yields null. Output kind is the child's kind. There is no spill.
    */
   case WideCompute(child: PhysicalOp, expr: ColumnExpr, name: String)
+
+  /**
+   * Inner hash join of two wide rows on one int or long key. The right side is the build. A null
+   * key is dropped. A null payload stays. Output kind is [[PhysicalOp.Kind.Columns]]. There is no
+   * spill.
+   */
+  case WideHashJoin(left: PhysicalOp, right: PhysicalOp, leftKey: Int, rightKey: Int)
+
+  /**
+   * Inner broadcast join of two wide rows. The right side is the build and is joined with every
+   * left batch. Nulls follow [[WideHashJoin]]. Output kind is [[PhysicalOp.Kind.Columns]]. There
+   * is no spill.
+   */
+  case WideBroadcastJoin(left: PhysicalOp, right: PhysicalOp, leftKey: Int, rightKey: Int)
 
 object PhysicalOp:
 

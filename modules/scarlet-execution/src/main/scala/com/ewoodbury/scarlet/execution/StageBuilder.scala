@@ -380,6 +380,9 @@ object StageBuilder:
       case wide: Plan.WideComputeOp =>
         WidePlanStages.attachCompute(ctx, wide, builderMap, dependencies)
 
+      case _: Plan.WideJoinOp =>
+        throw new UnsupportedOperationException("wide join is executed by WideJoinRows")
+
       case Plan.FlatMapOp(sourcePlan, f) =>
         val (sourceStageId, _) = buildStagesFromPlan(ctx, sourcePlan, builderMap, dependencies)
         val resultId = appendOperation(

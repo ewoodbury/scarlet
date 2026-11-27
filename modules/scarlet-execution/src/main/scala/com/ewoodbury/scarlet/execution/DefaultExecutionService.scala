@@ -59,9 +59,23 @@ class DefaultExecutionService extends ExecutionService {
         .tryRun(plan)
         .getOrElse(RowBoundary.mapValues(source, mapFunction).getOrElse(runRow(plan)))
 
+    case join: Plan.WideJoinOp =>
+      wideJoinPartitions(plan, join)
+
     case _ =>
       ColumnarPlanner.tryRun(plan).orElse(MixedJoin.partitions(plan)).getOrElse(runRow(plan))
   }
+
+  /**
+   * Columnar wide join when it lowers. Otherwise the in-memory wide join. `Plan` is invariant, so
+   * the row partitions are cast back to the caller's element type. [[Plan.WideJoinOp]] is always
+   * `Plan[WideRow]`.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+  private def wideJoinPartitions[A](plan: Plan[A], join: Plan.WideJoinOp): Seq[Partition[A]] =
+    ColumnarPlanner.tryRun(plan).getOrElse {
+      WideJoinRows.partitions(join).asInstanceOf[Seq[Partition[A]]]
+    }
 
   def count[A](plan: Plan[A]): Long =
     ColumnarPlanner.tryCount(plan).getOrElse(countAfterMiss(plan))
