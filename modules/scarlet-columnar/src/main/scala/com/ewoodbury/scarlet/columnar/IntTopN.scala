@@ -194,13 +194,15 @@ private[scarlet] object IntTopN:
         val row = one.rows(slot)
         val keyPresent = Validity.isSet(keyWords, row)
         val valuePresent = Validity.isSet(valueWords, row)
-        heap.offer(
-          if (keyPresent) keys.values(row) else 0,
-          if (valuePresent) values.values(row) else 0,
-          seq,
-          keyPresent,
-          valuePresent,
-        )
+        val value = if (valuePresent) values.values(row) else 0
+        if (!heap.losesOnValue(value)) then
+          heap.offer(
+            if (keyPresent) keys.values(row) else 0,
+            value,
+            seq,
+            keyPresent,
+            valuePresent,
+          )
         seq += 1
         slot += 1
       }
@@ -293,7 +295,8 @@ private[scarlet] object IntTopN:
     var row = stripe.start
     var seq = stripe.seqBase
     while (row < end) {
-      heap.offer(keys(row), values(row), seq, true, true)
+      val value = values(row)
+      if (!heap.losesOnValue(value)) then heap.offer(keys(row), value, seq, true, true)
       row += 1
       seq += 1
     }
@@ -311,7 +314,9 @@ private[scarlet] object IntTopN:
     var row = stripe.start
     var seq = stripe.seqBase
     while (row < end) {
-      if (keep(column(row))) then heap.offer(keys(row), values(row), seq, true, true)
+      if (keep(column(row))) then
+        val value = values(row)
+        if (!heap.losesOnValue(value)) then heap.offer(keys(row), value, seq, true, true)
       row += 1
       seq += 1
     }
@@ -333,7 +338,8 @@ private[scarlet] object IntTopN:
     var seq = stripe.seqBase
     while (row < end) {
       if (keepLeft(left(row)) && keepRight(right(row))) then
-        heap.offer(keys(row), values(row), seq, true, true)
+        val value = values(row)
+        if (!heap.losesOnValue(value)) then heap.offer(keys(row), value, seq, true, true)
       row += 1
       seq += 1
     }
@@ -349,7 +355,9 @@ private[scarlet] object IntTopN:
     var row = stripe.start
     var seq = stripe.seqBase
     while (row < end) {
-      if (keeps(steps, keys, values, row)) then heap.offer(keys(row), values(row), seq, true, true)
+      if (keeps(steps, keys, values, row)) then
+        val value = values(row)
+        if (!heap.losesOnValue(value)) then heap.offer(keys(row), value, seq, true, true)
       row += 1
       seq += 1
     }
@@ -432,6 +440,15 @@ private[scarlet] object IntTopN:
     private val keyPresent = new Array[Boolean](limit)
     private val valuePresent = new Array[Boolean](limit)
     private var size = 0
+
+    /**
+     * True when the heap is full and `value` is strictly below the worst winner.
+     *
+     * An equal value still enters [[offer]], because the key and the source sequence break that
+     * tie. A null is already stored as zero, which is the number [[offer]] compares.
+     */
+    def losesOnValue(value: Int): Boolean =
+      size == limit && value < values(0)
 
     def offer(
         key: Int,
