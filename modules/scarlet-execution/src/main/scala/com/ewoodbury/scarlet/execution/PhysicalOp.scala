@@ -1,7 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
 import com.ewoodbury.scarlet.columnar.LogicalType
-import com.ewoodbury.scarlet.core.{ColumnCompare, Partition}
+import com.ewoodbury.scarlet.core.{ColumnCompare, ColumnExpr, Partition}
 
 /**
  * One columnar operator, lowered from a logical [[com.ewoodbury.scarlet.core.Plan]].
@@ -686,6 +686,7 @@ enum PhysicalOp:
       PhysicalOp.Kind.StringOuter
     case WideFilter(child, _, _) => child.kind
     case WideProject(child, _) => child.kind
+    case WideCompute(child, _, _) => child.kind
 
   /**
    * Output columns. [[kind]] stays the admission enum. A [[Project]] whose child kind is
@@ -845,6 +846,7 @@ enum PhysicalOp:
       s"StringSortMergeFullOuter(${left.shape}, ${right.shape})"
     case WideFilter(child, columnOrdinal, _) => s"WideFilter$columnOrdinal(${child.shape})"
     case WideProject(child, _) => s"WideProject(${child.shape})"
+    case WideCompute(child, _, _) => s"WideCompute(${child.shape})"
 
   /**
    * Non-adding `reduceByKey` of an int key and a long value. The child is an [[Exchange]]. The
@@ -997,6 +999,12 @@ enum PhysicalOp:
    * child's kind. There is no spill.
    */
   case WideProject(child: PhysicalOp, spec: Vector[(Int, String)])
+
+  /**
+   * Appends one computed column. The child is a wide scan, filter, project, or compute. A null
+   * input yields null. Output kind is the child's kind. There is no spill.
+   */
+  case WideCompute(child: PhysicalOp, expr: ColumnExpr, name: String)
 
 object PhysicalOp:
 

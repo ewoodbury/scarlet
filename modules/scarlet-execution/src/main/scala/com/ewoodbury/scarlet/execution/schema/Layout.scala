@@ -183,7 +183,7 @@ private[execution] object Layout:
       join(node.kind, OuterSide.Full)
     case node: PhysicalOp.IntExtremum =>
       columns(node.kind)
-    case _: PhysicalOp.WideFilter | _: PhysicalOp.WideProject =>
+    case _: PhysicalOp.WideFilter | _: PhysicalOp.WideProject | _: PhysicalOp.WideCompute =>
       Output.Opaque("wide row")
 
   private def columns(kind: PhysicalOp.Kind): Output =

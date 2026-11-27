@@ -377,6 +377,9 @@ object StageBuilder:
       case wide: Plan.WideProjectOp =>
         WidePlanStages.attachProject(ctx, wide, builderMap, dependencies)
 
+      case wide: Plan.WideComputeOp =>
+        WidePlanStages.attachCompute(ctx, wide, builderMap, dependencies)
+
       case Plan.FlatMapOp(sourcePlan, f) =>
         val (sourceStageId, _) = buildStagesFromPlan(ctx, sourcePlan, builderMap, dependencies)
         val resultId = appendOperation(
@@ -1120,7 +1123,7 @@ object StageBuilder:
           _: GroupByKeyLocalOp[_, _] | _: CountByKeyLocalOp[_, _] | _: CountSumByKeyLocalOp |
           _: CountSumByLongKeyLocalOp | _: CountSumByStringKeyLocalOp |
           _: CountSumByIntLongKeyLocalOp | _: ReduceByKeyLocalOp[_, _] | _: ExtremumByKeyLocalOp |
-          _: WideFilterOp | _: WideProjectOp =>
+          _: WideFilterOp | _: WideProjectOp | _: WideComputeOp =>
         prev
     }
 

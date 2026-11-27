@@ -122,3 +122,4 @@ private[execution] object Describe:
     case _: PhysicalOp.IntExtremum => KernelChoice.IntExtremum
     case _: PhysicalOp.WideFilter => KernelChoice.Filter
     case _: PhysicalOp.WideProject => KernelChoice.Project
+    case _: PhysicalOp.WideCompute => KernelChoice.Project

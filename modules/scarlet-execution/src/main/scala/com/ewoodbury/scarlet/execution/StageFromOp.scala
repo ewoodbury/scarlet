@@ -67,5 +67,7 @@ private[execution] object StageFromOp:
       Stage.wideFilter(ordinal, compare).asInstanceOf[Stage[Any, Any]]
     case WideProjectOp(spec) =>
       Stage.wideProject(spec).asInstanceOf[Stage[Any, Any]]
+    case WideComputeOp(expr, name) =>
+      Stage.wideCompute(expr, name).asInstanceOf[Stage[Any, Any]]
     case _ =>
       throw new UnsupportedOperationException(s"Cannot create stage from operation: $op")
