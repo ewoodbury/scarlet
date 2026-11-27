@@ -36,8 +36,8 @@ object FoundationParents:
   )
 
   /**
-   * Checksums at `rows`. `count-above` lowers. The other parents must not. A checksum mismatch
-   * throws.
+   * Checksums at `rows`. `count-above` and `filter-above` lower. `key-above` and `reduce-other`
+   * must not. A checksum mismatch throws.
    */
   def check(rows: Int): Unit =
     observe(rows).foreach { one =>
@@ -78,8 +78,13 @@ object FoundationParents:
     name match
       case "filter-above" =>
         val data = filtered(rows)
-        refuse(name, data.plan)
-        watched(name, sumOrdered(collect(data)), sumOrdered(keptFilter(rows)))
+        if ColumnarPlanner.lower(data.plan).isEmpty then
+          throw new IllegalStateException(s"$name stayed on rows")
+        val lowered = ColumnarPlanner
+          .tryRun(data.plan)
+          .getOrElse(throw new IllegalStateException(s"$name did not run columnar"))
+        val kept = lowered.iterator.flatMap(_.data.iterator).toSeq
+        watched(name, sumOrdered(collect(data)), sumOrdered(kept))
       case "count-above" =>
         val data = counted(rows)
         if ColumnarPlanner.lower(data.plan).isEmpty then
@@ -125,14 +130,11 @@ object FoundationParents:
 
   private def elapsedKept(name: String): Long =
     name match
-      case "filter-above" => elapsedWork(keptFilter(largeRows).size)
+      case "filter-above" => elapsedLowered(filtered(largeRows))
       case "count-above" => elapsedWork(keptCount(largeRows).size)
       case "key-above" => elapsedWork(keptKey(largeRows).size)
       case "reduce-other" => elapsedWork(keptReduce(largeRows).size)
       case other => throw new IllegalStateException(s"unknown query $other")
-
-  private def keptFilter(rows: Int): Seq[(Int, Long)] =
-    scheduled(Plan.FilterValuesOp(frozen(rows), (value: Long) => value > 0L))
 
   private def keptCount(rows: Int): Seq[(Int, Int)] =
     scheduled(Plan.CountByKeyOp(frozen(rows)))
@@ -192,6 +194,16 @@ object FoundationParents:
 
   private def discard(sample: Long): Unit =
     if sample < 0L then throw new IllegalStateException("negative sample")
+
+  private def elapsedLowered[A](data: DistCollection[A]): Long =
+    val started = System.nanoTime()
+    val lowered = ColumnarPlanner
+      .tryRun(data.plan)
+      .getOrElse(throw new IllegalStateException("filter-above did not run columnar"))
+    val taken = System.nanoTime() - started
+    if lowered.iterator.flatMap(_.data.iterator).size < 0 then
+      throw new IllegalStateException("negative collect")
+    taken
 
   private def elapsedCollect[A](data: DistCollection[A]): Long =
     val previous = ScarletConf.get
