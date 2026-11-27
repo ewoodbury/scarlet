@@ -173,11 +173,10 @@ object ColumnarPlanner:
       accepted(plan) match
         case None => None
         case Some(op) =>
-          try takeAccepted(plan, op, n).map(_.asInstanceOf[Seq[A]])
-          // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
-          catch case _: ClassCastException => None
+          // The prefix has the plan's element type. ColumnarQuery already caught a decline.
+          ColumnarQuery.take(plan, op, n).map(_.asInstanceOf[Seq[A]])
 
-  private def takeAccepted(plan: Plan[_], op: PhysicalOp, n: Int): Option[Seq[Any]] =
+  private[execution] def takeAccepted(plan: Plan[_], op: PhysicalOp, n: Int): Option[Seq[Any]] =
     op match
       case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByLongKey |
           _: PhysicalOp.SortByStringKey | _: PhysicalOp.SortByLongValueDesc |
@@ -288,16 +287,7 @@ object ColumnarPlanner:
    * [[ColumnarFallback]] is its named form.
    */
   def tryCount(plan: Plan[_]): Option[Long] =
-    accepted(plan) match
-      case None => None
-      case Some(op) =>
-        try
-          TrailingProject
-            .count(plan, op)
-            .orElse(Option.when(countsFilteredPairs(plan, op))(countFilteredPairs(plan, op)))
-            .orElse(finishedCount(plan, op))
-        // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
-        catch case _: ClassCastException => None
+    accepted(plan).flatMap(op => ColumnarQuery.count(plan, op))
 
   /**
    * True when `plan` is a pair-slot filter stack whose source is an int-pair scan.
@@ -305,7 +295,7 @@ object ColumnarPlanner:
    * of one. An empty stack, a long or string pair, a triple, and a stack reached through a map are
    * false, and [[finishedCount]] runs them.
    */
-  private def countsFilteredPairs(plan: Plan[_], op: PhysicalOp): Boolean =
+  private[execution] def countsFilteredPairs(plan: Plan[_], op: PhysicalOp): Boolean =
     PredicatePlan.childOf(plan, op) match
       case (_, PhysicalOp.Scan(PhysicalOp.Kind.Pairs, _)) =>
         PredicatePlan.compile(plan, op).flatMap(PredicatePlan.selectionSteps) match
@@ -327,7 +317,7 @@ object ColumnarPlanner:
    * no-op while the pair filter still demands both columns, so the steps stay on those logical
    * ordinals.
    */
-  private def countFilteredPairs(plan: Plan[_], op: PhysicalOp): Long =
+  private[execution] def countFilteredPairs(plan: Plan[_], op: PhysicalOp): Long =
     val compiled = PredicatePlan.compile(plan, op).getOrElse(missingPairCount)
     val ordinals = ColumnUse.ordinals(plan, op)
     val steps = PredicatePlan
@@ -342,7 +332,7 @@ object ColumnarPlanner:
   private def missingPairCount: Nothing =
     throw new IllegalStateException("pair filter count lost its scan")
 
-  private def finishedCount(plan: Plan[_], op: PhysicalOp): Option[Long] =
+  private[execution] def finishedCount(plan: Plan[_], op: PhysicalOp): Option[Long] =
     op match
       case PhysicalOp.GroupedDecode(child) =>
         Some(GroupedDecode.count(plan, child))
@@ -359,12 +349,7 @@ object ColumnarPlanner:
    * fallback. [[ColumnarFallback]] is its named form.
    */
   def trySumInt(plan: Plan[_]): Option[Long] =
-    accepted(plan) match
-      case Some(op) if isInt(op) =>
-        try Some(sumInt(plan, op))
-        // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
-        catch case _: ClassCastException => None
-      case _ => None
+    accepted(plan).flatMap(op => ColumnarQuery.sumInt(plan, op))
 
   /**
    * Sum of a double plan. `None` means the row path, including a plan whose result is not a double
@@ -373,23 +358,14 @@ object ColumnarPlanner:
    * its named form.
    */
   def trySumDouble(plan: Plan[_]): Option[Double] =
-    accepted(plan) match
-      case Some(op) if isFloat(op) =>
-        try Some(sumDouble(plan, op))
-        // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
-        catch case _: ClassCastException => None
-      case _ => None
+    accepted(plan).flatMap(op => ColumnarQuery.sumDouble(plan, op))
 
   /**
    * Sum of a float32 plan. `None` means the row path. Null slots are skipped. The total is a
    * `Float`, the same accumulator as the row fold. The catch is the row-path fallback.
    */
   def trySumFloat(plan: Plan[_]): Option[Float] =
-    accepted(plan) match
-      case Some(op) if op.kind eq PhysicalOp.Kind.Float32s =>
-        try Some(Float32Sum.of(plan, op))
-        catch case _: ClassCastException => None
-      case _ => None
+    accepted(plan).flatMap(op => ColumnarQuery.sumFloat(plan, op))
 
   /**
    * Wide sum of a finished long column. `None` means the row path, including a plan whose result
@@ -398,12 +374,7 @@ object ColumnarPlanner:
    * fallback. [[ColumnarFallback]] is its named form.
    */
   def trySumLong(plan: Plan[_]): Option[Long] =
-    accepted(plan) match
-      case Some(op) if isLong(op) =>
-        try Some(sumLong(plan, op))
-        // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
-        catch case _: ClassCastException => None
-      case _ => None
+    accepted(plan).flatMap(op => ColumnarQuery.sumLong(plan, op))
 
   /**
    * Folded wide sum of int pairs. `None` means the row path. A typed pair source runs
@@ -431,7 +402,7 @@ object ColumnarPlanner:
           catch case _: ClassCastException => None
         case _ => None
 
-  private def sumInt(plan: Plan[_], op: PhysicalOp): Long =
+  private[execution] def sumInt(plan: Plan[_], op: PhysicalOp): Long =
     TrailingProject.sum(plan, op).getOrElse(matchedSumInt(plan, op))
 
   private def matchedSumInt(plan: Plan[_], op: PhysicalOp): Long = (plan, op) match
@@ -481,7 +452,7 @@ object ColumnarPlanner:
     case _ =>
       ColumnReduce.sumInt32(ColumnarInterpreter.batchesOf(ColumnarInterpreter.interpret(plan, op)))
 
-  private def sumLong(plan: Plan[_], op: PhysicalOp): Long =
+  private[execution] def sumLong(plan: Plan[_], op: PhysicalOp): Long =
     TrailingProject.sumLong(plan, op).getOrElse(matchedSumLong(plan, op))
 
   private def matchedSumLong(plan: Plan[_], op: PhysicalOp): Long = (plan, op) match
@@ -514,7 +485,7 @@ object ColumnarPlanner:
         0,
       )
 
-  private def sumDouble(plan: Plan[_], op: PhysicalOp): Double = (plan, op) match
+  private[execution] def sumDouble(plan: Plan[_], op: PhysicalOp): Double = (plan, op) match
     case (Plan.Source(partitions, _), PhysicalOp.Scan(PhysicalOp.Kind.Floats, _)) =>
       ColumnReduce.sumFloat64(SourceEncode.encodeFloats(partitions))
     case (
@@ -624,7 +595,7 @@ object ColumnarPlanner:
     case PhysicalOp.Kind.Ints => true
     case _ => false
 
-  private def isFloat(op: PhysicalOp): Boolean = op.kind match
+  private[execution] def isFloat(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Floats => true
     case _ => false
 
