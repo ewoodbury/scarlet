@@ -687,7 +687,8 @@ enum PhysicalOp:
     case WideFilter(child, _, _) => child.kind
     case WideProject(child, _) => child.kind
     case WideCompute(child, _, _) => child.kind
-    case WideHashJoin(_, _, _, _) | WideBroadcastJoin(_, _, _, _) => PhysicalOp.Kind.Columns
+    case WideHashJoin(_, _, _, _) | WideBroadcastJoin(_, _, _, _) | WideGroup(_, _, _) =>
+      PhysicalOp.Kind.Columns
 
   /**
    * Output columns. [[kind]] stays the admission enum. A [[Project]] whose child kind is
@@ -851,6 +852,7 @@ enum PhysicalOp:
     case WideHashJoin(left, right, _, _) => s"WideHashJoin(${left.shape},${right.shape})"
     case WideBroadcastJoin(left, right, _, _) =>
       s"WideBroadcastJoin(${left.shape},${right.shape})"
+    case WideGroup(child, _, _) => s"WideGroup(${child.shape})"
 
   /**
    * Non-adding `reduceByKey` of an int key and a long value. The child is an [[Exchange]]. The
@@ -1023,6 +1025,14 @@ enum PhysicalOp:
    * is no spill.
    */
   case WideBroadcastJoin(left: PhysicalOp, right: PhysicalOp, leftKey: Int, rightKey: Int)
+
+  /**
+   * Group one int or long column and aggregate one numeric column: count, sum, min, and max. A
+   * null key is dropped. A null measure is counted and skipped by sum, min, and max. A key whose
+   * measures are all null still emits a row. Output kind is [[PhysicalOp.Kind.Columns]]. There is
+   * no spill. This does not call `groupByKey`.
+   */
+  case WideGroup(child: PhysicalOp, key: Int, measure: Int)
 
 object PhysicalOp:
 

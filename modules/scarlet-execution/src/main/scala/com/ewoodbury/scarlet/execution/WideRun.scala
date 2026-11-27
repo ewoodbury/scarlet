@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.columnar.{ColumnBatch, WideBatch, WideExpr, WideJoin}
+import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{ColumnField, Partition, WideColumns, WideRow}
 
 /**
@@ -61,6 +61,8 @@ private[execution] object WideRun:
       Seq(join(left, right, leftKey, rightKey, broadcast = false))
     case PhysicalOp.WideBroadcastJoin(left, right, leftKey, rightKey) =>
       Seq(join(left, right, leftKey, rightKey, broadcast = true))
+    case PhysicalOp.WideGroup(child, key, measure) =>
+      Seq(group(child, key, measure))
     case other =>
       throw new IllegalStateException(s"wide run does not accept ${other.shape}")
 
@@ -78,6 +80,17 @@ private[execution] object WideRun:
         WideJoin.broadcast(leftBatches, rightBatches, leftFields, rightFields, leftKey, rightKey)
       else WideJoin.hash(leftBatches, rightBatches, leftFields, rightFields, leftKey, rightKey)
     Table(fields, batch)
+
+  private def group(child: PhysicalOp, key: Int, measure: Int): Table =
+    val tables = run(child)
+    val fields = tables.headOption
+      .map(_.fields)
+      .orElse(WideLowering.fieldsOf(child))
+      .getOrElse(
+        throw new IllegalStateException(s"wide group child ${child.shape} has no schema"),
+      )
+    val (outFields, batch) = WideGroup.aggregate(tables.map(_.batch), fields, key, measure)
+    Table(outFields, batch)
 
   private def side(op: PhysicalOp): (Vector[ColumnField], Seq[ColumnBatch]) =
     val tables = run(op)
