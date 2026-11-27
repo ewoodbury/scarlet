@@ -117,21 +117,21 @@ class TestClosedKernel extends AnyFlatSpec with Matchers with BeforeAndAfterEach
   }
 
   it should "count string pairs by key and collect a map" in {
-    val counted = stringPairScan(Seq("red" -> 1, "blue" -> 2), Seq("red" -> 4, "green" -> 3))
-      .countByKey
+    val counted =
+      stringPairScan(Seq("red" -> 1, "blue" -> 2), Seq("red" -> 4, "green" -> 3)).countByKey
     assertMap(counted.plan, "CountByKey(Exchange(Scan))")
   }
 
   it should "count an int inner join" in {
     val left = DistCollection.ofIntPairs(Array(1, 2, 1), Array(10, 20, 11), 2)
     val right = DistCollection.ofIntPairs(Array(1, 3, 2), Array(100, 300, 200), 2)
-    assertCount(left.join(right).plan, "HashJoin(Exchange(Scan), Exchange(Scan))")
+    assertCount(left.join(right).plan, "BroadcastJoin(Scan, Scan)")
   }
 
   it should "count a long inner join" in {
     val left = DistCollection.ofLongPairs(Array(1L, 2L, 1L), Array(10L, 20L, 11L), 2)
     val right = DistCollection.ofLongPairs(Array(1L, 3L, 2L), Array(100L, 300L, 200L), 2)
-    assertCount(left.join(right).plan, "LongHashJoin(Exchange(Scan), Exchange(Scan))")
+    assertCount(left.join(right).plan, "LongBroadcastJoin(Scan, Scan)")
   }
 
   it should "count a string inner join" in {

@@ -82,22 +82,33 @@ final case class DistCollection[A](plan: Plan[A]):
     DistCollection(Plan.WideComputeOp(widePlan, expr, name))
 
   /**
-   * Inner hash join on one int or long column. The right side is the build. A null key is dropped.
-   * A null payload stays. Output is every left column, then every right column except the key.
+   * Inner join on one int or long column. The right side is the build. A known build count at or
+   * under the broadcast threshold broadcasts. Anything else hashes. A null key is dropped. A null
+   * payload stays. Output is every left column, then every right column except the key.
    */
   def joinColumns(right: DistCollection[WideRow], leftKey: Int, rightKey: Int)(using
       ev: A =:= WideRow,
   ): DistCollection[WideRow] =
-    DistCollection(Plan.WideJoinOp(widePlan, right.plan, leftKey, rightKey, broadcast = false))
+    DistCollection(Plan.WideJoinOp(widePlan, right.plan, leftKey, rightKey, broadcast = None))
+
+  /** Inner hash join on one int or long column. The right side is the build. */
+  def hashJoinColumns(right: DistCollection[WideRow], leftKey: Int, rightKey: Int)(using
+      ev: A =:= WideRow,
+  ): DistCollection[WideRow] =
+    DistCollection(
+      Plan.WideJoinOp(widePlan, right.plan, leftKey, rightKey, broadcast = Some(false)),
+    )
 
   /**
    * Broadcasts `right` as the build and probes this collection. The matched rows are the same
-   * multiset as [[joinColumns]].
+   * multiset as [[hashJoinColumns]].
    */
   def broadcastJoinColumns(right: DistCollection[WideRow], leftKey: Int, rightKey: Int)(using
       ev: A =:= WideRow,
   ): DistCollection[WideRow] =
-    DistCollection(Plan.WideJoinOp(widePlan, right.plan, leftKey, rightKey, broadcast = true))
+    DistCollection(
+      Plan.WideJoinOp(widePlan, right.plan, leftKey, rightKey, broadcast = Some(true)),
+    )
 
   /**
    * Sums one long column. A null slot contributes nothing. The total wraps. A columnar plan adds

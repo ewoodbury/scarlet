@@ -217,7 +217,7 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     )
     val joined = keyed.join(keyed)
     ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
-      "StringHashJoin(Exchange(Scan), Exchange(Scan))",
+      "StringBroadcastJoin(Scan, Scan)",
     )
     ColumnarPlanner.partitioning(joined.plan).map(_.layout) shouldBe Some(
       Layout.StringTriple(ScarletConf.get.columnarBatchSize),

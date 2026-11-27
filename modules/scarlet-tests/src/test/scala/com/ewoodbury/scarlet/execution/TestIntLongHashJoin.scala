@@ -100,7 +100,7 @@ class TestIntLongHashJoin extends AnyFlatSpec with Matchers with BeforeAndAfterE
     ) shouldBe
       "IntLongSortMergeFullOuter(Exchange(IntLongMapValue(Scan)), Exchange(IntLongMapValue(Scan)))"
     ColumnarPlanner.lower(left.join(ints).plan) shouldBe None
-    shape(ints.join(other)) shouldBe "HashJoin(Exchange(Scan), Exchange(Scan))"
+    shape(ints.join(other)) shouldBe "BroadcastJoin(Scan, Scan)"
     shape(ints.broadcastJoin(other)) shouldBe "BroadcastJoin(Scan, Scan)"
     shape(ints.sortMergeJoin(other)) shouldBe "SortMergeJoin(Exchange(Scan), Exchange(Scan))"
     shape(ints.leftOuterJoin(other)) shouldBe "HashLeftOuter(Exchange(Scan), Exchange(Scan))"

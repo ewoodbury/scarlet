@@ -50,7 +50,7 @@ private[execution] object WideLowering:
       right: PlanNode,
       leftKey: Int,
       rightKey: Int,
-      broadcast: Boolean,
+      broadcast: Option[Boolean],
       lowerChild: com.ewoodbury.scarlet.core.Plan[_] => Option[PhysicalOp],
   ): Option[PhysicalOp] =
     (lowerChild(left), lowerChild(right)) match
@@ -58,8 +58,10 @@ private[execution] object WideLowering:
         (fieldsOf(leftOp), fieldsOf(rightOp)) match
           case (Some(leftFields), Some(rightFields))
               if keysMatch(leftFields, rightFields, leftKey, rightKey) =>
+            val useBroadcast = broadcast.getOrElse(JoinCost.preferBroadcast(rightOp))
             val joined =
-              if (broadcast) then PhysicalOp.WideBroadcastJoin(leftOp, rightOp, leftKey, rightKey)
+              if (useBroadcast) then
+                PhysicalOp.WideBroadcastJoin(leftOp, rightOp, leftKey, rightKey)
               else PhysicalOp.WideHashJoin(leftOp, rightOp, leftKey, rightKey)
             Some(joined)
           case _ =>

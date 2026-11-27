@@ -123,7 +123,7 @@ class TestLongSortMergeJoin extends AnyFlatSpec with Matchers with BeforeAndAfte
       PhysicalOp.Kind.LongTriples,
     )
     ColumnarPlanner.lower(left.join(right).plan).map(_.shape) shouldBe Some(
-      "LongHashJoin(Exchange(Scan), Exchange(Scan))",
+      "LongBroadcastJoin(Scan, Scan)",
     )
     ColumnarPlanner.lower(left.shuffleHashJoin(right).plan).map(_.shape) shouldBe Some(
       "LongHashJoin(Exchange(Scan), Exchange(Scan))",

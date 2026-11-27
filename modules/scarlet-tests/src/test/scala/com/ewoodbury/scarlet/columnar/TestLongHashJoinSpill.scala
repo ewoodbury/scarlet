@@ -237,14 +237,14 @@ class TestLongHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAfte
         Seq(pair(longRef(0L), longRef(7L)), pair(longRef(4L), longRef(8L))),
         width,
       )
-      val joined = left.join(right)
+      val joined = left.shuffleHashJoin(right)
       ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
         "LongHashJoin(Exchange(Scan), Exchange(Scan))",
       )
       ColumnarPlanner.tryRun(joined.plan).isDefined shouldBe true
       val collected = joined.collect().toList
       collected should contain theSameElementsAs rowOf(joined)
-      collected should contain ((0L, pair(absent, longRef(7L))))
+      collected should contain((0L, pair(absent, longRef(7L))))
       // tryRun and collect each spill that parent into two pieces.
       LongHashJoinSpill.filesWrittenForTest shouldBe 4L
       LongHashJoinSpill.openTablesForTest shouldBe 1

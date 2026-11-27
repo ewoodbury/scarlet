@@ -65,7 +65,7 @@ class TestWideJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       ColumnField("q", ColumnKind.Int32),
       ColumnField("p", ColumnKind.Int64),
     )
-    val hashed = left.joinColumns(right, 0, 0)
+    val hashed = left.hashJoinColumns(right, 0, 0)
     val broadcast = left.broadcastJoinColumns(right, 0, 0)
     ColumnarPlanner.lower(hashed.plan).map(_.shape) shouldBe Some("WideHashJoin(Scan,Scan)")
     ColumnarPlanner.lower(broadcast.plan).map(_.shape) shouldBe Some(

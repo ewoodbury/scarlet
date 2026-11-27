@@ -41,7 +41,7 @@ class TestJoinAdmission extends AnyFlatSpec with Matchers with BeforeAndAfterEac
   "a hash, broadcast, or sort-merge join" should "report three columns on its Bound" in {
     val left = pairs(Array(1, 2), Array(10, 20))
     val right = pairs(Array(1, 3), Array(100, 300))
-    val hash = boundOf(left.join(right).plan)
+    val hash = boundOf(left.shuffleHashJoin(right).plan)
     val broadcast = boundOf(left.broadcastJoin(right).plan)
     val merged = boundOf(left.sortMergeJoin(right).plan)
     threeInts(hash, KernelChoice.HashJoin)

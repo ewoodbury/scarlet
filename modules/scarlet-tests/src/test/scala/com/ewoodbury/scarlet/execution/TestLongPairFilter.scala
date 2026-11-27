@@ -264,7 +264,7 @@ class TestLongPairFilter extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     assertEmpty(joined.filterKeys[Long, (Long, Long)]((key: Long) => key > 0L))
     ColumnarPlanner.lower(sorted.plan).map(_.shape) shouldBe Some("SortByLongKey(Scan)")
     ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some(
-      "LongHashJoin(Exchange(Scan), Exchange(Scan))",
+      "LongBroadcastJoin(Scan, Scan)",
     )
     assertColumnar(mapped, "Project(Scan)")
   }

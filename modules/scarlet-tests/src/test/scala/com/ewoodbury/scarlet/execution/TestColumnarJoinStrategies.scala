@@ -49,9 +49,7 @@ class TestColumnarJoinStrategies
     rowResult(broadcast) should contain theSameElementsAs expected
 
     ColumnarPlanner.partitioning(plain).map(_.layout) shouldBe Some(columnarLayout)
-    ColumnarPlanner.lower(plain).map(_.shape) shouldBe Some(
-      "HashJoin(Exchange(Scan), Exchange(Scan))",
-    )
+    ColumnarPlanner.lower(plain).map(_.shape) shouldBe Some("BroadcastJoin(Scan, Scan)")
     ColumnarPlanner.tryRun(plain) shouldBe defined
     collected(plain) should contain theSameElementsAs rowResult(plain)
     rowResult(plain) should contain theSameElementsAs expected

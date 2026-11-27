@@ -686,7 +686,7 @@ private[execution] object ColumnarInterpreter:
         ordinals,
       )
     case (
-          Plan.JoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
+          Plan.JoinOp(left, right, None | Some(Plan.JoinStrategy.Broadcast)),
           PhysicalOp.BroadcastJoin(leftOp, rightOp, buildSide),
         ) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
@@ -702,7 +702,7 @@ private[execution] object ColumnarInterpreter:
         ordinals,
       )
     case (
-          Plan.JoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
+          Plan.JoinOp(left, right, None | Some(Plan.JoinStrategy.Broadcast)),
           PhysicalOp.LongBroadcastJoin(leftOp, rightOp, buildSide),
         ) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
@@ -718,7 +718,7 @@ private[execution] object ColumnarInterpreter:
         ordinals,
       )
     case (
-          Plan.JoinOp(left, right, Some(Plan.JoinStrategy.Broadcast)),
+          Plan.JoinOp(left, right, None | Some(Plan.JoinStrategy.Broadcast)),
           PhysicalOp.StringBroadcastJoin(leftOp, rightOp, buildSide),
         ) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.

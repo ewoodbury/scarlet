@@ -59,10 +59,23 @@ private[execution] object JoinLowering:
   ): Option[PhysicalOp] =
     (lowerChild(left), lowerChild(right)) match
       case (Some(leftOp), Some(rightOp)) =>
-        built(leftOp, rightOp, strategy, place) match
+        built(leftOp, rightOp, decided(strategy, place, rightOp), place) match
           case Some(op) => Some(op)
           case None => refuseKinds(plan, leftOp.kind, rightOp.kind)
       case _ => refuseChild(plan)
+
+  /**
+   * An unhinted inner join broadcasts when [[JoinCost]] knows the right side is small enough. An
+   * outer join, a named hint, and an unknown count keep the strategy the caller passed.
+   */
+  private def decided(
+      strategy: Option[Plan.JoinStrategy],
+      place: JoinClass.Place,
+      build: PhysicalOp,
+  ): Option[Plan.JoinStrategy] = strategy match
+    case None if place == JoinClass.Place.Inner && JoinCost.preferBroadcast(build) =>
+      Some(Plan.JoinStrategy.Broadcast)
+    case other => other
 
   /**
    * Class for two children that share a pair kind. The key type is read from each child's columns.
