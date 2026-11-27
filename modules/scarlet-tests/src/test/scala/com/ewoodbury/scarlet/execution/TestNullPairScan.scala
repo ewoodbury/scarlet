@@ -234,16 +234,6 @@ class TestNullPairScan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       }
       .sortBy(_._1)
 
-  private def row[A](body: => A): A =
-    val saved = ScarletConf.get
-    try
-      ScarletConf.set(saved.copy(columnarExecution = false))
-      ScarletRuntime.get.shuffle.clear()
-      body
-    finally
-      ScarletConf.set(saved)
-      ScarletRuntime.get.shuffle.clear()
-
   @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
   private def cellText(cell: Any): String = cell match
     case null => "null"
