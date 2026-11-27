@@ -66,12 +66,12 @@ class TestCrossEnginePlans extends AnyFlatSpec with Matchers with BeforeAndAfter
     expect(
       "filter-join/1",
       present("filter-join", 1),
-      "HashJoin(Exchange(FilterKey(Scan)), Exchange(Scan))",
+      "BroadcastJoin(FilterKey(Scan), Scan)",
     )
     expect(
       "filter-join/2",
       present("filter-join", 2),
-      "HashJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(Scan))",
+      "BroadcastJoin(FilterValue(FilterKey(Scan)), Scan)",
     )
     expect("filter-sort/1", present("filter-sort", 1), "SortByIntKey(FilterKey(Scan))")
     expect(
@@ -90,7 +90,7 @@ class TestCrossEnginePlans extends AnyFlatSpec with Matchers with BeforeAndAfter
     expect(
       "null-join/2",
       filterInts(nullInts).join(joinSide).plan,
-      "HashJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(Scan))",
+      "BroadcastJoin(FilterValue(FilterKey(Scan)), Scan)",
     )
     expect(
       "null-reduce/1",

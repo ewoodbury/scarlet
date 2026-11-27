@@ -15,10 +15,10 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * String inner shuffle-hash join over a filter selection.
  *
- * A filter stack on either side, including one filter, keeps the survivor index. The exchange scatters those rows
- * and does not slice them. A null key on a selected row is dropped. `""` matches. A null value
- * stays a clear validity bit and is not an absence bit. The two sides keep independent
- * dictionaries.
+ * A filter stack on either side, including one filter, keeps the survivor index. The exchange
+ * scatters those rows and does not slice them. A null key on a selected row is dropped. `""`
+ * matches. A null value stays a clear validity bit and is not an absence bit. The two sides keep
+ * independent dictionaries.
  */
 class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -50,6 +50,8 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
   )
   private val buildShape =
     "StringHashJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(Scan))"
+  private val broadcastBuildShape =
+    "StringBroadcastJoin(FilterValue(FilterKey(Scan)), Scan)"
   private val probeShape =
     "StringHashJoin(Exchange(Scan), Exchange(FilterValue(FilterKey(Scan))))"
   private val bothShape =
@@ -163,7 +165,7 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
     val joined = filtered.join(probe)
     val expected = Seq("" -> ((1, 10)), "red" -> ((5, 8)))
 
-    shape(joined) shouldBe buildShape
+    shape(joined) shouldBe broadcastBuildShape
     val found = joined.collect().toSeq
     // The value predicate sees the null key, so that row survived the key filter. The exchange
     // still drops it. `""` is a present key and matches.
@@ -237,7 +239,7 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
       .join(probe)
     val expected = Seq("" -> ((1, 10)), "red" -> ((2, 3)))
 
-    shape(joined) shouldBe buildShape
+    shape(joined) shouldBe broadcastBuildShape
     val found = joined.collect().toSeq
     found should contain theSameElementsAs expected
     found should contain theSameElementsAs build.join(probe).collect().toSeq
@@ -253,7 +255,7 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
     val joined = build.join(DistCollection(Seq("hot" -> 100), 2))
     val expected = (1 to rows).map(value => "hot" -> ((value, 100)))
 
-    shape(joined) shouldBe buildShape
+    shape(joined) shouldBe broadcastBuildShape
     val found = joined.collect().toSeq
     found should contain theSameElementsAs expected
     found should contain theSameElementsAs row(joined.collect().toSeq)
@@ -333,7 +335,7 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
     val joined = source.filterKeys((_: String) => true).join(DistCollection(Seq("red" -> 3), 1))
     val op = ColumnarPlanner.lower(joined.plan).getOrElse(fail("null value join did not lower"))
 
-    op.shape should include("StringHashJoin")
+    op.shape should include("StringBroadcastJoin")
     ColumnarPlanner.tryRun(joined.plan).isDefined shouldBe true
     val found = joined.collect().toSeq
     shown(found) should contain theSameElementsAs shown(row(joined.collect().toSeq))
@@ -531,9 +533,11 @@ class TestSelectionStringJoin extends AnyFlatSpec with Matchers with BeforeAndAf
 
   @SuppressWarnings(Array("org.wartremover.warts.Equals"))
   private def rowOf(keys: DictUtf8Column, text: String): Int =
-    (0 until keys.length).find { row =>
-      keys.isValid(row) && keys.dictionary(keys.codes(row)) == text
-    }.getOrElse(fail(s"missing key $text"))
+    (0 until keys.length)
+      .find { row =>
+        keys.isValid(row) && keys.dictionary(keys.codes(row)) == text
+      }
+      .getOrElse(fail(s"missing key $text"))
 
   private def pairBatch(keys: DictUtf8Column, values: Int32Column): ColumnBatch =
     new ColumnBatch(

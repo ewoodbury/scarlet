@@ -16,9 +16,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Int inner shuffle-hash join over a filter selection.
  *
  * An owned int-pair slot stack is copied as dense survivors. A boxed source, a null, or any other
- * stack keeps the survivor index. The exchange scatters those rows and does not slice them. A
- * null value on a dropped row stays on the index path. A null value on a selected row, or on a
- * dense side beside a selection, stays columnar. A null key is still dropped.
+ * stack keeps the survivor index. The exchange scatters those rows and does not slice them. A null
+ * value on a dropped row stays on the index path. A null value on a selected row, or on a dense
+ * side beside a selection, stays columnar. A null key is still dropped.
  */
 class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -47,6 +47,8 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
   )
   private val buildShape =
     "HashJoin(Exchange(FilterValue(FilterKey(Scan))), Exchange(Scan))"
+  private val broadcastBuildShape =
+    "BroadcastJoin(FilterValue(FilterKey(Scan)), Scan)"
   private val probeShape =
     "HashJoin(Exchange(Scan), Exchange(FilterValue(FilterKey(Scan))))"
   private val bothShape =
@@ -86,7 +88,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       }
     val joined = filtered.join(probe)
 
-    shape(joined) shouldBe buildShape
+    shape(joined) shouldBe broadcastBuildShape
     val found = joined.collect().toSeq
     // One pass: the key predicate sees every build row, and the value predicate sees the seven
     // keys that passed. A second interpret would double both counts.
@@ -97,7 +99,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val hinted = filtered.shuffleHashJoin(probe)
     shape(hinted) shouldBe buildShape
     hinted.collect().toSeq should contain theSameElementsAs buildOnlyMatches
-    assertFewerBatches(joined, build, probe, Some(filtered), None)
+    assertFewerBatches(hinted, build, probe, Some(filtered), None)
   }
 
   it should "match the row path and skip the compact on the probe side" in {
@@ -192,7 +194,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val joined = build.join(DistCollection.ofIntPairs(Array(1, 4), Array(100, 8), 2))
     val expected = Seq((1, (10, 100)), (4, (40, 8)))
 
-    shape(joined) shouldBe "HashJoin(Exchange(FilterKey(FilterKey(Scan))), Exchange(Scan))"
+    shape(joined) shouldBe "BroadcastJoin(FilterKey(FilterKey(Scan)), Scan)"
     val found = joined.collect().toSeq
     keyCalls.get() shouldBe 3
     narrowCalls.get() shouldBe 2
@@ -216,7 +218,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     }
     val joined = build.join(DistCollection.ofIntPairs(Array(1, 2), Array(100, 200), 2))
 
-    shape(joined) shouldBe "HashJoin(Exchange(FilterKey(FilterKey(Scan))), Exchange(Scan))"
+    shape(joined) shouldBe "BroadcastJoin(FilterKey(FilterKey(Scan)), Scan)"
     val found = shown(joined.collect())
     keyCalls.get() shouldBe 2
     narrowCalls.get() shouldBe 2
@@ -242,7 +244,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val probe = DistCollection(Seq((1, 100), erased(Some(4), None)), 2)
     val joined = build.join(probe)
 
-    shape(joined) shouldBe buildShape
+    shape(joined) shouldBe broadcastBuildShape
     val found = shown(joined.collect())
     keyCalls.get() shouldBe 2
     valueCalls.get() shouldBe 2
@@ -264,7 +266,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val joined = build.join(probe)
     val expected = Seq((1, (10, 100)), (4, (40, 8)))
 
-    shape(joined) shouldBe "HashJoin(Exchange(FilterValue(FilterValue(Scan))), Exchange(Scan))"
+    shape(joined) shouldBe "BroadcastJoin(FilterValue(FilterValue(Scan)), Scan)"
     val found = joined.collect().toSeq
     found should contain theSameElementsAs expected
     found should contain theSameElementsAs row(joined.collect().toSeq)
@@ -294,7 +296,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .filterValues((_: Int) => true)
       .join(probePairs)
 
-    shape(joined) shouldBe buildShape
+    shape(joined) shouldBe broadcastBuildShape
     joined.collect() shouldBe empty
     joined.collect() shouldBe row(joined.collect())
     published(joined.collect()) should be > 0L
@@ -307,7 +309,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .filterValues((_: Int) => true)
       .join(DistCollection.ofIntPairs(Array(1), Array(2), 2))
 
-    shape(joined) shouldBe buildShape
+    shape(joined) shouldBe broadcastBuildShape
     joined.collect() shouldBe empty
     joined.collect() shouldBe row(joined.collect())
     published(joined.collect()) should be > 0L
@@ -322,7 +324,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .join(probe)
     val expected = Seq((1, (10, 100)), (-1, (30, 300)))
 
-    shape(joined) shouldBe buildShape
+    shape(joined) shouldBe broadcastBuildShape
     val found = joined.collect().toSeq
     found should contain theSameElementsAs expected
     found should contain theSameElementsAs build.join(probe).collect().toSeq
@@ -338,7 +340,7 @@ class TestSelectionJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val joined = build.join(DistCollection.ofIntPairs(Array(7), Array(100), 2))
     val expected = (1 to rows).map(value => (7, (value, 100)))
 
-    shape(joined) shouldBe buildShape
+    shape(joined) shouldBe broadcastBuildShape
     val found = joined.collect().toSeq
     found should contain theSameElementsAs expected
     found should contain theSameElementsAs row(joined.collect().toSeq)

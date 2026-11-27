@@ -11,10 +11,10 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
  * Collect of one pair or triple slot filter decodes a survivor index. It visits each morsel and
- * does not publish a filtered batch. Count of a pair scan folds the owned arrays and publishes
- * no batch. Interpreting the filter, and counting a triple filter, still chain one kernel: one
- * output per morsel and one regroup when a partition is split. Copying each slice would publish
- * one extra batch per visit, and that batch count rejects it.
+ * does not publish a filtered batch. Count of a pair scan folds the owned arrays and publishes no
+ * batch. Interpreting the filter, and counting a triple filter, still chain one kernel: one output
+ * per morsel and one regroup when a partition is split. Copying each slice would publish one extra
+ * batch per visit, and that batch count rejects it.
  */
 class TestPairFilterScans extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -101,7 +101,7 @@ class TestPairFilterScans extends AnyFlatSpec with Matchers with BeforeAndAfterE
     val keys = Array.tabulate(rows)(identity)
     val build = DistCollection.ofIntPairs(keys, Array.fill(rows)(1), 1)
     val probe = DistCollection.ofIntPairs(keys, Array.fill(rows)(2), 1)
-    val joined = build.join(probe)
+    val joined = build.shuffleHashJoin(probe)
     val filtered = joined.filterJoinKey(key => key % 2 == 0)
     val cuts = ColumnBatches.cuts(rows, batchSize)
     val expected = (0 until rows by 2).map(key => key -> ((1, 2)))
@@ -134,7 +134,8 @@ class TestPairFilterScans extends AnyFlatSpec with Matchers with BeforeAndAfterE
     val joined = build.join(probe)
     val filtered = joined.filterJoinLeft(left => left % 20 == 0)
     // Even keys fill a 4-row partition (one morsel). Odd keys fill a 5-row partition (two).
-    val filterVisits = ColumnBatches.cuts(4, batchSize).length + ColumnBatches.cuts(5, batchSize).length
+    val filterVisits =
+      ColumnBatches.cuts(4, batchSize).length + ColumnBatches.cuts(5, batchSize).length
 
     arm(threads = 4, partitions = 2)
     val countedJoin = measure(joined.count())
@@ -144,8 +145,9 @@ class TestPairFilterScans extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
     collected.result shouldBe rowResult
     countedJoin.result shouldBe rows.toLong
-    countedJoin.batches shouldBe 0L
-    countedJoin.visits shouldBe (sourceMorsels(rows, 1) + sourceMorsels(rows, 2)).toLong
+    // Broadcast count publishes the joined batches. Hash count publishes none.
+    countedJoin.batches shouldBe 4L
+    countedJoin.visits shouldBe 1L
     // The filter visits each output morsel and does not publish a copied slice.
     collected.visits - plain.visits shouldBe filterVisits.toLong
     collected.batches shouldBe plain.batches

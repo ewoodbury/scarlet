@@ -79,7 +79,7 @@ groupByKey with string keys	GroupByKey
 groupByKey with long keys	GroupByKey
 long reduceByKey	LongHashAggregate
 reduceByKey with string keys	StringHashAggregate
-long inner join	LongHashJoin
+long inner join	LongBroadcastJoin
 explicit shuffle-hash long join	LongHashJoin
 explicit broadcast long join	LongBroadcastJoin
 explicit sort-merge long join	LongSortMergeJoin
