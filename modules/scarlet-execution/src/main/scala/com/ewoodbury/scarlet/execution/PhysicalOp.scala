@@ -592,12 +592,15 @@ enum PhysicalOp:
     case Dedupe(child) => child.kind
     case Exchange(child) => child.kind
     case Column(child, ordinal) =>
-      child.kind match
-        case PhysicalOp.Kind.LongPairs => PhysicalOp.Kind.Longs
-        case PhysicalOp.Kind.LongCounts if ordinal == 0 => PhysicalOp.Kind.Longs
-        case PhysicalOp.Kind.StringPairs if ordinal == 0 => PhysicalOp.Kind.Strings
-        case PhysicalOp.Kind.StringPairs => PhysicalOp.Kind.Ints
-        case _ => PhysicalOp.Kind.Ints
+      if (IntLongParents.widened(child)) then
+        if (ordinal == 0) then PhysicalOp.Kind.Ints else PhysicalOp.Kind.Longs
+      else
+        child.kind match
+          case PhysicalOp.Kind.LongPairs => PhysicalOp.Kind.Longs
+          case PhysicalOp.Kind.LongCounts if ordinal == 0 => PhysicalOp.Kind.Longs
+          case PhysicalOp.Kind.StringPairs if ordinal == 0 => PhysicalOp.Kind.Strings
+          case PhysicalOp.Kind.StringPairs => PhysicalOp.Kind.Ints
+          case _ => PhysicalOp.Kind.Ints
     case MapValue(child) =>
       child.kind match
         case PhysicalOp.Kind.LongPairs => PhysicalOp.Kind.LongPairs

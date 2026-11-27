@@ -128,11 +128,15 @@ class TestFoundationLock extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     ColumnBinding.chooseCallsForTest shouldBe 0
   }
 
-  "a filter above the widened map" should "stay empty" in {
+  "a filter above the widened map" should "lower a value filter and a row filter" in {
     val byValue = widened.filterValues((value: Long) => value > 0L)
     val byRow = widened.filter((pair: (Int, Long)) => pair._2 > 0L)
-    ColumnarPlanner.lower(byValue.plan) shouldBe None
-    ColumnarPlanner.lower(byRow.plan) shouldBe None
+    ColumnarPlanner.lower(byValue.plan).map(_.shape) shouldBe Some(
+      "FilterValue(IntLongMapValue(Scan))",
+    )
+    ColumnarPlanner.lower(byRow.plan).map(_.shape) shouldBe Some(
+      "FilterRow(IntLongMapValue(Scan))",
+    )
   }
 
   "countByKey of the widened map" should "count the int keys" in {

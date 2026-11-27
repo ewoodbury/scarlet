@@ -36,6 +36,8 @@ private[execution] object PhysicalSchema:
       IntLong
     case _: PhysicalOp.IntLongMapValue =>
       IntLong
+    case PhysicalOp.MapValue(child) if IntLongParents.widened(child) =>
+      IntLong
     case other =>
       ofKind(other.kind)
 

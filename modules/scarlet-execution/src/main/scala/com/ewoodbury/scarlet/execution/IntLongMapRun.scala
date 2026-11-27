@@ -14,9 +14,9 @@ import ColumnarInterpreter.{Columns, onEachMorsel, pairsOf}
  */
 private[execution] object IntLongMapRun:
 
-  def decodes(op: PhysicalOp): Boolean = op match
-    case _: PhysicalOp.IntLongMapValue => true
-    case _ => false
+  /** The widening, a filter of it, or a `Long => Long` map of it. Not an int pair. */
+  def decodes(op: PhysicalOp): Boolean =
+    IntLongParents.widened(op)
 
   def columns(input: Columns, mapper: Any): Columns =
     val fn = longValue(mapper)

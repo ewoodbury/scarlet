@@ -96,11 +96,13 @@ private[execution] object ColumnDecoders:
    * stays null. The function and the predicate are not read.
    */
   private def mappedIntKey(op: PhysicalOp): Boolean = op match
+    case PhysicalOp.Column(child, 0) if IntLongParents.widened(child) => true
     case PhysicalOp.Column(child, ordinal) if ordinal == 0 || ordinal == 1 =>
       MapIntKey.admitsColumn(child)
     case _ => false
 
   private def absentLongColumn(op: PhysicalOp): Boolean = op match
+    case PhysicalOp.Column(child, _) if IntLongParents.widened(child) => true
     case PhysicalOp.Column(child, _) =>
       child.kind match
         case PhysicalOp.Kind.LongPairs => true

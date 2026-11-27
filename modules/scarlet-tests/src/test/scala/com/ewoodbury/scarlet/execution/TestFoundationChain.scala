@@ -17,8 +17,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * `IntLongMapValue(FilterValue(Scan))`. [[Describe.choice]] is [[KernelChoice.IntLongMapValue]]
  * and [[Layout.known]] is [[Output.IntLongPairs]]. The widening asks [[ColumnBinding.choose]] on
  * the filter child. The collect publishes a batch and matches the row collect. A value filter and
- * a whole-row filter above that chain stay empty, and so do the same filters above the map with
- * no filter under it. The shape comparison is the whole string.
+ * a whole-row filter above that chain lower, and so do the same filters above the map with no
+ * filter under it. The shape comparison is the whole string.
  */
 class TestFoundationChain extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -61,15 +61,23 @@ class TestFoundationChain extends AnyFlatSpec with Matchers with BeforeAndAfterE
     rows shouldBe row(mapped.collect().toSeq)
   }
 
-  "a filter above the widened map" should "stay empty" in {
+  "a filter above the widened map" should "lower above the map and above the filtered map" in {
     val byValue = widened.filterValues((value: Long) => value > 0L)
     val byRow = widened.filter((pair: (Int, Long)) => pair._2 > 0L)
-    ColumnarPlanner.lower(byValue.plan) shouldBe None
-    ColumnarPlanner.lower(byRow.plan) shouldBe None
+    ColumnarPlanner.lower(byValue.plan).map(_.shape) shouldBe Some(
+      "FilterValue(IntLongMapValue(Scan))",
+    )
+    ColumnarPlanner.lower(byRow.plan).map(_.shape) shouldBe Some(
+      "FilterRow(IntLongMapValue(Scan))",
+    )
     val pinnedByValue = filteredWidened.filterValues((value: Long) => value > 0L)
     val pinnedByRow = filteredWidened.filter((pair: (Int, Long)) => pair._2 > 0L)
-    ColumnarPlanner.lower(pinnedByValue.plan) shouldBe None
-    ColumnarPlanner.lower(pinnedByRow.plan) shouldBe None
+    ColumnarPlanner.lower(pinnedByValue.plan).map(_.shape) shouldBe Some(
+      "FilterValue(IntLongMapValue(FilterValue(Scan)))",
+    )
+    ColumnarPlanner.lower(pinnedByRow.plan).map(_.shape) shouldBe Some(
+      "FilterRow(IntLongMapValue(FilterValue(Scan)))",
+    )
   }
 
   /** Present positive ints. Two partitions. Key 1 sits in both partitions. */

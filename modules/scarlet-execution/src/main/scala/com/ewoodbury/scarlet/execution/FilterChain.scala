@@ -46,6 +46,17 @@ private[execution] object FilterChain:
       preserveAbsence: Boolean,
       ordinals: Set[Int],
   ): Columns =
+    if (IntLongParents.widened(op)) then
+      IntLongParents.filter(plan, op, selectedPartition, preserveAbsence, ordinals)
+    else runCompiled(plan, op, selectedPartition, preserveAbsence, ordinals)
+
+  private def runCompiled(
+      plan: Plan[_],
+      op: PhysicalOp,
+      selectedPartition: Option[Int],
+      preserveAbsence: Boolean,
+      ordinals: Set[Int],
+  ): Columns =
     val (source, child) = PredicatePlan.childOf(plan, op)
     val columns = ColumnarInterpreter.interpretAt(
       source,
@@ -119,7 +130,8 @@ private[execution] object FilterChain:
     // under the map. Interpret publishes the mapped pairs. A null value stays null, is not passed
     // to `mapValues`, and orders as zero. A slot above that project or that map is not
     // [[SortLowering.pairProjectOnScan]] or [[SortLowering.pairMapValueOnScan]].
-    if (declinesIndexed(op)) then None
+    // An int-long filter is not an int-pair index. Collect decodes the widened batches.
+    if (IntLongParents.widened(op) || declinesIndexed(op)) then None
     else selectIndexed(plan, op, selectedPartition, preserveAbsence, ordinals)
 
   /**

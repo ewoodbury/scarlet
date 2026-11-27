@@ -130,10 +130,11 @@ private[execution] object ColumnBinding:
   /**
    * [[choose]] on the columns of `child`.
    *
-   * An opaque child is [[scala.None]] and does not call [[choose]]. [[Output.IntLongPairs]] is
-   * [[scala.None]] too, and does not call [[choose]]: those columns equal
-   * [[Layout.AssumedIntLong]] when both are nullable, and feeding them here would tag a count or a
-   * project sum. [[AggregateBinding]] asks that layout on its own. The reducer witness is not an
+   * An opaque child is [[scala.None]] and does not call [[choose]]. [[Output.IntLongPairs]] does
+   * not call [[choose]] either: those columns equal [[Layout.AssumedIntLong]] when both are
+   * nullable, and feeding them here would tag a count or a project sum. Keys and values of that
+   * widening are [[KernelChoice.Column]]. Every other operator on it stays [[scala.None]].
+   * [[AggregateBinding]] asks the triple-project layout on its own. The reducer witness is not an
    * input for `groupByKey`, `distinct`, `keys`, or `values`.
    */
   private[execution] def asked(child: PhysicalOp, operator: Operator): Option[KernelChoice] =
@@ -147,7 +148,11 @@ private[execution] object ColumnBinding:
           Bound.nulls(bound),
           Bound.side(bound),
         )
-      case Output.IntLongPairs(_) | Output.Opaque(_) => None
+      case Output.IntLongPairs(_) =>
+        operator match
+          case Operator.Keys | Operator.Values => Some(KernelChoice.Column)
+          case _ => None
+      case Output.Opaque(_) => None
 
   /**
    * Parents that have no tag, an outer side, or a null policy the kernels do not run.
