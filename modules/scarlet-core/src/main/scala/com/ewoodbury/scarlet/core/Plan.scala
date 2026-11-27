@@ -672,16 +672,24 @@ object Plan {
   ) extends Plan[WideRow]
 
   /**
-   * Groups by one int or long column and aggregates one numeric column: count, sum, min, and max.
-   * A null key is dropped. A null measure is counted and skipped by sum, min, and max. A key whose
-   * measures are all null still emits a row. This does not build value lists.
+   * Groups by one int or long column, or by two, and aggregates one numeric column: count, sum,
+   * min, and max. A null in either key is dropped. A null measure is counted and skipped by sum,
+   * min, and max. A key whose measures are all null still emits a row. `key2` empty is the one-key
+   * group. This does not build value lists and it does not call `groupByKey`.
    *
    * @param source
    *   The preceding wide-row plan.
    * @param key
-   *   Group column.
+   *   First group column.
    * @param measure
    *   Numeric column to aggregate.
+   * @param key2
+   *   Second group column, when the group has two keys.
    */
-  case class WideGroupOp(source: Plan[WideRow], key: Int, measure: Int) extends Plan[WideRow]
+  case class WideGroupOp(
+      source: Plan[WideRow],
+      key: Int,
+      measure: Int,
+      key2: Option[Int] = None,
+  ) extends Plan[WideRow]
 }

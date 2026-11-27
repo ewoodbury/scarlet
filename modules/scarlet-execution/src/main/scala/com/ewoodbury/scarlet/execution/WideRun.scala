@@ -61,8 +61,8 @@ private[execution] object WideRun:
       Seq(join(left, right, leftKey, rightKey, broadcast = false))
     case PhysicalOp.WideBroadcastJoin(left, right, leftKey, rightKey) =>
       Seq(join(left, right, leftKey, rightKey, broadcast = true))
-    case PhysicalOp.WideGroup(child, key, measure) =>
-      Seq(group(child, key, measure))
+    case PhysicalOp.WideGroup(child, key, measure, key2) =>
+      Seq(group(child, key, measure, key2))
     case other =>
       throw new IllegalStateException(s"wide run does not accept ${other.shape}")
 
@@ -81,7 +81,7 @@ private[execution] object WideRun:
       else WideJoin.hash(leftBatches, rightBatches, leftFields, rightFields, leftKey, rightKey)
     Table(fields, batch)
 
-  private def group(child: PhysicalOp, key: Int, measure: Int): Table =
+  private def group(child: PhysicalOp, key: Int, measure: Int, key2: Option[Int]): Table =
     val tables = run(child)
     val fields = tables.headOption
       .map(_.fields)
@@ -89,7 +89,8 @@ private[execution] object WideRun:
       .getOrElse(
         throw new IllegalStateException(s"wide group child ${child.shape} has no schema"),
       )
-    val (outFields, batch) = WideGroup.aggregate(tables.map(_.batch), fields, key, measure)
+    val (outFields, batch) =
+      WideGroup.aggregate(tables.map(_.batch), fields, key, measure, key2)
     Table(outFields, batch)
 
   private def side(op: PhysicalOp): (Vector[ColumnField], Seq[ColumnBatch]) =
