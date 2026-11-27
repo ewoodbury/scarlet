@@ -48,8 +48,12 @@ jobs:
           restore-keys: sbt-classes-${{ runner.os }}-
 
       # Checksum and a loose columnar-versus-row ratio. Not a benchmark. The five-minute cap is
-      # the job timeout above.
+      # the job timeout above. Compiling every test file does not fit in that cap, and this smoke
+      # only needs its own file plus the sort checksum it calls. The filter is on unmanagedSources
+      # so log4j2-test.xml still lands on the classpath. A hyphenated project id is not valid in set.
       - name: Perf smoke
         run: |
           sbt -J-Xmx3g -batch \
-            "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.PerfCheck"
+            "project scarlet-tests" \
+            "set Test / unmanagedSources / includeFilter := new SimpleFileFilter(f => { val n = f.getName; n == \"PerfCheck.scala\" || n == \"SortChecksum.scala\" })" \
+            "Test/runMain com.ewoodbury.scarlet.execution.PerfCheck"

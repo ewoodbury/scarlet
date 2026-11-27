@@ -25,6 +25,7 @@ object PerfCheck:
   private val warmup = 1
   private val rounds = 3
   private val maxRatio = 2.0
+  private val topLimit = 100
 
   def main(args: Array[String]): Unit =
     val savedConf = ScarletConf.get
@@ -82,11 +83,11 @@ object PerfCheck:
       ("filter-sort", () => SortChecksum.of(sorted)),
       (
         "filter-twogroup",
-        () => CrossEngineShapes.tripleChecksum(filtered.countSumByKey.collect()),
+        () => tripleChecksum(filtered.countSumByKey.collect()),
       ),
       (
         "filter-topn",
-        () => CrossEngineShapes.pairChecksum(top.take(CrossEngineShapes.topLimit)),
+        () => pairChecksum(top.take(topLimit)),
       ),
     )
 
@@ -161,6 +162,15 @@ object PerfCheck:
     case number: Long => number
     case number: Int => number.toLong
     case other => throw new IllegalStateException(s"unexpected checksum $other")
+
+  private def pairChecksum(rows: Iterable[(Int, Int)]): Long =
+    rows.iterator.foldLeft(0L)((total, row) => total + row._1.toLong * 31L + row._2.toLong)
+
+  private def tripleChecksum(rows: Iterable[(Int, Int, Long)]): Long =
+    rows.iterator.foldLeft(0L) { (total, row) =>
+      val (key, count, sum) = row
+      total + (key.toLong * 31L + count.toLong) * 31L + sum
+    }
 
   private def lcgValues(count: Int): Array[Int] =
     val values = new Array[Int](count)
