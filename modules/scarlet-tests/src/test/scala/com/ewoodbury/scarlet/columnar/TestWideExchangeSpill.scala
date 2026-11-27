@@ -12,7 +12,8 @@ import com.ewoodbury.scarlet.core.*
  * A wide scan exchanged through the existing spill store.
  *
  * Spill on writes each over-budget bucket and reads it back, including a clear validity bit. The
- * default configuration writes nothing. Float, float32, and bool columns use the same store.
+ * default configuration writes nothing. Float, float32, bool, and decimal columns use the same
+ * store.
  */
 class TestWideExchangeSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -156,6 +157,44 @@ class TestWideExchangeSpill extends AnyFlatSpec with Matchers with BeforeAndAfte
       rows(exchanged, table.fields) shouldBe Vector(
         Vector(Cell.Int32(1), Cell.Float64(1.5)),
         Vector(Cell.Int32(2), Cell.Float64(2.5)),
+      )
+      WideExchange.filesWrittenForTest shouldBe 0L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+  }
+
+  "a decimal payload" should "spill when the exchange is over budget" in {
+    val table = WideColumns(
+      Vector(
+        WideInput.ints("k", Array(1, 2)),
+        WideInput.nullableDecimals("v", 4, 2, Array(150L, 0L), Array(true, false)),
+      ),
+    )
+    withConf(1L, enabled = true) { dir =>
+      val exchanged =
+        WideExchange.exchange(Vector(WideBatch.encode(table)), 0, false, 1, 1, ScarletConf.get)
+      rows(exchanged, table.fields) shouldBe Vector(
+        Vector(Cell.Int32(1), Cell.Decimal(4, 2, 150L)),
+        Vector(Cell.Int32(2), Cell.Null),
+      )
+      WideExchange.filesWrittenForTest shouldBe 1L
+      SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
+    }
+  }
+
+  "a decimal payload" should "stay in memory when spill is off" in {
+    val table = WideColumns(
+      Vector(
+        WideInput.ints("k", Array(1, 2)),
+        WideInput.decimals("v", 4, 2, Array(150L, 250L)),
+      ),
+    )
+    withConf(1L, enabled = false) { dir =>
+      val exchanged =
+        WideExchange.exchange(Vector(WideBatch.encode(table)), 0, false, 1, 1, ScarletConf.get)
+      rows(exchanged, table.fields) shouldBe Vector(
+        Vector(Cell.Int32(1), Cell.Decimal(4, 2, 150L)),
+        Vector(Cell.Int32(2), Cell.Decimal(4, 2, 250L)),
       )
       WideExchange.filesWrittenForTest shouldBe 0L
       SpillStore.listForTest(dir) shouldBe Vector.empty[Path]

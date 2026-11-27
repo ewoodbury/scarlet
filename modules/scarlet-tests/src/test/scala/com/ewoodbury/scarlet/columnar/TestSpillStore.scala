@@ -290,7 +290,7 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
         val file = store.write(batches)
         val raw = Files.readAllBytes(file.location)
         val header = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
-        SpillLayout.Version shouldBe 3
+        SpillLayout.Version shouldBe 4
         SpillLayout.Utf8Tag shouldBe 3
         header.position(8)
         header.getInt shouldBe SpillLayout.Version
@@ -382,6 +382,42 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
         val file = store.write(Vector(intBatch(Seq(1, 2))))
         patchVersion(file.location, 2)
         file.read().map(_.length) shouldBe Vector(2)
+      finally store.close()
+    }
+  }
+
+  test("round-trips a decimal column, including a clear bit") {
+    withDir { dir =>
+      val present = Validity.pack(2, row => row == 0)
+      val column = DecimalColumn.of(4, 2, Array(150L, 0L), present, 2)
+      val batch = new ColumnBatch(Vector(LogicalType.Decimal(4, 2)), Vector(column), 2)
+      val store = SpillStore.open(dir)
+      try
+        val read = store.write(Vector(batch)).read()
+        read should have length 1
+        read.head.columns.head match
+          case values: DecimalColumn =>
+            values.precision shouldBe 4
+            values.scale shouldBe 2
+            values.values(0) shouldBe 150L
+            values.isValid(1) shouldBe false
+          case other => fail(s"expected a decimal, got ${other.logicalType}")
+      finally store.close()
+    }
+  }
+
+  test("a version-3 file refuses a decimal tag") {
+    withDir { dir =>
+      val column = DecimalColumn.of(4, 2, Array(150L), Validity.allValid(1), 1)
+      val batch = new ColumnBatch(Vector(LogicalType.Decimal(4, 2)), Vector(column), 1)
+      val store = SpillStore.open(dir)
+      try
+        val file = store.write(Vector(batch))
+        patchVersion(file.location, 3)
+        val refused = intercept[IllegalArgumentException] {
+          val _ = file.read()
+        }
+        refused.getMessage should include("unknown spill column tag")
       finally store.close()
     }
   }
