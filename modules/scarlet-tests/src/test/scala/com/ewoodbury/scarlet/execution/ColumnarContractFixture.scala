@@ -364,7 +364,8 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.BroadcastLeftOuter(_, _) | PhysicalOp.BroadcastRightOuter(_, _) |
         PhysicalOp.BroadcastFullOuter(_, _) | PhysicalOp.SortByIntKey(_) |
         PhysicalOp.SortByIntValueDesc(_) | PhysicalOp.SortByLongKey(_) |
-        PhysicalOp.SortByStringKey(_) | PhysicalOp.Union(_, _) | PhysicalOp.Dedupe(_) |
+        PhysicalOp.SortByStringKey(_) | PhysicalOp.SortByLongValueDesc(_) |
+        PhysicalOp.SortByStringValueDesc(_) | PhysicalOp.Union(_, _) | PhysicalOp.Dedupe(_) |
         PhysicalOp.LongHashLeftOuter(_, _) | PhysicalOp.LongHashRightOuter(_, _) |
         PhysicalOp.LongHashFullOuter(_, _) | PhysicalOp.LongBroadcastLeftOuter(_, _) |
         PhysicalOp.LongBroadcastRightOuter(_, _) | PhysicalOp.LongBroadcastFullOuter(_, _) |
@@ -379,7 +380,8 @@ trait ColumnarContractFixture extends Matchers:
   /** A key sort is not partition-preserving, and `tryTake` still runs it. */
   protected def acceptsTake(op: PhysicalOp): Boolean = op match
     case _: PhysicalOp.SortByIntKey | _: PhysicalOp.SortByIntValueDesc |
-        _: PhysicalOp.SortByLongKey | _: PhysicalOp.SortByStringKey =>
+        _: PhysicalOp.SortByLongKey | _: PhysicalOp.SortByStringKey |
+        _: PhysicalOp.SortByLongValueDesc | _: PhysicalOp.SortByStringValueDesc =>
       true
     case other => preservesPartitions(other)
 
@@ -521,6 +523,8 @@ trait ColumnarContractFixture extends Matchers:
     case Plan.SortByIntValueDescOp(_) => PlanNode.SortBy
     case Plan.SortByLongKeyOp(_) => PlanNode.SortBy
     case Plan.SortByStringKeyOp(_) => PlanNode.SortBy
+    case Plan.SortByLongValueDescOp(_) => PlanNode.SortBy
+    case Plan.SortByStringValueDescOp(_) => PlanNode.SortBy
     case Plan.JoinOp(_, _, _) => PlanNode.Join
     case Plan.LeftOuterJoinOp(_, _, _) => PlanNode.Join
     case Plan.RightOuterJoinOp(_, _, _) => PlanNode.Join

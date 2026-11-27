@@ -398,6 +398,34 @@ object Plan {
   case class SortByStringKeyOp(source: Plan[(String, Int)]) extends Plan[(String, Int)]
 
   /**
+   * Sorts `(Long, Long)` pairs by column 1 descending, then column 0 ascending. This node is
+   * planned like [[SortByOp]] with a null-safe key `(value, key)` and
+   * `Ordering.Tuple2(Ordering.Long.reverse, Ordering.Long)`. A null orders as zero and stays null.
+   * A scan, filters over that scan, one long-pair project, one key or value filter above that
+   * project, or one `mapValues` on that scan or filter stack lowers. Neither function is read. A
+   * second map, a slot above `mapValues`, a second slot, a whole-row filter above the project, and
+   * a parent above the sort stay on the row path. Ties keep input order. There is no spill.
+   *
+   * @param source
+   *   The preceding plan node.
+   */
+  case class SortByLongValueDescOp(source: Plan[(Long, Long)]) extends Plan[(Long, Long)]
+
+  /**
+   * Sorts `(String, Int)` pairs by the int value descending, then the string key ascending. A
+   * present key orders by `String.compareTo`. A null key orders as `""` and stays null. A null
+   * value orders as zero and stays null. A scan, filters over that scan, one string-pair project,
+   * one key or value filter above that project, or one `mapValues` on that scan or filter stack
+   * lowers. Neither function is read. A second map, a slot above `mapValues`, a second slot, a
+   * whole-row filter above the project, and a parent above the sort stay on the row path. Ties
+   * keep input order. There is no spill.
+   *
+   * @param source
+   *   The preceding plan node.
+   */
+  case class SortByStringValueDescOp(source: Plan[(String, Int)]) extends Plan[(String, Int)]
+
+  /**
    * Join execution strategies for physical planning.
    */
   enum JoinStrategy {

@@ -551,6 +551,25 @@ enum PhysicalOp:
   case SortByStringKey(child: PhysicalOp)
 
   /**
+   * Global sort of published long pairs by effective value descending, then effective key
+   * ascending. A null orders as zero and stays null. Ties keep input order. Output kind is
+   * [[PhysicalOp.Kind.LongPairs]]. There is no spill. `take` decodes a prefix of this order.
+   *
+   * The ordering tag is [[OrderingTag.Sorted]] with `Seq(1, 0)` and `Seq(false, true)`.
+   */
+  case SortByLongValueDesc(child: PhysicalOp)
+
+  /**
+   * Global sort of published string pairs by the int value descending, then the string key
+   * ascending. A null key orders as `""` and stays null. A null value orders as zero and stays
+   * null. Ties keep input order. Output kind is [[PhysicalOp.Kind.StringPairs]]. There is no
+   * spill. `take` decodes a prefix of this order.
+   *
+   * The ordering tag is [[OrderingTag.Sorted]] with `Seq(1, 0)` and `Seq(false, true)`.
+   */
+  case SortByStringValueDesc(child: PhysicalOp)
+
+  /**
    * Direct physical children. A scan has none. Every operator stores its children as constructor
    * arguments, so a new case cannot hide a key map from [[MapIntKey.inTree]].
    */
@@ -590,6 +609,8 @@ enum PhysicalOp:
     case SortByIntValueDesc(_) => PhysicalOp.Kind.Pairs
     case SortByLongKey(_) => PhysicalOp.Kind.LongPairs
     case SortByStringKey(_) => PhysicalOp.Kind.StringPairs
+    case SortByLongValueDesc(_) => PhysicalOp.Kind.LongPairs
+    case SortByStringValueDesc(_) => PhysicalOp.Kind.StringPairs
     case HashAggregate(_, _) => PhysicalOp.Kind.Pairs
     case LongHashAggregate(_) => PhysicalOp.Kind.LongPairs
     case StringHashAggregate(_) => PhysicalOp.Kind.StringPairs
@@ -706,6 +727,8 @@ enum PhysicalOp:
     case SortByIntValueDesc(child) => s"SortByIntValueDesc(${child.shape})"
     case SortByLongKey(child) => s"SortByLongKey(${child.shape})"
     case SortByStringKey(child) => s"SortByStringKey(${child.shape})"
+    case SortByLongValueDesc(child) => s"SortByLongValueDesc(${child.shape})"
+    case SortByStringValueDesc(child) => s"SortByStringValueDesc(${child.shape})"
     case HashAggregate(child, _) => s"HashAggregate(${child.shape})"
     case LongHashAggregate(child) => s"LongHashAggregate(${child.shape})"
     case StringHashAggregate(child) => s"StringHashAggregate(${child.shape})"

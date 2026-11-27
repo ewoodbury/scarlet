@@ -78,6 +78,7 @@ private[execution] object ColumnBinding:
     case Filter, FilterKeys, FilterValues
     case Project, Pipeline
     case Union
+    case SortByLongValueDesc, SortByStringValueDesc
 
   /**
    * Reducer witness the caller already computed.
@@ -168,9 +169,10 @@ private[execution] object ColumnBinding:
         false
       case Operator.CountByKey | Operator.ReduceByKey | Operator.CountSumByKey |
           Operator.SortByIntKey | Operator.SortByIntValueDesc | Operator.SortByLongKey |
-          Operator.SortByStringKey | Operator.GroupByKey | Operator.Distinct | Operator.Keys |
-          Operator.Values | Operator.FilterKeys | Operator.FilterValues | Operator.Project |
-          Operator.Pipeline | Operator.MapValues | Operator.IntLongMapValue =>
+          Operator.SortByStringKey | Operator.SortByLongValueDesc |
+          Operator.SortByStringValueDesc | Operator.GroupByKey | Operator.Distinct |
+          Operator.Keys | Operator.Values | Operator.FilterKeys | Operator.FilterValues |
+          Operator.Project | Operator.Pipeline | Operator.MapValues | Operator.IntLongMapValue =>
         outer(side) || refused(nulls) || layout.exists(absent)
 
   private def refused(nulls: NullAdmission): Boolean = nulls match
@@ -217,8 +219,9 @@ private[execution] object ColumnBinding:
     case Operator.CountByKey | Operator.ReduceByKey | Operator.CountSumByKey | Operator.MapValues |
         Operator.IntLongMapValue | Operator.TupleMap | Operator.SortByIntKey |
         Operator.SortByIntValueDesc | Operator.SortByLongKey | Operator.SortByStringKey |
-        Operator.GroupByKey | Operator.Distinct | Operator.Keys | Operator.Values |
-        Operator.Project | Operator.Pipeline | Operator.Union =>
+        Operator.SortByLongValueDesc | Operator.SortByStringValueDesc | Operator.GroupByKey |
+        Operator.Distinct | Operator.Keys | Operator.Values | Operator.Project |
+        Operator.Pipeline | Operator.Union =>
       false
 
   /**
@@ -308,9 +311,10 @@ private[execution] object ColumnBinding:
     case Operator.ReduceByKey | Operator.CountSumByKey | Operator.MapValues |
         Operator.IntLongMapValue | Operator.TupleMap | Operator.SortByIntKey |
         Operator.SortByIntValueDesc | Operator.SortByLongKey | Operator.SortByStringKey |
-        Operator.GroupByKey | Operator.Distinct | Operator.Keys | Operator.Values |
-        Operator.Filter | Operator.FilterKeys | Operator.FilterValues | Operator.Project |
-        Operator.Pipeline | Operator.Union =>
+        Operator.SortByLongValueDesc | Operator.SortByStringValueDesc | Operator.GroupByKey |
+        Operator.Distinct | Operator.Keys | Operator.Values | Operator.Filter |
+        Operator.FilterKeys | Operator.FilterValues | Operator.Project | Operator.Pipeline |
+        Operator.Union =>
       None
 
   private def assumedIntLong(layout: Vector[ColumnLayout]): Boolean = Layout.AssumedIntLong match
@@ -388,6 +392,8 @@ private[execution] object ColumnBinding:
         Some(KernelChoice.CountSum)
       case (Vector(ColumnType.Int64, ColumnType.Int64), Operator.SortByLongKey) =>
         Some(KernelChoice.SortByLongKey)
+      case (Vector(ColumnType.Int64, ColumnType.Int64), Operator.SortByLongValueDesc) =>
+        Some(KernelChoice.SortByLongValueDesc)
       case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.CountByKey) =>
         Some(KernelChoice.CountByKey)
       case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.ReduceByKey) =>
@@ -396,6 +402,8 @@ private[execution] object ColumnBinding:
         Some(KernelChoice.CountSum)
       case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.SortByStringKey) =>
         Some(KernelChoice.SortByStringKey)
+      case (Vector(ColumnType.Utf8Dict, ColumnType.Int32), Operator.SortByStringValueDesc) =>
+        Some(KernelChoice.SortByStringValueDesc)
       case (Vector(ColumnType.Int32, ColumnType.Int32), Operator.GroupByKey) =>
         Some(KernelChoice.GroupByKey)
       case (Vector(ColumnType.Int64, ColumnType.Int64), Operator.GroupByKey) =>

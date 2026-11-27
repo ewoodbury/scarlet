@@ -115,6 +115,10 @@ private[execution] object Layout:
       columns(node.kind)
     case node: PhysicalOp.SortByStringKey =>
       columns(node.kind)
+    case node: PhysicalOp.SortByLongValueDesc =>
+      columns(node.kind)
+    case node: PhysicalOp.SortByStringValueDesc =>
+      columns(node.kind)
     case node @ (_: PhysicalOp.HashJoin | _: PhysicalOp.SortMergeJoin |
         _: PhysicalOp.BroadcastJoin) =>
       join(node.kind, OuterSide.Inner)
@@ -281,3 +285,4 @@ private[execution] enum KernelChoice:
   case StringBroadcastLeftOuter, StringBroadcastRightOuter, StringBroadcastFullOuter
   case StringSortMergeLeftOuter, StringSortMergeRightOuter, StringSortMergeFullOuter
   case Scan, Filter, Project, Column, MapValue, IntLongMapValue, MapKey, Pipeline, Union, Exchange
+  case SortByLongValueDesc, SortByStringValueDesc

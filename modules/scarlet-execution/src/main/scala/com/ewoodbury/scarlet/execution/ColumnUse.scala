@@ -90,6 +90,10 @@ private[execution] object ColumnUse:
       walk(source, child, parent union Set(0, 1))
     case (Plan.SortByStringKeyOp(source), PhysicalOp.SortByStringKey(child)) =>
       walk(source, child, parent union Set(0, 1))
+    case (Plan.SortByLongValueDescOp(source), PhysicalOp.SortByLongValueDesc(child)) =>
+      walk(source, child, parent union Set(0, 1))
+    case (Plan.SortByStringValueDescOp(source), PhysicalOp.SortByStringValueDesc(child)) =>
+      walk(source, child, parent union Set(0, 1))
     case _ =>
       joinSides(plan, op) match
         case Some((left, leftOp, right, rightOp)) =>
@@ -166,6 +170,8 @@ private[execution] object ColumnUse:
     case Plan.SortByIntValueDescOp(source) => Some(source)
     case Plan.SortByLongKeyOp(source) => Some(source)
     case Plan.SortByStringKeyOp(source) => Some(source)
+    case Plan.SortByLongValueDescOp(source) => Some(source)
+    case Plan.SortByStringValueDescOp(source) => Some(source)
     case Plan.Source(_, _) | Plan.UnionOp(_, _) | Plan.JoinOp(_, _, _) |
         Plan.LeftOuterJoinOp(_, _, _) | Plan.RightOuterJoinOp(_, _, _) |
         Plan.FullOuterJoinOp(_, _, _) | Plan.CoGroupOp(_, _) =>
