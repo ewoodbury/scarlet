@@ -98,5 +98,5 @@ private[execution] object KeyValueLowering:
         PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter |
         PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
-        PhysicalOp.Kind.GroupedIntLongs =>
+        PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples =>
       false

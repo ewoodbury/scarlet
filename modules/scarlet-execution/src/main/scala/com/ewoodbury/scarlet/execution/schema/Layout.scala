@@ -167,6 +167,8 @@ private[execution] object Layout:
     case node @ (_: PhysicalOp.StringHashFullOuter | _: PhysicalOp.StringBroadcastFullOuter |
         _: PhysicalOp.StringSortMergeFullOuter) =>
       join(node.kind, OuterSide.Full)
+    case node: PhysicalOp.IntLongHashJoin =>
+      join(node.kind, OuterSide.Inner)
 
   private def columns(kind: PhysicalOp.Kind): Output =
     Output.Columns(
@@ -300,3 +302,4 @@ private[execution] enum KernelChoice:
   case SortByLongValueDesc, SortByStringValueDesc
   case IntLongHashAggregate
   case SortByIntLongKey, SortByIntLongValueDesc
+  case IntLongHashJoin

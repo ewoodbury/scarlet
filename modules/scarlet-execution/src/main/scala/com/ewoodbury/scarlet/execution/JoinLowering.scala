@@ -73,12 +73,22 @@ private[execution] object JoinLowering:
       strategy: Option[Plan.JoinStrategy],
       place: JoinClass.Place,
   ): Option[PhysicalOp] =
-    (keyOf(left), keyOf(right)) match
-      case (Some(leftKey), Some(rightKey)) if samePair(left.kind, right.kind) =>
-        JoinClass
-          .choose(leftKey, rightKey, left.kind, strategy, place)
-          .flatMap(choice => JoinClass.build(choice, left, right))
-      case _ => None
+    if (intLongPairs(left) && intLongPairs(right)) then
+      JoinClass
+        .intLongInner(strategy, place)
+        .flatMap(choice => JoinClass.build(choice, left, right))
+    else
+      (keyOf(left), keyOf(right)) match
+        case (Some(leftKey), Some(rightKey)) if samePair(left.kind, right.kind) =>
+          JoinClass
+            .choose(leftKey, rightKey, left.kind, strategy, place)
+            .flatMap(choice => JoinClass.build(choice, left, right))
+        case _ => None
+
+  /** The widening, including a filter or a `Long => Long` map of it. Not a triple project. */
+  private def intLongPairs(op: PhysicalOp): Boolean = Columns.known(op) match
+    case Output.IntLongPairs(_) => true
+    case Output.Columns(_) | Output.Opaque(_) => false
 
   /** First column, when every column is present or nullable. Absence is an outer partner. */
   private def keyOf(op: PhysicalOp): Option[ColumnType] = Columns.known(op) match
@@ -156,6 +166,8 @@ private[execution] object JoinLowering:
       hashed(PhysicalOp.Kind.LongPairs)
     case _: PhysicalOp.StringHashJoin | _: PhysicalOp.StringSortMergeJoin =>
       hashed(PhysicalOp.Kind.StringTriples)
+    case _: PhysicalOp.IntLongHashJoin =>
+      hashed(PhysicalOp.Kind.IntLongTriples)
     case _: PhysicalOp.LongHashLeftOuter | _: PhysicalOp.LongHashRightOuter |
         _: PhysicalOp.LongHashFullOuter | _: PhysicalOp.LongSortMergeLeftOuter |
         _: PhysicalOp.LongSortMergeRightOuter | _: PhysicalOp.LongSortMergeFullOuter =>

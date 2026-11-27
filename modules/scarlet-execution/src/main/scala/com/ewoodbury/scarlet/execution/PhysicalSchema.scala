@@ -89,6 +89,8 @@ private[execution] object PhysicalSchema:
       Vector(LogicalType.Int64, LogicalType.Int64, LogicalType.Int64)
     case PhysicalOp.Kind.StringCountSums =>
       Vector(LogicalType.Utf8Dict, LogicalType.Int64, LogicalType.Int64)
+    case PhysicalOp.Kind.IntLongTriples =>
+      Vector(LogicalType.Int32, LogicalType.Int64, LogicalType.Int64)
     case PhysicalOp.Kind.IntLongSums => IntLong
     case PhysicalOp.Kind.GroupedInts => Vector(LogicalType.Int32, LogicalType.Int32)
     case PhysicalOp.Kind.GroupedLongs => Vector(LogicalType.Int64, LogicalType.Int64)
