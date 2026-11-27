@@ -476,6 +476,25 @@ enum PhysicalOp:
   case CountSum(child: PhysicalOp)
 
   /**
+   * Count and sum of `(Long, Long)` pairs. The child is an [[Exchange]]. The kernel shuffles with
+   * the long-key exchange. A null key is dropped. A null value is counted and not added. One
+   * `(key, count, sum)` row per distinct key, including an empty bucket. Output kind is
+   * [[PhysicalOp.Kind.LongCountSums]]. The schema is `[Int64, Int64, Int64]`. The count narrows to
+   * `Int` at decode and wraps. There is no spill path.
+   */
+  case LongCountSum(child: PhysicalOp)
+
+  /**
+   * Count and sum of `(String, Int)` pairs. The child is an [[Exchange]]. The kernel shuffles with
+   * the string-key exchange. A null key is dropped. An empty string is a present key. A null value
+   * is counted and not added. One `(key, count, sum)` row per distinct key, including an empty
+   * bucket. Output kind is [[PhysicalOp.Kind.StringCountSums]]. The schema is
+   * `[Utf8Dict, Int64, Int64]`. The count narrows to `Int` at decode and wraps. There is no spill
+   * path.
+   */
+  case StringCountSum(child: PhysicalOp)
+
+  /**
    * Global sort of an int-pair scan. Each source partition is sorted by effective key, then the
    * sorted runs are rank-merged into `defaultShufflePartitions`. A null key orders as zero and
    * stays null. A null value stays null. Ties keep input order. Output kind is
@@ -600,6 +619,8 @@ enum PhysicalOp:
               s"countByKey column is $other, expected int, long, or string pairs",
             )
     case CountSum(_) => PhysicalOp.Kind.CountSums
+    case LongCountSum(_) => PhysicalOp.Kind.LongCountSums
+    case StringCountSum(_) => PhysicalOp.Kind.StringCountSums
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
     case JoinProbeSum(_, _, _) => PhysicalOp.Kind.IntLongSums
     case LongHashJoin(_, _) | LongBroadcastJoin(_, _, _) | LongSortMergeJoin(_, _) =>
@@ -692,6 +713,8 @@ enum PhysicalOp:
     case GroupedDecode(child) => s"GroupedDecode(${child.shape})"
     case CountByKey(child) => s"CountByKey(${child.shape})"
     case CountSum(child) => s"CountSum(${child.shape})"
+    case LongCountSum(child) => s"LongCountSum(${child.shape})"
+    case StringCountSum(child) => s"StringCountSum(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
     case JoinProbeSum(left, right, measure) =>
       val side = measure match
@@ -770,7 +793,9 @@ object PhysicalOp:
       StringOuter,
       CountSums,
       IntLongSums,
-      GroupedIntLongs
+      GroupedIntLongs,
+      LongCountSums,
+      StringCountSums
 
   /** Which value column [[JoinProbeSum]] adds. `Left` is the build side. */
   enum ProbeMeasure:

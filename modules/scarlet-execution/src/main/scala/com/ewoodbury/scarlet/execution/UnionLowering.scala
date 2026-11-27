@@ -97,7 +97,8 @@ private[execution] object UnionLowering:
         PhysicalOp.Kind.Bools | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Pairs |
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.Triples |
         PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples | PhysicalOp.Kind.LongCounts |
-        PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums =>
+        PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
+        PhysicalOp.Kind.LongCountSums | PhysicalOp.Kind.StringCountSums =>
       true
 
   def info(

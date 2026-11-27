@@ -78,6 +78,10 @@ private[execution] object ColumnUse:
       walk(source, child, parent union Set(0, 1))
     case (Plan.CountSumByKeyOp(source), PhysicalOp.CountSum(child)) =>
       walk(source, child, parent union Set(0, 1))
+    case (Plan.CountSumByLongKeyOp(source), PhysicalOp.LongCountSum(child)) =>
+      walk(source, child, parent union Set(0, 1))
+    case (Plan.CountSumByStringKeyOp(source), PhysicalOp.StringCountSum(child)) =>
+      walk(source, child, parent union Set(0, 1))
     case (Plan.SortByIntKeyOp(source), PhysicalOp.SortByIntKey(child)) =>
       walk(source, child, parent union Set(0, 1))
     case (Plan.SortByIntValueDescOp(source), PhysicalOp.SortByIntValueDesc(child)) =>
@@ -106,7 +110,8 @@ private[execution] object ColumnUse:
         PhysicalOp.Kind.IntLongSums | PhysicalOp.Kind.GroupedIntLongs =>
       Set(0, 1)
     case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
-        PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums =>
+        PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
+        PhysicalOp.Kind.LongCountSums | PhysicalOp.Kind.StringCountSums =>
       Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools =>
@@ -123,7 +128,8 @@ private[execution] object ColumnUse:
 
   private def fullWidth(op: PhysicalOp): Set[Int] = op.kind match
     case PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
-        PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums =>
+        PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums |
+        PhysicalOp.Kind.LongCountSums | PhysicalOp.Kind.StringCountSums =>
       Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts |
@@ -152,6 +158,8 @@ private[execution] object ColumnUse:
     case Plan.GroupByKeyOp(source) => Some(source)
     case Plan.CountByKeyOp(source) => Some(source)
     case Plan.CountSumByKeyOp(source) => Some(source)
+    case Plan.CountSumByLongKeyOp(source) => Some(source)
+    case Plan.CountSumByStringKeyOp(source) => Some(source)
     case Plan.ReduceByKeyOp(source, _) => Some(source)
     case Plan.SortByOp(source, _, _) => Some(source)
     case Plan.SortByIntKeyOp(source) => Some(source)

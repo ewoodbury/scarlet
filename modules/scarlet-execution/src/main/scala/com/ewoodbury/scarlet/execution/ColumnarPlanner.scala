@@ -852,6 +852,10 @@ object ColumnarPlanner:
       AggregateBinding.count(source, lowerChild)
     case Plan.CountSumByKeyOp(source) =>
       AggregateBinding.countSum(source, lowerChild)
+    case Plan.CountSumByLongKeyOp(source) =>
+      AggregateBinding.countSum(source, lowerChild)
+    case Plan.CountSumByStringKeyOp(source) =>
+      AggregateBinding.countSum(source, lowerChild)
     case plan if JoinLowering.isJoin(plan) => JoinLowering.lower(plan, lowerChild)
     case Plan.SortByIntKeyOp(source) =>
       SortLowering.lowerInt(source, lowerPlan)
@@ -906,7 +910,8 @@ object ColumnarPlanner:
     case PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples | PhysicalOp.Kind.StringTriples |
         PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
         PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.StringOuter |
-        PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums |
+        PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
+        PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
         PhysicalOp.Kind.GroupedIntLongs =>
       None
 
@@ -1063,6 +1068,10 @@ object ColumnarPlanner:
       hashed(count.kind)
     case _: PhysicalOp.CountSum =>
       hashed(PhysicalOp.Kind.CountSums)
+    case _: PhysicalOp.LongCountSum =>
+      hashed(PhysicalOp.Kind.LongCountSums)
+    case _: PhysicalOp.StringCountSum =>
+      hashed(PhysicalOp.Kind.StringCountSums)
     case _: PhysicalOp.JoinProbeSum =>
       hashed(PhysicalOp.Kind.IntLongSums)
     case PhysicalOp.Exchange(_) =>
@@ -1107,7 +1116,8 @@ object ColumnarPlanner:
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Bools | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples |
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
-        PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.IntLongSums =>
+        PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
+        PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums =>
       Layout.Columnar(ScarletConf.get.columnarBatchSize)
 
   private[execution] def batchSize: Int =
