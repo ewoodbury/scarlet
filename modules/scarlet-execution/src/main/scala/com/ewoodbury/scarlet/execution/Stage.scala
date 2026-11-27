@@ -195,6 +195,13 @@ object Stage {
     }
   }
 
+  /** Local count and sum of `(Int, Long)`. A null key is dropped. A null value is not added. */
+  def countSumByIntLongKeyLocal: Stage[(Any, Any), (Int, Int, Long)] = {
+    SingleOpStage { p =>
+      Partition(CountSumRows.intLongs(p.data))
+    }
+  }
+
   /**
    * Local keyed reduce on a single partition. Used for shuffle-bypass reduceByKey and as the
    * per-partition operator of a reduceByKey shuffle stage (input is already key-partitioned). A

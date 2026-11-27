@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.execution.schema.ColumnBinding.Operator
+import com.ewoodbury.scarlet.execution.schema.ColumnBinding.{Operator, ReducerWitness}
 import com.ewoodbury.scarlet.execution.schema.{ColumnBinding, KernelChoice}
 
 /**
@@ -21,12 +21,20 @@ import com.ewoodbury.scarlet.execution.schema.{ColumnBinding, KernelChoice}
  */
 private[execution] object ReduceByKeyLowering:
 
-  def apply(child: PhysicalOp): Option[PhysicalOp] =
+  def apply(child: PhysicalOp, reducer: ReducerWitness): Option[PhysicalOp] =
     hashPartitionedProject(child) match
       case Some(projected) => Some(aggregated(projected))
       case None if intLongProject(child) => Some(aggregated(child))
-      case None if intLongMapValue(child) => Some(aggregated(child))
+      case None if intLongMapValue(child) => intLongReduced(child, reducer)
       case None => reducedFromTag(child)
+
+  /** Addition stays a sum. Any other `(Long, Long) => Long` is the int-long hash reduce. */
+  private def intLongReduced(child: PhysicalOp, reducer: ReducerWitness): Option[PhysicalOp] =
+    reducer match
+      case ReducerWitness.AddsLongs => Some(aggregated(child))
+      case ReducerWitness.Other =>
+        Some(PhysicalOp.IntLongHashAggregate(PhysicalOp.Exchange(child)))
+      case ReducerWitness.NotApplicable | ReducerWitness.NotLongs => None
 
   /**
    * The binder tag picks the hash-aggregate class.

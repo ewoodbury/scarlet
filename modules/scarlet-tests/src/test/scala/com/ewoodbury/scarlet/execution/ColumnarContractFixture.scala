@@ -353,6 +353,7 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.LongHashAggregate(_) | PhysicalOp.StringHashAggregate(_) |
         PhysicalOp.GroupByKey(_) | PhysicalOp.GroupedDecode(_) | PhysicalOp.CountByKey(_) |
         PhysicalOp.CountSum(_) | PhysicalOp.LongCountSum(_) | PhysicalOp.StringCountSum(_) |
+        PhysicalOp.IntLongHashAggregate(_) | PhysicalOp.IntLongCountSum(_) |
         PhysicalOp.JoinProbeSum(_, _, _) | PhysicalOp.HashJoin(_, _) |
         PhysicalOp.LongHashJoin(_, _) | PhysicalOp.LongSortMergeJoin(_, _) |
         PhysicalOp.StringHashJoin(_, _) | PhysicalOp.StringSortMergeJoin(_, _) |
@@ -514,7 +515,8 @@ trait ColumnarContractFixture extends Matchers:
     case Plan.FlatMapValuesOp(_, _) => PlanNode.FlatMapValues
     case Plan.GroupByKeyOp(_) => PlanNode.GroupByKey
     case Plan.CountByKeyOp(_) => PlanNode.CountByKey
-    case Plan.CountSumByKeyOp(_) | Plan.CountSumByLongKeyOp(_) | Plan.CountSumByStringKeyOp(_) =>
+    case Plan.CountSumByKeyOp(_) | Plan.CountSumByLongKeyOp(_) | Plan.CountSumByStringKeyOp(_) |
+        Plan.CountSumByIntLongKeyOp(_) =>
       PlanNode.CountSumByKey
     case Plan.ReduceByKeyOp(_, _) => PlanNode.ReduceByKey
     case Plan.SortByOp(_, _, _) => PlanNode.SortBy

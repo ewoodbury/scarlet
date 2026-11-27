@@ -60,6 +60,8 @@ private[execution] object ColumnUse:
       walk(source, child, parent union Set(0, 1))
     case (Plan.ReduceByKeyOp(source, _), PhysicalOp.StringHashAggregate(child)) =>
       walk(source, child, parent union Set(0, 1))
+    case (Plan.ReduceByKeyOp(source, _), PhysicalOp.IntLongHashAggregate(child)) =>
+      walk(source, child, parent union Set(0, 1))
     case (
           Plan.ReduceByKeyOp(Plan.MapOp(Plan.JoinOp(left, right, _), _), _),
           PhysicalOp.JoinProbeSum(leftOp, rightOp, _),
@@ -81,6 +83,8 @@ private[execution] object ColumnUse:
     case (Plan.CountSumByLongKeyOp(source), PhysicalOp.LongCountSum(child)) =>
       walk(source, child, parent union Set(0, 1))
     case (Plan.CountSumByStringKeyOp(source), PhysicalOp.StringCountSum(child)) =>
+      walk(source, child, parent union Set(0, 1))
+    case (Plan.CountSumByIntLongKeyOp(source), PhysicalOp.IntLongCountSum(child)) =>
       walk(source, child, parent union Set(0, 1))
     case (Plan.SortByIntKeyOp(source), PhysicalOp.SortByIntKey(child)) =>
       walk(source, child, parent union Set(0, 1))
@@ -164,6 +168,7 @@ private[execution] object ColumnUse:
     case Plan.CountSumByKeyOp(source) => Some(source)
     case Plan.CountSumByLongKeyOp(source) => Some(source)
     case Plan.CountSumByStringKeyOp(source) => Some(source)
+    case Plan.CountSumByIntLongKeyOp(source) => Some(source)
     case Plan.ReduceByKeyOp(source, _) => Some(source)
     case Plan.SortByOp(source, _, _) => Some(source)
     case Plan.SortByIntKeyOp(source) => Some(source)

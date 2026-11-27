@@ -15,8 +15,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * The witness is an int-pair scan, a key slot filter, `mapIntKey`, then `reduceByKey`. Its tag is
  * [[KernelChoice.IntHashAggregate]] and its checksum matches the row path. The long and string
  * stacks name their tags and publish a batch. A checksum alone can match after a row rerun.
- * `mapValues` to `Long` lowers. A reducer that does not add longs stays empty. A filter stack and
- * `countByKey` of that map stay empty.
+ * `mapValues` to `Long` lowers. A reducer that does not add longs is an int-long hash aggregate. A
+ * filter stack and `countByKey` of that stack stay empty. `countByKey` of the bare map lowers.
  */
 class TestAggregateAdmission extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -71,7 +71,9 @@ class TestAggregateAdmission extends AnyFlatSpec with Matchers with BeforeAndAft
       "CountByKey(Exchange(IntLongMapValue(Scan)))",
     )
     ColumnarPlanner.lower(Plan.CountByKeyOp(stacked)) shouldBe None
-    ColumnarPlanner.lower(Plan.ReduceByKeyOp(widened.plan, keep)) shouldBe None
+    ColumnarPlanner.lower(Plan.ReduceByKeyOp(widened.plan, keep)).map(_.shape) shouldBe Some(
+      "IntLongHashAggregate(Exchange(IntLongMapValue(Scan)))",
+    )
     ColumnarPlanner.lower(Plan.ReduceByKeyOp(stacked, add)) shouldBe None
   }
 

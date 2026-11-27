@@ -9,6 +9,7 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.ScarletConf
+import com.ewoodbury.scarlet.execution.schema.ColumnBinding.ReducerWitness
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
@@ -440,11 +441,11 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     rowPairs shouldBe Map(1 -> (20, 30), 2 -> (20, 10))
     val scan = PhysicalOp.Scan(PhysicalOp.Kind.Pairs, Seq.empty)
     val bare = PhysicalOp.Project(PhysicalOp.SortMergeJoin(scan, scan))
-    ReduceByKeyLowering.apply(bare).isEmpty shouldBe true
+    ReduceByKeyLowering.apply(bare, ReducerWitness.NotApplicable).isEmpty shouldBe true
     val oneSide = PhysicalOp.Project(
       PhysicalOp.SortMergeJoin(PhysicalOp.Exchange(scan), scan),
     )
-    ReduceByKeyLowering.apply(oneSide).isEmpty shouldBe true
+    ReduceByKeyLowering.apply(oneSide, ReducerWitness.NotApplicable).isEmpty shouldBe true
     val joined = PhysicalOp.SortMergeJoin(
       PhysicalOp.Exchange(scan),
       PhysicalOp.Exchange(scan),
@@ -460,7 +461,7 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
       val counted = CountByKeyLowering.apply(between).get.shape
       counted should include(s"CountByKey(Exchange(Project(${slot.label}(HashJoin")
       counted should not include "SortMergeJoin"
-      val reduced = ReduceByKeyLowering.apply(between).get.shape
+      val reduced = ReduceByKeyLowering.apply(between, ReducerWitness.NotApplicable).get.shape
       reduced should include(s"HashAggregate(Exchange(Project(${slot.label}(HashJoin")
       reduced should not include "SortMergeJoin"
     }
@@ -481,8 +482,8 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
       ),
     )
     val element = PhysicalOp.Project(PhysicalOp.Filter(joined, PhysicalOp.Slot.Row))
-    ReduceByKeyLowering.apply(stacked).isEmpty shouldBe true
-    ReduceByKeyLowering.apply(element).isEmpty shouldBe true
+    ReduceByKeyLowering.apply(stacked, ReducerWitness.NotApplicable).isEmpty shouldBe true
+    ReduceByKeyLowering.apply(element, ReducerWitness.NotApplicable).isEmpty shouldBe true
     CountByKeyLowering.apply(bare).isEmpty shouldBe true
     CountByKeyLowering.apply(oneSide).isEmpty shouldBe true
     CountByKeyLowering.apply(stacked).isEmpty shouldBe true
@@ -744,7 +745,7 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
     CountByKeyLowering.apply(slotted).map(_.shape) shouldBe Some(
       "CountByKey(Exchange(FilterKey(Project(HashJoin(Exchange(Scan), Exchange(Scan))))))",
     )
-    ReduceByKeyLowering.apply(slotted).isEmpty shouldBe true
+    ReduceByKeyLowering.apply(slotted, ReducerWitness.NotApplicable).isEmpty shouldBe true
     val second = PhysicalOp.Filter(slotted, PhysicalOp.Slot.Value)
     CountByKeyLowering.apply(second).isEmpty shouldBe true
     val oneSide = PhysicalOp.Filter(

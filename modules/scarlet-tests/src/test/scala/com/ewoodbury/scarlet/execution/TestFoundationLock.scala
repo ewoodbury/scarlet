@@ -145,9 +145,11 @@ class TestFoundationLock extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     )
   }
 
-  "reduceByKey that keeps the left long" should "stay empty" in {
+  "reduceByKey that keeps the left long" should "lower the int-long hash aggregate" in {
     val kept = widened.reduceByKey[Int, Long]((left: Long, _: Long) => left)
-    ColumnarPlanner.lower(kept.plan) shouldBe None
+    ColumnarPlanner.lower(kept.plan).map(_.shape) shouldBe Some(
+      "IntLongHashAggregate(Exchange(IntLongMapValue(Scan)))",
+    )
   }
 
   "an int scan under flatMap" should "keep the row boundary and publish a batch" in {

@@ -60,6 +60,31 @@ private[execution] object CountSumRows:
         acc.update(keyLong, (count + 1, nextSum))
     acc.iterator.map { case (key, (count, sum)) => (key, count, sum) }.toSeq
 
+  /** Same null rules as [[of]] for `(Int, Long)`. The value is already a `Long`. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+      "org.wartremover.warts.Equals",
+      "org.wartremover.warts.Var",
+      "org.wartremover.warts.MutableDataStructures",
+    ),
+  )
+  def intLongs(rows: Iterable[(Any, Any)]): Seq[(Int, Int, Long)] =
+    val acc = LinkedHashMap.empty[Int, (Int, Long)]
+    val iterator = rows.iterator
+    while (iterator.hasNext) do
+      val product: Product = iterator.next()
+      val key = product.productElement(0)
+      if (key != null) then
+        val value = product.productElement(1)
+        val keyInt = key.asInstanceOf[Int]
+        val (count, sum) = acc.getOrElse(keyInt, (0, 0L))
+        val nextSum = if (value != null) then sum + value.asInstanceOf[Long] else sum
+        acc.update(keyInt, (count + 1, nextSum))
+    acc.iterator.map { case (key, (count, sum)) => (key, count, sum) }.toSeq
+
   /**
    * Same null rules as [[of]] for `(String, Int)`. An empty string is a present key. The count is
    * an `Int` and wraps. The value is widened to `Long` before it is added.

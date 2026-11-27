@@ -561,21 +561,20 @@ private[execution] object ColumnarInterpreter:
         case ExecutionRoute.CountArm.IntPairs | ExecutionRoute.CountArm.LongPairs |
             ExecutionRoute.CountArm.StringPairs =>
           CountByKeyArms.columns(source, child, selectedPartition, preserveAbsence, ordinals)
+    case (plan, op) if CountSumColumns.accepts(plan, op) =>
+      CountSumColumns.dispatch(plan, op, selectedPartition, preserveAbsence, ordinals)
     case (
-          Plan.CountSumByKeyOp(source),
-          PhysicalOp.CountSum(PhysicalOp.Exchange(child)),
+          Plan.ReduceByKeyOp(source, reduceFunc),
+          PhysicalOp.IntLongHashAggregate(PhysicalOp.Exchange(child)),
         ) =>
-      CountSumArms.columns(source, child, selectedPartition, preserveAbsence, ordinals)
-    case (
-          Plan.CountSumByLongKeyOp(source),
-          PhysicalOp.LongCountSum(PhysicalOp.Exchange(child)),
-        ) =>
-      CountSumColumns.longs(source, child, selectedPartition, preserveAbsence, ordinals)
-    case (
-          Plan.CountSumByStringKeyOp(source),
-          PhysicalOp.StringCountSum(PhysicalOp.Exchange(child)),
-        ) =>
-      CountSumColumns.strings(source, child, selectedPartition, preserveAbsence, ordinals)
+      IntLongBinColumns.columns(
+        source,
+        child,
+        reduceFunc,
+        selectedPartition,
+        preserveAbsence,
+        ordinals,
+      )
     case (
           Plan.JoinOp(left, right, strategy),
           PhysicalOp.HashJoin(PhysicalOp.Exchange(leftOp), PhysicalOp.Exchange(rightOp)),

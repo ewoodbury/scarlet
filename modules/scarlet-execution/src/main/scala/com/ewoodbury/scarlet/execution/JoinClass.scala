@@ -124,8 +124,9 @@ private[execution] object JoinClass:
         Some(PhysicalOp.StringSortMergeFullOuter(leftExchange, rightExchange))
       case KernelChoice.IntHashAggregate | KernelChoice.LongHashAggregate |
           KernelChoice.StringHashAggregate | KernelChoice.IntLongProjectSum |
-          KernelChoice.CountByKey | KernelChoice.CountThroughProbe | KernelChoice.CountSum |
-          KernelChoice.JoinProbeSum | KernelChoice.SortByIntKey | KernelChoice.SortByIntValueDesc |
+          KernelChoice.IntLongHashAggregate | KernelChoice.CountByKey |
+          KernelChoice.CountThroughProbe | KernelChoice.CountSum | KernelChoice.JoinProbeSum |
+          KernelChoice.SortByIntKey | KernelChoice.SortByIntValueDesc |
           KernelChoice.SortByLongKey | KernelChoice.SortByStringKey |
           KernelChoice.SortByLongValueDesc | KernelChoice.SortByStringValueDesc |
           KernelChoice.GroupByKey | KernelChoice.GroupedDecode | KernelChoice.Dedupe |

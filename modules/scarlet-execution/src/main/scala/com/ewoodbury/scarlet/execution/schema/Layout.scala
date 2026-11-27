@@ -101,6 +101,15 @@ private[execution] object Layout:
       columns(node.kind)
     case node: PhysicalOp.StringCountSum =>
       columns(node.kind)
+    case node: PhysicalOp.IntLongCountSum =>
+      columns(node.kind)
+    case _: PhysicalOp.IntLongHashAggregate =>
+      Output.IntLongPairs(
+        Vector(
+          ColumnLayout(ColumnType.Int32, NullPolicy.Nullable),
+          ColumnLayout(ColumnType.Int64, NullPolicy.Nullable),
+        ),
+      )
     case node: PhysicalOp.HashAggregate =>
       columns(node.kind)
     case node: PhysicalOp.LongHashAggregate =>
@@ -288,3 +297,4 @@ private[execution] enum KernelChoice:
   case StringSortMergeLeftOuter, StringSortMergeRightOuter, StringSortMergeFullOuter
   case Scan, Filter, Project, Column, MapValue, IntLongMapValue, MapKey, Pipeline, Union, Exchange
   case SortByLongValueDesc, SortByStringValueDesc
+  case IntLongHashAggregate

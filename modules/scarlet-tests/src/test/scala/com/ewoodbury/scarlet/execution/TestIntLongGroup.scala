@@ -15,8 +15,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * `groupByKey` after `mapValues` to long builds the lists on columns.
  *
  * The fake leaves `lower` empty. A null key is dropped. A null value stays in the iterable. A
- * filter and a non-adding `reduceByKey` above the widening stay empty. Replacing the group with a
- * combine would drop the lists.
+ * filter of the widening stays a value filter. A non-adding `reduceByKey` of the bare widening is
+ * an int-long hash aggregate. Replacing the group with a combine would drop the lists.
  */
 @SuppressWarnings(
   Array(
@@ -92,11 +92,9 @@ class TestIntLongGroup extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       .lower(widened.filterValues((value: Long) => value > 0L).plan)
       .map(_.shape) shouldBe
       Some("FilterValue(IntLongMapValue(Scan))")
-    assert(
-      ColumnarPlanner
-        .lower(widened.reduceByKey[Int, Long]((left: Long, _: Long) => left).plan)
-        .isEmpty,
-    )
+    ColumnarPlanner
+      .lower(widened.reduceByKey[Int, Long]((left: Long, _: Long) => left).plan)
+      .map(_.shape) shouldBe Some("IntLongHashAggregate(Exchange(IntLongMapValue(Scan)))")
   }
 
   /**

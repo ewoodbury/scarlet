@@ -43,9 +43,11 @@ private[execution] object Describe:
     case PhysicalOp.CountByKey(PhysicalOp.HashJoin(_, _)) =>
       KernelChoice.CountThroughProbe
     case _: PhysicalOp.LongHashAggregate => KernelChoice.LongHashAggregate
+    case _: PhysicalOp.IntLongHashAggregate => KernelChoice.IntLongHashAggregate
     case _: PhysicalOp.StringHashAggregate => KernelChoice.StringHashAggregate
     case _: PhysicalOp.CountByKey => KernelChoice.CountByKey
-    case _: PhysicalOp.CountSum | _: PhysicalOp.LongCountSum | _: PhysicalOp.StringCountSum =>
+    case _: PhysicalOp.CountSum | _: PhysicalOp.LongCountSum | _: PhysicalOp.StringCountSum |
+        _: PhysicalOp.IntLongCountSum =>
       KernelChoice.CountSum
     case _: PhysicalOp.JoinProbeSum => KernelChoice.JoinProbeSum
     case _: PhysicalOp.SortByIntKey => KernelChoice.SortByIntKey

@@ -645,6 +645,8 @@ enum PhysicalOp:
     case CountSum(_) => PhysicalOp.Kind.CountSums
     case LongCountSum(_) => PhysicalOp.Kind.LongCountSums
     case StringCountSum(_) => PhysicalOp.Kind.StringCountSums
+    case IntLongHashAggregate(_) => PhysicalOp.Kind.Pairs
+    case IntLongCountSum(_) => PhysicalOp.Kind.CountSums
     case HashJoin(_, _) => PhysicalOp.Kind.Triples
     case JoinProbeSum(_, _, _) => PhysicalOp.Kind.IntLongSums
     case LongHashJoin(_, _) | LongBroadcastJoin(_, _, _) | LongSortMergeJoin(_, _) =>
@@ -741,6 +743,8 @@ enum PhysicalOp:
     case CountSum(child) => s"CountSum(${child.shape})"
     case LongCountSum(child) => s"LongCountSum(${child.shape})"
     case StringCountSum(child) => s"StringCountSum(${child.shape})"
+    case IntLongHashAggregate(child) => s"IntLongHashAggregate(${child.shape})"
+    case IntLongCountSum(child) => s"IntLongCountSum(${child.shape})"
     case HashJoin(left, right) => s"HashJoin(${left.shape}, ${right.shape})"
     case JoinProbeSum(left, right, measure) =>
       val side = measure match
@@ -799,6 +803,22 @@ enum PhysicalOp:
       s"StringSortMergeRightOuter(${left.shape}, ${right.shape})"
     case StringSortMergeFullOuter(left, right) =>
       s"StringSortMergeFullOuter(${left.shape}, ${right.shape})"
+
+  /**
+   * Non-adding `reduceByKey` of an int key and a long value. The child is an [[Exchange]]. The
+   * kernel shuffles on the int key. Addition stays [[HashAggregate]] with
+   * [[PhysicalOp.HashAggregateTag.IntLongSum]]. A null key is dropped. A null value stays null
+   * until another value arrives. Output kind is [[PhysicalOp.Kind.Pairs]]. The schema is
+   * `[Int32, Int64]`. There is no spill path.
+   */
+  case IntLongHashAggregate(child: PhysicalOp)
+
+  /**
+   * Count and sum of `(Int, Long)` pairs. The child is an [[Exchange]]. The kernel shuffles on the
+   * int key. A null key is dropped. A null value is counted and not added. Output kind is
+   * [[PhysicalOp.Kind.CountSums]]. The schema is `[Int32, Int64, Int64]`. There is no spill path.
+   */
+  case IntLongCountSum(child: PhysicalOp)
 
 object PhysicalOp:
 
