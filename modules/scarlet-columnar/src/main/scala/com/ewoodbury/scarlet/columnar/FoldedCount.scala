@@ -707,7 +707,7 @@ private[scarlet] object FoldedCount:
     keyType match
       case LogicalType.Int32 => ()
       case LogicalType.Int64 | LogicalType.Float64 | LogicalType.Float32 | LogicalType.Bool |
-          LogicalType.Utf8Dict =>
+          LogicalType.Utf8Dict | LogicalType.Decimal(_, _) =>
         throw new ColumnarFallback(
           s"countByKey expects an Int32 key column, found $keyType",
         )

@@ -56,4 +56,9 @@ private[scarlet] object WideFields:
     case (ColumnKind.Bool, ColumnKind.Bool) => true
     case (ColumnKind.Utf8, ColumnKind.Utf8) => true
     case (ColumnKind.Float32, ColumnKind.Float32) => true
+    case (
+          ColumnKind.Decimal(leftPrecision, leftScale),
+          ColumnKind.Decimal(rightPrecision, rightScale),
+        ) =>
+      leftPrecision == rightPrecision && leftScale == rightScale
     case _ => false

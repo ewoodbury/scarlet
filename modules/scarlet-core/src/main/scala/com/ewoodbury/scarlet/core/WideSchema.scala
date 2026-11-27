@@ -7,14 +7,19 @@ package com.ewoodbury.scarlet.core
  * exists. The name is for the job and for error text. Kernels address columns by ordinal. There is
  * no nested row and no array column.
  *
- * A compare is a closed set: a numeric column against a constant of the same kind, or equality on
- * a bool. A null does not pass. String compares and float32 compares are not in this set.
+ * A compare is a closed set: a numeric column against a constant of the same kind, equality on a
+ * bool, or a decimal against a decimal constant. Scales align by an exact power of ten. A null
+ * does not pass. String compares and float32 compares are not in this set.
  */
 enum ColumnKind:
   case Int32, Int64, Float64, Bool, Utf8, Float32
+  case Decimal(precision: Int, scale: Int)
 
 final case class ColumnField(name: String, kind: ColumnKind):
   require(name.nonEmpty, "column name must not be empty")
+  kind match
+    case ColumnKind.Decimal(precision, scale) => DecimalRules.check(precision, scale)
+    case _ => ()
 
 enum CompareOp:
   case Gt, Ge, Lt, Le, Eq, Ne
@@ -24,12 +29,18 @@ enum ColumnLiteral:
   case Int64(value: Long)
   case Float64(value: Double)
   case Bool(value: Boolean)
+  case Decimal(precision: Int, scale: Int, value: Long)
 
   def kind: ColumnKind = this match
     case _: Int32 => ColumnKind.Int32
     case _: Int64 => ColumnKind.Int64
     case _: Float64 => ColumnKind.Float64
     case _: Bool => ColumnKind.Bool
+    case Decimal(precision, scale, value) =>
+      DecimalRules.check(precision, scale)
+      if (!DecimalRules.fits(value, precision)) then
+        throw new IllegalArgumentException(s"decimal value does not fit precision $precision")
+      ColumnKind.Decimal(precision, scale)
 
 final case class ColumnCompare(op: CompareOp, literal: ColumnLiteral):
 
@@ -39,6 +50,7 @@ final case class ColumnCompare(op: CompareOp, literal: ColumnLiteral):
     case (ColumnKind.Int64, _: ColumnLiteral.Int64, _) => true
     case (ColumnKind.Float64, _: ColumnLiteral.Float64, _) => true
     case (ColumnKind.Bool, _: ColumnLiteral.Bool, CompareOp.Eq | CompareOp.Ne) => true
+    case (ColumnKind.Decimal(_, _), _: ColumnLiteral.Decimal, _) => true
     case _ => false
 
   /**
@@ -86,6 +98,15 @@ final case class ColumnCompare(op: CompareOp, literal: ColumnLiteral):
       sameBool(constant, value)
     case (CompareOp.Ne, ColumnLiteral.Bool(constant), Cell.Bool(value)) =>
       !sameBool(constant, value)
+    case (_, ColumnLiteral.Decimal(_, scale, constant), Cell.Decimal(_, valueScale, value)) =>
+      val order = DecimalRules.compare(value, valueScale, constant, scale)
+      op match
+        case CompareOp.Gt => order > 0
+        case CompareOp.Ge => order >= 0
+        case CompareOp.Lt => order < 0
+        case CompareOp.Le => order <= 0
+        case CompareOp.Eq => order == 0
+        case CompareOp.Ne => order != 0
     case _ =>
       throw new IllegalArgumentException(s"$this does not apply to $cell")
 
@@ -101,6 +122,7 @@ enum Cell:
   case Bool(value: Boolean)
   case Utf8(value: String)
   case Float32(value: Float)
+  case Decimal(precision: Int, scale: Int, value: Long)
   case Null
 
 final case class WideRow(fields: Vector[ColumnField], cells: Vector[Cell])

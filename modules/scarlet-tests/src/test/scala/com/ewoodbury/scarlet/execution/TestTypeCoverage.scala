@@ -135,7 +135,8 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
   }
 
   "coverage enums" should "name every logical type, source descriptor, and physical kind" in {
-    LogicalType.values.toSet shouldBe CoverageType.values.map(logicalType).toSet
+    CoverageType.values.map(logicalType).toSet shouldBe singletonLogicalTypes
+    wideOnly(LogicalType.Decimal(18, 0)) shouldBe None
     Plan.SourceDescriptor.values.toSet shouldBe Set(
       Plan.SourceDescriptor.Unknown,
       Plan.SourceDescriptor.Ints,
@@ -622,6 +623,26 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     case CoverageType.Booleans => LogicalType.Bool
     case CoverageType.Strings => LogicalType.Utf8Dict
     case CoverageType.Float32 => LogicalType.Float32
+
+  /** Singleton logical types. A decimal is a wide column, not one of these sources. */
+  private def singletonLogicalTypes: Set[LogicalType] = Set(
+    LogicalType.Int32,
+    LogicalType.Int64,
+    LogicalType.Float64,
+    LogicalType.Bool,
+    LogicalType.Utf8Dict,
+    LogicalType.Float32,
+  )
+
+  /** [[None]] for a wide-only type. A new logical type has to be named here. */
+  private def wideOnly(tpe: LogicalType): Option[CoverageType] = tpe match
+    case LogicalType.Int32 => Some(CoverageType.Ints)
+    case LogicalType.Int64 => Some(CoverageType.Longs)
+    case LogicalType.Float64 => Some(CoverageType.Doubles)
+    case LogicalType.Bool => Some(CoverageType.Booleans)
+    case LogicalType.Utf8Dict => Some(CoverageType.Strings)
+    case LogicalType.Float32 => Some(CoverageType.Float32)
+    case LogicalType.Decimal(_, _) => None
 
   private def open(sumInt: Boolean, sumLong: Boolean, sumDouble: Boolean): Gates =
     Gates(

@@ -135,12 +135,38 @@ class DefaultExecutionService extends ExecutionService {
       }
     }
 
+  def sumWideDecimal(plan: Plan[WideRow], ordinal: Int): Long =
+    WideSum.decimalColumn(plan, ordinal).getOrElse {
+      rowPartitions(plan).foldLeft(0L) { (total, partition) =>
+        partition.data.foldLeft(total)((acc, row) => addDecimalCell(acc, row, ordinal))
+      }
+    }
+
   private def addLongCell(total: Long, row: WideRow, ordinal: Int): Long =
     row.cells(ordinal) match
       case Cell.Int64(value) => total + value
       case Cell.Null => total
       case other =>
         throw new IllegalArgumentException(s"column $ordinal is $other, expected a long")
+
+  private def addDecimalCell(total: Long, row: WideRow, ordinal: Int): Long =
+    row.cells(ordinal) match
+      case Cell.Decimal(_, _, value) =>
+        val sum =
+          try Math.addExact(total, value)
+          catch
+            case _: ArithmeticException =>
+              throw new IllegalArgumentException(
+                s"decimal value does not fit precision ${DecimalRules.MaxPrecision}",
+              )
+        if (!DecimalRules.fits(sum, DecimalRules.MaxPrecision)) then
+          throw new IllegalArgumentException(
+            s"decimal value does not fit precision ${DecimalRules.MaxPrecision}",
+          )
+        sum
+      case Cell.Null => total
+      case other =>
+        throw new IllegalArgumentException(s"column $ordinal is $other, expected a decimal")
 
   def sumDouble(plan: Plan[Double]): Double =
     ColumnarPlanner.trySumDouble(plan).getOrElse {

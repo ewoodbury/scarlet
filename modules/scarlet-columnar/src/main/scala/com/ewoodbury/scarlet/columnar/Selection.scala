@@ -1025,6 +1025,7 @@ private[scarlet] object Selection:
       case float32: Float32Column => gatherFloat32(float32, index, count, capacity)
       case bool: BoolColumn => gatherBool(bool, index, count, capacity)
       case utf8: DictUtf8Column => gatherUtf8(utf8, index, count, capacity)
+      case decimal: DecimalColumn => DecimalColumn.gather(decimal, index, count, capacity)
 
   private def gatherInt32(
       column: Int32Column,

@@ -272,6 +272,8 @@ object WideJoin:
           Validity.pack(length, row => present(row)),
           length,
         )
+      case source: DecimalColumn =>
+        DecimalColumn.gather(source, rows, length, length)
 
   private def copyInts(
       source: Array[Int],
@@ -327,6 +329,8 @@ object WideJoin:
     case ColumnKind.Bool => BoolColumn.of(Array.emptyByteArray, Validity.allValid(0), 0)
     case ColumnKind.Utf8 =>
       DictUtf8Column.of(Array.empty[String], Array.emptyIntArray, Validity.allValid(0), 0)
+    case ColumnKind.Decimal(precision, scale) =>
+      DecimalColumn.of(precision, scale, Array.emptyLongArray, Validity.allValid(0), 0)
 
   private def append(pieces: Vector[Column], rows: Int): Column =
     pieces.head match
@@ -375,6 +379,30 @@ object WideJoin:
             case other => mismatch(other)
         }
         BoolColumn.of(values, Validity.pack(rows, row => present(row)), rows)
+      case first: DecimalColumn =>
+        pieces.foreach {
+          case source: DecimalColumn =>
+            require(
+              source.precision == first.precision && source.scale == first.scale,
+              "wide join cannot concatenate decimals with different precision or scale",
+            )
+          case other =>
+            mismatch(other)
+        }
+        val values = new Array[Long](rows)
+        val present = new Array[Boolean](rows)
+        fill(pieces, rows, present) { (column, from, at) =>
+          column match
+            case source: DecimalColumn => values(from) = source.values(at)
+            case other => mismatch(other)
+        }
+        DecimalColumn.of(
+          first.precision,
+          first.scale,
+          values,
+          Validity.pack(rows, row => present(row)),
+          rows,
+        )
       case first: DictUtf8Column =>
         pieces.foreach {
           case source: DictUtf8Column =>
@@ -393,6 +421,8 @@ object WideJoin:
             case other => mismatch(other)
         }
         DictUtf8Column.of(first.dictionary, codes, Validity.pack(rows, row => present(row)), rows)
+      case other =>
+        throw new IllegalArgumentException(s"${other.logicalType} is not supported here")
 
   private def mismatch(column: Column): Nothing =
     throw new IllegalArgumentException(s"wide join column changed type to ${column.logicalType}")

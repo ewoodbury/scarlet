@@ -1,13 +1,14 @@
 package com.ewoodbury.scarlet.columnar
 
-import com.ewoodbury.scarlet.core.{ColumnExpr, ColumnField, ColumnKind, ColumnLiteral, CompareOp}
+import com.ewoodbury.scarlet.core.*
 
 /**
  * Appends one computed column to a wide batch.
  *
  * Arithmetic uses the wider input: double, then float, then long, then int. A compare yields bool.
  * A null input leaves the result null and the value slot unread. Divide uses that same widening
- * and refuses a present zero divisor. Strings are not in this set. Casts are the same Java
+ * and refuses a present zero divisor. A decimal add, subtract, or multiply stays exact, and
+ * decimal divide is not in this set. Strings are not in this set. Casts are the same Java
  * conversions the row path uses. A literal fills every row and is never null.
  */
 object WideExpr:
@@ -66,6 +67,9 @@ object WideExpr:
       float32(at(batch, left), at(batch, right), length, add, sub, div)
     case ColumnKind.Float64 =>
       float64(at(batch, left), at(batch, right), length, add, sub, div)
+    case ColumnKind.Decimal(_, _) =>
+      if (div) then throw new IllegalArgumentException("decimal divide is not supported")
+      else WideDecimal.arithmetic(at(batch, left), at(batch, right), kind, length, add, sub)
     case _ =>
       throw new IllegalArgumentException(s"arithmetic result $kind")
 
@@ -208,6 +212,8 @@ object WideExpr:
       case ColumnLiteral.Bool(flag) =>
         val byte: Byte = if (flag) then 1.toByte else 0.toByte
         BoolColumn.of(Array.tabulate(length)(_ => byte), present, length)
+      case ColumnLiteral.Decimal(precision, scale, number) =>
+        DecimalColumn.of(precision, scale, Array.tabulate(length)(_ => number), present, length)
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def compare(
@@ -219,6 +225,10 @@ object WideExpr:
   ): Column =
     val leftColumn = at(batch, left)
     val rightColumn = at(batch, right)
+    (leftColumn, rightColumn) match
+      case (_: DecimalColumn, _: DecimalColumn) =>
+        return WideDecimal.compare(leftColumn, rightColumn, op, length)
+      case _ => ()
     val kind = ColumnExpr
       .wider(kindOf(leftColumn), kindOf(rightColumn))
       .getOrElse(throw new IllegalArgumentException(s"$op is not numeric"))
@@ -376,6 +386,8 @@ object WideExpr:
           row += 1
         }
         Float64Column.of(out, packed(live), length)
+      case ColumnKind.Decimal(precision, scale) =>
+        WideDecimal.castFrom(column, precision, scale, length)
       case _ =>
         throw new IllegalArgumentException(s"cannot cast to $to")
 
@@ -391,6 +403,7 @@ object WideExpr:
     case values: Int64Column => values.values(row)
     case values: Float32Column => values.values(row).toLong
     case values: Float64Column => values.values(row).toLong
+    case values: DecimalColumn => DecimalRules.toLong(values.values(row), values.scale)
     case _ => throw new IllegalArgumentException(s"cannot cast ${column.logicalType} to long")
 
   private def castFloat(column: Column, row: Int): Float = column match
@@ -552,3 +565,4 @@ object WideExpr:
     case LogicalType.Bool => ColumnKind.Bool
     case LogicalType.Utf8Dict => ColumnKind.Utf8
     case LogicalType.Float32 => ColumnKind.Float32
+    case LogicalType.Decimal(precision, scale) => ColumnKind.Decimal(precision, scale)

@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import com.ewoodbury.scarlet.core.DecimalRules
+
 /**
  * One primitive column. The value array and the validity bitmap share one capacity. `length` is
  * the live row count and may be shorter. Slots at `length` and beyond are undefined.
@@ -370,3 +372,85 @@ object DictUtf8Column:
 
   private[columnar] object Words:
     def empty: Words = new Words
+
+/**
+ * A decimal column stored as a scaled long.
+ *
+ * Precision is 1 through 18 and scale is 0 through that precision. `values` holds the unscaled
+ * integer, multiplied by `10^scale`. A present value that does not fit the precision is refused.
+ * There is no absence bitmap: a decimal is not an outer-join key.
+ */
+final class DecimalColumn private (
+    val precision: Int,
+    val scale: Int,
+    val values: Array[Long],
+    val validity: Validity,
+    val length: Int,
+) extends Column:
+  def logicalType: LogicalType = LogicalType.Decimal(precision, scale)
+
+object DecimalColumn:
+
+  /**
+   * Retains `values`. A present slot that needs a 19th digit, or more than `precision`, refuses.
+   */
+  def of(
+      precision: Int,
+      scale: Int,
+      values: Array[Long],
+      validity: Validity,
+      length: Int,
+  ): DecimalColumn =
+    DecimalRules.check(precision, scale)
+    Column.check(length, values.length, validity)
+    requireFits(precision, values, validity, length)
+    new DecimalColumn(precision, scale, values, validity, length)
+
+  /** One contiguous range. `start` is a row of `column` and `length` is the copied live count. */
+  def slice(column: DecimalColumn, start: Int, length: Int): DecimalColumn =
+    val values = new Array[Long](length)
+    System.arraycopy(column.values, start, values, 0, length)
+    of(
+      column.precision,
+      column.scale,
+      values,
+      Validity.pack(length, row => column.validity.isValid(start + row)),
+      length,
+    )
+
+  /**
+   * Rows `index(0 until count)` in that order. `capacity` is the value-array length and must be at
+   * least `count`. A null source row stays null.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  def gather(
+      column: DecimalColumn,
+      index: Array[Int],
+      count: Int,
+      capacity: Int,
+  ): DecimalColumn =
+    val values = new Array[Long](capacity)
+    val present = new Array[Boolean](capacity)
+    var slot = 0
+    while (slot < count) {
+      val row = index(slot)
+      if (column.isValid(row)) then
+        present(slot) = true
+        values(slot) = column.values(row)
+      slot += 1
+    }
+    of(column.precision, column.scale, values, Validity.pack(capacity, row => present(row)), count)
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def requireFits(
+      precision: Int,
+      values: Array[Long],
+      validity: Validity,
+      length: Int,
+  ): Unit =
+    var row = 0
+    while (row < length) {
+      if (validity.isValid(row) && !DecimalRules.fits(values(row), precision)) then
+        throw new IllegalArgumentException(s"decimal value does not fit precision $precision")
+      row += 1
+    }

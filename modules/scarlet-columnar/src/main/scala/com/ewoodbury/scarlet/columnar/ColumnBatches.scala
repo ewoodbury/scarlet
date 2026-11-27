@@ -328,6 +328,8 @@ object ColumnBatches:
           validityRange(utf8.validity, start, length),
           length,
         )
+      case decimal: DecimalColumn =>
+        DecimalColumn.slice(decimal, start, length)
 
   private def append(columns: Vector[Column], total: Int): Column =
     columns.headOption match
@@ -343,6 +345,10 @@ object ColumnBatches:
         appendBool(columns.collect { case column: BoolColumn => column }, total)
       case Some(_: DictUtf8Column) =>
         appendUtf8(columns.collect { case column: DictUtf8Column => column }, total)
+      case Some(first: DecimalColumn) =>
+        appendDecimal(columns.collect { case column: DecimalColumn => column }, total, first)
+      case Some(other) =>
+        throw new IllegalArgumentException(s"${other.logicalType} is not supported here")
       case None =>
         throw new IllegalArgumentException("concat needs a column")
 
@@ -387,6 +393,28 @@ object ColumnBatches:
       case Some(bits) =>
         Int64Column.withAbsence(values, validity, Validity.fromWords(bits, total), total)
       case None => Int64Column.of(values, validity, total)
+
+  private def appendDecimal(
+      columns: Vector[DecimalColumn],
+      total: Int,
+      first: DecimalColumn,
+  ): DecimalColumn =
+    columns.foreach { column =>
+      require(
+        column.precision == first.precision && column.scale == first.scale,
+        "cannot concatenate decimals with different precision or scale",
+      )
+    }
+    val values = new Array[Long](total)
+    val words = Validity.allocate(total)
+    val written = columns.foldLeft(0) { (offset, column) =>
+      val length = column.length
+      System.arraycopy(column.values, 0, values, offset, length)
+      copyBits(column.validity, 0, words, offset, length)
+      offset + length
+    }
+    require(written == total, s"copied $written rows into $total")
+    DecimalColumn.of(first.precision, first.scale, values, Validity.fromWords(words, total), total)
 
   private def appendFloat64(columns: Vector[Float64Column], total: Int): Float64Column =
     val values = new Array[Double](total)

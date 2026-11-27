@@ -39,8 +39,9 @@ private[scarlet] object WideAggregate:
   private def groupKey(kind: ColumnKind): Boolean = kind match
     case ColumnKind.Int32 | ColumnKind.Int64 => true
     case ColumnKind.Float64 | ColumnKind.Bool | ColumnKind.Utf8 | ColumnKind.Float32 => false
+    case ColumnKind.Decimal(_, _) => false
 
   private def summed(kind: ColumnKind): Option[ColumnKind] = kind match
     case ColumnKind.Int32 | ColumnKind.Int64 => Some(ColumnKind.Int64)
     case ColumnKind.Float64 | ColumnKind.Float32 => Some(ColumnKind.Float64)
-    case ColumnKind.Bool | ColumnKind.Utf8 => None
+    case ColumnKind.Bool | ColumnKind.Utf8 | ColumnKind.Decimal(_, _) => None

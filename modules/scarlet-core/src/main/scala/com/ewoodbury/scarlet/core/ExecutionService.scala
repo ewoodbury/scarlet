@@ -39,6 +39,12 @@ trait ExecutionService {
   def sumWideLong(plan: Plan[WideRow], ordinal: Int): Long
 
   /**
+   * Sums one decimal column of a wide row. A null slot contributes nothing. The unscaled total
+   * refuses when it needs a 19th digit. Empty input returns zero.
+   */
+  def sumWideDecimal(plan: Plan[WideRow], ordinal: Int): Long
+
+  /**
    * Sums a `Double` plan. Empty input returns zero.
    */
   def sumDouble(plan: Plan[Double]): Double
@@ -99,6 +105,12 @@ object ExecutionService {
     }
 
     def sumWideLong(plan: Plan[WideRow], ordinal: Int): Long = {
+      throw new UnsupportedOperationException(
+        "No execution service registered. Please ensure the execution module is properly initialized.",
+      )
+    }
+
+    def sumWideDecimal(plan: Plan[WideRow], ordinal: Int): Long = {
       throw new UnsupportedOperationException(
         "No execution service registered. Please ensure the execution module is properly initialized.",
       )
