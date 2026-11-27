@@ -104,6 +104,115 @@ class TestWideExpr extends AnyFlatSpec with Matchers:
     )
   }
 
+  it should "append a literal on both paths" in {
+    val base = WideColumns(Vector(WideInput.ints("n", Array(1))))
+    agree(base, ColumnExpr.Lit(ColumnLiteral.Int32(11)), "k").map(_.cells.last) shouldBe Vector(
+      Cell.Int32(11),
+    )
+    agree(base, ColumnExpr.Lit(ColumnLiteral.Int64(11L)), "k").map(_.cells.last) shouldBe Vector(
+      Cell.Int64(11L),
+    )
+    agree(base, ColumnExpr.Lit(ColumnLiteral.Float64(1.5)), "k").map(_.cells.last) shouldBe Vector(
+      Cell.Float64(1.5),
+    )
+    agree(base, ColumnExpr.Lit(ColumnLiteral.Bool(false)), "k").map(_.cells.last) shouldBe Vector(
+      Cell.Bool(false),
+    )
+  }
+
+  it should "add a literal to an int on both paths" in {
+    val base = WideColumns(Vector(WideInput.ints("n", Array(1, 2))))
+    val lit = ColumnExpr.Lit(ColumnLiteral.Int32(11))
+    val rowLit = base.compute(lit, "eleven")
+    val (fields, batch) = WideExpr.append(WideBatch.encode(base), base.fields, lit, "eleven")
+    WideBatch.decode(batch, fields) shouldBe rowLit.rows
+    val summed = rowLit.compute(ColumnExpr.Add(0, 1), "sum")
+    val (sumFields, sumBatch) = WideExpr.append(batch, fields, ColumnExpr.Add(0, 1), "sum")
+    WideBatch.decode(sumBatch, sumFields) shouldBe summed.rows
+    summed.rows.map(_.cells.last) shouldBe Vector(Cell.Int32(12), Cell.Int32(13))
+  }
+
+  it should "divide integers toward zero" in {
+    val rows = agree(
+      WideColumns(
+        Vector(
+          WideInput.ints("n", Array(-5, 5, 7)),
+          WideInput.ints("d", Array(2, -2, 2)),
+        ),
+      ),
+      ColumnExpr.Div(0, 1),
+      "q",
+    )
+    rows.map(_.cells.last) shouldBe Vector(Cell.Int32(-2), Cell.Int32(-2), Cell.Int32(3))
+    val longs = agree(
+      WideColumns(
+        Vector(
+          WideInput.longs("n", Array(-5L)),
+          WideInput.longs("d", Array(2L)),
+        ),
+      ),
+      ColumnExpr.Div(0, 1),
+      "q",
+    )
+    longs.map(_.cells.last) shouldBe Vector(Cell.Int64(-2L))
+  }
+
+  it should "leave a null divisor null" in {
+    val rows = agree(
+      WideColumns(
+        Vector(
+          WideInput.ints("n", Array(5, 5)),
+          WideInput.nullableInts("d", Array(0, 2), Array(false, true)),
+        ),
+      ),
+      ColumnExpr.Div(0, 1),
+      "q",
+    )
+    rows.map(_.cells.last) shouldBe Vector(Cell.Null, Cell.Int32(2))
+  }
+
+  it should "divide a double" in {
+    val rows = agree(
+      WideColumns(
+        Vector(
+          WideInput.doubles("n", Array(1.5)),
+          WideInput.doubles("d", Array(0.5)),
+        ),
+      ),
+      ColumnExpr.Div(0, 1),
+      "q",
+    )
+    rows.head.fields.last.kind shouldBe ColumnKind.Float64
+    rows.map(_.cells.last) shouldBe Vector(Cell.Float64(3.0))
+  }
+
+  it should "refuse a present zero divisor" in {
+    val table = WideColumns(
+      Vector(
+        WideInput.ints("n", Array(8, 5)),
+        WideInput.ints("d", Array(2, 0)),
+      ),
+    )
+    val rowThrown = the[IllegalArgumentException] thrownBy {
+      table.compute(ColumnExpr.Div(0, 1), "q")
+    }
+    val batchThrown = the[IllegalArgumentException] thrownBy {
+      WideExpr.append(WideBatch.encode(table), table.fields, ColumnExpr.Div(0, 1), "q")
+    }
+    rowThrown.getMessage shouldBe "divide by zero"
+    batchThrown.getMessage shouldBe "divide by zero"
+    val negativeZero = WideColumns(
+      Vector(
+        WideInput.doubles("n", Array(1.0)),
+        WideInput.doubles("d", Array(-0.0)),
+      ),
+    )
+    val floatThrown = the[IllegalArgumentException] thrownBy {
+      negativeZero.compute(ColumnExpr.Div(0, 1), "q")
+    }
+    floatThrown.getMessage shouldBe "divide by zero"
+  }
+
   it should "reject a string factor" in {
     val table = WideColumns(
       Vector(

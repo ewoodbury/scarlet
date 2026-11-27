@@ -1,13 +1,14 @@
 package com.ewoodbury.scarlet.columnar
 
-import com.ewoodbury.scarlet.core.{ColumnExpr, ColumnField, ColumnKind, CompareOp}
+import com.ewoodbury.scarlet.core.{ColumnExpr, ColumnField, ColumnKind, ColumnLiteral, CompareOp}
 
 /**
  * Appends one computed column to a wide batch.
  *
  * Arithmetic uses the wider input: double, then float, then long, then int. A compare yields bool.
- * A null input leaves the result null and the value slot unread. Divide and strings are not in
- * this set. Casts are the same Java conversions the row path uses.
+ * A null input leaves the result null and the value slot unread. Divide uses that same widening
+ * and refuses a present zero divisor. Strings are not in this set. Casts are the same Java
+ * conversions the row path uses. A literal fills every row and is never null.
  */
 object WideExpr:
 
@@ -27,11 +28,15 @@ object WideExpr:
     val length = batch.length
     expr match
       case ColumnExpr.Add(left, right) =>
-        arithmetic(batch, left, right, kind, length, add = true, sub = false)
+        arithmetic(batch, left, right, kind, length, add = true, sub = false, div = false)
       case ColumnExpr.Sub(left, right) =>
-        arithmetic(batch, left, right, kind, length, add = false, sub = true)
+        arithmetic(batch, left, right, kind, length, add = false, sub = true, div = false)
       case ColumnExpr.Mul(left, right) =>
-        arithmetic(batch, left, right, kind, length, add = false, sub = false)
+        arithmetic(batch, left, right, kind, length, add = false, sub = false, div = false)
+      case ColumnExpr.Div(left, right) =>
+        arithmetic(batch, left, right, kind, length, add = false, sub = false, div = true)
+      case ColumnExpr.Lit(value) =>
+        literal(value, length)
       case ColumnExpr.Compare(op, left, right) =>
         compare(batch, op, left, right, length)
       case ColumnExpr.And(left, right) =>
@@ -51,15 +56,16 @@ object WideExpr:
       length: Int,
       add: Boolean,
       sub: Boolean,
+      div: Boolean,
   ): Column = kind match
     case ColumnKind.Int32 =>
-      int32(at(batch, left), at(batch, right), length, add, sub)
+      int32(at(batch, left), at(batch, right), length, add, sub, div)
     case ColumnKind.Int64 =>
-      int64(at(batch, left), at(batch, right), length, add, sub)
+      int64(at(batch, left), at(batch, right), length, add, sub, div)
     case ColumnKind.Float32 =>
-      float32(at(batch, left), at(batch, right), length, add, sub)
+      float32(at(batch, left), at(batch, right), length, add, sub, div)
     case ColumnKind.Float64 =>
-      float64(at(batch, left), at(batch, right), length, add, sub)
+      float64(at(batch, left), at(batch, right), length, add, sub, div)
     case _ =>
       throw new IllegalArgumentException(s"arithmetic result $kind")
 
@@ -70,6 +76,7 @@ object WideExpr:
       length: Int,
       add: Boolean,
       sub: Boolean,
+      div: Boolean,
   ): Column =
     val lv = ints(left, length)
     val rv = ints(right, length)
@@ -84,6 +91,7 @@ object WideExpr:
         out(row) =
           if (add) then lv(row) + rv(row)
           else if (sub) then lv(row) - rv(row)
+          else if (div) then divInt(lv(row), rv(row))
           else lv(row) * rv(row)
       row += 1
     }
@@ -96,6 +104,7 @@ object WideExpr:
       length: Int,
       add: Boolean,
       sub: Boolean,
+      div: Boolean,
   ): Column =
     val lv = longs(left, length)
     val rv = longs(right, length)
@@ -110,6 +119,7 @@ object WideExpr:
         out(row) =
           if (add) then lv(row) + rv(row)
           else if (sub) then lv(row) - rv(row)
+          else if (div) then divLong(lv(row), rv(row))
           else lv(row) * rv(row)
       row += 1
     }
@@ -122,6 +132,7 @@ object WideExpr:
       length: Int,
       add: Boolean,
       sub: Boolean,
+      div: Boolean,
   ): Column =
     val lv = floats(left, length)
     val rv = floats(right, length)
@@ -136,6 +147,7 @@ object WideExpr:
         out(row) =
           if (add) then lv(row) + rv(row)
           else if (sub) then lv(row) - rv(row)
+          else if (div) then divFloat(lv(row), rv(row))
           else lv(row) * rv(row)
       row += 1
     }
@@ -148,6 +160,7 @@ object WideExpr:
       length: Int,
       add: Boolean,
       sub: Boolean,
+      div: Boolean,
   ): Column =
     val lv = doubles(left, length)
     val rv = doubles(right, length)
@@ -162,10 +175,39 @@ object WideExpr:
         out(row) =
           if (add) then lv(row) + rv(row)
           else if (sub) then lv(row) - rv(row)
+          else if (div) then divDouble(lv(row), rv(row))
           else lv(row) * rv(row)
       row += 1
     }
     Float64Column.of(out, packed(present), length)
+
+  private def divInt(left: Int, right: Int): Int =
+    if (right == 0) then refuseZero() else left / right
+
+  private def divLong(left: Long, right: Long): Long =
+    if (right == 0L) then refuseZero() else left / right
+
+  private def divFloat(left: Float, right: Float): Float =
+    if (right == 0.0f) then refuseZero() else left / right
+
+  private def divDouble(left: Double, right: Double): Double =
+    if (right == 0.0) then refuseZero() else left / right
+
+  private def refuseZero(): Nothing =
+    throw new IllegalArgumentException("divide by zero")
+
+  private def literal(value: ColumnLiteral, length: Int): Column =
+    val present = Validity.allValid(length)
+    value match
+      case ColumnLiteral.Int32(number) =>
+        Int32Column.of(Array.tabulate(length)(_ => number), present, length)
+      case ColumnLiteral.Int64(number) =>
+        Int64Column.of(Array.tabulate(length)(_ => number), present, length)
+      case ColumnLiteral.Float64(number) =>
+        Float64Column.of(Array.tabulate(length)(_ => number), present, length)
+      case ColumnLiteral.Bool(flag) =>
+        val byte: Byte = if (flag) then 1.toByte else 0.toByte
+        BoolColumn.of(Array.tabulate(length)(_ => byte), present, length)
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def compare(

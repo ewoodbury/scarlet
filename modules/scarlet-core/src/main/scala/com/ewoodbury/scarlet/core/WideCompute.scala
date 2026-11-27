@@ -143,6 +143,10 @@ private[scarlet] object WideCompute:
           binary(kind, columns(left), columns(right), row, _ - _, _ - _, _ - _, _ - _)
         case ColumnExpr.Mul(left, right) =>
           binary(kind, columns(left), columns(right), row, _ * _, _ * _, _ * _, _ * _)
+        case ColumnExpr.Div(left, right) =>
+          binary(kind, columns(left), columns(right), row, divInt, divLong, divFloat, divDouble)
+        case ColumnExpr.Lit(value) =>
+          literal(value)
         case ColumnExpr.Compare(op, left, right) =>
           val wider = ColumnExpr
             .wider(columns(left).field.kind, columns(right).field.kind)
@@ -238,11 +242,34 @@ private[scarlet] object WideCompute:
       case ColumnExpr.Add(left, right) => on(columns, left, row) && on(columns, right, row)
       case ColumnExpr.Sub(left, right) => on(columns, left, row) && on(columns, right, row)
       case ColumnExpr.Mul(left, right) => on(columns, left, row) && on(columns, right, row)
+      case ColumnExpr.Div(left, right) => on(columns, left, row) && on(columns, right, row)
+      case ColumnExpr.Lit(_) => true
       case ColumnExpr.Compare(_, left, right) => on(columns, left, row) && on(columns, right, row)
       case ColumnExpr.And(left, right) => on(columns, left, row) && on(columns, right, row)
       case ColumnExpr.Or(left, right) => on(columns, left, row) && on(columns, right, row)
       case ColumnExpr.Not(input) => on(columns, input, row)
       case ColumnExpr.Cast(input, _) => on(columns, input, row)
+
+  private def divInt(left: Int, right: Int): Int =
+    if (right == 0) then refuseZero() else left / right
+
+  private def divLong(left: Long, right: Long): Long =
+    if (right == 0L) then refuseZero() else left / right
+
+  private def divFloat(left: Float, right: Float): Float =
+    if (right == 0.0f) then refuseZero() else left / right
+
+  private def divDouble(left: Double, right: Double): Double =
+    if (right == 0.0) then refuseZero() else left / right
+
+  private def refuseZero(): Nothing =
+    throw new IllegalArgumentException("divide by zero")
+
+  private def literal(value: ColumnLiteral): Cell = value match
+    case ColumnLiteral.Int32(number) => Cell.Int32(number)
+    case ColumnLiteral.Int64(number) => Cell.Int64(number)
+    case ColumnLiteral.Float64(number) => Cell.Float64(number)
+    case ColumnLiteral.Bool(number) => Cell.Bool(number)
 
   private def on(columns: Vector[WideColumn], ordinal: Int, row: Int): Boolean =
     columns(ordinal).isPresent(row)
