@@ -43,6 +43,19 @@ private[execution] object SortStages:
   def stringValueKey(pair: (String, Int)): (Int, String) =
     (intOrZero(pair.productElement(1)), stringOrEmpty(pair.productElement(0)))
 
+  /** Effective int key of `(Int, Long)`. A null key orders as zero. The pair is not rewritten. */
+  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Product"))
+  def intLongKey(pair: (Int, Long)): Int =
+    intOrZero(pair.productElement(0))
+
+  /**
+   * Order key for `(Int, Long)` value sort: value descending, then key ascending. A null orders as
+   * zero. The pair itself is not rewritten.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Product"))
+  def intLongValueKey(pair: (Int, Long)): (Long, Int) =
+    (longOrZero(pair.productElement(1)), intOrZero(pair.productElement(0)))
+
   /**
    * Range-partitions and locally sorts. The typed sorts share this shuffle. The caller supplies
    * the key function and the ordering.

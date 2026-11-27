@@ -103,7 +103,8 @@ private[execution] object Layout:
       columns(node.kind)
     case node: PhysicalOp.IntLongCountSum =>
       columns(node.kind)
-    case _: PhysicalOp.IntLongHashAggregate =>
+    case _: PhysicalOp.IntLongHashAggregate | _: PhysicalOp.SortByIntLongKey |
+        _: PhysicalOp.SortByIntLongValueDesc =>
       Output.IntLongPairs(
         Vector(
           ColumnLayout(ColumnType.Int32, NullPolicy.Nullable),
@@ -298,3 +299,4 @@ private[execution] enum KernelChoice:
   case Scan, Filter, Project, Column, MapValue, IntLongMapValue, MapKey, Pipeline, Union, Exchange
   case SortByLongValueDesc, SortByStringValueDesc
   case IntLongHashAggregate
+  case SortByIntLongKey, SortByIntLongValueDesc

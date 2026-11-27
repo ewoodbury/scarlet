@@ -954,6 +954,9 @@ private[execution] object ColumnarInterpreter:
           ColumnarPlanner.shuffleWidth,
         ),
       )
+    case (plan, op) if IntLongSortColumns.accepts(plan, op) =>
+      require(selectedPartition.isEmpty, "a partition selector cannot run a sort")
+      IntLongSortColumns.dispatch(plan, op, ordinals)
     case (plan, op) if LongOuterArms.accepts(plan, op) =>
       // Boundary guard: take refuses a join, so a selector never reaches this arm.
       require(selectedPartition.isEmpty, "a partition selector cannot run a join")
