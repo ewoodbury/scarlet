@@ -132,6 +132,8 @@ final class StageExecutor(
         executeCountByKeyOperation(inputPartitions)
       case Some(_: CountSumByKeyWideOp) =>
         executeCountSumByKeyOperation(inputPartitions)
+      case Some(op: ExtremumByKeyWideOp) =>
+        executeExtremumByKeyOperation(op, inputPartitions)
       case Some(_: CountSumByLongKeyWideOp) =>
         executeCountSumByLongKeyOperation(inputPartitions)
       case Some(_: CountSumByStringKeyWideOp) =>
@@ -288,6 +290,15 @@ final class StageExecutor(
   ): Seq[Partition[_]] = {
     val typedPartitions = inputPartitions.asInstanceOf[Seq[Partition[(Any, Any)]]]
     executePerPartition(typedPartitions, Stage.countSumByKeyLocal)
+  }
+
+  /** Per-partition min or max. Input partitions are already key-hashed. */
+  private def executeExtremumByKeyOperation(
+      op: ExtremumByKeyWideOp,
+      inputPartitions: Seq[Partition[_]],
+  ): Seq[Partition[_]] = {
+    val typedPartitions = inputPartitions.asInstanceOf[Seq[Partition[(Any, Any)]]]
+    executePerPartition(typedPartitions, Stage.extremumByKeyLocal(op.minimum))
   }
 
   /** Per-partition count and sum of `(Long, Long)`. Input partitions are already key-hashed. */

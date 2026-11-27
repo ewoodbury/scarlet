@@ -181,6 +181,17 @@ object Stage {
     }
   }
 
+  /**
+   * Local min or max on a single partition. A null key is dropped. A null value is skipped. A key
+   * whose values are all null emits no row. Used for shuffle-bypass and as the per-partition
+   * operator of an extremum shuffle stage.
+   */
+  def extremumByKeyLocal(minimum: Boolean): Stage[(Any, Any), (Int, Int)] = {
+    SingleOpStage { p =>
+      Partition(ExtremumRows.of(p.data, minimum))
+    }
+  }
+
   /** Local count and sum of `(Long, Long)`. A null key is dropped. A null value is not added. */
   def countSumByLongKeyLocal: Stage[(Any, Any), (Long, Int, Long)] = {
     SingleOpStage { p =>

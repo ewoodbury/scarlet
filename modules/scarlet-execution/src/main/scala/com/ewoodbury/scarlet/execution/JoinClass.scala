@@ -149,8 +149,8 @@ private[execution] object JoinClass:
       case KernelChoice.IntHashAggregate | KernelChoice.LongHashAggregate |
           KernelChoice.StringHashAggregate | KernelChoice.IntLongProjectSum |
           KernelChoice.IntLongHashAggregate | KernelChoice.CountByKey |
-          KernelChoice.CountThroughProbe | KernelChoice.CountSum | KernelChoice.JoinProbeSum |
-          KernelChoice.SortByIntKey | KernelChoice.SortByIntValueDesc |
+          KernelChoice.CountThroughProbe | KernelChoice.CountSum | KernelChoice.IntExtremum |
+          KernelChoice.JoinProbeSum | KernelChoice.SortByIntKey | KernelChoice.SortByIntValueDesc |
           KernelChoice.SortByLongKey | KernelChoice.SortByStringKey |
           KernelChoice.SortByLongValueDesc | KernelChoice.SortByStringValueDesc |
           KernelChoice.SortByIntLongKey | KernelChoice.SortByIntLongValueDesc |

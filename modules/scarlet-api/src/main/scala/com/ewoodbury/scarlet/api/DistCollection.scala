@@ -242,6 +242,28 @@ final case class DistCollection[A](plan: Plan[A]):
     DistCollection(Plan.CountSumByKeyOp(kvPlan))
 
   /**
+   * Minimum `(Int, Int)` value by key, requiring a shuffle. A null key is dropped. A null value is
+   * skipped. A key whose values are all null emits no row. One `(key, value)` row per distinct key
+   * that has a present value. Does not trigger computation.
+   *
+   * Generic `groupByKey.map` does not call this. The node is the witness, the way
+   * [[countSumByKey]] is, and the planner does not inspect a grouped map.
+   */
+  def minByKey(using ev: A =:= (Int, Int)): DistCollection[(Int, Int)] =
+    DistCollection(Plan.ExtremumByKeyOp(kvPlan, minimum = true))
+
+  /**
+   * Maximum `(Int, Int)` value by key, requiring a shuffle. A null key is dropped. A null value is
+   * skipped. A key whose values are all null emits no row. One `(key, value)` row per distinct key
+   * that has a present value. Does not trigger computation.
+   *
+   * Generic `groupByKey.map` does not call this. The node is the witness, the way
+   * [[countSumByKey]] is, and the planner does not inspect a grouped map.
+   */
+  def maxByKey(using ev: A =:= (Int, Int)): DistCollection[(Int, Int)] =
+    DistCollection(Plan.ExtremumByKeyOp(kvPlan, minimum = false))
+
+  /**
    * Counts and sums `(Long, Long)` values by key, requiring a shuffle. A null key is dropped. A
    * null value is counted and not added. The count is an `Int` and wraps. The sum is a `Long`. One
    * `(key, count, sum)` row per distinct key. Does not trigger computation.

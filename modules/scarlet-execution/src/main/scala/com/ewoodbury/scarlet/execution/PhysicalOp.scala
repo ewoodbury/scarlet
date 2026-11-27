@@ -644,6 +644,7 @@ enum PhysicalOp:
               s"countByKey column is $other, expected int, long, or string pairs",
             )
     case CountSum(_) => PhysicalOp.Kind.CountSums
+    case IntExtremum(_, _) => PhysicalOp.Kind.Pairs
     case LongCountSum(_) => PhysicalOp.Kind.LongCountSums
     case StringCountSum(_) => PhysicalOp.Kind.StringCountSums
     case IntLongHashAggregate(_) => PhysicalOp.Kind.Pairs
@@ -750,6 +751,9 @@ enum PhysicalOp:
     case GroupedDecode(child) => s"GroupedDecode(${child.shape})"
     case CountByKey(child) => s"CountByKey(${child.shape})"
     case CountSum(child) => s"CountSum(${child.shape})"
+    case IntExtremum(child, minimum) =>
+      val which = if (minimum) then "min" else "max"
+      s"IntExtremum(${child.shape},$which)"
     case LongCountSum(child) => s"LongCountSum(${child.shape})"
     case StringCountSum(child) => s"StringCountSum(${child.shape})"
     case IntLongHashAggregate(child) => s"IntLongHashAggregate(${child.shape})"
@@ -968,6 +972,14 @@ enum PhysicalOp:
    * schema is `[Int32, Int64, Int64]`. There is no spill.
    */
   case IntLongSortMergeFullOuter(left: PhysicalOp, right: PhysicalOp)
+
+  /**
+   * Min or max of `(Int, Int)` pairs. The child is an [[Exchange]]. The kernel shuffles. A null
+   * key is dropped. A null value is skipped, and a key whose values are all null emits no row.
+   * `minimum` selects the min. Output kind is [[PhysicalOp.Kind.Pairs]]. The schema is
+   * `[Int32, Int32]`.
+   */
+  case IntExtremum(child: PhysicalOp, minimum: Boolean)
 
 object PhysicalOp:
 

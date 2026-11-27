@@ -628,6 +628,9 @@ object StageBuilder:
       case countSum: Plan.CountSumByKeyOp =>
         CountSumStages.attach(ctx, countSum, builderMap, dependencies)
 
+      case extremum: Plan.ExtremumByKeyOp =>
+        ExtremumStages.attach(ctx, extremum, builderMap, dependencies)
+
       case longSum: Plan.CountSumByLongKeyOp =>
         CountSumStages.attachLong(ctx, longSum, builderMap, dependencies)
 
@@ -1058,6 +1061,7 @@ object StageBuilder:
       case GroupByKeyWideOp(m) => m
       case CountByKeyWideOp(m) => m
       case CountSumByKeyWideOp(m) => m
+      case ExtremumByKeyWideOp(m, _) => m
       case CountSumByLongKeyWideOp(m) => m
       case CountSumByStringKeyWideOp(m) => m
       case CountSumByIntLongKeyWideOp(m) => m

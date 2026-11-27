@@ -86,6 +86,8 @@ private[execution] object ColumnUse:
       walk(source, child, parent union Set(0, 1))
     case (Plan.CountSumByIntLongKeyOp(source), PhysicalOp.IntLongCountSum(child)) =>
       walk(source, child, parent union Set(0, 1))
+    case (Plan.ExtremumByKeyOp(source, _), PhysicalOp.IntExtremum(child, _)) =>
+      walk(source, child, parent union Set(0, 1))
     case (Plan.SortByIntKeyOp(source), PhysicalOp.SortByIntKey(child)) =>
       walk(source, child, parent union Set(0, 1))
     case (Plan.SortByIntValueDescOp(source), PhysicalOp.SortByIntValueDesc(child)) =>
@@ -175,6 +177,7 @@ private[execution] object ColumnUse:
     case Plan.CountSumByLongKeyOp(source) => Some(source)
     case Plan.CountSumByStringKeyOp(source) => Some(source)
     case Plan.CountSumByIntLongKeyOp(source) => Some(source)
+    case Plan.ExtremumByKeyOp(source, _) => Some(source)
     case Plan.ReduceByKeyOp(source, _) => Some(source)
     case Plan.SortByOp(source, _, _) => Some(source)
     case Plan.SortByIntKeyOp(source) => Some(source)

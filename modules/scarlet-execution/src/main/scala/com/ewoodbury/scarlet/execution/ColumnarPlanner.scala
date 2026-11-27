@@ -842,6 +842,8 @@ object ColumnarPlanner:
       AggregateBinding.countSum(source, lowerChild)
     case Plan.CountSumByIntLongKeyOp(source) =>
       AggregateBinding.countSum(source, lowerChild)
+    case Plan.ExtremumByKeyOp(source, minimum) =>
+      AggregateBinding.extremum(source, minimum, lowerChild)
     case plan if JoinLowering.isJoin(plan) => JoinLowering.lower(plan, lowerChild)
     case Plan.SortByIntKeyOp(source) =>
       SortLowering.lowerInt(source, lowerPlan)
@@ -1087,6 +1089,8 @@ object ColumnarPlanner:
       hashed(PhysicalOp.Kind.Pairs)
     case _: PhysicalOp.IntLongCountSum =>
       hashed(PhysicalOp.Kind.CountSums)
+    case _: PhysicalOp.IntExtremum =>
+      hashed(PhysicalOp.Kind.Pairs)
     case _: PhysicalOp.JoinProbeSum =>
       hashed(PhysicalOp.Kind.IntLongSums)
     case PhysicalOp.Exchange(_) =>

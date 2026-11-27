@@ -79,6 +79,7 @@ private[execution] object ColumnBinding:
     case Project, Pipeline
     case Union
     case SortByLongValueDesc, SortByStringValueDesc
+    case ExtremumByKey
 
   /**
    * Reducer witness the caller already computed.
@@ -179,7 +180,8 @@ private[execution] object ColumnBinding:
           Operator.SortByStringKey | Operator.SortByLongValueDesc |
           Operator.SortByStringValueDesc | Operator.GroupByKey | Operator.Distinct |
           Operator.Keys | Operator.Values | Operator.FilterKeys | Operator.FilterValues |
-          Operator.Project | Operator.Pipeline | Operator.MapValues | Operator.IntLongMapValue =>
+          Operator.Project | Operator.Pipeline | Operator.MapValues | Operator.IntLongMapValue |
+          Operator.ExtremumByKey =>
         outer(side) || refused(nulls) || layout.exists(absent)
 
   private def refused(nulls: NullAdmission): Boolean = nulls match
@@ -229,7 +231,7 @@ private[execution] object ColumnBinding:
         Operator.SortByIntValueDesc | Operator.SortByLongKey | Operator.SortByStringKey |
         Operator.SortByLongValueDesc | Operator.SortByStringValueDesc | Operator.GroupByKey |
         Operator.Distinct | Operator.Keys | Operator.Values | Operator.Project |
-        Operator.Pipeline | Operator.Union =>
+        Operator.Pipeline | Operator.Union | Operator.ExtremumByKey =>
       false
 
   /**
@@ -324,7 +326,7 @@ private[execution] object ColumnBinding:
         Operator.SortByLongValueDesc | Operator.SortByStringValueDesc | Operator.GroupByKey |
         Operator.Distinct | Operator.Keys | Operator.Values | Operator.Filter |
         Operator.FilterKeys | Operator.FilterValues | Operator.Project | Operator.Pipeline |
-        Operator.Union =>
+        Operator.Union | Operator.ExtremumByKey =>
       None
 
   private def assumedIntLong(layout: Vector[ColumnLayout]): Boolean = Layout.AssumedIntLong match
@@ -390,6 +392,8 @@ private[execution] object ColumnBinding:
         Some(KernelChoice.IntHashAggregate)
       case (Vector(ColumnType.Int32, ColumnType.Int32), Operator.CountSumByKey) =>
         Some(KernelChoice.CountSum)
+      case (Vector(ColumnType.Int32, ColumnType.Int32), Operator.ExtremumByKey) =>
+        Some(KernelChoice.IntExtremum)
       case (Vector(ColumnType.Int32, ColumnType.Int32), Operator.SortByIntKey) =>
         Some(KernelChoice.SortByIntKey)
       case (Vector(ColumnType.Int32, ColumnType.Int32), Operator.SortByIntValueDesc) =>
