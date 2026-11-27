@@ -218,7 +218,8 @@ object LongHashCount:
     }
     keyType match
       case LogicalType.Int64 => ()
-      case LogicalType.Int32 | LogicalType.Float64 | LogicalType.Bool | LogicalType.Utf8Dict =>
+      case LogicalType.Int32 | LogicalType.Float64 | LogicalType.Float32 | LogicalType.Bool |
+          LogicalType.Utf8Dict =>
         throw new ColumnarFallback(
           s"countByKey expects an Int64 key column, found $keyType",
         )

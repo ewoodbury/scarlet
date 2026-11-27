@@ -1022,6 +1022,7 @@ private[scarlet] object Selection:
       case int32: Int32Column => gatherInt32(int32, index, count, capacity)
       case int64: Int64Column => gatherInt64(int64, index, count, capacity)
       case float64: Float64Column => gatherFloat64(float64, index, count, capacity)
+      case float32: Float32Column => gatherFloat32(float32, index, count, capacity)
       case bool: BoolColumn => gatherBool(bool, index, count, capacity)
       case utf8: DictUtf8Column => gatherUtf8(utf8, index, count, capacity)
 
@@ -1087,6 +1088,27 @@ private[scarlet] object Selection:
       slot += 1
     }
     Float64Column.of(out, Validity.fromWords(dstWords, capacity), count)
+
+  private def gatherFloat32(
+      column: Float32Column,
+      index: Array[Int],
+      count: Int,
+      capacity: Int,
+  ): Float32Column =
+    val in = column.values
+    val srcWords = column.validity.words
+    val out = new Array[Float](capacity)
+    val dstWords = Validity.allocate(capacity)
+    var slot = 0
+    while (slot < count) {
+      val row = index(slot)
+      if (Validity.isSet(srcWords, row)) then
+        out(slot) = in(row)
+        Validity.setBit(dstWords, slot)
+      else out(slot) = 0.0f
+      slot += 1
+    }
+    Float32Column.of(out, Validity.fromWords(dstWords, capacity), count)
 
   private def gatherBool(
       column: BoolColumn,

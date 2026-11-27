@@ -290,8 +290,9 @@ private[execution] object RowBoundary:
   private def numeric(descriptor: Plan.SourceDescriptor): Boolean =
     descriptor match
       case Plan.SourceDescriptor.Ints | Plan.SourceDescriptor.Longs |
-          Plan.SourceDescriptor.Doubles | Plan.SourceDescriptor.Pairs |
-          Plan.SourceDescriptor.Bools | Plan.SourceDescriptor.LongPairs =>
+          Plan.SourceDescriptor.Doubles | Plan.SourceDescriptor.Float32s |
+          Plan.SourceDescriptor.Pairs | Plan.SourceDescriptor.Bools |
+          Plan.SourceDescriptor.LongPairs =>
         true
       case Plan.SourceDescriptor.Unknown | Plan.SourceDescriptor.Strings =>
         false

@@ -12,6 +12,8 @@ boolean filter chain	Filter
 double source	Scan
 double filter	Filter
 double map	Project
+single-precision Float source	Scan
+single-precision Float map	Project
 string source	Scan
 string filter	Filter
 string map	Project

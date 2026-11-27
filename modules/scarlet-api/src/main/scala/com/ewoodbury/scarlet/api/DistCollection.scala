@@ -655,7 +655,10 @@ private[scarlet] object IntJoinTriplePredicate:
 // Companion object for creating a DistCollection from a source
 object DistCollection:
 
-  /** Sum of an `Int` or `Long` column as a `Long`, or a `Double` column as a `Double`. */
+  /**
+   * Sum of an `Int` or `Long` column as a `Long`, a `Double` column as a `Double`, or a `Float`
+   * column as a `Float`.
+   */
   trait SumOf[A, R]:
     def apply(plan: Plan[A]): R
 
@@ -668,6 +671,9 @@ object DistCollection:
 
     given SumOf[Double, Double] with
       def apply(plan: Plan[Double]): Double = service.sumDouble(plan)
+
+    given SumOf[Float, Float] with
+      def apply(plan: Plan[Float]): Float = service.sumFloat(plan)
 
   /**
    * Loads the execution module while the registry is still empty. A missing module leaves
@@ -787,6 +793,18 @@ object DistCollection:
 
     splitSource(values.length, numPartitions, Plan.SourceDescriptor.Doubles) { (start, end) =>
       DoubleArrays.fromOwned(values.slice(start, end))
+    }
+
+  /**
+   * Partitions a primitive `Float` array. Each partition is a
+   * [[com.ewoodbury.scarlet.core.FloatArrays]] copy of its range. The caller's array is not
+   * retained, and the partition array is not publicly mutable.
+   */
+  def ofFloats(values: Array[Float], numPartitions: Int): DistCollection[Float] =
+    import com.ewoodbury.scarlet.core.FloatArrays
+
+    splitSource(values.length, numPartitions, Plan.SourceDescriptor.Float32s) { (start, end) =>
+      FloatArrays.fromOwned(values.slice(start, end))
     }
 
   /**

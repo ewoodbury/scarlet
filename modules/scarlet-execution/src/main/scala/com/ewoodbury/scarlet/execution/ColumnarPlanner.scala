@@ -381,6 +381,17 @@ object ColumnarPlanner:
       case _ => None
 
   /**
+   * Sum of a float32 plan. `None` means the row path. Null slots are skipped. The total is a
+   * `Float`, the same accumulator as the row fold. The catch is the row-path fallback.
+   */
+  def trySumFloat(plan: Plan[_]): Option[Float] =
+    accepted(plan) match
+      case Some(op) if op.kind eq PhysicalOp.Kind.Float32s =>
+        try Some(Float32Sum.of(plan, op))
+        catch case _: ClassCastException => None
+      case _ => None
+
+  /**
    * Wide sum of a finished long column. `None` means the row path, including a plan whose result
    * is not a long column. The sum wraps. Null slots are skipped. A filter/project chain adds in
    * the fused walk and does not write that chain's output column. The catch is the row-path
@@ -605,7 +616,8 @@ object ColumnarPlanner:
             IntPairCells.isNullablePair(first) && values.forall(IntPairCells.isNullablePair)
       case Plan.SourceDescriptor.Ints | Plan.SourceDescriptor.Longs |
           Plan.SourceDescriptor.Doubles | Plan.SourceDescriptor.Bools |
-          Plan.SourceDescriptor.Strings | Plan.SourceDescriptor.LongPairs =>
+          Plan.SourceDescriptor.Strings | Plan.SourceDescriptor.LongPairs |
+          Plan.SourceDescriptor.Float32s =>
         false
 
   private[execution] def isInt(op: PhysicalOp): Boolean = op.kind match
@@ -910,6 +922,8 @@ object ColumnarPlanner:
       // The kind names this element chain. [[ProjectBinding]] asks for [[KernelChoice.Project]]
       // or [[KernelChoice.Pipeline]]. This match does not pick the class.
       ProjectBinding.chain(child, steps)
+    case PhysicalOp.Kind.Float32s =>
+      Float32Steps.lower(child, steps)
     case PhysicalOp.Kind.Pairs | PhysicalOp.Kind.Triples | PhysicalOp.Kind.LongPairs =>
       steps.foldLeft(Option(child)) { (current, step) =>
         current.flatMap(op => lowerElementStep(op, step))
@@ -1148,7 +1162,7 @@ object ColumnarPlanner:
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
-        PhysicalOp.Kind.IntLongTriples | PhysicalOp.Kind.IntLongOuter =>
+        PhysicalOp.Kind.IntLongTriples | PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Float32s =>
       Layout.Columnar(ScarletConf.get.columnarBatchSize)
 
   private[execution] def batchSize: Int =

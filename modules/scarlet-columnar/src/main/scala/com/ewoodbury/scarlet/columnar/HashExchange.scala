@@ -533,6 +533,7 @@ object HashExchange:
       case int32: Int32Column => scatterInt32(int32, dest, counts)
       case int64: Int64Column => scatterInt64(int64, dest, counts)
       case float64: Float64Column => scatterFloat64(float64, dest, counts)
+      case float32: Float32Column => scatterFloat32(float32, dest, counts)
       case bool: BoolColumn => scatterBool(bool, dest, counts)
       case utf8: DictUtf8Column => scatterUtf8(utf8, dest, counts)
 
@@ -648,6 +649,30 @@ object HashExchange:
     }
     outputs.indices.map { part =>
       Float64Column.of(outputs(part), Validity.fromWords(words(part), counts(part)), counts(part))
+    }.toVector
+
+  private def scatterFloat32(
+      column: Float32Column,
+      dest: Array[Int],
+      counts: Array[Int],
+  ): Vector[Column] =
+    val outputs = counts.map(count => new Array[Float](count))
+    val words = counts.map(count => Validity.allocate(count))
+    val cursor = new Array[Int](counts.length)
+    val values = column.values
+    val validity = column.validity.words
+    var row = 0
+    while (row < dest.length) {
+      val part = dest(row)
+      if (part >= 0) then
+        val at = cursor(part)
+        outputs(part)(at) = values(row)
+        if (Validity.isSet(validity, row)) then Validity.setBit(words(part), at)
+        cursor(part) = at + 1
+      row += 1
+    }
+    outputs.indices.map { part =>
+      Float32Column.of(outputs(part), Validity.fromWords(words(part), counts(part)), counts(part))
     }.toVector
 
   private def scatterBool(

@@ -38,6 +38,11 @@ trait ExecutionService {
   def sumDouble(plan: Plan[Double]): Double
 
   /**
+   * Sums a `Float` plan. Empty input returns zero. The total is a `Float`.
+   */
+  def sumFloat(plan: Plan[Float]): Float
+
+  /**
    * Sums `(Int, Int)` values by key as a `Long` and folds the group sums. Empty input returns
    * zero. A null component drops the row before a fused filter or map. Any other cell type fails.
    * The total does not wrap at `Int`.
@@ -88,6 +93,12 @@ object ExecutionService {
     }
 
     def sumDouble(plan: Plan[Double]): Double = {
+      throw new UnsupportedOperationException(
+        "No execution service registered. Please ensure the execution module is properly initialized.",
+      )
+    }
+
+    def sumFloat(plan: Plan[Float]): Float = {
       throw new UnsupportedOperationException(
         "No execution service registered. Please ensure the execution module is properly initialized.",
       )

@@ -196,6 +196,7 @@ private[execution] object Layout:
     case LogicalType.Float64 => ColumnType.Float64
     case LogicalType.Bool => ColumnType.Bool
     case LogicalType.Utf8Dict => ColumnType.Utf8Dict
+    case LogicalType.Float32 => ColumnType.Float32
 
   private def triples(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Triples => true
@@ -250,7 +251,7 @@ private[execution] object Layout:
     column.copy(nullPolicy = NullPolicy.Absence)
 
 private[execution] enum ColumnType:
-  case Int32, Int64, Float64, Bool, Utf8Dict
+  case Int32, Int64, Float64, Bool, Utf8Dict, Float32
 
 /**
  * `Absence` is a missing outer-join partner. It is not [[NullPolicy.Nullable]].

@@ -108,6 +108,56 @@ private[execution] object SourceEncode:
     if (built.forall(_.isDefined)) then BatchCodec.float64s(built.flatten)
     else BatchCodec.nullableFloat64s(built)
 
+  private[execution] def encodeFloat32s(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
+    import com.ewoodbury.scarlet.core.FloatArrays
+
+    partitions.map { partition =>
+      partition.data match
+        case owned: FloatArrays => Float32Codec.copied(owned.values)
+        case other =>
+          // Named erasure boundary. Classification already selected float elements.
+          @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+          val rows = other.asInstanceOf[Iterable[Float]]
+          Float32Codec.fromIterable(rows)
+    }.toVector
+
+  /**
+   * Float scan under `distinct`. An owned array has no null. A boxed cell keeps a null as a clear
+   * bit. `-0.0f` stays `-0.0f` in the column; the kernel canonicalises it. Other operators still
+   * use [[encodeFloat32s]], which unboxes.
+   */
+  private[execution] def encodeNullableFloat32s(
+      partitions: Seq[Partition[_]],
+  ): Vector[ColumnBatch] =
+    import com.ewoodbury.scarlet.core.FloatArrays
+
+    partitions.map { partition =>
+      partition.data match
+        case owned: FloatArrays => Float32Codec.copied(owned.values)
+        case other => nullableFloat32s(other)
+    }.toVector
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def nullableFloat32s(values: Iterable[Any]): ColumnBatch =
+    val cells = Vector.newBuilder[Option[Float]]
+    values.iterator.foreach { cell =>
+      cell match
+        case null => cells += None
+        case value: Float => cells += Some(value)
+        case other =>
+          val found = other.asInstanceOf[AnyRef].getClass.getName
+          throw new ColumnarFallback(s"columnar float expected a Float, found $found")
+    }
+    val built = cells.result()
+    if (built.forall(_.isDefined)) then Float32Codec.fromIterable(built.flatten)
+    else Float32Codec.fromNullable(built)
+
   private[execution] def encodeBools(partitions: Seq[Partition[_]]): Vector[ColumnBatch] =
     import com.ewoodbury.scarlet.core.BoolArrays
 

@@ -12,11 +12,11 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 /**
  * Distinct keeps one copy of each value across partitions.
  *
- * Int, long, double, and string columns lower to `Dedupe(Exchange(Scan))`. A bool, a float, a
- * pair, and an int column with columnar execution off hash-shuffle on the row path and then
- * dedupe inside each shuffle partition. A per-partition `iterator.distinct` with no shuffle
- * keeps a duplicate that landed in two source partitions. `-0.0` collapses with `0.0`. Every
- * `NaN` stays, matching `==` on a primitive `Double`.
+ * Int, long, double, float, and string columns lower to `Dedupe(Exchange(Scan))`. A bool, a pair,
+ * and an int column with columnar execution off hash-shuffle on the row path and then dedupe
+ * inside each shuffle partition. A per-partition `iterator.distinct` with no shuffle keeps a
+ * duplicate that landed in two source partitions. `-0.0` collapses with `0.0`. Every `NaN` stays,
+ * matching `==` on a primitive `Double`.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Null"))
 class TestDistinct extends AnyFlatSpec with Matchers with BeforeAndAfterEach:

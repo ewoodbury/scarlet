@@ -13,8 +13,9 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Type-by-operation coverage. Every cell runs the same gate checks. The expected record is a
  * literal, so a new type or operation without a row fails this suite. The key set is the product
  * of the types and operations. `Sum` repeats `Source` on purpose: sum is that plan, not a separate
- * node, and the cell documents its sum gates. An accepted Boolean or String source still leaves
- * every sum gate closed.
+ * node, and the cell documents its sum gates. An accepted Boolean, String, or Float32 source still
+ * leaves every sum gate closed. The Float32 cell still runs `source.sum` and compares that `Float`
+ * total with the row path.
  *
  * `Count` and `Take` follow a filter. `MapCount` and `MapTake` follow a same-type map and use that
  * map's gates. Int, Long, Double, and String same-type maps are accepted. A Boolean same-type map
@@ -33,6 +34,7 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
   private val intRows = Array(1, 2, 3, 4)
   private val longRows = Array(1L, 2L, 3L, 4L)
   private val doubleRows = Array(1.0, 2.0, 3.0, 4.0)
+  private val floatRows = Array(1.0f, 2.0f, 3.0f, 4.0f)
   private val boolRows = Array(true, false, true, false)
   private val stringRows = Array("a", "bb", "a", "c")
 
@@ -51,7 +53,7 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       op <- CoverageOp.values.toList
     yield (kind, op)
 
-    product.size shouldBe 45
+    product.size shouldBe 54
     product.size shouldBe CoverageType.values.length * CoverageOp.values.length
     matrix.keySet shouldBe product.toSet
     product.foreach { case (kind, op) =>
@@ -76,7 +78,7 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
             gates.sumInt shouldBe false
             gates.sumLong shouldBe false
             gates.sumDouble shouldBe accepted
-          case CoverageType.Booleans | CoverageType.Strings =>
+          case CoverageType.Booleans | CoverageType.Strings | CoverageType.Float32 =>
             gates.sumInt shouldBe false
             gates.sumLong shouldBe false
             gates.sumDouble shouldBe false
@@ -143,6 +145,7 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       Plan.SourceDescriptor.Strings,
       Plan.SourceDescriptor.Bools,
       Plan.SourceDescriptor.LongPairs,
+      Plan.SourceDescriptor.Float32s,
     )
     PhysicalOp.Kind.values.toSet shouldBe Set(
       PhysicalOp.Kind.Ints,
@@ -169,6 +172,7 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       PhysicalOp.Kind.StringCountSums,
       PhysicalOp.Kind.IntLongTriples,
       PhysicalOp.Kind.IntLongOuter,
+      PhysicalOp.Kind.Float32s,
     )
   }
 
@@ -256,6 +260,7 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     case (CoverageType.Ints, _) => ints(op, gates)
     case (CoverageType.Longs, _) => longs(op, gates)
     case (CoverageType.Doubles, _) => doubles(op, gates)
+    case (CoverageType.Float32, _) => floats(op, gates)
     case (CoverageType.Booleans, _) => booleans(op, gates)
     case (CoverageType.Strings, _) => strings(op, gates)
 
@@ -412,6 +417,57 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
         check(mapped, gates, None, None, Some(rowPath(mapped.sum)))
         mapped.take(Prefix) shouldBe List(2.0, 3.0)
 
+  private def floats(op: CoverageOp, gates: Gates): Unit =
+    val source = DistCollection.ofFloats(floatRows, Partitions)
+    op match
+      case CoverageOp.Source =>
+        val summed = rowPath(source.sum)
+        check(source, gates, None, None, None)
+        source.collect().toVector shouldBe Vector(1.0f, 2.0f, 3.0f, 4.0f)
+        source.sum shouldBe summed
+        summed shouldBe 10.0f
+      case CoverageOp.Filter =>
+        val filtered = source.filter(value => value > 2.0f)
+        val summed = rowPath(filtered.sum)
+        check(filtered, gates, None, None, None)
+        filtered.collect().toVector shouldBe Vector(3.0f, 4.0f)
+        filtered.sum shouldBe summed
+        summed shouldBe 7.0f
+      case CoverageOp.MapSame =>
+        val mapped = source.map(value => value + 1.0f)
+        val summed = rowPath(mapped.sum)
+        check(mapped, gates, None, None, None)
+        mapped.collect().toVector shouldBe Vector(2.0f, 3.0f, 4.0f, 5.0f)
+        mapped.sum shouldBe summed
+        summed shouldBe 14.0f
+      case CoverageOp.MapChanging =>
+        val mapped = source.map(value => value.toInt)
+        check(mapped, gates, None, None, None)
+        mapped.collect().toVector shouldBe Vector(1, 2, 3, 4)
+        mapped.sum shouldBe rowPath(mapped.sum)
+        mapped.sum shouldBe 10L
+      case CoverageOp.Count =>
+        val filtered = source.filter(value => value > 2.0f)
+        check(filtered, gates, None, None, None)
+        filtered.count() shouldBe 2L
+      case CoverageOp.MapCount =>
+        val mapped = source.map(value => value + 1.0f)
+        check(mapped, gates, None, None, None)
+        mapped.count() shouldBe 4L
+      case CoverageOp.Sum =>
+        val summed = rowPath(source.sum)
+        check(source, gates, None, None, None)
+        source.sum shouldBe summed
+        summed shouldBe 10.0f
+      case CoverageOp.Take =>
+        val filtered = source.filter(value => value > 2.0f)
+        check(filtered, gates, None, None, None)
+        filtered.take(Prefix) shouldBe List(3.0f, 4.0f)
+      case CoverageOp.MapTake =>
+        val mapped = source.map(value => value + 1.0f)
+        check(mapped, gates, None, None, None)
+        mapped.take(Prefix) shouldBe List(2.0f, 3.0f)
+
   private def booleans(op: CoverageOp, gates: Gates): Unit =
     val source = DistCollection.ofBools(boolRows, Partitions)
     op match
@@ -563,6 +619,7 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     case CoverageType.Doubles => LogicalType.Float64
     case CoverageType.Booleans => LogicalType.Bool
     case CoverageType.Strings => LogicalType.Utf8Dict
+    case CoverageType.Float32 => LogicalType.Float32
 
   private def open(sumInt: Boolean, sumLong: Boolean, sumDouble: Boolean): Gates =
     Gates(
@@ -596,8 +653,9 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
    *
    * A Boolean same-type map is refused. `Function1` has no `apply$mcZZ$sp`, so `Boolean =>
    * Boolean` cannot be distinguished from `Boolean => Int` by declared signature. Refusing is the
-   * honest contract. Long rows sum to 10. Overflow is not a matrix cell. `TestLongColumnar` covers
-   * the wrap, and this suite asserts it on its own two-element source.
+   * honest contract. Float32 rows are open the same way doubles are, and every sum gate stays
+   * closed. Long rows sum to 10. Overflow is not a matrix cell. `TestLongColumnar` covers the
+   * wrap, and this suite asserts it on its own two-element source.
    */
   private val matrix: Map[(CoverageType, CoverageOp), Gates] = Map(
     (CoverageType.Ints, CoverageOp.Source) -> intOpen,
@@ -645,6 +703,15 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     (CoverageType.Strings, CoverageOp.Sum) -> nonNumericOpen,
     (CoverageType.Strings, CoverageOp.Take) -> nonNumericOpen,
     (CoverageType.Strings, CoverageOp.MapTake) -> nonNumericOpen,
+    (CoverageType.Float32, CoverageOp.Source) -> nonNumericOpen,
+    (CoverageType.Float32, CoverageOp.Filter) -> nonNumericOpen,
+    (CoverageType.Float32, CoverageOp.MapSame) -> nonNumericOpen,
+    (CoverageType.Float32, CoverageOp.MapChanging) -> refusedGates,
+    (CoverageType.Float32, CoverageOp.Count) -> nonNumericOpen,
+    (CoverageType.Float32, CoverageOp.MapCount) -> nonNumericOpen,
+    (CoverageType.Float32, CoverageOp.Sum) -> nonNumericOpen,
+    (CoverageType.Float32, CoverageOp.Take) -> nonNumericOpen,
+    (CoverageType.Float32, CoverageOp.MapTake) -> nonNumericOpen,
   )
 
 private final case class Gates(
@@ -658,7 +725,7 @@ private final case class Gates(
 )
 
 enum CoverageType:
-  case Ints, Longs, Doubles, Booleans, Strings
+  case Ints, Longs, Doubles, Booleans, Strings, Float32
 
 enum CoverageOp:
   case Source, Filter, MapSame, MapChanging, Count, MapCount, Sum, Take, MapTake

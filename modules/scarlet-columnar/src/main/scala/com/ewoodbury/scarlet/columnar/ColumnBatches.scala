@@ -311,6 +311,10 @@ object ColumnBatches:
         val values = new Array[Double](length)
         System.arraycopy(float64.values, start, values, 0, length)
         Float64Column.of(values, validityRange(float64.validity, start, length), length)
+      case float32: Float32Column =>
+        val values = new Array[Float](length)
+        System.arraycopy(float32.values, start, values, 0, length)
+        Float32Column.of(values, validityRange(float32.validity, start, length), length)
       case bool: BoolColumn =>
         val values = new Array[Byte](length)
         System.arraycopy(bool.values, start, values, 0, length)
@@ -333,6 +337,8 @@ object ColumnBatches:
         appendInt64(columns.collect { case column: Int64Column => column }, total)
       case Some(_: Float64Column) =>
         appendFloat64(columns.collect { case column: Float64Column => column }, total)
+      case Some(_: Float32Column) =>
+        appendFloat32(columns.collect { case column: Float32Column => column }, total)
       case Some(_: BoolColumn) =>
         appendBool(columns.collect { case column: BoolColumn => column }, total)
       case Some(_: DictUtf8Column) =>
@@ -393,6 +399,18 @@ object ColumnBatches:
     }
     require(written == total, s"copied $written rows into $total")
     Float64Column.of(values, Validity.fromWords(words, total), total)
+
+  private def appendFloat32(columns: Vector[Float32Column], total: Int): Float32Column =
+    val values = new Array[Float](total)
+    val words = Validity.allocate(total)
+    val written = columns.foldLeft(0) { (offset, column) =>
+      val length = column.length
+      System.arraycopy(column.values, 0, values, offset, length)
+      copyBits(column.validity, 0, words, offset, length)
+      offset + length
+    }
+    require(written == total, s"copied $written rows into $total")
+    Float32Column.of(values, Validity.fromWords(words, total), total)
 
   private def appendBool(columns: Vector[BoolColumn], total: Int): BoolColumn =
     val values = new Array[Byte](total)

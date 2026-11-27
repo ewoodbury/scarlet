@@ -809,6 +809,7 @@ object ColumnKernel:
       case int32: Int32Column => compactInt32(int32, selection, count, capacity)
       case int64: Int64Column => compactInt64(int64, selection, count, capacity)
       case float64: Float64Column => compactFloat64(float64, selection, count, capacity)
+      case float32: Float32Column => compactFloat32(float32, selection, count, capacity)
       case bool: BoolColumn => compactBool(bool, selection, count, capacity)
       case utf8: DictUtf8Column => compactUtf8(utf8, selection, count, capacity)
 
@@ -871,6 +872,26 @@ object ColumnKernel:
       index += 1
     }
     Float64Column.of(out, Validity.fromWords(dstWords, capacity), count)
+
+  private def compactFloat32(
+      column: Float32Column,
+      selection: Array[Int],
+      count: Int,
+      capacity: Int,
+  ): Float32Column =
+    val in = column.values
+    val srcWords = column.validity.words
+    val out = new Array[Float](capacity)
+    val dstWords = Validity.allocate(capacity)
+    var index = 0
+    while (index < count) {
+      val row = selection(index)
+      if (Validity.isSet(srcWords, row)) then
+        out(index) = in(row)
+        Validity.setBit(dstWords, index)
+      index += 1
+    }
+    Float32Column.of(out, Validity.fromWords(dstWords, capacity), count)
 
   private def compactBool(
       column: BoolColumn,

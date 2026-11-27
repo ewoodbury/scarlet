@@ -127,7 +127,7 @@ private[execution] object ColumnUse:
         PhysicalOp.Kind.IntLongTriples | PhysicalOp.Kind.IntLongOuter =>
       Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
-        PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools =>
+        PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools | PhysicalOp.Kind.Float32s =>
       Set.empty[Int]
 
   private def slotDemand(slot: PhysicalOp.Slot): Set[Int] = slot match
@@ -146,9 +146,9 @@ private[execution] object ColumnUse:
         PhysicalOp.Kind.IntLongTriples | PhysicalOp.Kind.IntLongOuter =>
       Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
-        PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts |
-        PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools |
-        PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
+        PhysicalOp.Kind.Float32s | PhysicalOp.Kind.Pairs | PhysicalOp.Kind.LongPairs |
+        PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.Strings |
+        PhysicalOp.Kind.Bools | PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
         PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.IntLongSums |
         PhysicalOp.Kind.GroupedIntLongs =>
       Set(0, 1)

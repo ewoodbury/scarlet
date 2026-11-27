@@ -992,7 +992,8 @@ object PhysicalOp:
       LongCountSums,
       StringCountSums,
       IntLongTriples,
-      IntLongOuter
+      IntLongOuter,
+      Float32s
 
   /** Which value column [[JoinProbeSum]] adds. `Left` is the build side. */
   enum ProbeMeasure:

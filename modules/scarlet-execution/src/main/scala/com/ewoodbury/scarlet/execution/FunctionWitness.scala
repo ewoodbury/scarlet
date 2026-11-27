@@ -5,16 +5,16 @@ package com.ewoodbury.scarlet.execution
  *
  * [[ColumnarPlanner]] uses [[declaredElement]] when a project or `mapValues` must declare the
  * column's signature. `Int => Int` is `apply$mcII$sp`, `Long => Long` is `apply$mcJJ$sp`,
- * `Double => Double` is `apply$mcDD$sp`, `String => String` is `apply`, and `(Int, Int) => (Int,
- * Int)` is `apply(Tuple2): Tuple2`. Erasure gives that same `apply` to a long or string pair
- * function. The pair kernel declines a cell that is not an int. A long-pair project and a
- * string-pair project reuse this tuple witness. [[declaredElement]] stays false for long pairs and
- * string pairs. The long kernel declines a cell that is not a long. The string kernel declines a
- * cell that is not a string or an int. The check reads method descriptors and does not call the
- * function. A primitive specialized apply is not a bridge. `Boolean` has no specialized apply, so
- * [[declaredElement]] is false for that kind and does not inspect the function.
- * [[declaredIntToLong]] is the separate `Int => Long` witness. [[declaredElement]] does not call
- * it, so an element map of that shape stays refused.
+ * `Double => Double` is `apply$mcDD$sp`, `Float => Float` is `apply$mcFF$sp`, `String => String`
+ * is `apply`, and `(Int, Int) => (Int, Int)` is `apply(Tuple2): Tuple2`. Erasure gives that same
+ * `apply` to a long or string pair function. The pair kernel declines a cell that is not an int. A
+ * long-pair project and a string-pair project reuse this tuple witness. [[declaredElement]] stays
+ * false for long pairs and string pairs. The long kernel declines a cell that is not a long. The
+ * string kernel declines a cell that is not a string or an int. The check reads method descriptors
+ * and does not call the function. A primitive specialized apply is not a bridge. `Boolean` has no
+ * specialized apply, so [[declaredElement]] is false for that kind and does not inspect the
+ * function. [[declaredIntToLong]] is the separate `Int => Long` witness. [[declaredElement]] does
+ * not call it, so an element map of that shape stays refused.
  */
 private[execution] object FunctionWitness:
 
@@ -46,6 +46,14 @@ private[execution] object FunctionWitness:
         "apply$mcDD$sp",
         classOf[Double],
         classOf[Double],
+        allowBridge = false,
+      )
+    case PhysicalOp.Kind.Float32s =>
+      declaredSignature(
+        function,
+        "apply$mcFF$sp",
+        classOf[Float],
+        classOf[Float],
         allowBridge = false,
       )
     case PhysicalOp.Kind.Strings =>

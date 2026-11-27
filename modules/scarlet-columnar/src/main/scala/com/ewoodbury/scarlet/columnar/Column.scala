@@ -196,6 +196,31 @@ object Float64Column:
     Column.check(length, values.length, validity)
     new Float64Column(values, validity, length)
 
+/** One `Float32` column. A null slot stores `0.0f` and is not a value. */
+final class Float32Column private (
+    val values: Array[Float],
+    val validity: Validity,
+    val length: Int,
+) extends Column:
+  def logicalType: LogicalType = LogicalType.Float32
+
+object Float32Column:
+
+  def fromNullable(values: Seq[Option[Float]]): Float32Column =
+    val buffer = new Array[Float](values.size)
+    val present = new Array[Boolean](values.size)
+    values.iterator.zipWithIndex.foreach { (cell, row) =>
+      cell.foreach { value =>
+        buffer(row) = value
+        present(row) = true
+      }
+    }
+    of(buffer, Validity.pack(present.length, row => present(row)), present.length)
+
+  def of(values: Array[Float], validity: Validity, length: Int): Float32Column =
+    Column.check(length, values.length, validity)
+    new Float32Column(values, validity, length)
+
 /**
  * Boolean values are bytes, `0` or `1`, not a bitset. A later filter kernel can scan them without
  * unpacking. Nulls still use [[Validity]].
