@@ -8,8 +8,9 @@ package com.ewoodbury.scarlet.core
  * no nested row and no array column.
  *
  * A compare is a closed set: a numeric column against a constant of the same kind, equality on a
- * bool, or a decimal against a decimal constant. Scales align by an exact power of ten. A null
- * does not pass. String compares and float32 compares are not in this set.
+ * bool, a decimal against a decimal constant, or equality and inequality of a string column
+ * against a string literal. Scales align by an exact power of ten. A null does not pass. String
+ * ordering and float32 compares are not in this set. A null string literal is refused.
  */
 enum ColumnKind:
   case Int32, Int64, Float64, Bool, Utf8, Float32
@@ -30,12 +31,16 @@ enum ColumnLiteral:
   case Float64(value: Double)
   case Bool(value: Boolean)
   case Decimal(precision: Int, scale: Int, value: Long)
+  case Utf8(value: String)
 
   def kind: ColumnKind = this match
     case _: Int32 => ColumnKind.Int32
     case _: Int64 => ColumnKind.Int64
     case _: Float64 => ColumnKind.Float64
     case _: Bool => ColumnKind.Bool
+    case Utf8(value) =>
+      require(value != null, "a string literal must not be null")
+      ColumnKind.Utf8
     case Decimal(precision, scale, value) =>
       DecimalRules.check(precision, scale)
       if (!DecimalRules.fits(value, precision)) then
@@ -43,6 +48,10 @@ enum ColumnLiteral:
       ColumnKind.Decimal(precision, scale)
 
 final case class ColumnCompare(op: CompareOp, literal: ColumnLiteral):
+  literal match
+    case ColumnLiteral.Utf8(value) =>
+      require(value != null, "a string literal must not be null")
+    case _ => ()
 
   /** True when this compare is legal for a column of `kind`. */
   def allows(kind: ColumnKind): Boolean = (kind, literal, op) match
@@ -51,6 +60,7 @@ final case class ColumnCompare(op: CompareOp, literal: ColumnLiteral):
     case (ColumnKind.Float64, _: ColumnLiteral.Float64, _) => true
     case (ColumnKind.Bool, _: ColumnLiteral.Bool, CompareOp.Eq | CompareOp.Ne) => true
     case (ColumnKind.Decimal(_, _), _: ColumnLiteral.Decimal, _) => true
+    case (ColumnKind.Utf8, _: ColumnLiteral.Utf8, CompareOp.Eq | CompareOp.Ne) => true
     case _ => false
 
   /**
@@ -98,6 +108,8 @@ final case class ColumnCompare(op: CompareOp, literal: ColumnLiteral):
       sameBool(constant, value)
     case (CompareOp.Ne, ColumnLiteral.Bool(constant), Cell.Bool(value)) =>
       !sameBool(constant, value)
+    case (CompareOp.Eq, ColumnLiteral.Utf8(constant), Cell.Utf8(value)) => value == constant
+    case (CompareOp.Ne, ColumnLiteral.Utf8(constant), Cell.Utf8(value)) => value != constant
     case (_, ColumnLiteral.Decimal(_, scale, constant), Cell.Decimal(_, valueScale, value)) =>
       val order = DecimalRules.compare(value, valueScale, constant, scale)
       op match

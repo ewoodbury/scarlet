@@ -186,6 +186,39 @@ object ColumnKernel:
     filterUtf8ByValues(batch, ordinal, 0, batch.length, values)
 
   /**
+   * Equality or inequality against one literal. The literal becomes a dictionary code once per
+   * batch. A null row is dropped. A literal missing from the dictionary keeps no row when equal,
+   * and every present row when not equal.
+   */
+  def filterUtf8Compare(
+      batch: ColumnBatch,
+      ordinal: Int,
+      value: String,
+      equal: Boolean,
+  ): ColumnBatch =
+    val column = asUtf8(columnAt(batch, ordinal), ordinal)
+    val mask = literalCodes(column, Seq(value))
+    val keep: Int32Predicate =
+      if (equal) then code => selected(mask, code) else code => !selected(mask, code)
+    val codeColumn = Int32Column.of(column.codes, column.validity, column.length)
+    if (batch.columns.length == 1) then
+      val scanned =
+        scanInt32(codeColumn, 0, column.length, keep, record = false, selection = noSelection)
+      publish(batch, filteredUtf8(column, scanned, ordinal), scanned.count)
+    else
+      val selection = new Array[Int](column.length)
+      val scanned =
+        scanInt32(codeColumn, 0, column.length, keep, record = true, selection = selection)
+      assemble(
+        batch,
+        ordinal,
+        filteredUtf8(column, scanned, ordinal),
+        selection,
+        scanned.count,
+        batch.length,
+      )
+
+  /**
    * Scans codes on `[start, start + length)`. The mask is built from the whole dictionary, as in
    * the whole-batch overload. Survivors keep that dictionary, and a multi-column batch records
    * absolute row indexes.
