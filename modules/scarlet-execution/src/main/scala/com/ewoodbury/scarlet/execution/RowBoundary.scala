@@ -277,6 +277,8 @@ private[execution] object RowBoundary:
       case Plan.CountSumByStringKeyOp(source) => trusted(source)
       case Plan.CountSumByIntLongKeyOp(source) => trusted(source)
       case Plan.ExtremumByKeyOp(source, _) => trusted(source)
+      case Plan.WideFilterOp(source, _, _) => trusted(source)
+      case Plan.WideProjectOp(source, _) => trusted(source)
       case Plan.ReduceByKeyOp(source, _) => trusted(source)
       case Plan.SortByOp(source, _, _) => trusted(source)
       case Plan.SortByIntKeyOp(source) => trusted(source)
@@ -295,7 +297,8 @@ private[execution] object RowBoundary:
           Plan.SourceDescriptor.Pairs | Plan.SourceDescriptor.Bools |
           Plan.SourceDescriptor.LongPairs =>
         true
-      case Plan.SourceDescriptor.Unknown | Plan.SourceDescriptor.Strings =>
+      case Plan.SourceDescriptor.Unknown | Plan.SourceDescriptor.Strings |
+          Plan.SourceDescriptor.Columns =>
         false
 
   private def runRow[A](plan: Plan[A]): Seq[Partition[A]] =

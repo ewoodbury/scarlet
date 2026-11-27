@@ -92,7 +92,7 @@ private[execution] object UnionLowering:
     case PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
         PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.IntLongSums |
         PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples |
-        PhysicalOp.Kind.IntLongOuter =>
+        PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Columns =>
       false
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
         PhysicalOp.Kind.Float32s | PhysicalOp.Kind.Bools | PhysicalOp.Kind.Strings |

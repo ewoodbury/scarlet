@@ -146,6 +146,7 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       Plan.SourceDescriptor.Bools,
       Plan.SourceDescriptor.LongPairs,
       Plan.SourceDescriptor.Float32s,
+      Plan.SourceDescriptor.Columns,
     )
     PhysicalOp.Kind.values.toSet shouldBe Set(
       PhysicalOp.Kind.Ints,
@@ -173,6 +174,7 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       PhysicalOp.Kind.IntLongTriples,
       PhysicalOp.Kind.IntLongOuter,
       PhysicalOp.Kind.Float32s,
+      PhysicalOp.Kind.Columns,
     )
   }
 

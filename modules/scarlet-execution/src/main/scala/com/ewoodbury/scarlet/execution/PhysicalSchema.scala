@@ -72,6 +72,8 @@ private[execution] object PhysicalSchema:
     case PhysicalOp.Kind.Longs => Vector(LogicalType.Int64)
     case PhysicalOp.Kind.Floats => Vector(LogicalType.Float64)
     case PhysicalOp.Kind.Float32s => Vector(LogicalType.Float32)
+    // A wide row's fields live on the partition, not on this enum.
+    case PhysicalOp.Kind.Columns => Vector.empty
     case PhysicalOp.Kind.Bools => Vector(LogicalType.Bool)
     case PhysicalOp.Kind.Strings => Vector(LogicalType.Utf8Dict)
     case PhysicalOp.Kind.Pairs => Vector(LogicalType.Int32, LogicalType.Int32)

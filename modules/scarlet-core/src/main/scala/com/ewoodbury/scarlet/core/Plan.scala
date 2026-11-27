@@ -15,7 +15,7 @@ object Plan {
    * Type information carried by a source for empty partitions and checked against non-empty data.
    */
   enum SourceDescriptor:
-    case Unknown, Ints, Longs, Doubles, Pairs, Strings, Bools, LongPairs, Float32s
+    case Unknown, Ints, Longs, Doubles, Pairs, Strings, Bools, LongPairs, Float32s, Columns
 
   /**
    * Applies a user function over each input partition using iterators. The function receives an
@@ -614,4 +614,32 @@ object Plan {
    *   True for the minimum value, false for the maximum.
    */
   case class ExtremumByKeyOp(source: Plan[(Int, Int)], minimum: Boolean) extends Plan[(Int, Int)]
+
+  /**
+   * Filter one column of a wide row.
+   *
+   * A null in that column is dropped and is not compared. A null in another column stays. The
+   * compare has to be one the closed set allows for that column. A compare it does not name stays
+   * on the row path.
+   *
+   * @param source
+   *   The preceding wide-row plan.
+   * @param ordinal
+   *   Column to test.
+   * @param compare
+   *   Comparison against a constant.
+   */
+  case class WideFilterOp(source: Plan[WideRow], ordinal: Int, compare: ColumnCompare)
+      extends Plan[WideRow]
+
+  /**
+   * Drop, reorder, or rename columns of a wide row. This does not compute a new column.
+   *
+   * @param source
+   *   The preceding wide-row plan.
+   * @param spec
+   *   Output order. Each pair is a source ordinal and the output name.
+   */
+  case class WideProjectOp(source: Plan[WideRow], spec: Vector[(Int, String)])
+      extends Plan[WideRow]
 }

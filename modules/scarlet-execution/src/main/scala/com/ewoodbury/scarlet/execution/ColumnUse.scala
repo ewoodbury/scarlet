@@ -129,7 +129,8 @@ private[execution] object ColumnUse:
         PhysicalOp.Kind.IntLongTriples | PhysicalOp.Kind.IntLongOuter =>
       Set(0, 1, 2)
     case PhysicalOp.Kind.Ints | PhysicalOp.Kind.Longs | PhysicalOp.Kind.Floats |
-        PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools | PhysicalOp.Kind.Float32s =>
+        PhysicalOp.Kind.Strings | PhysicalOp.Kind.Bools | PhysicalOp.Kind.Float32s |
+        PhysicalOp.Kind.Columns =>
       Set.empty[Int]
 
   private def slotDemand(slot: PhysicalOp.Slot): Set[Int] = slot match
@@ -152,7 +153,7 @@ private[execution] object ColumnUse:
         PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.StringPairs | PhysicalOp.Kind.Strings |
         PhysicalOp.Kind.Bools | PhysicalOp.Kind.GroupedInts | PhysicalOp.Kind.GroupedStrings |
         PhysicalOp.Kind.GroupedLongs | PhysicalOp.Kind.IntLongSums |
-        PhysicalOp.Kind.GroupedIntLongs =>
+        PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.Columns =>
       Set(0, 1)
 
   private def planChild(plan: Plan[_]): Option[Plan[_]] = plan match
@@ -178,6 +179,8 @@ private[execution] object ColumnUse:
     case Plan.CountSumByStringKeyOp(source) => Some(source)
     case Plan.CountSumByIntLongKeyOp(source) => Some(source)
     case Plan.ExtremumByKeyOp(source, _) => Some(source)
+    case Plan.WideFilterOp(source, _, _) => Some(source)
+    case Plan.WideProjectOp(source, _) => Some(source)
     case Plan.ReduceByKeyOp(source, _) => Some(source)
     case Plan.SortByOp(source, _, _) => Some(source)
     case Plan.SortByIntKeyOp(source) => Some(source)

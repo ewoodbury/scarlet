@@ -73,7 +73,7 @@ private[execution] object FunctionWitness:
         PhysicalOp.Kind.StringOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
         PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples |
-        PhysicalOp.Kind.IntLongOuter =>
+        PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Columns =>
       false
 
   /**

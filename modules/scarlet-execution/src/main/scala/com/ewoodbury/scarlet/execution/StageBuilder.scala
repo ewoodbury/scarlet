@@ -223,70 +223,6 @@ object StageBuilder:
   }
 
   /**
-   * Single controlled point of type erasure where it's unavoidable. This is the only place where
-   * we deal with Any types and casting, keeping type safety elsewhere.
-   */
-  private def createStageFromOpUnsafe(op: Operation[Any, Any]): Stage[Any, Any] = {
-    op match {
-      case MapOp(f) => Stage.map(f)
-      case FilterOp(p) => Stage.filter(p)
-      case FlatMapOp(f) => Stage.flatMap(f)
-      case DistinctOp() => Stage.distinct[Any]
-      case MapPartitionsOp(f) => Stage.mapPartitions(f)
-
-      // Bypassed wide ops are appended as no-op narrow stages: the upstream data is already
-      // partitioned the way the operation wants it.
-      case PartitionByLocalOp(_) => Stage.identity[Any]
-      case _: RepartitionOp[_] => Stage.identity[Any]
-      case _: CoalesceOp[_] => Stage.identity[Any]
-
-      // Key-value operations - controlled type erasure point
-      case _: KeysOp[_, _] =>
-        Stage.keys[Any, Any].asInstanceOf[Stage[Any, Any]]
-      case _: ValuesOp[_, _] =>
-        Stage.values[Any, Any].asInstanceOf[Stage[Any, Any]]
-      case MapValuesOp(f) =>
-        Stage
-          .mapValues[Any, Any, Any](f.asInstanceOf[Any => Any])
-          .asInstanceOf[Stage[Any, Any]]
-      case MapIntKeyOp(f) =>
-        Stage.mapIntKey(f).asInstanceOf[Stage[Any, Any]]
-      case FilterKeysOp(p) =>
-        Stage
-          .filterKeys[Any, Any](p.asInstanceOf[Any => Boolean])
-          .asInstanceOf[Stage[Any, Any]]
-      case FilterValuesOp(p) =>
-        Stage
-          .filterValues[Any, Any](p.asInstanceOf[Any => Boolean])
-          .asInstanceOf[Stage[Any, Any]]
-      case FlatMapValuesOp(f) =>
-        Stage
-          .flatMapValues[Any, Any, Any](f.asInstanceOf[Any => IterableOnce[Any]])
-          .asInstanceOf[Stage[Any, Any]]
-      case _: GroupByKeyLocalOp[_, _] =>
-        Stage.groupByKeyLocal[Any, Any].asInstanceOf[Stage[Any, Any]]
-      case _: CountByKeyLocalOp[_, _] =>
-        Stage.countByKeyLocal[Any, Any].asInstanceOf[Stage[Any, Any]]
-      case _: CountSumByKeyLocalOp =>
-        Stage.countSumByKeyLocal.asInstanceOf[Stage[Any, Any]]
-      case _: CountSumByLongKeyLocalOp =>
-        Stage.countSumByLongKeyLocal.asInstanceOf[Stage[Any, Any]]
-      case _: CountSumByStringKeyLocalOp =>
-        Stage.countSumByStringKeyLocal.asInstanceOf[Stage[Any, Any]]
-      case _: CountSumByIntLongKeyLocalOp =>
-        Stage.countSumByIntLongKeyLocal.asInstanceOf[Stage[Any, Any]]
-      case ExtremumByKeyLocalOp(minimum) =>
-        Stage.extremumByKeyLocal(minimum).asInstanceOf[Stage[Any, Any]]
-      case ReduceByKeyLocalOp(reduceFunc) =>
-        Stage
-          .reduceByKeyLocal[Any, Any](reduceFunc.asInstanceOf[(Any, Any) => Any])
-          .asInstanceOf[Stage[Any, Any]]
-
-      case _ => throw new UnsupportedOperationException(s"Cannot create stage from operation: $op")
-    }
-  }
-
-  /**
    * Helper function to chain an operation onto an existing stage. This function encapsulates the
    * pattern matching for operation chaining and eliminates the need for unsafe type casting where
    * possible.
@@ -295,7 +231,7 @@ object StageBuilder:
       stage: Stage[Any, Any],
       op: Operation[Any, Any],
   ): Stage[Any, Any] = {
-    Stage.ChainedStage(stage, createStageFromOpUnsafe(op))
+    Stage.ChainedStage(stage, StageFromOp(op))
   }
 
   /**
@@ -327,9 +263,8 @@ object StageBuilder:
    *   This method only supports narrow operations. Wide operations should be handled through
    *   shuffle stages created by createShuffleStageUnified().
    */
-  private def createStageFromOp(op: Operation[Any, Any]): Stage[Any, Any] = {
-    createStageFromOpUnsafe(op)
-  }
+  private def createStageFromOp(op: Operation[Any, Any]): Stage[Any, Any] =
+    StageFromOp(op)
 
   /**
    * Core recursive method that traverses a Plan tree and builds stage graphs with operation
@@ -435,6 +370,12 @@ object StageBuilder:
           dependencies,
         )
         (resultId, Some(plan))
+
+      case wide: Plan.WideFilterOp =>
+        WidePlanStages.attachFilter(ctx, wide, builderMap, dependencies)
+
+      case wide: Plan.WideProjectOp =>
+        WidePlanStages.attachProject(ctx, wide, builderMap, dependencies)
 
       case Plan.FlatMapOp(sourcePlan, f) =>
         val (sourceStageId, _) = buildStagesFromPlan(ctx, sourcePlan, builderMap, dependencies)
@@ -1178,7 +1119,8 @@ object StageBuilder:
           _: FilterValuesOp[_, _] | _: FlatMapValuesOp[_, _, _] | _: DistinctOp[_] |
           _: GroupByKeyLocalOp[_, _] | _: CountByKeyLocalOp[_, _] | _: CountSumByKeyLocalOp |
           _: CountSumByLongKeyLocalOp | _: CountSumByStringKeyLocalOp |
-          _: CountSumByIntLongKeyLocalOp | _: ReduceByKeyLocalOp[_, _] | _: ExtremumByKeyLocalOp =>
+          _: CountSumByIntLongKeyLocalOp | _: ReduceByKeyLocalOp[_, _] | _: ExtremumByKeyLocalOp |
+          _: WideFilterOp | _: WideProjectOp =>
         prev
     }
 

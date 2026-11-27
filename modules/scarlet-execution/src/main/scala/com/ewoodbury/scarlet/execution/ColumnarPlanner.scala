@@ -138,6 +138,7 @@ object ColumnarPlanner:
       val decoded = op match
         case PhysicalOp.GroupedDecode(child) => GroupedDecode.partitions(plan, child)
         case sum: PhysicalOp.JoinProbeSum => JoinProbeAggregate.partitions(plan, sum)
+        case _ if op.kind eq PhysicalOp.Kind.Columns => WideRun.partitions(op)
         case _ => decodeAccepted(plan, op)
       Some(decoded.asInstanceOf[Seq[Partition[A]]])
     // ColumnarFallback extends ClassCastException, so the catch above still sees a decline.
@@ -172,6 +173,9 @@ object ColumnarPlanner:
     else
       accepted(plan) match
         case None => None
+        case Some(op) if op.kind eq PhysicalOp.Kind.Columns =>
+          // The prefix has the plan's element type.
+          WideRun.take(op, n).map(_.asInstanceOf[Seq[A]])
         case Some(op) =>
           // The prefix has the plan's element type. ColumnarQuery already caught a decline.
           ColumnarQuery.take(plan, op, n).map(_.asInstanceOf[Seq[A]])
@@ -340,6 +344,8 @@ object ColumnarPlanner:
         Some(JoinProbeAggregate.count(plan, sum))
       case group: PhysicalOp.GroupByKey =>
         Some(GroupByKeyCount.of(plan, group))
+      case _ if op.kind eq PhysicalOp.Kind.Columns =>
+        Some(WideRun.rowCount(op))
       case _ =>
         Some(MatchCount.of(plan, op))
 
@@ -588,7 +594,7 @@ object ColumnarPlanner:
       case Plan.SourceDescriptor.Ints | Plan.SourceDescriptor.Longs |
           Plan.SourceDescriptor.Doubles | Plan.SourceDescriptor.Bools |
           Plan.SourceDescriptor.Strings | Plan.SourceDescriptor.LongPairs |
-          Plan.SourceDescriptor.Float32s =>
+          Plan.SourceDescriptor.Float32s | Plan.SourceDescriptor.Columns =>
         false
 
   private[execution] def isInt(op: PhysicalOp): Boolean = op.kind match
@@ -844,6 +850,10 @@ object ColumnarPlanner:
       AggregateBinding.countSum(source, lowerChild)
     case Plan.ExtremumByKeyOp(source, minimum) =>
       AggregateBinding.extremum(source, minimum, lowerChild)
+    case Plan.WideFilterOp(source, ordinal, compare) =>
+      WideLowering.filter(source, ordinal, compare, lowerChild)
+    case Plan.WideProjectOp(source, spec) =>
+      WideLowering.project(source, spec, lowerChild)
     case plan if JoinLowering.isJoin(plan) => JoinLowering.lower(plan, lowerChild)
     case Plan.SortByIntKeyOp(source) =>
       SortLowering.lowerInt(source, lowerPlan)
@@ -911,7 +921,7 @@ object ColumnarPlanner:
         PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
         PhysicalOp.Kind.GroupedIntLongs | PhysicalOp.Kind.IntLongTriples |
-        PhysicalOp.Kind.IntLongOuter =>
+        PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Columns =>
       None
 
   /**
@@ -1091,6 +1101,8 @@ object ColumnarPlanner:
       hashed(PhysicalOp.Kind.CountSums)
     case _: PhysicalOp.IntExtremum =>
       hashed(PhysicalOp.Kind.Pairs)
+    case PhysicalOp.WideFilter(child, _, _) => infoOf(child)
+    case PhysicalOp.WideProject(child, _) => infoOf(child)
     case _: PhysicalOp.JoinProbeSum =>
       hashed(PhysicalOp.Kind.IntLongSums)
     case PhysicalOp.Exchange(_) =>
@@ -1137,7 +1149,8 @@ object ColumnarPlanner:
         PhysicalOp.Kind.LongPairs | PhysicalOp.Kind.LongCounts | PhysicalOp.Kind.LongTriples |
         PhysicalOp.Kind.LongOuter | PhysicalOp.Kind.CountSums | PhysicalOp.Kind.LongCountSums |
         PhysicalOp.Kind.StringCountSums | PhysicalOp.Kind.IntLongSums |
-        PhysicalOp.Kind.IntLongTriples | PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Float32s =>
+        PhysicalOp.Kind.IntLongTriples | PhysicalOp.Kind.IntLongOuter | PhysicalOp.Kind.Float32s |
+        PhysicalOp.Kind.Columns =>
       Layout.Columnar(ScarletConf.get.columnarBatchSize)
 
   private[execution] def batchSize: Int =
