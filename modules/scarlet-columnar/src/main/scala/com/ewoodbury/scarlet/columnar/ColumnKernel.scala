@@ -812,6 +812,7 @@ object ColumnKernel:
       case float32: Float32Column => compactFloat32(float32, selection, count, capacity)
       case bool: BoolColumn => compactBool(bool, selection, count, capacity)
       case utf8: DictUtf8Column => compactUtf8(utf8, selection, count, capacity)
+      case decimal: DecimalColumn => DecimalColumn.gather(decimal, selection, count, capacity)
 
   private def compactInt32(
       column: Int32Column,

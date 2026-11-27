@@ -31,6 +31,8 @@ object WideBatch:
         ColumnKernel.filterFloat64(batch, ordinal, doublePredicate(compare.op, constant))
       case (ColumnKind.Bool, ColumnLiteral.Bool(constant)) =>
         ColumnKernel.filterBool(batch, ordinal, boolPredicate(compare.op, constant))
+      case (ColumnKind.Decimal(_, _), ColumnLiteral.Decimal(precision, scale, constant)) =>
+        WideDecimal.filter(batch, ordinal, compare.op, precision, scale, constant)
       case _ =>
         throw new IllegalArgumentException(s"no columnar compare for $kind column $ordinal")
 
@@ -60,7 +62,11 @@ object WideBatch:
     case int32: WideInt32 =>
       Int32Column.of(int32.values.clone(), bits(int32), int32.length)
     case int64: WideInt64 =>
-      Int64Column.of(int64.values.clone(), bits(int64), int64.length)
+      int64.field.kind match
+        case ColumnKind.Decimal(precision, scale) =>
+          DecimalColumn.of(precision, scale, int64.values.clone(), bits(int64), int64.length)
+        case _ =>
+          Int64Column.of(int64.values.clone(), bits(int64), int64.length)
     case float64: WideFloat64 =>
       Float64Column.of(float64.values.clone(), bits(float64), float64.length)
     case float32: WideFloat32 =>
@@ -105,6 +111,7 @@ object WideBatch:
     case LogicalType.Bool => ColumnKind.Bool
     case LogicalType.Utf8Dict => ColumnKind.Utf8
     case LogicalType.Float32 => ColumnKind.Float32
+    case LogicalType.Decimal(precision, scale) => ColumnKind.Decimal(precision, scale)
 
   private def sameType(logical: LogicalType, kind: ColumnKind): Boolean =
     (logical, kind) match
@@ -114,6 +121,11 @@ object WideBatch:
       case (LogicalType.Bool, ColumnKind.Bool) => true
       case (LogicalType.Utf8Dict, ColumnKind.Utf8) => true
       case (LogicalType.Float32, ColumnKind.Float32) => true
+      case (
+            LogicalType.Decimal(leftPrecision, leftScale),
+            ColumnKind.Decimal(rightPrecision, rightScale),
+          ) =>
+        leftPrecision == rightPrecision && leftScale == rightScale
       case _ => false
 
   private def cellAt(
@@ -133,6 +145,9 @@ object WideBatch:
         case (bool: BoolColumn, ColumnKind.Bool) => Cell.Bool(boolBit(bool.values(row)))
         case (utf8: DictUtf8Column, ColumnKind.Utf8) =>
           Cell.Utf8(utf8.dictionary(utf8.codes(row)))
+        case (decimal: DecimalColumn, ColumnKind.Decimal(precision, scale))
+            if decimal.precision == precision && decimal.scale == scale =>
+          Cell.Decimal(precision, scale, decimal.values(row))
         case _ =>
           throw new IllegalArgumentException(
             s"column $ordinal is ${column.logicalType}, field is ${fields(ordinal).kind}",

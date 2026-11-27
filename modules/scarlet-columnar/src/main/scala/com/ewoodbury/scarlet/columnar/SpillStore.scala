@@ -380,6 +380,8 @@ private[columnar] object SpillLayout:
     case LogicalType.Float64 => Float64Tag
     case LogicalType.Float32 => Float32Tag
     case LogicalType.Bool => BoolTag
+    case LogicalType.Decimal(_, _) =>
+      throw new IllegalArgumentException("decimal columns cannot be spilled")
 
   /**
    * Column type of `tag` in a file of `version`. Float and bool tags exist only in version 3, so a

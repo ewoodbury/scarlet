@@ -228,6 +228,8 @@ class TestLayout extends AnyFlatSpec with Matchers:
       case LogicalType.Bool => ColumnType.Bool
       case LogicalType.Utf8Dict => ColumnType.Utf8Dict
       case LogicalType.Float32 => ColumnType.Float32
+      case LogicalType.Decimal(_, _) =>
+        throw new IllegalArgumentException("decimal is not a physical column")
     ColumnLayout(typed, NullPolicy.Nullable)
 
   private def absent(column: ColumnLayout): ColumnLayout =

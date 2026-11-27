@@ -74,8 +74,9 @@ final case class DistCollection[A](plan: Plan[A]):
 
   /**
    * Appends one computed column. Arithmetic uses the wider input: double, then float, then long,
-   * then int. A compare yields bool. Null in an input yields null. Divide and strings are not in
-   * this set.
+   * then int. A decimal add, subtract, or multiply stays exact. A compare yields bool. Null in an
+   * input yields null. Divide refuses a present zero. Decimal divide and strings are not in this
+   * set.
    */
   def compute(expr: ColumnExpr, name: String)(using ev: A =:= WideRow): DistCollection[WideRow] =
     WideFields.known(widePlan).foreach(fields => ColumnExpr.checked(expr, fields, name))
@@ -124,6 +125,13 @@ final case class DistCollection[A](plan: Plan[A]):
    */
   def sumLongColumn(ordinal: Int)(using ev: A =:= WideRow): Long =
     DistCollection.service.sumWideLong(widePlan, ordinal)
+
+  /**
+   * Sums one decimal column. A null slot contributes nothing. The unscaled total refuses when it
+   * needs a 19th digit. A columnar plan adds that column and does not decode the row.
+   */
+  def sumDecimalColumn(ordinal: Int)(using ev: A =:= WideRow): Long =
+    DistCollection.service.sumWideDecimal(widePlan, ordinal)
 
   /**
    * Filters strings equal to `value`. This explicit form is recognized by the columnar planner,

@@ -146,6 +146,29 @@ object WideInput:
     require(values.forall(value => value != null), s"column $name stores null in the value array")
     new StringInput(name, values.clone(), present.clone())
 
+  def decimals(name: String, precision: Int, scale: Int, values: Array[Long]): WideInput =
+    nullableDecimals(name, precision, scale, values, allPresent(values.length))
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  def nullableDecimals(
+      name: String,
+      precision: Int,
+      scale: Int,
+      values: Array[Long],
+      present: Array[Boolean],
+  ): WideInput =
+    requireLength(name, values.length, present.length)
+    DecimalRules.check(precision, scale)
+    val copied = values.clone()
+    val bits = present.clone()
+    var row = 0
+    while (row < copied.length) {
+      if (bits(row) && !DecimalRules.fits(copied(row), precision)) then
+        throw new IllegalArgumentException(s"decimal value does not fit precision $precision")
+      row += 1
+    }
+    new DecimalInput(name, precision, scale, copied, bits)
+
   def floats(name: String, values: Array[Float]): WideInput =
     nullableFloats(name, values, allPresent(values.length))
 
@@ -204,6 +227,17 @@ object WideInput:
     private[scarlet] def toColumn: WideColumn =
       new WideFloat32(ColumnField(name, ColumnKind.Float32), values, present)
 
+  private final class DecimalInput(
+      val name: String,
+      precision: Int,
+      scale: Int,
+      values: Array[Long],
+      present: Array[Boolean],
+  ) extends WideInput:
+    def length: Int = values.length
+    private[scarlet] def toColumn: WideColumn =
+      new WideInt64(ColumnField(name, ColumnKind.Decimal(precision, scale)), values, present)
+
 /** One column of a [[WideColumns]] partition. The arrays are owned by the partition. */
 sealed trait WideColumn:
   def field: ColumnField
@@ -243,7 +277,12 @@ final class WideInt64 private[scarlet] (
 ) extends WideColumn:
   def length: Int = values.length
   def isPresent(row: Int): Boolean = present(row)
-  def cell(row: Int): Cell = if (present(row)) then Cell.Int64(values(row)) else Cell.Null
+  def cell(row: Int): Cell =
+    if (!present(row)) then Cell.Null
+    else
+      field.kind match
+        case ColumnKind.Decimal(precision, scale) => Cell.Decimal(precision, scale, values(row))
+        case _ => Cell.Int64(values(row))
   def renamed(name: String): WideColumn = new WideInt64(field.copy(name = name), values, present)
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))

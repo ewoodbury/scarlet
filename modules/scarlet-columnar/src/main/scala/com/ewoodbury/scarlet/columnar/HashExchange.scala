@@ -536,6 +536,8 @@ object HashExchange:
       case float32: Float32Column => scatterFloat32(float32, dest, counts)
       case bool: BoolColumn => scatterBool(bool, dest, counts)
       case utf8: DictUtf8Column => scatterUtf8(utf8, dest, counts)
+      case other =>
+        throw new IllegalArgumentException(s"${other.logicalType} is not supported here")
 
   private def scatterInt32(
       column: Int32Column,

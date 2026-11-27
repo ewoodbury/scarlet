@@ -3,8 +3,9 @@ package com.ewoodbury.scarlet.core
 /**
  * Row-path evaluation of one [[ColumnExpr]].
  *
- * A null input yields a null result. Arithmetic uses [[ColumnExpr.wider]]. The caller has already
- * rejected an expression the closed set does not name.
+ * A null input yields a null result. Arithmetic uses [[ColumnExpr.wider]]. A decimal add,
+ * subtract, or multiply stays exact. The caller has already rejected an expression the closed set
+ * does not name.
  */
 private[scarlet] object WideCompute:
 
@@ -22,6 +23,8 @@ private[scarlet] object WideCompute:
       case ColumnKind.Bool => bools(columns, expr, field, length)
       case ColumnKind.Utf8 =>
         throw new IllegalArgumentException(s"${field.name} cannot be a string")
+      case ColumnKind.Decimal(_, _) =>
+        decimals(columns, expr, field, length)
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def ints(
@@ -57,6 +60,29 @@ private[scarlet] object WideCompute:
     while (row < length) {
       eval(columns, expr, field.kind, row) match
         case Cell.Int64(value) =>
+          present(row) = true
+          values(row) = value
+        case Cell.Null => ()
+        case other => reject(field, other)
+      row += 1
+    }
+    new WideInt64(field, values, present)
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def decimals(
+      columns: Vector[WideColumn],
+      expr: ColumnExpr,
+      field: ColumnField,
+      length: Int,
+  ): WideColumn =
+    val values = new Array[Long](length)
+    val present = new Array[Boolean](length)
+    var row = 0
+    while (row < length) {
+      eval(columns, expr, field.kind, row) match
+        case Cell.Decimal(precision, scale, value) =>
+          if (field.kind != ColumnKind.Decimal(precision, scale)) then
+            reject(field, Cell.Decimal(precision, scale, value))
           present(row) = true
           values(row) = value
         case Cell.Null => ()
@@ -138,20 +164,39 @@ private[scarlet] object WideCompute:
     else
       expr match
         case ColumnExpr.Add(left, right) =>
-          binary(kind, columns(left), columns(right), row, _ + _, _ + _, _ + _, _ + _)
+          kind match
+            case ColumnKind.Decimal(_, _) =>
+              decimalCell(columns, left, right, row, DecimalRules.add)
+            case _ =>
+              binary(kind, columns(left), columns(right), row, _ + _, _ + _, _ + _, _ + _)
         case ColumnExpr.Sub(left, right) =>
-          binary(kind, columns(left), columns(right), row, _ - _, _ - _, _ - _, _ - _)
+          kind match
+            case ColumnKind.Decimal(_, _) =>
+              decimalCell(columns, left, right, row, DecimalRules.subtract)
+            case _ =>
+              binary(kind, columns(left), columns(right), row, _ - _, _ - _, _ - _, _ - _)
         case ColumnExpr.Mul(left, right) =>
-          binary(kind, columns(left), columns(right), row, _ * _, _ * _, _ * _, _ * _)
+          kind match
+            case ColumnKind.Decimal(_, _) =>
+              decimalCell(columns, left, right, row, DecimalRules.multiply)
+            case _ =>
+              binary(kind, columns(left), columns(right), row, _ * _, _ * _, _ * _, _ * _)
         case ColumnExpr.Div(left, right) =>
           binary(kind, columns(left), columns(right), row, divInt, divLong, divFloat, divDouble)
         case ColumnExpr.Lit(value) =>
           literal(value)
         case ColumnExpr.Compare(op, left, right) =>
-          val wider = ColumnExpr
-            .wider(columns(left).field.kind, columns(right).field.kind)
-            .getOrElse(throw new IllegalArgumentException(s"$op is not numeric"))
-          Cell.Bool(compare(op, wider, columns(left), columns(right), row))
+          (columns(left).field.kind, columns(right).field.kind) match
+            case (ColumnKind.Decimal(_, leftScale), ColumnKind.Decimal(_, rightScale)) =>
+              val (leftValue, _, _) = decimalAt(columns(left), row)
+              val (rightValue, _, _) = decimalAt(columns(right), row)
+              val order = DecimalRules.compare(leftValue, leftScale, rightValue, rightScale)
+              Cell.Bool(decimalOrder(op, order))
+            case _ =>
+              val wider = ColumnExpr
+                .wider(columns(left).field.kind, columns(right).field.kind)
+                .getOrElse(throw new IllegalArgumentException(s"$op is not numeric"))
+              Cell.Bool(compare(op, wider, columns(left), columns(right), row))
         case ColumnExpr.And(left, right) =>
           Cell.Bool(boolAt(columns(left), row) && boolAt(columns(right), row))
         case ColumnExpr.Or(left, right) =>
@@ -235,6 +280,12 @@ private[scarlet] object WideCompute:
     case (ColumnKind.Float64, Cell.Int64(value)) => Cell.Float64(value.toDouble)
     case (ColumnKind.Float64, Cell.Float32(value)) => Cell.Float64(value.toDouble)
     case (ColumnKind.Float64, Cell.Float64(value)) => Cell.Float64(value)
+    case (ColumnKind.Decimal(precision, scale), Cell.Int32(value)) =>
+      Cell.Decimal(precision, scale, DecimalRules.fromLong(value.toLong, precision, scale))
+    case (ColumnKind.Decimal(precision, scale), Cell.Int64(value)) =>
+      Cell.Decimal(precision, scale, DecimalRules.fromLong(value, precision, scale))
+    case (ColumnKind.Int64, Cell.Decimal(_, scale, value)) =>
+      Cell.Int64(DecimalRules.toLong(value, scale))
     case _ => throw new IllegalArgumentException(s"cannot cast $cell to $to")
 
   private def ready(columns: Vector[WideColumn], expr: ColumnExpr, row: Int): Boolean =
@@ -270,6 +321,41 @@ private[scarlet] object WideCompute:
     case ColumnLiteral.Int64(number) => Cell.Int64(number)
     case ColumnLiteral.Float64(number) => Cell.Float64(number)
     case ColumnLiteral.Bool(number) => Cell.Bool(number)
+    case ColumnLiteral.Decimal(precision, scale, number) =>
+      Cell.Decimal(precision, scale, number)
+
+  private def decimalCell(
+      columns: Vector[WideColumn],
+      left: Int,
+      right: Int,
+      row: Int,
+      op: (Long, Int, Int, Long, Int, Int) => (Long, ColumnKind),
+  ): Cell =
+    val (leftValue, leftPrecision, leftScale) = decimalAt(columns(left), row)
+    val (rightValue, rightPrecision, rightScale) = decimalAt(columns(right), row)
+    val (value, kind) = op(
+      leftValue,
+      leftPrecision,
+      leftScale,
+      rightValue,
+      rightPrecision,
+      rightScale,
+    )
+    kind match
+      case ColumnKind.Decimal(precision, scale) => Cell.Decimal(precision, scale, value)
+      case other => throw new IllegalArgumentException(s"decimal result $other")
+
+  private def decimalAt(column: WideColumn, row: Int): (Long, Int, Int) = column.cell(row) match
+    case Cell.Decimal(precision, scale, value) => (value, precision, scale)
+    case other => throw new IllegalArgumentException(s"expected a decimal, found $other")
+
+  private def decimalOrder(op: CompareOp, order: Int): Boolean = op match
+    case CompareOp.Gt => order > 0
+    case CompareOp.Ge => order >= 0
+    case CompareOp.Lt => order < 0
+    case CompareOp.Le => order <= 0
+    case CompareOp.Eq => order == 0
+    case CompareOp.Ne => order != 0
 
   private def on(columns: Vector[WideColumn], ordinal: Int, row: Int): Boolean =
     columns(ordinal).isPresent(row)
