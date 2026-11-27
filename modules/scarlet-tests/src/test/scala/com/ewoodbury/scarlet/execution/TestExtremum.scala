@@ -59,6 +59,19 @@ class TestExtremum extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     onRows(data.maxByKey.collect().toMap) shouldBe Map(1 -> 9, 2 -> 8, 3 -> 0)
   }
 
+  it should "fold locally when the pairs are already hashed" in {
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(saved.copy(columnarExecution = false, defaultShufflePartitions = 2))
+      ScarletRuntime.get.shuffle.clear()
+      val hashed = pairs().partitionBy(2)
+      hashed.minByKey.collect().toMap shouldBe Map(1 -> 3, 2 -> -4, 3 -> 0)
+      hashed.maxByKey.collect().toMap shouldBe Map(1 -> 9, 2 -> 8, 3 -> 0)
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
+  }
+
   it should "keep the extreme int" in {
     val data = DistCollection.ofIntPairs(
       Array(1, 1, 2, 2),
