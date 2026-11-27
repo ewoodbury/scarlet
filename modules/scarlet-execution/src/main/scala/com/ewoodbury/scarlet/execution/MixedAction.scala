@@ -34,6 +34,13 @@ private[execution] object MixedAction:
   def partitions[A](plan: Plan[A]): Seq[Partition[A]] = plan match
     case source: Plan.Source[A] => source.partitions
     case Plan.MapPartitionsOp(inner, f) => tail(inner, f)
+    case join: Plan.WideJoinOp =>
+      freeze(
+        ColumnarPlanner
+          .tryRun(join)
+          .getOrElse(WideJoinRows.partitions(join))
+          .asInstanceOf[Seq[Partition[A]]],
+      )
     case other =>
       freeze(MixedJoin.partitions(other).getOrElse(runRow(other)))
 

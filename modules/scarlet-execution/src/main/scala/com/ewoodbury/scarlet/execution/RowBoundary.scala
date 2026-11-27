@@ -250,6 +250,7 @@ private[execution] object RowBoundary:
     plan match
       case Plan.Source(_, descriptor) => numeric(descriptor)
       case _: Plan.JoinOp[?, ?, ?] => false
+      case _: Plan.WideJoinOp => false
       case _: Plan.LeftOuterJoinOp[?, ?, ?] => false
       case _: Plan.RightOuterJoinOp[?, ?, ?] => false
       case _: Plan.FullOuterJoinOp[?, ?, ?] => false
