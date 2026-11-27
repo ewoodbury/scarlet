@@ -273,6 +273,8 @@ object StageBuilder:
         Stage.countSumByLongKeyLocal.asInstanceOf[Stage[Any, Any]]
       case _: CountSumByStringKeyLocalOp =>
         Stage.countSumByStringKeyLocal.asInstanceOf[Stage[Any, Any]]
+      case _: CountSumByIntLongKeyLocalOp =>
+        Stage.countSumByIntLongKeyLocal.asInstanceOf[Stage[Any, Any]]
       case ReduceByKeyLocalOp(reduceFunc) =>
         Stage
           .reduceByKeyLocal[Any, Any](reduceFunc.asInstanceOf[(Any, Any) => Any])
@@ -631,6 +633,9 @@ object StageBuilder:
 
       case stringSum: Plan.CountSumByStringKeyOp =>
         CountSumStages.attachString(ctx, stringSum, builderMap, dependencies)
+
+      case intLongSum: Plan.CountSumByIntLongKeyOp =>
+        CountSumStages.attachIntLong(ctx, intLongSum, builderMap, dependencies)
 
       case reduceByKey: Plan.ReduceByKeyOp[_, _] =>
         val (sourceStageId, _) =
@@ -1033,6 +1038,7 @@ object StageBuilder:
       case CountSumByKeyWideOp(m) => m
       case CountSumByLongKeyWideOp(m) => m
       case CountSumByStringKeyWideOp(m) => m
+      case CountSumByIntLongKeyWideOp(m) => m
       case ReduceByKeyWideOp(m) => m
       case SortByWideOp(m) => m
       case PartitionByWideOp(m) => m
@@ -1144,7 +1150,7 @@ object StageBuilder:
           _: FilterValuesOp[_, _] | _: FlatMapValuesOp[_, _, _] | _: DistinctOp[_] |
           _: GroupByKeyLocalOp[_, _] | _: CountByKeyLocalOp[_, _] | _: CountSumByKeyLocalOp |
           _: CountSumByLongKeyLocalOp | _: CountSumByStringKeyLocalOp |
-          _: ReduceByKeyLocalOp[_, _] =>
+          _: CountSumByIntLongKeyLocalOp | _: ReduceByKeyLocalOp[_, _] =>
         prev
     }
 

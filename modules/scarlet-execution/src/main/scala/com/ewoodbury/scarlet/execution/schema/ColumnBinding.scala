@@ -88,7 +88,7 @@ private[execution] object ColumnBinding:
    * call the reducer.
    */
   enum ReducerWitness:
-    case AddsLongs, Other, NotApplicable
+    case AddsLongs, Other, NotApplicable, NotLongs
 
   /** Inner input, or an outer join whose missing partner is [[NullPolicy.Absence]]. */
   enum Side:
@@ -133,9 +133,10 @@ private[execution] object ColumnBinding:
    * An opaque child is [[scala.None]] and does not call [[choose]]. [[Output.IntLongPairs]] does
    * not call [[choose]] either: those columns equal [[Layout.AssumedIntLong]] when both are
    * nullable, and feeding them here would tag a count or a project sum. Keys and values of that
-   * widening are [[KernelChoice.Column]]. Every other operator on it stays [[scala.None]].
-   * [[AggregateBinding]] asks the triple-project layout on its own. The reducer witness is not an
-   * input for `groupByKey`, `distinct`, `keys`, or `values`.
+   * widening are [[KernelChoice.Column]]. `countSumByKey` is [[KernelChoice.CountSum]]. Every
+   * other operator on it stays [[scala.None]]. [[AggregateBinding]] asks the triple-project layout
+   * on its own. The reducer witness is not an input for `groupByKey`, `distinct`, `keys`, or
+   * `values`.
    */
   private[execution] def asked(child: PhysicalOp, operator: Operator): Option[KernelChoice] =
     val bound = Bound.of(child, Vector.empty, ReducerWitness.NotApplicable)
@@ -151,6 +152,7 @@ private[execution] object ColumnBinding:
       case Output.IntLongPairs(_) =>
         operator match
           case Operator.Keys | Operator.Values => Some(KernelChoice.Column)
+          case Operator.CountSumByKey => Some(KernelChoice.CountSum)
           case _ => None
       case Output.Opaque(_) => None
 

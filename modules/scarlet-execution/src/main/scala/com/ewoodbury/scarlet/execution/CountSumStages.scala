@@ -7,7 +7,7 @@ import com.ewoodbury.scarlet.core.{Plan, ScarletConf, StageId}
 /**
  * Stage graph for count-sum. Same bypass rule as `countByKey`: an upstream hash at the default
  * width runs the local fold, and anything else shuffles with [[WideOpKind.GroupByKey]] so the
- * writer hashes by key. Int, long, and string keys each keep their own local fold.
+ * writer hashes by key. Int, long, string, and int-long keys each keep their own local fold.
  */
 @SuppressWarnings(
   Array(
@@ -62,6 +62,22 @@ private[execution] object CountSumStages:
       plan,
       CountSumByStringKeyLocalOp().asInstanceOf[Operation[Any, Any]],
       meta => CountSumByStringKeyWideOp(meta),
+      builderMap,
+      dependencies,
+    )
+
+  def attachIntLong(
+      ctx: StageBuilder.BuildContext,
+      plan: Plan.CountSumByIntLongKeyOp,
+      builderMap: mutable.Map[StageId, StageBuilder.StageDraft],
+      dependencies: mutable.Map[StageId, mutable.Set[StageId]],
+  ): (StageId, Option[Plan[_]]) =
+    attachWide(
+      ctx,
+      plan.source,
+      plan,
+      CountSumByIntLongKeyLocalOp().asInstanceOf[Operation[Any, Any]],
+      meta => CountSumByIntLongKeyWideOp(meta),
       builderMap,
       dependencies,
     )

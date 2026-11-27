@@ -36,8 +36,8 @@ object FoundationParents:
   )
 
   /**
-   * Checksums at `rows`. `count-above` and `filter-above` lower. `key-above` and `reduce-other`
-   * must not. A checksum mismatch throws.
+   * Checksums at `rows`. `count-above`, `filter-above`, and `reduce-other` lower. `key-above` must
+   * not. A checksum mismatch throws.
    */
   def check(rows: Int): Unit =
     observe(rows).foreach { one =>
@@ -96,8 +96,13 @@ object FoundationParents:
         watched(name, sumOrdered(collect(data)), sumOrdered(keptKey(rows)))
       case "reduce-other" =>
         val data = reduced(rows)
-        refuse(name, data.plan)
-        watched(name, sumReduced(collect(data)), sumReduced(keptReduce(rows)))
+        if ColumnarPlanner.lower(data.plan).isEmpty then
+          throw new IllegalStateException(s"$name stayed on rows")
+        val lowered = ColumnarPlanner
+          .tryRun(data.plan)
+          .getOrElse(throw new IllegalStateException(s"$name did not run columnar"))
+        val kept = lowered.iterator.flatMap(_.data.iterator).toSeq
+        watched(name, sumReduced(collect(data)), sumReduced(kept))
       case other =>
         throw new IllegalStateException(s"unknown query $other")
 
@@ -133,7 +138,7 @@ object FoundationParents:
       case "filter-above" => elapsedLowered(filtered(largeRows))
       case "count-above" => elapsedWork(keptCount(largeRows).size)
       case "key-above" => elapsedWork(keptKey(largeRows).size)
-      case "reduce-other" => elapsedWork(keptReduce(largeRows).size)
+      case "reduce-other" => elapsedLowered(reduced(largeRows))
       case other => throw new IllegalStateException(s"unknown query $other")
 
   private def keptCount(rows: Int): Seq[(Int, Int)] =
@@ -141,9 +146,6 @@ object FoundationParents:
 
   private def keptKey(rows: Int): Seq[(Int, Long)] =
     scheduled(Plan.MapOp(frozen(rows), (pair: (Int, Long)) => (pair._1 + 1, pair._2)))
-
-  private def keptReduce(rows: Int): Seq[(Int, Long)] =
-    scheduled(Plan.ReduceByKeyOp(frozen(rows), (left: Long, _: Long) => left))
 
   private def frozen(rows: Int): Plan[(Int, Long)] =
     val parts = decoded(widened(rows).plan).map(part => Partition(part))
@@ -199,7 +201,7 @@ object FoundationParents:
     val started = System.nanoTime()
     val lowered = ColumnarPlanner
       .tryRun(data.plan)
-      .getOrElse(throw new IllegalStateException("filter-above did not run columnar"))
+      .getOrElse(throw new IllegalStateException("parent did not run columnar"))
     val taken = System.nanoTime() - started
     if lowered.iterator.flatMap(_.data.iterator).size < 0 then
       throw new IllegalStateException("negative collect")

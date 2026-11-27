@@ -38,6 +38,8 @@ private[execution] object PhysicalSchema:
       IntLong
     case PhysicalOp.MapValue(child) if IntLongParents.widened(child) =>
       IntLong
+    case _: PhysicalOp.IntLongHashAggregate =>
+      IntLong
     case other =>
       ofKind(other.kind)
 

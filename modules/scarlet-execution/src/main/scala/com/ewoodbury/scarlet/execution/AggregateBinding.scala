@@ -54,7 +54,8 @@ private[execution] object AggregateBinding:
       reducer: Any,
       lowerChild: Plan[_] => Option[PhysicalOp],
   ): Option[PhysicalOp] =
-    kept(source, lowerChild, Operator.ReduceByKey, witness(reducer))(ReduceByKeyLowering.apply)
+    val seen = witness(reducer)
+    kept(source, lowerChild, Operator.ReduceByKey, seen)(child => ReduceByKeyLowering(child, seen))
 
   def countSum(
       source: Plan[_],
@@ -178,16 +179,20 @@ private[execution] object AggregateBinding:
       case other => other
 
   /**
-   * `countByKey` and long addition on an int-to-long `mapValues`. Every other operator is
-   * [[scala.None]]. The count reads the int key and does not read the long value. Routing these
-   * columns through [[ColumnBinding.choose]] would also tag a count, because they compare equal to
+   * Operators on an int-to-long `mapValues`. `countByKey` reads the int key. `countSumByKey`
+   * counts and sums the long. Long addition is a sum. Any other `(Long, Long) => Long` is the
+   * int-long hash reduce. Every other operator is [[scala.None]]. Routing these columns through
+   * [[ColumnBinding.choose]] would also tag a count, because they compare equal to
    * [[Layout.AssumedIntLong]].
    */
   private def intLongMap(operator: Operator, reducer: ReducerWitness): Option[KernelChoice] =
     (operator, reducer) match
       case (Operator.CountByKey, _) => Some(KernelChoice.CountByKey)
+      case (Operator.CountSumByKey, _) => Some(KernelChoice.CountSum)
       case (Operator.ReduceByKey, ReducerWitness.AddsLongs) =>
         Some(KernelChoice.IntLongProjectSum)
+      case (Operator.ReduceByKey, ReducerWitness.Other) =>
+        Some(KernelChoice.IntLongHashAggregate)
       case _ => None
 
   /** Long addition, or any other reducer. [[witness]] calls the function. */
@@ -195,7 +200,8 @@ private[execution] object AggregateBinding:
 
   /**
    * Long addition, checked by calling `reducer`. The body is not read. Any other function,
-   * including one that does not accept two longs, is [[ReducerWitness.Other]].
+   * including one that does not accept two longs, is [[ReducerWitness.NotLongs]].
+   * [[ReducerWitness.Other]] is a `(Long, Long) => Long` that is not addition.
    */
   @SuppressWarnings(
     Array(
@@ -209,4 +215,4 @@ private[execution] object AggregateBinding:
       val fn = reducer.asInstanceOf[(Long, Long) => Long]
       if (fn(1L, 2L) == 3L && fn(5L, 0L) == 5L && fn(-2L, 2L) == 0L) then ReducerWitness.AddsLongs
       else ReducerWitness.Other
-    catch case _: ClassCastException => ReducerWitness.Other
+    catch case _: ClassCastException => ReducerWitness.NotLongs

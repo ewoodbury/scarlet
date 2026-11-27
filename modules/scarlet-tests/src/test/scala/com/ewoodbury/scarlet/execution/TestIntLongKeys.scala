@@ -16,8 +16,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Present rows match the row path. A null key or a null long does not: the row path unboxes it.
  * The columnar key slot drops a null key and keeps a null long. The value slot drops a null long
  * and keeps a null key. Neither calls the predicate on the clear bit. A whole-row filter drops a
- * row when either bit is clear. `Long => Int` and `Long => Double` stay empty. A non-adding
- * reduce, and `countByKey` or `groupByKey` of the filter, stay empty.
+ * row when either bit is clear. `Long => Int` and `Long => Double` stay empty. A non-adding reduce
+ * of the bare widening lowers. `countByKey` or `groupByKey` of the filter stay empty.
  */
 class TestIntLongKeys extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -146,9 +146,11 @@ class TestIntLongKeys extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     ColumnarPlanner.lower(widened.mapValues((value: Long) => value.toDouble).plan) shouldBe None
     ColumnarPlanner.lower(filtered.countByKey.plan) shouldBe None
     ColumnarPlanner.lower(filtered.groupByKey.plan) shouldBe None
-    ColumnarPlanner.lower(
-      widened.reduceByKey[Int, Long]((left: Long, _: Long) => left).plan,
-    ) shouldBe None
+    ColumnarPlanner
+      .lower(
+        widened.reduceByKey[Int, Long]((left: Long, _: Long) => left).plan,
+      )
+      .map(_.shape) shouldBe Some("IntLongHashAggregate(Exchange(IntLongMapValue(Scan)))")
   }
 
   /** Present pair, null value, null key. One partition, input order. */

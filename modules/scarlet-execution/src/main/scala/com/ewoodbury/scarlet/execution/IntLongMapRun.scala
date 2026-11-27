@@ -14,9 +14,14 @@ import ColumnarInterpreter.{Columns, onEachMorsel, pairsOf}
  */
 private[execution] object IntLongMapRun:
 
-  /** The widening, a filter of it, or a `Long => Long` map of it. Not an int pair. */
+  /**
+   * The widening, a filter of it, a `Long => Long` map of it, or the non-adding int-long reduce.
+   * Not an int pair. The reduce is not part of [[IntLongParents.widened]].
+   */
   def decodes(op: PhysicalOp): Boolean =
-    IntLongParents.widened(op)
+    IntLongParents.widened(op) || (op match
+      case _: PhysicalOp.IntLongHashAggregate => true
+      case _ => false)
 
   def columns(input: Columns, mapper: Any): Columns =
     val fn = longValue(mapper)

@@ -275,6 +275,7 @@ private[execution] object RowBoundary:
       case Plan.CountSumByKeyOp(source) => trusted(source)
       case Plan.CountSumByLongKeyOp(source) => trusted(source)
       case Plan.CountSumByStringKeyOp(source) => trusted(source)
+      case Plan.CountSumByIntLongKeyOp(source) => trusted(source)
       case Plan.ReduceByKeyOp(source, _) => trusted(source)
       case Plan.SortByOp(source, _, _) => trusted(source)
       case Plan.SortByIntKeyOp(source) => trusted(source)
