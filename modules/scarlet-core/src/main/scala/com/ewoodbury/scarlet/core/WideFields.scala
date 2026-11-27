@@ -39,8 +39,8 @@ private[scarlet] object WideFields:
           })
         case _ =>
           None
-    case Plan.WideGroupOp(source, key, measure) =>
-      known(source).flatMap(fields => WideAggregate.output(fields, key, measure))
+    case Plan.WideGroupOp(source, key, measure, key2) =>
+      known(source).flatMap(fields => WideAggregate.output(fields, key, measure, key2))
     case _ =>
       None
 

@@ -30,6 +30,8 @@ object ClickBenchSlice:
   /** Keys 1 to 7, count 512, sum 512 * key, min and max the key. Count descending, then key. */
   val groupedMix: Long = -2156419963914273660L
   val groups: Long = 7L
+  val twoKeyGroups: Long = 200L
+  val twoKeyMix: Long = -5517106496331210496L
 
   val note: Vector[String] = Vector(
     "0 count. This file.",
@@ -64,7 +66,7 @@ object ClickBenchSlice:
     "29 add a literal to a column. This file.",
     "30 two-column group and a string filter. Missing: multi-column group.",
     "31 two-column group. Missing: multi-column group.",
-    "32 two-column group. Missing: multi-column group.",
+    "32 two int keys. This file. The checker applies the order.",
     "33 group by a string. Missing: string group key.",
     "34 group by a constant and a string. Missing: string group key.",
     "35 group by a column expression. Missing: expression group key.",
@@ -139,8 +141,15 @@ object ClickBenchSlice:
   def grouped(): DistCollection[WideRow] =
     filtered().groupColumns(0, 0)
 
+  /** Query 32 shape: two numeric keys, then count, sum, min, and max. */
+  def groupedTwo(): DistCollection[WideRow] =
+    scan().groupColumns(0, 1, 0)
+
   def groupedChecksum(rows: Iterable[WideRow]): Long =
     rows.toVector.sortWith(groupBefore).foldLeft(0L)(mixGroup)
+
+  def twoKeyChecksum(rows: Iterable[WideRow]): Long =
+    rows.toVector.sortWith(twoBefore).foldLeft(0L)(mixTwo)
 
   private def prove(): List[String] =
     List(
@@ -155,6 +164,8 @@ object ClickBenchSlice:
       extremum("query 6 max", scan().plan, 1, maxWidth, least = false),
       shaped("query 7", grouped().plan, "WideGroup(WideFilter0(Scan))"),
       counted("query 7", grouped().plan, groups),
+      shaped("query 32", groupedTwo().plan, "WideGroup(Scan)"),
+      counted("query 32", groupedTwo().plan, twoKeyGroups),
       shaped(
         "query 29",
         widthPlus().plan,
@@ -171,6 +182,7 @@ object ClickBenchSlice:
       both("query 3", sumUser)(scan().sumLongColumn(2)),
       both("query 6", widthExtremum)(mixExtremum()),
       both("query 7", groupedMix)(groupedChecksum(grouped().collect())),
+      both("query 32", twoKeyMix)(twoKeyChecksum(groupedTwo().collect())),
       both("query 29", sumWidthPlus)(widthPlus().sumLongColumn(5)),
     ).flatten
 
@@ -249,6 +261,29 @@ object ClickBenchSlice:
         max.toLong
     case other =>
       refuse(other.size)
+
+  private def twoBefore(left: WideRow, right: WideRow): Boolean =
+    val leftKey = intAt(left, 0)
+    val rightKey = intAt(right, 0)
+    leftKey < rightKey || (leftKey == rightKey && intAt(left, 1) < intAt(right, 1))
+
+  private def mixTwo(acc: Long, row: WideRow): Long = cells(row) match
+    case Vector(
+          Cell.Int32(key),
+          Cell.Int32(key2),
+          Cell.Int64(count),
+          Cell.Int64(sum),
+          Cell.Int32(min),
+          Cell.Int32(max),
+        ) =>
+      (((((acc * 31L + key.toLong) * 31L + key2.toLong) * 31L + count) * 31L + sum) * 31L +
+        min.toLong) * 31L + max.toLong
+    case other =>
+      refuse(other.size)
+
+  private def intAt(row: WideRow, ordinal: Int): Int = cells(row)(ordinal) match
+    case Cell.Int32(value) => value
+    case _ => refuse(cells(row).size)
 
   private def keyOf(row: WideRow): Int = cells(row) match
     case Vector(Cell.Int32(key), _, _, _, _) => key

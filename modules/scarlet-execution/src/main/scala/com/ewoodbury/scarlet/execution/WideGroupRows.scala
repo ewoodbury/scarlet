@@ -16,12 +16,16 @@ private[execution] object WideGroupRows:
 
   def partitions(group: Plan.WideGroupOp): Seq[Partition[WideRow]] =
     val (fields, rows) = materialize(group.source)
-    val out = WideAggregate.output(fields, group.key, group.measure).getOrElse {
+    val out = WideAggregate.output(fields, group.key, group.measure, group.key2).getOrElse {
       throw new IllegalArgumentException(
-        s"columns ${group.key} and ${group.measure} of ${fields.map(_.kind)} do not group",
+        s"columns ${group.key}, ${group.key2}, and ${group.measure} of ${fields.map(_.kind)} do not group",
       )
     }
-    Seq(Partition(fold(rows, group.key, group.measure, fields(group.measure).kind, out)))
+    val folded = group.key2 match
+      case None => fold(rows, group.key, group.measure, fields(group.measure).kind, out)
+      case Some(second) =>
+        foldTwo(rows, group.key, second, group.measure, fields(group.measure).kind, out)
+    Seq(Partition(folded))
 
   private def materialize(plan: Plan[WideRow]): (Vector[ColumnField], Vector[WideRow]) =
     val parts = ExecutionService.get.executePartitions(plan)
@@ -120,6 +124,46 @@ private[execution] object WideGroupRows:
     groups.iterator.map { (keyCell, acc) =>
       WideRow(fields, Vector(keyCell, Cell.Int64(acc.count)) ++ aggregateCells(acc, measureKind))
     }.toVector
+
+  private def foldTwo(
+      rows: Vector[WideRow],
+      key: Int,
+      key2: Int,
+      measure: Int,
+      measureKind: ColumnKind,
+      fields: Vector[ColumnField],
+  ): Vector[WideRow] =
+    val groups = mutable.LinkedHashMap.empty[(Cell, Cell), Acc]
+    rows.foreach { row =>
+      (numericKey(row, key), numericKey(row, key2)) match
+        case (Some(left), Some(right)) =>
+          val acc = groups.getOrElseUpdate((left, right), new Acc)
+          acc.count += 1L
+          addMeasure(acc, cellAt(row, measure))
+        case _ => ()
+    }
+    groups.iterator.map { case ((left, right), acc) =>
+      WideRow(
+        fields,
+        Vector(left, right, Cell.Int64(acc.count)) ++ aggregateCells(acc, measureKind),
+      )
+    }.toVector
+
+  private def numericKey(row: WideRow, ordinal: Int): Option[Cell] =
+    cellAt(row, ordinal) match
+      case Cell.Null => None
+      case value @ (Cell.Int32(_) | Cell.Int64(_)) => Some(value)
+      case other =>
+        throw new IllegalArgumentException(s"group key $other is not int or long")
+
+  private def addMeasure(acc: Acc, cell: Cell): Unit = cell match
+    case Cell.Null => ()
+    case Cell.Int32(value) => acc.addInt(value)
+    case Cell.Int64(value) => acc.addLong(value)
+    case Cell.Float64(value) => acc.addDouble(value)
+    case Cell.Float32(value) => acc.addFloat(value)
+    case other =>
+      throw new IllegalArgumentException(s"measure $other does not aggregate")
 
   private def aggregateCells(acc: Acc, measureKind: ColumnKind): Vector[Cell] =
     if (!acc.seen) then Vector(Cell.Null, Cell.Null, Cell.Null)

@@ -14,24 +14,35 @@ private[scarlet] object WideAggregate:
       fields: Vector[ColumnField],
       key: Int,
       measure: Int,
+      key2: Option[Int] = None,
   ): Option[Vector[ColumnField]] =
     fieldAt(fields, key).flatMap { keyField =>
-      fieldAt(fields, measure).flatMap { measureField =>
-        summed(measureField.kind).flatMap { sumKind =>
-          if (groupKey(keyField.kind)) then
-            Some(
-              Vector(
-                keyField,
-                ColumnField("count", ColumnKind.Int64),
-                ColumnField("sum", sumKind),
-                ColumnField("min", measureField.kind),
-                ColumnField("max", measureField.kind),
-              ),
-            )
-          else None
+      secondField(fields, key, key2).flatMap { extra =>
+        fieldAt(fields, measure).flatMap { measureField =>
+          summed(measureField.kind).flatMap { sumKind =>
+            if (groupKey(keyField.kind) && extra.forall(field => groupKey(field.kind))) then
+              Some(
+                Vector(keyField) ++ extra.toVector ++ Vector(
+                  ColumnField("count", ColumnKind.Int64),
+                  ColumnField("sum", sumKind),
+                  ColumnField("min", measureField.kind),
+                  ColumnField("max", measureField.kind),
+                ),
+              )
+            else None
+          }
         }
       }
     }
+
+  private def secondField(
+      fields: Vector[ColumnField],
+      key: Int,
+      key2: Option[Int],
+  ): Option[Option[ColumnField]] = key2 match
+    case None => Some(None)
+    case Some(ordinal) if ordinal != key => fieldAt(fields, ordinal).map(Some(_))
+    case Some(_) => None
 
   private def fieldAt(fields: Vector[ColumnField], ordinal: Int): Option[ColumnField] =
     if (ordinal >= 0 && ordinal < fields.size) then Some(fields(ordinal)) else None

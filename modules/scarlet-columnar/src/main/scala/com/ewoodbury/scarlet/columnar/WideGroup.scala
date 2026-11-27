@@ -20,6 +20,16 @@ object WideGroup:
       fields: Vector[ColumnField],
       key: Int,
       measure: Int,
+      key2: Option[Int] = None,
+  ): (Vector[ColumnField], ColumnBatch) = key2 match
+    case Some(second) => WideGroupPair.aggregate(batches, fields, key, second, measure)
+    case None => aggregateOne(batches, fields, key, measure)
+
+  private def aggregateOne(
+      batches: Seq[ColumnBatch],
+      fields: Vector[ColumnField],
+      key: Int,
+      measure: Int,
   ): (Vector[ColumnField], ColumnBatch) =
     val out = WideAggregate.output(fields, key, measure).getOrElse {
       throw new IllegalArgumentException(
@@ -51,7 +61,7 @@ object WideGroup:
 
   /** Count, sum, min, and max addressed by the same slot as the key table. */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private final class Measures(kind: ColumnKind):
+  private[columnar] final class Measures(kind: ColumnKind):
     private val familyKind = family(kind)
     private var cap = 16
     private var counts = new Array[Long](cap)

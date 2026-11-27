@@ -117,7 +117,19 @@ final case class DistCollection[A](plan: Plan[A]):
    * This does not build value lists.
    */
   def groupColumns(key: Int, measure: Int)(using ev: A =:= WideRow): DistCollection[WideRow] =
-    DistCollection(Plan.WideGroupOp(widePlan, key, measure))
+    DistCollection(Plan.WideGroupOp(widePlan, key, measure, None))
+
+  /**
+   * Groups by two int or long columns and aggregates one numeric column. A null in either key is
+   * dropped. The measure follows [[groupColumns]]: count includes nulls, and sum, min, and max
+   * skip them. Output is the two keys, then count, sum, min, and max. This does not call
+   * `groupByKey`.
+   */
+  def groupColumns(key: Int, key2: Int, measure: Int)(using
+      ev: A =:= WideRow,
+  ): DistCollection[WideRow] =
+    require(key != key2, "group keys must be different columns")
+    DistCollection(Plan.WideGroupOp(widePlan, key, measure, Some(key2)))
 
   /**
    * Sums one long column. A null slot contributes nothing. The total wraps. A columnar plan adds
