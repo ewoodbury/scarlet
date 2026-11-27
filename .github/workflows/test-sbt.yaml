@@ -57,8 +57,7 @@ jobs:
       - name: Gates
         run: |
           sbt -J-Xmx4g -batch \
-            ";checkFileLength; scalafixAll --check; scalafmtCheck; test; \
-              scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.PerfCheck"
+            ";checkFileLength; scalafixAll --check; scalafmtCheck; test"
 
       - name: Bounded-heap spill check
         run: make test-spill

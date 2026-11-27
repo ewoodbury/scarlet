@@ -1,6 +1,5 @@
 package com.ewoodbury.scarlet.execution
 
-
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
 import com.ewoodbury.scarlet.core.ScarletConf
@@ -10,21 +9,21 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 /**
  * Lightweight CI performance and correctness check. Not part of `make test`.
  *
- * Runs three filter queries on 200k rows in both layouts and compares checksums. It fails when a
+ * Runs five filter queries on 100k rows in both layouts and compares checksums. It fails when a
  * checksum differs, the published batches are wrong, or the columnar p50 is more than twice the
- * row p50. A columnar sample must publish a batch and a row sample must publish none. The
- * threshold is deliberately loose: a shared CI runner is noisy, and this is a smoke test for a
- * clear regression, not a benchmark.
+ * row p50. A columnar sample must publish a batch or a fold, and a row sample must publish
+ * neither. The threshold is deliberately loose: a shared CI runner is noisy, and this is a smoke
+ * test for a clear regression, not a benchmark. The job that runs it is capped at five minutes.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Var"))
 object PerfCheck:
 
-  private val rows = 200_000
+  private val rows = 100_000
   private val groups = 256
   private val threads = 4
   private val batchSize = 8192
-  private val warmup = 2
-  private val rounds = 5
+  private val warmup = 1
+  private val rounds = 3
   private val maxRatio = 2.0
 
   def main(args: Array[String]): Unit =
@@ -64,6 +63,11 @@ object PerfCheck:
       .filterValues((value: Int) => value >= 0)
       .sortByIntKey
 
+    val top = DistCollection
+      .ofIntPairs(sortKeys, values, 2)
+      .filterKeys((key: Int) => key % 3 != 0)
+      .filterValues((value: Int) => value >= 0)
+      .sortByIntValueDesc
     val cases = List(
       ("filter-count", () => filtered.count()),
       (
@@ -75,9 +79,14 @@ object PerfCheck:
             .map { case (key, value) => key * 31L + value }
             .sum,
       ),
+      ("filter-sort", () => SortChecksum.of(sorted)),
       (
-        "filter-sort",
-        () => SortChecksum.of(sorted),
+        "filter-twogroup",
+        () => CrossEngineShapes.tripleChecksum(filtered.countSumByKey.collect()),
+      ),
+      (
+        "filter-topn",
+        () => CrossEngineShapes.pairChecksum(top.take(CrossEngineShapes.topLimit)),
       ),
     )
 
@@ -124,7 +133,8 @@ object PerfCheck:
         val value = action()
         samples(round) = (System.nanoTime() - start) / 1_000_000.0
         checksum = checksumOf(value)
-        if problem.isEmpty then problem = publishedMiss(name, columnar, sink.batchCount, sink.fusedCount)
+        if problem.isEmpty then
+          problem = publishedMiss(name, columnar, sink.batchCount, sink.fusedCount)
       finally ColumnMetrics.restore(previous)
       round += 1
     java.util.Arrays.sort(samples)
@@ -136,11 +146,16 @@ object PerfCheck:
       batches: Long,
       fused: Long,
   ): Option[String] =
-    // A filtered count or sum publishes no batch and folds the source columns in place; either note
-    // proves the columnar path ran. A row run must show neither.
+    // A count folds in place and publishes no batch. A sort, a top-100, or a count-sum publishes
+    // a batch. Either result shows the columnar path ran. A row run shows neither.
     if columnar then
-      Option.when(batches == 0L && fused == 0L)(s"$name columnar published no batch and folded nothing")
-    else Option.when(batches != 0L || fused != 0L)(s"$name row published $batches batches, $fused folds")
+      Option.when(batches == 0L && fused == 0L)(
+        s"$name columnar published no batch and folded nothing",
+      )
+    else
+      Option.when(batches != 0L || fused != 0L)(
+        s"$name row published $batches batches, $fused folds",
+      )
 
   private def checksumOf(value: Any): Long = value match
     case number: Long => number
@@ -163,7 +178,7 @@ object PerfCheck:
     var state = 58L
     var index = count - 1
     while (index > 0) do
-      state = (state * 1664525 + 1013904223) & 0xFFFFFFFFL
+      state = (state * 1664525 + 1013904223) & 0xffffffffL
       val other = (state % (index + 1)).toInt
       val held = order(index)
       order(index) = order(other)

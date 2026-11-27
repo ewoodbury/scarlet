@@ -1,0 +1,55 @@
+name: Perf smoke
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+# A newer push to the same branch makes the older run pointless; stop paying for it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
+
+      - name: Cache coursier and sbt
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.sbt
+            ~/.ivy2/cache
+          key: sbt-deps-${{ runner.os }}-${{ hashFiles('**/*.sbt', 'project/build.properties') }}
+          restore-keys: sbt-deps-${{ runner.os }}-
+
+      - name: Cache compiled classes
+        uses: actions/cache@v4
+        with:
+          path: |
+            **/target
+            project/target
+            project/project/target
+          key: sbt-classes-${{ runner.os }}-${{ hashFiles('**/*.sbt', 'project/build.properties') }}
+          restore-keys: sbt-classes-${{ runner.os }}-
+
+      # Checksum and a loose columnar-versus-row ratio. Not a benchmark. The five-minute cap is
+      # the job timeout above.
+      - name: Perf smoke
+        run: |
+          sbt -J-Xmx3g -batch \
+            "scarlet-tests/Test/runMain com.ewoodbury.scarlet.execution.PerfCheck"
