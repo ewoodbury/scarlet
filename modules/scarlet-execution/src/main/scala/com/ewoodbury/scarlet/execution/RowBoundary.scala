@@ -279,6 +279,7 @@ private[execution] object RowBoundary:
       case Plan.ExtremumByKeyOp(source, _) => trusted(source)
       case Plan.WideFilterOp(source, _, _) => trusted(source)
       case Plan.WideProjectOp(source, _) => trusted(source)
+      case Plan.WideComputeOp(source, _, _) => trusted(source)
       case Plan.ReduceByKeyOp(source, _) => trusted(source)
       case Plan.SortByOp(source, _, _) => trusted(source)
       case Plan.SortByIntKeyOp(source) => trusted(source)

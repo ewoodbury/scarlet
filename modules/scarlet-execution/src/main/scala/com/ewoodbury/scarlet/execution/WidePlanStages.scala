@@ -32,6 +32,14 @@ private[execution] object WidePlanStages:
       dependencies,
     )
 
+  def attachCompute(
+      ctx: StageBuilder.BuildContext,
+      plan: Plan.WideComputeOp,
+      builderMap: mutable.Map[StageId, StageBuilder.StageDraft],
+      dependencies: mutable.Map[StageId, mutable.Set[StageId]],
+  ): (StageId, Option[Plan[_]]) =
+    attach(ctx, plan.source, WideComputeOp(plan.expr, plan.name), plan, builderMap, dependencies)
+
   def attachProject(
       ctx: StageBuilder.BuildContext,
       plan: Plan.WideProjectOp,

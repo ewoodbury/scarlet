@@ -349,6 +349,7 @@ trait ColumnarContractFixture extends Matchers:
     case PhysicalOp.Project(child) => preservesPartitions(child)
     case PhysicalOp.WideFilter(child, _, _) => preservesPartitions(child)
     case PhysicalOp.WideProject(child, _) => preservesPartitions(child)
+    case PhysicalOp.WideCompute(child, _, _) => preservesPartitions(child)
     case PhysicalOp.Pipeline(child, _) => preservesPartitions(child)
     case PhysicalOp.Column(child, _) => preservesPartitions(child)
     case PhysicalOp.MapValue(child) => preservesPartitions(child)
@@ -519,6 +520,7 @@ trait ColumnarContractFixture extends Matchers:
     case Plan.FilterOp(_, _) => PlanNode.Filter
     case Plan.WideFilterOp(_, _, _) => PlanNode.Filter
     case Plan.WideProjectOp(_, _) => PlanNode.Map
+    case Plan.WideComputeOp(_, _, _) => PlanNode.Map
     case Plan.FlatMapOp(_, _) => PlanNode.FlatMap
     case Plan.DistinctOp(_) => PlanNode.Distinct
     case Plan.UnionOp(_, _) => PlanNode.Union

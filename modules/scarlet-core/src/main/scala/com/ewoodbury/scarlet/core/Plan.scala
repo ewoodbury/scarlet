@@ -642,4 +642,18 @@ object Plan {
    */
   case class WideProjectOp(source: Plan[WideRow], spec: Vector[(Int, String)])
       extends Plan[WideRow]
+
+  /**
+   * Appends one computed column. Arithmetic uses the wider numeric input. A compare yields bool.
+   * Null in an input yields null. Divide and strings are not in this set.
+   *
+   * @param source
+   *   The preceding wide-row plan.
+   * @param expr
+   *   Closed expression over source ordinals.
+   * @param name
+   *   Name of the appended column.
+   */
+  case class WideComputeOp(source: Plan[WideRow], expr: ColumnExpr, name: String)
+      extends Plan[WideRow]
 }

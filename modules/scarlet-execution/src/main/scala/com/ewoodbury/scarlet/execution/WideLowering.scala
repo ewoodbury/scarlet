@@ -24,6 +24,27 @@ private[execution] object WideLowering:
           None
     }
 
+  def compute(
+      source: com.ewoodbury.scarlet.core.Plan[WideRow],
+      expr: com.ewoodbury.scarlet.core.ColumnExpr,
+      name: String,
+      lowerChild: com.ewoodbury.scarlet.core.Plan[_] => Option[PhysicalOp],
+  ): Option[PhysicalOp] =
+    if (name.isEmpty) then None
+    else
+      lowerChild(source).flatMap { child =>
+        fieldsOf(child) match
+          case Some(fields)
+              if com.ewoodbury.scarlet.core.ColumnExpr.resultKind(expr, fields).isDefined &&
+                !fields.exists(field => field.name.equals(name)) =>
+            Some(PhysicalOp.WideCompute(child, expr, name))
+          case Some(_) =>
+            LoweringTrace.note("WideComputeOp", child.kind, "WideLowering")
+            None
+          case None =>
+            None
+      }
+
   def project(
       source: com.ewoodbury.scarlet.core.Plan[WideRow],
       spec: Vector[(Int, String)],
@@ -49,13 +70,19 @@ private[execution] object WideLowering:
       spec.map(_._1).distinct.size == spec.size &&
       spec.map(_._2).distinct.size == spec.size
 
-  private def fieldsOf(op: PhysicalOp): Option[Vector[ColumnField]] = op match
+  private[execution] def fieldsOf(op: PhysicalOp): Option[Vector[ColumnField]] = op match
     case PhysicalOp.Scan(PhysicalOp.Kind.Columns, partitions) =>
       schema(partitions)
     case PhysicalOp.WideFilter(child, _, _) =>
       fieldsOf(child)
     case PhysicalOp.WideProject(child, spec) =>
       fieldsOf(child).map(fields => spec.map((ordinal, name) => fields(ordinal).copy(name = name)))
+    case PhysicalOp.WideCompute(child, expr, name) =>
+      fieldsOf(child).flatMap { fields =>
+        com.ewoodbury.scarlet.core.ColumnExpr.resultKind(expr, fields).map { kind =>
+          fields :+ com.ewoodbury.scarlet.core.ColumnField(name, kind)
+        }
+      }
     case _ =>
       None
 

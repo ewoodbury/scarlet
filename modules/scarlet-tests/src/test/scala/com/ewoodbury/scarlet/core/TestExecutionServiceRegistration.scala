@@ -67,6 +67,8 @@ class TestExecutionServiceRegistration extends AnyFlatSpec with Matchers with Be
 
     def sumLong(plan: Plan[Long]): Long = 0L
 
+    def sumWideLong(plan: Plan[WideRow], ordinal: Int): Long = 0L
+
     def sumDouble(plan: Plan[Double]): Double = 0.0
 
     def sumFloat(plan: Plan[Float]): Float = 0.0f

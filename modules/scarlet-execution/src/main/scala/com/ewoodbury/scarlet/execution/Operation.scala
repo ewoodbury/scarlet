@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.core.{ColumnCompare, Plan, WideRow}
+import com.ewoodbury.scarlet.core.{ColumnCompare, ColumnExpr, Plan, WideRow}
 
 /**
  * Planner IR for the steps applied inside a stage. [[Stage]] is what runs. [[StageBuilder]] builds
@@ -170,6 +170,9 @@ final case class WideFilterOp(ordinal: Int, compare: ColumnCompare)
 
 /** Drop, reorder, or rename wide-row columns. Does not compute. */
 final case class WideProjectOp(spec: Vector[(Int, String)]) extends Operation[WideRow, WideRow]
+
+/** Appends one computed wide-row column. Null in an input yields null. */
+final case class WideComputeOp(expr: ColumnExpr, name: String) extends Operation[WideRow, WideRow]
 
 object Operation {
 
