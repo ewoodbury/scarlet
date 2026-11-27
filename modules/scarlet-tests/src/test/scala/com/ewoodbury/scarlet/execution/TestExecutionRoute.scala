@@ -119,6 +119,8 @@ class TestExecutionRoute extends AnyFlatSpec with Matchers with BeforeAndAfterEa
 
   "pair layouts" should "name the arm the tag shares" in {
     val ints = PhysicalOp.Scan(PhysicalOp.Kind.Ints, Seq.empty)
+    val longColumn = PhysicalOp.Scan(PhysicalOp.Kind.Longs, Seq.empty)
+    val doubles = PhysicalOp.Scan(PhysicalOp.Kind.Floats, Seq.empty)
     val strings = PhysicalOp.Scan(PhysicalOp.Kind.Strings, Seq.empty)
     val pairs = PhysicalOp.Scan(PhysicalOp.Kind.Pairs, Seq.empty)
     val longs = PhysicalOp.Scan(PhysicalOp.Kind.LongPairs, Seq.empty)
@@ -136,6 +138,8 @@ class TestExecutionRoute extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     ExecutionRoute.pairArm(triples) shouldBe None
     Layout.known(grouped) shouldBe Layout.Grouped
     ExecutionRoute.distinctArm(ints) shouldBe ExecutionRoute.DistinctArm.Ints
+    ExecutionRoute.distinctArm(longColumn) shouldBe ExecutionRoute.DistinctArm.Longs
+    ExecutionRoute.distinctArm(doubles) shouldBe ExecutionRoute.DistinctArm.Doubles
     ExecutionRoute.distinctArm(strings) shouldBe ExecutionRoute.DistinctArm.Strings
     ExecutionRoute.mapValueArm(pairs) shouldBe ExecutionRoute.MapValueArm.IntValues
     ExecutionRoute.mapValueArm(longs) shouldBe ExecutionRoute.MapValueArm.LongValues

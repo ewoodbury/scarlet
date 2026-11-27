@@ -5,16 +5,18 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
+import com.ewoodbury.scarlet.columnar.{BatchCodec, DistinctKernel}
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
  * Distinct keeps one copy of each value across partitions.
  *
- * Int and string columns lower to `Dedupe(Exchange(Scan))`. Every other type, and an int column
- * with columnar execution off, hash-shuffles on the row path and then dedupes inside each shuffle
- * partition. A per-partition `iterator.distinct` with no shuffle keeps a duplicate that landed in
- * two source partitions.
+ * Int, long, double, and string columns lower to `Dedupe(Exchange(Scan))`. A bool, a float, a
+ * pair, and an int column with columnar execution off hash-shuffle on the row path and then
+ * dedupe inside each shuffle partition. A per-partition `iterator.distinct` with no shuffle
+ * keeps a duplicate that landed in two source partitions. `-0.0` collapses with `0.0`. Every
+ * `NaN` stays, matching `==` on a primitive `Double`.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Null"))
 class TestDistinct extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
@@ -65,17 +67,83 @@ class TestDistinct extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     PartitionPreserving.of(lowered) shouldBe Option.empty[Int]
   }
 
+  it should "lower a long column and keep one null beside zero" in {
+    val absent: java.lang.Long = null
+    val rows = Seq[java.lang.Long](
+      java.lang.Long.valueOf(1L),
+      absent,
+      java.lang.Long.valueOf(0L),
+      java.lang.Long.valueOf(1L),
+      absent,
+      java.lang.Long.valueOf(0L),
+      java.lang.Long.valueOf(Long.MinValue),
+      java.lang.Long.valueOf(Long.MinValue),
+    )
+    val distinct = DistCollection(rows, 3).distinct()
+    ColumnarPlanner.lower(distinct.plan).map(_.shape) shouldBe Some("Dedupe(Exchange(Scan))")
+    val columnar = distinct.collect()
+    distinct.count() shouldBe 4L
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = false))
+    val row = DistCollection(rows, 3).distinct().collect()
+    longProfile(columnar) shouldBe longProfile(row)
+    longProfile(columnar) shouldBe (1, Seq(Long.MinValue, 0L, 1L))
+
+    val batch = BatchCodec.nullableLongs(Seq(Some(0L), None, Some(0L), None))
+    val decoded = DistinctKernel.longs(Vector(batch), 4).flatMap(BatchCodec.decodeNullableLongs)
+    decoded.count(_.isEmpty) shouldBe 1
+    decoded.flatten shouldBe Seq(0L)
+  }
+
+  it should "lower a double column, collapse negative zero, and keep every NaN" in {
+    val payload = java.lang.Double.longBitsToDouble(0x7ff8000000000001L)
+    val values = Array(
+      1.0,
+      -0.0,
+      0.0,
+      Double.NaN,
+      Double.NaN,
+      payload,
+      1.0,
+      Double.PositiveInfinity,
+      Double.NegativeInfinity,
+    )
+    val distinct = DistCollection.ofDoubles(values, 3).distinct()
+    ColumnarPlanner.lower(distinct.plan).map(_.shape) shouldBe Some("Dedupe(Exchange(Scan))")
+    val columnar = distinct.collect()
+    distinct.count() shouldBe 7L
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = false))
+    val row = DistCollection.ofDoubles(values, 3).distinct().collect()
+    doubleProfile(columnar) shouldBe doubleProfile(row)
+    doubleProfile(columnar) shouldBe (
+      3,
+      Seq(Double.NegativeInfinity, 0.0, 1.0, Double.PositiveInfinity),
+    )
+
+    val absent: java.lang.Double = null
+    val boxed = Seq[java.lang.Double](
+      java.lang.Double.valueOf(1.0),
+      absent,
+      java.lang.Double.valueOf(1.0),
+      absent,
+    )
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = true))
+    val kept = DistCollection(boxed, 2).distinct()
+    val keptRows = kept.collect()
+    kept.count() shouldBe 2L
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = false))
+    nullsOf(keptRows) shouldBe nullsOf(DistCollection(boxed, 2).distinct().collect())
+    nullsOf(keptRows) shouldBe 1
+  }
+
   /**
-   * Fails if each source partition dedupes itself and never shuffles. The long `1` is in both
-   * source partitions, so that fake counts 4. The global answer is 3.
+   * Fails if each source partition dedupes itself and never shuffles. The bool `true` is in both
+   * source partitions. Global distinct still returns two values, and the row graph hash-shuffles.
    */
   it should "drop a duplicate that lands in another partition" in {
-    val longs = DistCollection.ofLongs(Array(0L, 1L, 0L, 1L, 2L, 2L), 2)
-    assert(ColumnarPlanner.lower(longs.distinct().plan).isEmpty)
-    val longDistinct = longs.distinct()
-    longDistinct.count() shouldBe 3L
-    longDistinct.collect().toSet shouldBe Set(0L, 1L, 2L)
-    val graph = StageBuilder.buildStageGraph(longDistinct.plan)
+    val bools = DistCollection.ofBools(Array(true, false, true, false), 2)
+    assert(ColumnarPlanner.lower(bools.distinct().plan).isEmpty)
+    bools.distinct().count() shouldBe 2L
+    val graph = StageBuilder.buildStageGraph(bools.distinct().plan)
     val shuffle = graph.stages(graph.finalStageId)
     shuffle.isShuffleStage shouldBe true
     shuffle.wideOp shouldBe Some(
@@ -90,10 +158,6 @@ class TestDistinct extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       Distribution.Unknown(ScarletConf.get.defaultShufflePartitions),
     )
 
-    val doubles = DistCollection.ofDoubles(Array(1.0, 2.0, 1.0, 2.0), 2)
-    doubles.distinct().count() shouldBe 2L
-    val bools = DistCollection.ofBools(Array(true, false, true, false), 2)
-    bools.distinct().count() shouldBe 2L
     val pairs = DistCollection.ofIntPairs(Array(1, 2, 1, 2), Array(10, 20, 10, 20), 2)
     pairs.distinct().count() shouldBe 2L
     pairs.distinct().collect().toSet shouldBe Set((1, 10), (2, 20))
@@ -114,7 +178,40 @@ class TestDistinct extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     ints.collect().toSeq.sorted shouldBe Seq(-1, 0, 1, 2, 3, 4)
     DistCollection(Seq.empty[Int], 3).distinct().collect() shouldBe empty
     DistCollection(Seq(7, 7, 7), 1).distinct().collect().toSeq shouldBe Seq(7)
+    DistCollection.ofLongs(Array(1L, 1L, 2L), 2).distinct().collect().toSet shouldBe Set(1L, 2L)
     val words = DistCollection(Seq[String]("a", null, "b", null, "a"), 2).distinct()
     words.count() shouldBe 3L
     words.collect().toSet shouldBe Set[String]("a", "b", null)
   }
+
+  /** One null, then the present longs in order. A `scala.Long` read would unbox the null. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.Equals",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def longProfile(values: Iterable[java.lang.Long]): (Int, Seq[Long]) =
+    val cells = values.iterator.toList
+    val nulls = cells.count(_ == null)
+    val present = cells.collect { case value: java.lang.Long => value.longValue() }.sorted
+    (nulls, present)
+
+  /** `NaN` count, then the other doubles with `-0.0` written as `0.0`. */
+  @SuppressWarnings(Array("org.wartremover.warts.Equals"))
+  private def doubleProfile(values: Iterable[Double]): (Int, Seq[Double]) =
+    val cells = values.iterator.toList
+    val nans = cells.count(_.isNaN)
+    val present = cells.filter(!_.isNaN).map(value => if (value == 0.0) 0.0 else value).sorted
+    (nans, present)
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.Equals",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def nullsOf(values: Iterable[java.lang.Double]): Int =
+    values.iterator.count(_ == null)

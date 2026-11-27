@@ -173,7 +173,10 @@ class TestStringDistinct extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     val source = Plan.Source(Seq(Partition(Seq(absent, absent))))
     ColumnarPlanner.lower(source) shouldBe None
     ColumnarPlanner.lower(Plan.DistinctOp(source)) shouldBe None
-    ColumnarPlanner.lower(DistCollection(Seq(1L, 1L), 2).distinct().plan) shouldBe None
+    ColumnarPlanner.lower(DistCollection(Seq(1L, 1L), 2).distinct().plan).map(_.shape) shouldBe
+      Some("Dedupe(Exchange(Scan))")
+    ColumnarPlanner.lower(DistCollection.ofBools(Array(true, true), 2).distinct().plan) shouldBe
+      None
   }
 
   private def strings(left: Seq[String], right: Seq[String]): DistCollection[String] =
