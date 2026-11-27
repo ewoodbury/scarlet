@@ -360,7 +360,11 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.JoinProbeSum(_, _, _) | PhysicalOp.HashJoin(_, _) |
         PhysicalOp.LongHashJoin(_, _) | PhysicalOp.IntLongHashJoin(_, _) |
         PhysicalOp.IntLongHashLeftOuter(_, _) | PhysicalOp.IntLongHashRightOuter(_, _) |
-        PhysicalOp.IntLongHashFullOuter(_, _) | PhysicalOp.LongSortMergeJoin(_, _) |
+        PhysicalOp.IntLongHashFullOuter(_, _) | PhysicalOp.IntLongBroadcastJoin(_, _, _) |
+        PhysicalOp.IntLongBroadcastLeftOuter(_, _) | PhysicalOp.IntLongBroadcastRightOuter(_, _) |
+        PhysicalOp.IntLongBroadcastFullOuter(_, _) | PhysicalOp.IntLongSortMergeJoin(_, _) |
+        PhysicalOp.IntLongSortMergeLeftOuter(_, _) | PhysicalOp.IntLongSortMergeRightOuter(_, _) |
+        PhysicalOp.IntLongSortMergeFullOuter(_, _) | PhysicalOp.LongSortMergeJoin(_, _) |
         PhysicalOp.StringHashJoin(_, _) | PhysicalOp.StringSortMergeJoin(_, _) |
         PhysicalOp.SortMergeJoin(_, _) | PhysicalOp.SortMergeLeftOuter(_, _) |
         PhysicalOp.SortMergeRightOuter(_, _) | PhysicalOp.SortMergeFullOuter(_, _) |

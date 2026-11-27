@@ -167,13 +167,17 @@ private[execution] object Layout:
     case node @ (_: PhysicalOp.StringHashFullOuter | _: PhysicalOp.StringBroadcastFullOuter |
         _: PhysicalOp.StringSortMergeFullOuter) =>
       join(node.kind, OuterSide.Full)
-    case node: PhysicalOp.IntLongHashJoin =>
+    case node @ (_: PhysicalOp.IntLongHashJoin | _: PhysicalOp.IntLongBroadcastJoin |
+        _: PhysicalOp.IntLongSortMergeJoin) =>
       join(node.kind, OuterSide.Inner)
-    case node: PhysicalOp.IntLongHashLeftOuter =>
+    case node @ (_: PhysicalOp.IntLongHashLeftOuter | _: PhysicalOp.IntLongBroadcastLeftOuter |
+        _: PhysicalOp.IntLongSortMergeLeftOuter) =>
       join(node.kind, OuterSide.Left)
-    case node: PhysicalOp.IntLongHashRightOuter =>
+    case node @ (_: PhysicalOp.IntLongHashRightOuter | _: PhysicalOp.IntLongBroadcastRightOuter |
+        _: PhysicalOp.IntLongSortMergeRightOuter) =>
       join(node.kind, OuterSide.Right)
-    case node: PhysicalOp.IntLongHashFullOuter =>
+    case node @ (_: PhysicalOp.IntLongHashFullOuter | _: PhysicalOp.IntLongBroadcastFullOuter |
+        _: PhysicalOp.IntLongSortMergeFullOuter) =>
       join(node.kind, OuterSide.Full)
 
   private def columns(kind: PhysicalOp.Kind): Output =
@@ -310,3 +314,7 @@ private[execution] enum KernelChoice:
   case SortByIntLongKey, SortByIntLongValueDesc
   case IntLongHashJoin
   case IntLongHashLeftOuter, IntLongHashRightOuter, IntLongHashFullOuter
+  case IntLongBroadcastJoin
+  case IntLongBroadcastLeftOuter, IntLongBroadcastRightOuter, IntLongBroadcastFullOuter
+  case IntLongSortMergeJoin
+  case IntLongSortMergeLeftOuter, IntLongSortMergeRightOuter, IntLongSortMergeFullOuter

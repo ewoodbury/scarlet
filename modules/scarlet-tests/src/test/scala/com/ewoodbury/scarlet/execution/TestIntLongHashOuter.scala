@@ -12,7 +12,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Hash outer joins of `mapValues` from `(Int, Int)` to `(Int, Long)`.
  *
  * A null key does not match. The preserved side keeps it, and the other value is absent. A null
- * long stays null and is not a missing partner. Broadcast and sort-merge stay on rows.
+ * long stays null and is not a missing partner. An unhinted outer uses the hash node.
  */
 @SuppressWarnings(
   Array(

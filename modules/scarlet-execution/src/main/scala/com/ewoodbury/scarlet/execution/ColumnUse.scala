@@ -219,6 +219,40 @@ private[execution] object ColumnUse:
             PhysicalOp.IntLongHashFullOuter(leftOp, rightOp),
           ) =>
         pair(left, right, leftOp, rightOp)
+      case (Plan.JoinOp(left, right, _), PhysicalOp.IntLongBroadcastJoin(leftOp, rightOp, _)) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.LeftOuterJoinOp(left, right, _),
+            PhysicalOp.IntLongBroadcastLeftOuter(leftOp, rightOp),
+          ) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.RightOuterJoinOp(left, right, _),
+            PhysicalOp.IntLongBroadcastRightOuter(leftOp, rightOp),
+          ) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.FullOuterJoinOp(left, right, _),
+            PhysicalOp.IntLongBroadcastFullOuter(leftOp, rightOp),
+          ) =>
+        pair(left, right, leftOp, rightOp)
+      case (Plan.JoinOp(left, right, _), PhysicalOp.IntLongSortMergeJoin(leftOp, rightOp)) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.LeftOuterJoinOp(left, right, _),
+            PhysicalOp.IntLongSortMergeLeftOuter(leftOp, rightOp),
+          ) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.RightOuterJoinOp(left, right, _),
+            PhysicalOp.IntLongSortMergeRightOuter(leftOp, rightOp),
+          ) =>
+        pair(left, right, leftOp, rightOp)
+      case (
+            Plan.FullOuterJoinOp(left, right, _),
+            PhysicalOp.IntLongSortMergeFullOuter(leftOp, rightOp),
+          ) =>
+        pair(left, right, leftOp, rightOp)
       case (Plan.JoinOp(left, right, _), PhysicalOp.LongSortMergeJoin(leftOp, rightOp)) =>
         pair(left, right, leftOp, rightOp)
       case (Plan.JoinOp(left, right, _), PhysicalOp.StringHashJoin(leftOp, rightOp)) =>

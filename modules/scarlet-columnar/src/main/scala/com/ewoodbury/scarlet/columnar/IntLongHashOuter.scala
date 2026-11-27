@@ -74,6 +74,24 @@ object IntLongHashOuter:
       Place.Full,
     )
 
+  /** One left-outer batch. `left` is the probe and `right` is the build. */
+  def leftOuter(left: ColumnBatch, right: ColumnBatch): ColumnBatch =
+    join(left, right, Place.Left)
+
+  /** One right-outer batch. `right` is the probe and `left` is the build. */
+  def rightOuter(left: ColumnBatch, right: ColumnBatch): ColumnBatch =
+    join(left, right, Place.Right)
+
+  /**
+   * One full-outer batch. A broadcast calls this once. Once per probe batch would emit unmatched
+   * build rows again.
+   */
+  def fullOuter(left: ColumnBatch, right: ColumnBatch): ColumnBatch =
+    join(left, right, Place.Full)
+
+  /** Zero-row `(Int32, Int64, Int64)` batch. A fresh batch on every call. */
+  private[columnar] def emptyBatch: ColumnBatch = empty
+
   /** Left outer rows. A clear bit with no absence mark is a null long, not a missing partner. */
   def decodeLeft(batch: ColumnBatch, maxRows: Int): Seq[(Int, (Long, Option[Long]))] =
     val (rows, keys, left, right) = columns(batch, maxRows)

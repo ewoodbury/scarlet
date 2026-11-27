@@ -12,7 +12,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * Inner hash join of `mapValues` from `(Int, Int)` to `(Int, Long)` on both sides.
  *
  * A null key is dropped and does not match. A null long stays null and still matches. Broadcast
- * and sort-merge stay on rows. An int-pair join stays [[PhysicalOp.HashJoin]].
+ * and sort-merge of this pair lower too. An int-pair join stays [[PhysicalOp.HashJoin]].
  */
 @SuppressWarnings(
   Array(
@@ -82,22 +82,27 @@ class TestIntLongHashJoin extends AnyFlatSpec with Matchers with BeforeAndAfterE
     seen shouldBe Seq((Some(1), Some(10L), Some(4L)))
   }
 
-  it should "leave other strategies and int pairs alone" in {
+  it should "keep an int-pair join on the int class" in {
     val left = widened(Array(1, 2), Array(10, 20))
     val right = widened(Array(2, 3), Array(5, 6))
     val ints = DistCollection.ofIntPairs(Array(1, 2), Array(3, 4), 1)
     val other = DistCollection.ofIntPairs(Array(2), Array(5), 1)
 
-    ColumnarPlanner.lower(left.broadcastJoin(right).plan) shouldBe None
-    ColumnarPlanner.lower(left.sortMergeJoin(right).plan) shouldBe None
-    ColumnarPlanner.lower(
+    shape(left.broadcastJoin(right)) shouldBe
+      "IntLongBroadcastJoin(IntLongMapValue(Scan), IntLongMapValue(Scan))"
+    shape(left.sortMergeJoin(right)) shouldBe
+      "IntLongSortMergeJoin(Exchange(IntLongMapValue(Scan)), Exchange(IntLongMapValue(Scan)))"
+    shape(
       Plan.LeftOuterJoinOp(left.plan, right.plan, Some(Plan.JoinStrategy.Broadcast)),
-    ) shouldBe None
-    ColumnarPlanner.lower(
+    ) shouldBe "IntLongBroadcastLeftOuter(IntLongMapValue(Scan), IntLongMapValue(Scan))"
+    shape(
       Plan.FullOuterJoinOp(left.plan, right.plan, Some(Plan.JoinStrategy.SortMerge)),
-    ) shouldBe None
+    ) shouldBe
+      "IntLongSortMergeFullOuter(Exchange(IntLongMapValue(Scan)), Exchange(IntLongMapValue(Scan)))"
     ColumnarPlanner.lower(left.join(ints).plan) shouldBe None
     shape(ints.join(other)) shouldBe "HashJoin(Exchange(Scan), Exchange(Scan))"
+    shape(ints.broadcastJoin(other)) shouldBe "BroadcastJoin(Scan, Scan)"
+    shape(ints.sortMergeJoin(other)) shouldBe "SortMergeJoin(Exchange(Scan), Exchange(Scan))"
     shape(ints.leftOuterJoin(other)) shouldBe "HashLeftOuter(Exchange(Scan), Exchange(Scan))"
   }
 
@@ -110,8 +115,10 @@ class TestIntLongHashJoin extends AnyFlatSpec with Matchers with BeforeAndAfterE
   private def pairs(rows: Seq[(Int, Int)]): DistCollection[(Int, Int)] =
     DistCollection(rows, 1)
 
-  private def shape(collection: DistCollection[_]): String =
-    ColumnarPlanner.lower(collection.plan).map(_.shape).getOrElse("none")
+  private def shape(collection: DistCollection[_]): String = shape(collection.plan)
+
+  private def shape(plan: Plan[_]): String =
+    ColumnarPlanner.lower(plan).map(_.shape).getOrElse("none")
 
   private def columnar[A](collection: DistCollection[A]): Seq[A] =
     ColumnarPlanner

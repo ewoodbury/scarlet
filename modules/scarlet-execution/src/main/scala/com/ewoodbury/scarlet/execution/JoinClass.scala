@@ -130,6 +130,22 @@ private[execution] object JoinClass:
         Some(PhysicalOp.IntLongHashRightOuter(leftExchange, rightExchange))
       case KernelChoice.IntLongHashFullOuter =>
         Some(PhysicalOp.IntLongHashFullOuter(leftExchange, rightExchange))
+      case KernelChoice.IntLongBroadcastJoin =>
+        Some(PhysicalOp.IntLongBroadcastJoin(left, right, PhysicalOp.BuildSide.Right))
+      case KernelChoice.IntLongBroadcastLeftOuter =>
+        Some(PhysicalOp.IntLongBroadcastLeftOuter(left, right))
+      case KernelChoice.IntLongBroadcastRightOuter =>
+        Some(PhysicalOp.IntLongBroadcastRightOuter(left, right))
+      case KernelChoice.IntLongBroadcastFullOuter =>
+        Some(PhysicalOp.IntLongBroadcastFullOuter(left, right))
+      case KernelChoice.IntLongSortMergeJoin =>
+        Some(PhysicalOp.IntLongSortMergeJoin(leftExchange, rightExchange))
+      case KernelChoice.IntLongSortMergeLeftOuter =>
+        Some(PhysicalOp.IntLongSortMergeLeftOuter(leftExchange, rightExchange))
+      case KernelChoice.IntLongSortMergeRightOuter =>
+        Some(PhysicalOp.IntLongSortMergeRightOuter(leftExchange, rightExchange))
+      case KernelChoice.IntLongSortMergeFullOuter =>
+        Some(PhysicalOp.IntLongSortMergeFullOuter(leftExchange, rightExchange))
       case KernelChoice.IntHashAggregate | KernelChoice.LongHashAggregate |
           KernelChoice.StringHashAggregate | KernelChoice.IntLongProjectSum |
           KernelChoice.IntLongHashAggregate | KernelChoice.CountByKey |
@@ -145,9 +161,9 @@ private[execution] object JoinClass:
         None
 
   /**
-   * Hash join of two int-long pairs. The caller already checked both children.
+   * Join of two int-long pairs. The caller already checked both children.
    *
-   * Inner, left, right, and full use the int-long hash nodes. Broadcast and sort-merge stay empty.
+   * No hint and shuffle-hash use the hash nodes. Broadcast and sort-merge use their own nodes.
    * This is not [[choose]]: an `Int32` key on [[PhysicalOp.Kind.Pairs]] would build the int hash
    * join and read the long as an int.
    */
@@ -155,16 +171,31 @@ private[execution] object JoinClass:
       strategy: Option[Plan.JoinStrategy],
       place: Place,
   ): Option[KernelChoice] =
-    val hash = strategy match
-      case None | Some(Plan.JoinStrategy.ShuffleHash) => true
-      case Some(Plan.JoinStrategy.Broadcast) | Some(Plan.JoinStrategy.SortMerge) => false
-    if (!hash) then None
-    else
-      place match
-        case Place.Inner => Some(KernelChoice.IntLongHashJoin)
-        case Place.Left => Some(KernelChoice.IntLongHashLeftOuter)
-        case Place.Right => Some(KernelChoice.IntLongHashRightOuter)
-        case Place.Full => Some(KernelChoice.IntLongHashFullOuter)
+    (strategy, place) match
+      case (None | Some(Plan.JoinStrategy.ShuffleHash), Place.Inner) =>
+        Some(KernelChoice.IntLongHashJoin)
+      case (None | Some(Plan.JoinStrategy.ShuffleHash), Place.Left) =>
+        Some(KernelChoice.IntLongHashLeftOuter)
+      case (None | Some(Plan.JoinStrategy.ShuffleHash), Place.Right) =>
+        Some(KernelChoice.IntLongHashRightOuter)
+      case (None | Some(Plan.JoinStrategy.ShuffleHash), Place.Full) =>
+        Some(KernelChoice.IntLongHashFullOuter)
+      case (Some(Plan.JoinStrategy.Broadcast), Place.Inner) =>
+        Some(KernelChoice.IntLongBroadcastJoin)
+      case (Some(Plan.JoinStrategy.Broadcast), Place.Left) =>
+        Some(KernelChoice.IntLongBroadcastLeftOuter)
+      case (Some(Plan.JoinStrategy.Broadcast), Place.Right) =>
+        Some(KernelChoice.IntLongBroadcastRightOuter)
+      case (Some(Plan.JoinStrategy.Broadcast), Place.Full) =>
+        Some(KernelChoice.IntLongBroadcastFullOuter)
+      case (Some(Plan.JoinStrategy.SortMerge), Place.Inner) =>
+        Some(KernelChoice.IntLongSortMergeJoin)
+      case (Some(Plan.JoinStrategy.SortMerge), Place.Left) =>
+        Some(KernelChoice.IntLongSortMergeLeftOuter)
+      case (Some(Plan.JoinStrategy.SortMerge), Place.Right) =>
+        Some(KernelChoice.IntLongSortMergeRightOuter)
+      case (Some(Plan.JoinStrategy.SortMerge), Place.Full) =>
+        Some(KernelChoice.IntLongSortMergeFullOuter)
 
   /** Pair kinds the int, long, and string joins already run. Outer kinds are not pairs. */
   private def pairKind(kind: PhysicalOp.Kind): Boolean = kind match
