@@ -67,6 +67,18 @@ class TestClickBench extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     sameCount(ClickBenchSlice.scan(), ClickBenchSlice.countAll)
   }
 
+  "query 6" should "min and max ResolutionWidth" in {
+    val planned = ClickBenchSlice.scan()
+    WideExtremum.minInt(planned.plan, 1) shouldBe Some(ClickBenchSlice.minWidth)
+    WideExtremum.maxInt(planned.plan, 1) shouldBe Some(ClickBenchSlice.maxWidth)
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = true))
+    planned.minIntColumn(1) shouldBe ClickBenchSlice.minWidth
+    planned.maxIntColumn(1) shouldBe ClickBenchSlice.maxWidth
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = false))
+    planned.minIntColumn(1) shouldBe ClickBenchSlice.minWidth
+    planned.maxIntColumn(1) shouldBe ClickBenchSlice.maxWidth
+  }
+
   "query 3" should "sum UserID" in {
     val planned = ClickBenchSlice.scan()
     WideSum.longColumn(planned.plan, 2) shouldBe Some(ClickBenchSlice.sumUser)

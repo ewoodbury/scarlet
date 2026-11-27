@@ -6,7 +6,7 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 
 /**
- * Six ClickBench queries on 4096 generated rows. This is not the hits table.
+ * Seven ClickBench queries on 4096 generated rows. This is not the hits table.
  *
  * Numbers follow the 0-based order of `clickhouse/queries.sql`. An average is the long sum and the
  * count. Query 2's width average is 3679360 / 4096. Query 3's user average is 8386588672 / 4096.
@@ -21,6 +21,9 @@ object ClickBenchSlice:
   val sumAdv: Long = 14336L
   val sumWidth: Long = 3679360L
   val sumWidthPlus: Long = 3724416L
+  val minWidth: Int = 800
+  val maxWidth: Int = 999
+  val widthExtremum: Long = 800L * 31L + 999L
   val sumUser: Long = 8386588672L
   val mixedSums: Long = 17583232L
 
@@ -35,7 +38,7 @@ object ClickBenchSlice:
     "3 sum of UserID. This file.",
     "4 distinct count of UserID. Missing: distinct count.",
     "5 distinct count of a string. Missing: string distinct.",
-    "6 min and max with no group. Missing: ungrouped min and max.",
+    "6 min and max of ResolutionWidth. This file.",
     "7 group by AdvEngineID. This file. The checker applies the order.",
     "8 distinct count by one int. Missing: distinct count.",
     "9 several aggregates and a distinct count. Missing: distinct count.",
@@ -148,6 +151,8 @@ object ClickBenchSlice:
       summed("query 2 adv", advAsLong().plan, 3, sumAdv),
       summed("query 2 width", widthAsLong().plan, 3, sumWidth),
       summed("query 3", scan().plan, 2, sumUser),
+      extremum("query 6 min", scan().plan, 1, minWidth, least = true),
+      extremum("query 6 max", scan().plan, 1, maxWidth, least = false),
       shaped("query 7", grouped().plan, "WideGroup(WideFilter0(Scan))"),
       counted("query 7", grouped().plan, groups),
       shaped(
@@ -164,9 +169,15 @@ object ClickBenchSlice:
       both("query 1", countAdv)(filtered().count()),
       both("query 2", mixedSums)(mixSums()),
       both("query 3", sumUser)(scan().sumLongColumn(2)),
+      both("query 6", widthExtremum)(mixExtremum()),
       both("query 7", groupedMix)(groupedChecksum(grouped().collect())),
       both("query 29", sumWidthPlus)(widthPlus().sumLongColumn(5)),
     ).flatten
+
+  private def mixExtremum(): Long =
+    val min = scan().minIntColumn(1).toLong
+    val max = scan().maxIntColumn(1).toLong
+    min * 31L + max
 
   private def mixSums(): Long =
     val adv = advAsLong().sumLongColumn(3)
@@ -200,6 +211,20 @@ object ClickBenchSlice:
       case Some(value) if value == expected => None
       case Some(value) => Some(s"$name columnar sum $value expected $expected")
       case None => Some(s"$name sum did not lower")
+
+  private def extremum(
+      name: String,
+      plan: Plan[WideRow],
+      ordinal: Int,
+      expected: Int,
+      least: Boolean,
+  ): Option[String] =
+    val found =
+      if (least) then WideExtremum.minInt(plan, ordinal) else WideExtremum.maxInt(plan, ordinal)
+    found match
+      case Some(value) if value == expected => None
+      case Some(value) => Some(s"$name columnar $value expected $expected")
+      case None => Some(s"$name did not lower")
 
   private def shaped(name: String, plan: Plan[WideRow], shape: String): Option[String] =
     ColumnarPlanner.lower(plan).map(_.shape) match
