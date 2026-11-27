@@ -18,11 +18,11 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * Each bucket is one dictionary: unlike dictionaries are remapped when the bucket is concatenated,
  * so code equality is string equality.
  *
- * Each bucket keeps first-seen key order and input value order. A null value is not dropped. A
- * clear value bit is a planner bug and throws `IllegalArgumentException`, including a null value
- * on a row whose key is also null. That check runs before the exchange, which would otherwise drop
- * the null key and hide the value. [[int32Selected]] and [[stringsSelected]] check only
- * `rows(0 until count)`, so a null value on a dropped row does not throw. [[stringsSelected]]
+ * Each bucket keeps first-seen key order and input value order. A null key is dropped by the
+ * exchange, and a null value on that key goes with it. A null value on a present key stays in the
+ * group. [[int32Selected]] and [[stringsSelected]] keep a null on a selected present key and
+ * ignore a null on a dropped row. An over-budget post-exchange bucket that still has a clear value
+ * bit throws `IllegalArgumentException` before a spill file is opened. [[stringsSelected]]
  * scatters with [[HashExchange.partitionAllSelectedUtf8]], which drops a null key, keeps `""`, and
  * shares the source dictionary. One grouped batch is published per partition, including an empty
  * bucket. There is no partial combine and no sort.
@@ -68,13 +68,12 @@ object GroupByKey:
         ),
         "groupByKey expects (Int32, Int32) batches",
       )
-      batches.foreach(requirePresentValues)
       val buckets = HashExchange.partitionAll(batches, keyOrdinal = 0, partitions, parallelism)
       finishBuckets(buckets, parallelism, GroupByKeySpill.exceeds, GroupByKeySpill.finish, group)
 
   /**
-   * [[int32]] for a selection. Present values are checked on `rows(0 until count)` only. The
-   * exchange scatters those rows, then each bucket uses the dense [[group]].
+   * [[int32]] for a selection. The exchange scatters `rows(0 until count)`, drops a null key, and
+   * keeps a null value on a present key. Each bucket then uses the dense [[group]].
    */
   def int32Selected(
       selected: Vector[Selected],
@@ -89,7 +88,6 @@ object GroupByKey:
         selected.forall(one => isIntPair(one.batch)),
         "groupByKey expects (Int32, Int32) batches",
       )
-      selected.foreach(requirePresentSelection)
       val buckets =
         HashExchange.partitionAllSelected(selected, keyOrdinal = 0, partitions, parallelism)
       finishBuckets(buckets, parallelism, GroupByKeySpill.exceeds, GroupByKeySpill.finish, group)
@@ -110,7 +108,6 @@ object GroupByKey:
         ),
         "groupByKey expects (Utf8Dict, Int32) batches",
       )
-      batches.foreach(requirePresentValues)
       val buckets =
         HashExchange.partitionAllUtf8(batches, keyOrdinal = 0, partitions, parallelism)
       finishBuckets(
@@ -123,9 +120,8 @@ object GroupByKey:
 
   /**
    * Groups `(Long, Long)`. An empty input publishes `partitions` empty batches. Every batch must
-   * be `[Int64, Int64]`. A clear value bit throws before the exchange, including when the key is
-   * also null. [[HashExchange.partitionAllInt64]] then drops a null key. Each bucket is one
-   * [[LongGroupTable]].
+   * be `[Int64, Int64]`. [[HashExchange.partitionAllInt64]] drops a null key. A null value on a
+   * present key stays in the group. Each bucket is one [[LongGroupTable]].
    */
   def int64(
       batches: Vector[ColumnBatch],
@@ -143,7 +139,6 @@ object GroupByKey:
         ),
         "groupByKey expects (Int64, Int64) batches",
       )
-      batches.foreach(requirePresentLongValues)
       val buckets =
         HashExchange.partitionAllInt64(batches, keyOrdinal = 0, partitions, parallelism)
       finishBuckets(
@@ -158,10 +153,9 @@ object GroupByKey:
    * Groups `(Int, Long)` after the value has already been widened.
    *
    * Every batch is `[Int32, Int64]`. A null key is dropped by [[HashExchange.partitionAll]]. A
-   * null value is copied with its validity bit and stays in the group. This does not call
-   * [[requirePresentValues]]. Spill stays off for this shape: an over-budget bucket is still
-   * grouped in memory, and [[GroupByKeySpill.finish]] is not used, because that path groups int
-   * values.
+   * null value is copied with its validity bit and stays in the group. Spill stays off for this
+   * shape: an over-budget bucket is still grouped in memory, and [[GroupByKeySpill.finish]] is not
+   * used, because that path groups int values.
    */
   def intLong(
       batches: Vector[ColumnBatch],
@@ -183,8 +177,8 @@ object GroupByKey:
       MorselScheduler.map(buckets, parallelism)((_, bucket) => groupIntLong(bucket))
 
   /**
-   * [[strings]] for a selection. Present values are checked on `rows(0 until count)` only. The
-   * exchange scatters those rows, then each bucket uses the dense [[groupStrings]].
+   * [[strings]] for a selection. The exchange scatters `rows(0 until count)`, drops a null key,
+   * and keeps a null value on a present key. Each bucket then uses the dense [[groupStrings]].
    */
   def stringsSelected(
       selected: Vector[Selected],
@@ -199,7 +193,6 @@ object GroupByKey:
         selected.forall(one => isStringPair(one.batch)),
         "groupByKey expects (Utf8Dict, Int32) batches",
       )
-      selected.foreach(requirePresentSelection)
       val buckets =
         HashExchange.partitionAllSelectedUtf8(selected, keyOrdinal = 0, partitions, parallelism)
       finishBuckets(
@@ -210,31 +203,12 @@ object GroupByKey:
         groupStrings,
       )
 
-  private def requirePresentValues(batch: ColumnBatch): Unit =
-    val values = ColumnHash.int32At(batch, 1)
-    require(
-      Validity.livePresent(values.validity, values.length),
-      nullValueMessage,
-    )
-
-  /** Same refusal as [[requirePresentValues]], on the `Int64` value column. */
-  private def requirePresentLongValues(batch: ColumnBatch): Unit =
-    val values = ColumnHash.int64At(batch, 1)
-    require(
-      Validity.livePresent(values.validity, values.length),
-      nullValueMessage,
-    )
-
-  /** A null value on a dropped row is ignored. A null value on a selected row still throws. */
-  private def requirePresentSelection(selected: Selected): Unit =
-    val values = ColumnHash.int32At(selected.batch, 1)
-    val words = values.validity.words
-    val rows = selected.rows
-    var slot = 0
-    while (slot < selected.count) {
-      require(Validity.isSet(words, rows(slot)), nullValueMessage)
-      slot += 1
-    }
+  /**
+   * Spill refusal. The bucket is already past the exchange, so a clear value bit belongs to a
+   * present key. The caller throws this before opening a spill file.
+   */
+  private[columnar] def refuseSpilledValue(values: Column): Unit =
+    require(Validity.livePresent(values.validity, values.length), nullValueMessage)
 
   private def isIntPair(batch: ColumnBatch): Boolean =
     batch.schema.length == 2 && batch.schema(0) == LogicalType.Int32 &&
@@ -263,7 +237,6 @@ object GroupByKey:
     val keys = ColumnHash.int32At(batch, 0)
     val values = ColumnHash.int32At(batch, 1)
     require(keys.length == values.length, "key and value columns differ in length")
-    requirePresentValues(batch)
     if (keys.length == 0) then GroupedIntBatch.empty
     else fill(keys, values, ColumnHash.fullyPresent(keys))
 
@@ -298,6 +271,9 @@ object GroupByKey:
       }
       offsets(groups) = cursor
       val outValues = new Array[Int](cursor)
+      val presentValues = ColumnHash.fullyPresent(values)
+      val valueWords = values.validity.words
+      val outValueWords = if (presentValues) Array.emptyLongArray else Validity.allocate(cursor)
       val writeAt = Arrays.copyOf(offsets, groups)
       row = 0
       while (row < rows) {
@@ -305,6 +281,8 @@ object GroupByKey:
           val atGroup = table.indexOf(keyValues(row))
           val dest = writeAt(atGroup)
           outValues(dest) = valueValues(row)
+          if (!presentValues && Validity.isSet(valueWords, row)) then
+            Validity.setBit(outValueWords, dest)
           writeAt(atGroup) = dest + 1
         row += 1
       }
@@ -314,17 +292,20 @@ object GroupByKey:
         outKeys(group) = table.key(group)
         group += 1
       }
+      val valueBits =
+        if (presentValues) then Validity.allValid(cursor)
+        else Validity.fromWords(outValueWords, cursor)
       GroupedIntBatch(
         Int32Column.of(outKeys, Validity.allValid(groups), groups),
         offsets,
         outValues,
+        valueBits,
       )
 
   private[columnar] def groupStrings(batch: ColumnBatch): GroupedStringBatch =
     val keys = utf8At(batch, 0)
     val values = ColumnHash.int32At(batch, 1)
     require(keys.length == values.length, "key and value columns differ in length")
-    requirePresentValues(batch)
     if (keys.length == 0) then GroupedStringBatch.empty
     else fillStrings(keys, values, ColumnHash.fullyPresent(keys))
 
@@ -359,6 +340,9 @@ object GroupByKey:
       }
       offsets(groups) = cursor
       val outValues = new Array[Int](cursor)
+      val presentValues = ColumnHash.fullyPresent(values)
+      val valueWords = values.validity.words
+      val outValueWords = if (presentValues) Array.emptyLongArray else Validity.allocate(cursor)
       val writeAt = Arrays.copyOf(offsets, groups)
       row = 0
       while (row < rows) {
@@ -366,6 +350,8 @@ object GroupByKey:
           val atGroup = table.indexOf(codes(row))
           val dest = writeAt(atGroup)
           outValues(dest) = valueValues(row)
+          if (!presentValues && Validity.isSet(valueWords, row)) then
+            Validity.setBit(outValueWords, dest)
           writeAt(atGroup) = dest + 1
         row += 1
       }
@@ -375,17 +361,20 @@ object GroupByKey:
         outCodes(group) = table.key(group)
         group += 1
       }
+      val valueBits =
+        if (presentValues) then Validity.allValid(cursor)
+        else Validity.fromWords(outValueWords, cursor)
       GroupedStringBatch(
         DictUtf8Column.of(keys.dictionary, outCodes, Validity.allValid(groups), groups),
         offsets,
         outValues,
+        valueBits,
       )
 
   private[columnar] def groupLongs(batch: ColumnBatch): GroupedLongBatch =
     val keys = ColumnHash.int64At(batch, 0)
     val values = ColumnHash.int64At(batch, 1)
     require(keys.length == values.length, "key and value columns differ in length")
-    requirePresentLongValues(batch)
     if (keys.length == 0) then GroupedLongBatch.empty
     else fillLongs(keys, values, ColumnHash.fullyPresent(keys))
 
@@ -420,6 +409,9 @@ object GroupByKey:
       }
       offsets(groups) = cursor
       val outValues = new Array[Long](cursor)
+      val presentValues = ColumnHash.fullyPresent(values)
+      val valueWords = values.validity.words
+      val outValueWords = if (presentValues) Array.emptyLongArray else Validity.allocate(cursor)
       val writeAt = Arrays.copyOf(offsets, groups)
       row = 0
       while (row < rows) {
@@ -427,6 +419,8 @@ object GroupByKey:
           val atGroup = table.indexOf(keyValues(row))
           val dest = writeAt(atGroup)
           outValues(dest) = valueValues(row)
+          if (!presentValues && Validity.isSet(valueWords, row)) then
+            Validity.setBit(outValueWords, dest)
           writeAt(atGroup) = dest + 1
         row += 1
       }
@@ -436,10 +430,14 @@ object GroupByKey:
         outKeys(group) = table.key(group)
         group += 1
       }
+      val valueBits =
+        if (presentValues) then Validity.allValid(cursor)
+        else Validity.fromWords(outValueWords, cursor)
       GroupedLongBatch(
         Int64Column.of(outKeys, Validity.allValid(groups), groups),
         offsets,
         outValues,
+        valueBits,
       )
 
   private[columnar] def groupIntLong(batch: ColumnBatch): GroupedIntLongBatch =

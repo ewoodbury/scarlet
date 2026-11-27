@@ -424,13 +424,14 @@ enum PhysicalOp:
    * Output kind is [[PhysicalOp.Kind.GroupedInts]] for a [[PhysicalOp.Kind.Pairs]] child,
    * [[PhysicalOp.Kind.GroupedStrings]] for a [[PhysicalOp.Kind.StringPairs]] child, and
    * [[PhysicalOp.Kind.GroupedLongs]] for a [[PhysicalOp.Kind.LongPairs]] child. A clear value bit
-   * on those three is a planner bug. An int-to-long [[IntLongMapValue]] child publishes
-   * [[PhysicalOp.Kind.GroupedIntLongs]]: the key stays `Int32`, the values stay `Int64`, and a
-   * null value stays in the list. That group does not spill. Any other child is a planner bug.
-   * There is no partial combine and no sort. Spill off keeps the in-memory groups and writes
-   * nothing. Spill on slices one over-budget post-exchange bucket in input order. A morsel whose
-   * group table does not fit throws [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] before
-   * that table. The appended groups are not bounded by the budget.
+   * on those three stays in the group. Spill refuses it before a file is opened. An int-to-long
+   * [[IntLongMapValue]] child publishes [[PhysicalOp.Kind.GroupedIntLongs]]: the key stays
+   * `Int32`, the values stay `Int64`, and a null value stays in the list. That group does not
+   * spill. Any other child is a planner bug. There is no partial combine and no sort. Spill off
+   * keeps the in-memory groups and writes nothing. Spill on slices one over-budget post-exchange
+   * bucket in input order. A morsel whose group table does not fit throws
+   * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] before that table. The appended groups
+   * are not bounded by the budget.
    */
   case GroupByKey(child: PhysicalOp)
 

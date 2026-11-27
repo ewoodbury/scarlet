@@ -10,9 +10,16 @@ package com.ewoodbury.scarlet.columnar
  *
  * [[valuesFor]] is a view. A published array is not mutated, and the caller does not recycle it,
  * which is the same rule as [[Column]]. Holding one group pins the whole values array. The view is
- * an [[IndexedSeq]], so iteration is multi-pass and `equals` is structural.
+ * an [[IndexedSeq]], so iteration is multi-pass and `equals` is structural. A clear bit in
+ * `valueBits` is a null int. [[rows]] keeps that null. [[valuesFor]] stays an [[IndexedSeq]] and
+ * is the view for a group whose bits are all set.
  */
-final case class GroupedIntBatch(keys: Int32Column, offsets: Array[Int], values: Array[Int]):
+final case class GroupedIntBatch(
+    keys: Int32Column,
+    offsets: Array[Int],
+    values: Array[Int],
+    valueBits: Validity,
+):
   require(
     offsets.length == keys.length + 1,
     s"offsets length ${offsets.length} is not groups + 1 (${keys.length + 1})",
@@ -21,6 +28,10 @@ final case class GroupedIntBatch(keys: Int32Column, offsets: Array[Int], values:
   require(
     offsets(keys.length) == values.length,
     s"offsets end ${offsets(keys.length)} does not match ${values.length} values",
+  )
+  require(
+    valueBits.capacity == values.length,
+    s"value bits ${valueBits.capacity} do not match ${values.length} values",
   )
   require(monotonicOffsets, "offsets must be monotone")
   require(ColumnHash.fullyPresent(keys), "grouped keys must be fully present")
@@ -34,9 +45,11 @@ final case class GroupedIntBatch(keys: Int32Column, offsets: Array[Int], values:
     require(group >= 0 && group < groups, s"group $group outside 0 until $groups")
     new IntGroupView(values, offsets(group), offsets(group + 1))
 
-  /** One `(key, values)` row per group, in key order. Each value side is [[valuesFor]]. */
+  /** One `(key, values)` row per group, in key order. A clear value bit stays null. */
   def rows: Seq[(Int, Iterable[Int])] =
-    Seq.tabulate(groups)(group => (keys.values(group), valuesFor(group)))
+    Seq.tabulate(groups)(group =>
+      (keys.values(group), intGroupValues(values, valueBits, offsets, group)),
+    )
 
   private def monotonicOffsets: Boolean =
     offsets.indices.drop(1).forall(index => offsets(index) >= offsets(index - 1))
@@ -49,6 +62,7 @@ object GroupedIntBatch:
       Int32Column.of(Array.emptyIntArray, Validity.allValid(0), 0),
       Array(0),
       Array.emptyIntArray,
+      Validity.allValid(0),
     )
 
 /**
@@ -74,9 +88,15 @@ private final class IntGroupView(values: Array[Int], start: Int, end: Int) exten
  *
  * [[valuesFor]] is the same view as [[GroupedIntBatch.valuesFor]]. A published array is not
  * mutated, and the caller does not recycle it. Holding one group pins the whole values array. The
- * view is an [[IndexedSeq]], so iteration is multi-pass and `equals` is structural.
+ * view is an [[IndexedSeq]], so iteration is multi-pass and `equals` is structural. A clear bit in
+ * `valueBits` is a null int. [[rows]] keeps that null.
  */
-final case class GroupedStringBatch(keys: DictUtf8Column, offsets: Array[Int], values: Array[Int]):
+final case class GroupedStringBatch(
+    keys: DictUtf8Column,
+    offsets: Array[Int],
+    values: Array[Int],
+    valueBits: Validity,
+):
   require(
     offsets.length == keys.length + 1,
     s"offsets length ${offsets.length} is not groups + 1 (${keys.length + 1})",
@@ -85,6 +105,10 @@ final case class GroupedStringBatch(keys: DictUtf8Column, offsets: Array[Int], v
   require(
     offsets(keys.length) == values.length,
     s"offsets end ${offsets(keys.length)} does not match ${values.length} values",
+  )
+  require(
+    valueBits.capacity == values.length,
+    s"value bits ${valueBits.capacity} do not match ${values.length} values",
   )
   require(monotonicOffsets, "offsets must be monotone")
   require(ColumnHash.fullyPresent(keys), "grouped keys must be fully present")
@@ -98,9 +122,11 @@ final case class GroupedStringBatch(keys: DictUtf8Column, offsets: Array[Int], v
     require(group >= 0 && group < groups, s"group $group outside 0 until $groups")
     new IntGroupView(values, offsets(group), offsets(group + 1))
 
-  /** One `(key, values)` row per group, in key order. Each value side is [[valuesFor]]. */
+  /** One `(key, values)` row per group, in key order. A clear value bit stays null. */
   def rows: Seq[(String, Iterable[Int])] =
-    Seq.tabulate(groups)(group => (keys.dictionary(keys.codes(group)), valuesFor(group)))
+    Seq.tabulate(groups) { group =>
+      (keys.dictionary(keys.codes(group)), intGroupValues(values, valueBits, offsets, group))
+    }
 
   private def monotonicOffsets: Boolean =
     offsets.indices.drop(1).forall(index => offsets(index) >= offsets(index - 1))
@@ -115,6 +141,7 @@ object GroupedStringBatch:
       DictUtf8Column.of(Array.empty[String], Array.emptyIntArray, Validity.allValid(0), 0),
       Array(0),
       Array.emptyIntArray,
+      Validity.allValid(0),
     )
 
 /**
@@ -128,9 +155,15 @@ object GroupedStringBatch:
  *
  * [[valuesFor]] is a view over `Array[Long]`. A published array is not mutated, and the caller
  * does not recycle it. Holding one group pins the whole values array. The view is an
- * [[IndexedSeq]], so iteration is multi-pass and `equals` is structural.
+ * [[IndexedSeq]], so iteration is multi-pass and `equals` is structural. A clear bit in
+ * `valueBits` is a null long. [[rows]] keeps that null.
  */
-final case class GroupedLongBatch(keys: Int64Column, offsets: Array[Int], values: Array[Long]):
+final case class GroupedLongBatch(
+    keys: Int64Column,
+    offsets: Array[Int],
+    values: Array[Long],
+    valueBits: Validity,
+):
   require(
     offsets.length == keys.length + 1,
     s"offsets length ${offsets.length} is not groups + 1 (${keys.length + 1})",
@@ -139,6 +172,10 @@ final case class GroupedLongBatch(keys: Int64Column, offsets: Array[Int], values
   require(
     offsets(keys.length) == values.length,
     s"offsets end ${offsets(keys.length)} does not match ${values.length} values",
+  )
+  require(
+    valueBits.capacity == values.length,
+    s"value bits ${valueBits.capacity} do not match ${values.length} values",
   )
   require(monotonicOffsets, "offsets must be monotone")
   require(ColumnHash.fullyPresent(keys), "grouped keys must be fully present")
@@ -152,9 +189,16 @@ final case class GroupedLongBatch(keys: Int64Column, offsets: Array[Int], values
     require(group >= 0 && group < groups, s"group $group outside 0 until $groups")
     new LongGroupView(values, offsets(group), offsets(group + 1))
 
-  /** One `(key, values)` row per group, in key order. Each value side is [[valuesFor]]. */
+  /** One `(key, values)` row per group, in key order. A clear value bit stays null. */
   def rows: Seq[(Long, Iterable[Long])] =
-    Seq.tabulate(groups)(group => (keys.values(group), valuesFor(group)))
+    Seq.tabulate(groups) { group =>
+      val from = offsets(group)
+      val until = offsets(group + 1)
+      val grouped =
+        if (Validity.rangePresent(valueBits, from, until - from)) then valuesFor(group)
+        else new NullableLongValues(values, valueBits, from, until)
+      (keys.values(group), grouped)
+    }
 
   private def monotonicOffsets: Boolean =
     offsets.indices.drop(1).forall(index => offsets(index) >= offsets(index - 1))
@@ -167,6 +211,7 @@ object GroupedLongBatch:
       Int64Column.of(Array.emptyLongArray, Validity.allValid(0), 0),
       Array(0),
       Array.emptyLongArray,
+      Validity.allValid(0),
     )
 
 /**
@@ -181,6 +226,91 @@ private final class LongGroupView(values: Array[Long], start: Int, end: Int)
     if (index < 0 || index >= length) then
       throw new IndexOutOfBoundsException(s"index $index outside length $length")
     else values(start + index)
+
+/**
+ * Values of one int group. A fully present slice is [[IntGroupView]]. A hole is
+ * [[NullableIntGroupView]], so [[GroupedIntBatch.rows]] and [[GroupedStringBatch.rows]] keep null.
+ */
+private def intGroupValues(
+    values: Array[Int],
+    bits: Validity,
+    offsets: Array[Int],
+    group: Int,
+): Iterable[Int] =
+  val from = offsets(group)
+  val until = offsets(group + 1)
+  if (Validity.rangePresent(bits, from, until - from)) then new IntGroupView(values, from, until)
+  else new NullableIntGroupView(values, bits, from, until)
+
+/**
+ * One group's int values. A clear bit is a null reference, not `0`. The array is not copied.
+ *
+ * [[scala.collection.IndexedSeq]] cannot carry that null: `apply` returns `Int` and unboxes a
+ * clear bit to `0`. The iterator below is an `AnyRef` iterator so a cast to [[Iterable]] of
+ * references still sees null.
+ */
+@SuppressWarnings(
+  Array(
+    "org.wartremover.warts.Any",
+    "org.wartremover.warts.AsInstanceOf",
+    "org.wartremover.warts.Null",
+    "org.wartremover.warts.Var",
+  ),
+)
+private final class NullableIntGroupView(values: Array[Int], bits: Validity, start: Int, end: Int)
+    extends Iterable[Int]:
+
+  /**
+   * Named erasure boundary. `Iterator[Int].next` unboxes, so this iterator yields references and
+   * the cast keeps a clear bit as null.
+   */
+  override def iterator: Iterator[Int] =
+    val refs = new Iterator[AnyRef]:
+      private var index: Int = start
+
+      def hasNext: Boolean = index < end
+
+      def next(): AnyRef =
+        if (index >= end) then throw new NoSuchElementException("empty int group")
+        else
+          val row = index
+          index += 1
+          if (bits.isValid(row)) then Int.box(values(row)) else null
+    refs.asInstanceOf[Iterator[Int]]
+
+/**
+ * One group's long values stored in an array. A clear bit is a null reference, not `0L`.
+ *
+ * This is the array form of [[NullableLongGroupView]]. [[GroupedLongBatch.rows]] uses it when the
+ * group's bits have a hole. [[GroupedLongBatch.valuesFor]] stays an [[IndexedSeq]].
+ */
+@SuppressWarnings(
+  Array(
+    "org.wartremover.warts.Any",
+    "org.wartremover.warts.AsInstanceOf",
+    "org.wartremover.warts.Null",
+    "org.wartremover.warts.Var",
+  ),
+)
+private final class NullableLongValues(values: Array[Long], bits: Validity, start: Int, end: Int)
+    extends Iterable[Long]:
+
+  /**
+   * Named erasure boundary. `Iterator[Long].next` unboxes, so the cast keeps a clear bit as null.
+   */
+  override def iterator: Iterator[Long] =
+    val refs = new Iterator[AnyRef]:
+      private var index: Int = start
+
+      def hasNext: Boolean = index < end
+
+      def next(): AnyRef =
+        if (index >= end) then throw new NoSuchElementException("empty long group")
+        else
+          val row = index
+          index += 1
+          if (bits.isValid(row)) then Long.box(values(row)) else null
+    refs.asInstanceOf[Iterator[Long]]
 
 /**
  * One shuffle partition of `groupByKey` on int keys and long values.

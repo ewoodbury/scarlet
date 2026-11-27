@@ -62,7 +62,9 @@ private[scarlet] object GroupByKeySpill:
    * groups buckets one at a time, so this store is closed before the next bucket starts.
    */
   private[scarlet] def finish(bucket: ColumnBatch, conf: ScarletConf): GroupedIntBatch =
-    if (exceeds(bucket, conf)) then spill(bucket, conf)
+    if (exceeds(bucket, conf)) then
+      GroupByKey.refuseSpilledValue(ColumnHash.int32At(bucket, 1))
+      spill(bucket, conf)
     else GroupByKey.group(bucket)
 
   /** Spill files published since the last [[resetForTest]]. */
@@ -162,4 +164,9 @@ private[scarlet] object GroupByKeySpill:
       group += 1
     }
     offsets(groups) = cursor
-    GroupedIntBatch(Int32Column.of(keys, Validity.allValid(groups), groups), offsets, values)
+    GroupedIntBatch(
+      Int32Column.of(keys, Validity.allValid(groups), groups),
+      offsets,
+      values,
+      Validity.allValid(values.length),
+    )

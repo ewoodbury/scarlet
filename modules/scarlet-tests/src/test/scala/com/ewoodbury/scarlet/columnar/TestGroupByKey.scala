@@ -69,7 +69,7 @@ class TestGroupByKey extends AnyFlatSpec with Matchers:
     parts.foreach(assertBatch)
   }
 
-  it should "reject a clear value bit, including one beside a null key" in {
+  it should "keep a null value on a present key and drop one on a null key" in {
     val presentKey = new ColumnBatch(
       Vector(LogicalType.Int32, LogicalType.Int32),
       Vector(
@@ -87,14 +87,14 @@ class TestGroupByKey extends AnyFlatSpec with Matchers:
       2,
     )
 
-    val present = the[IllegalArgumentException] thrownBy {
-      GroupByKey.int32(Vector(presentKey), partitions = 2, parallelism = 1)
-    }
-    val absentKey = the[IllegalArgumentException] thrownBy {
-      GroupByKey.int32(Vector(nullKey), partitions = 2, parallelism = 1)
-    }
-    present.getMessage should include("clear value bit")
-    absentKey.getMessage should include("clear value bit")
+    val present = GroupByKey.int32(Vector(presentKey), partitions = 2, parallelism = 1)
+    Math.floorMod(1, 2) shouldBe 1
+    texts(present(1)) shouldBe Seq((1, Seq("10", "null")))
+    present(0).groups shouldBe 0
+
+    val absent = GroupByKey.int32(Vector(nullKey), partitions = 2, parallelism = 1)
+    texts(absent(1)) shouldBe Seq((1, Seq("10")))
+    absent(0).groups shouldBe 0
   }
 
   it should "publish an empty batch for every partition of an empty input" in {
@@ -196,18 +196,20 @@ class TestGroupByKey extends AnyFlatSpec with Matchers:
       .map(_._1) should contain("")
   }
 
-  it should "reject a clear value bit, including one beside a null key" in {
+  it should "keep a null value on a present key and drop one on a null key" in {
     val presentKey = stringBatch(Seq("red", "blue"), Array(10, 20), row => row != 1)
     val absentKey = stringBatch(Seq(nullText(0)._1, "red"), Array(99, 10), row => row != 0)
 
-    val present = the[IllegalArgumentException] thrownBy {
-      GroupByKey.strings(Vector(presentKey), partitions = 2, parallelism = 1)
-    }
-    val missingKey = the[IllegalArgumentException] thrownBy {
-      GroupByKey.strings(Vector(absentKey), partitions = 2, parallelism = 1)
-    }
-    present.getMessage should include("clear value bit")
-    missingKey.getMessage should include("clear value bit")
+    val present = GroupByKey.strings(Vector(presentKey), partitions = 2, parallelism = 1)
+    stringTexts(present).flatMap { (key, values) =>
+      values.map(key -> _)
+    } should contain theSameElementsAs Seq(
+      "red" -> "10",
+      "blue" -> "null",
+    )
+
+    val missing = GroupByKey.strings(Vector(absentKey), partitions = 2, parallelism = 1)
+    stringTexts(missing) shouldBe Seq("red" -> Seq("10"))
   }
 
   it should "publish an empty batch for every partition of an empty input" in {
@@ -275,6 +277,31 @@ class TestGroupByKey extends AnyFlatSpec with Matchers:
 
   private def rowsOf(batch: GroupedIntBatch): Seq[(Int, Seq[Int])] =
     batch.rows.map { case (key, values) => (key, values.toSeq) }
+
+  /** A clear value bit is the text `null`. The iterator is read as references. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def texts(batch: GroupedIntBatch): Seq[(Int, Seq[String])] =
+    batch.rows.map { (key, values) =>
+      val refs = values.iterator.asInstanceOf[Iterator[AnyRef]]
+      (key, refs.map(cell => if (cell == null) "null" else cell.toString).toSeq)
+    }
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def stringTexts(parts: Vector[GroupedStringBatch]): Seq[(String, Seq[String])] =
+    parts.flatMap(_.rows).map { (key, values) =>
+      val refs = values.iterator.asInstanceOf[Iterator[AnyRef]]
+      (key, refs.map(cell => if (cell == null) "null" else cell.toString).toSeq)
+    }
 
   private def assertBatch(batch: GroupedIntBatch): Unit =
     val offsets = batch.offsets.toSeq

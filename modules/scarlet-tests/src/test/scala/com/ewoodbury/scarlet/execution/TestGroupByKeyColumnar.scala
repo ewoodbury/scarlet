@@ -162,8 +162,8 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     (dense - selected) shouldBe compactPublishes
   }
 
-  it should "ignore a null value on a dropped row and reject one on a selected row" in {
-    val keyColumn = Int32Column.of(Array(0, 1), Validity.pack(2, row => row == 1), 2)
+  it should "ignore a null value on a dropped row and keep one on a selected row" in {
+    val keyColumn = Int32Column.of(Array(1, 2), Validity.allValid(2), 2)
     val valueColumn = Int32Column.of(Array(0, 10), Validity.pack(2, row => row == 1), 2)
     val batch = new ColumnBatch(
       Vector(LogicalType.Int32, LogicalType.Int32),
@@ -175,12 +175,11 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
 
     grouped.flatMap(_.rows).map { case (key, groupedValues) =>
       key -> groupedValues.toSeq
-    } shouldBe Seq(1 -> Seq(10))
+    } shouldBe Seq(2 -> Seq(10))
 
     val selectedNull = Selected(batch, Array(0), 1)
-    an[IllegalArgumentException] should be thrownBy {
-      GroupByKey.int32Selected(Vector(selectedNull), partitions = 1, parallelism = 1)
-    }
+    val kept = GroupByKey.int32Selected(Vector(selectedNull), partitions = 1, parallelism = 1)
+    shownInts(kept) shouldBe Seq(1 -> Seq("null"))
   }
 
   it should "refuse a union of two grouped results" in {
@@ -396,7 +395,7 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     }
   }
 
-  it should "reject a clear value bit, including one beside a null key" in {
+  it should "keep a null value on a present key and drop one on a null key" in {
     val presentKey = longBatch(
       Array(1L, 1L),
       Array(10L, 20L),
@@ -409,15 +408,11 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
       keyPresent = row => row != 0,
       valuePresent = row => row != 0,
     )
-    val present = the[IllegalArgumentException] thrownBy {
-      GroupByKey.int64(Vector(presentKey), partitions = 2, parallelism = 1)
-    }
-    val absentKey = the[IllegalArgumentException] thrownBy {
-      GroupByKey.int64(Vector(nullKey), partitions = 2, parallelism = 1)
-    }
+    val present = GroupByKey.int64(Vector(presentKey), partitions = 2, parallelism = 1)
+    val absent = GroupByKey.int64(Vector(nullKey), partitions = 2, parallelism = 1)
 
-    present.getMessage should include("clear value bit")
-    absentKey.getMessage should include("clear value bit")
+    shownLongs(present) should contain theSameElementsAs Seq(1L -> Seq("10", "null"))
+    shownLongs(absent) should contain theSameElementsAs Seq(1L -> Seq("10"))
   }
 
   it should "publish an empty batch for every shuffle slot of an empty source" in {
@@ -550,6 +545,31 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
 
   private def longRows(batch: GroupedLongBatch): Seq[(Long, Seq[Long])] =
     batch.rows.map { case (key, values) => (key, values.toSeq) }
+
+  /** A clear value bit is the text `null`. The iterator is read as references. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def shownInts(parts: Vector[GroupedIntBatch]): Seq[(Int, Seq[String])] =
+    parts.flatMap(_.rows).map { (key, values) =>
+      val refs = values.iterator.asInstanceOf[Iterator[AnyRef]]
+      (key, refs.map(cell => if (cell == null) "null" else cell.toString).toSeq)
+    }
+
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def shownLongs(parts: Vector[GroupedLongBatch]): Seq[(Long, Seq[String])] =
+    parts.flatMap(_.rows).map { (key, values) =>
+      val refs = values.iterator.asInstanceOf[Iterator[AnyRef]]
+      (key, refs.map(cell => if (cell == null) "null" else cell.toString).toSeq)
+    }
 
   private def longByKey(rows: Iterable[(Long, Iterable[Long])]): Map[Long, Seq[Long]] =
     rows.map { case (key, values) => key -> values.toSeq }.toMap

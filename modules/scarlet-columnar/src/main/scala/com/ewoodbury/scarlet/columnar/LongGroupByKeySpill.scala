@@ -57,7 +57,9 @@ private[scarlet] object LongGroupByKeySpill:
    * groups buckets one at a time, so this store is closed before the next bucket starts.
    */
   private[scarlet] def finish(bucket: ColumnBatch, conf: ScarletConf): GroupedLongBatch =
-    if (exceeds(bucket, conf)) then spill(bucket, conf)
+    if (exceeds(bucket, conf)) then
+      GroupByKey.refuseSpilledValue(ColumnHash.int64At(bucket, 1))
+      spill(bucket, conf)
     else GroupByKey.groupLongs(bucket)
 
   /** Spill files published since the last [[resetForTest]]. */
@@ -157,4 +159,9 @@ private[scarlet] object LongGroupByKeySpill:
       group += 1
     }
     offsets(groups) = cursor
-    GroupedLongBatch(Int64Column.of(keys, Validity.allValid(groups), groups), offsets, values)
+    GroupedLongBatch(
+      Int64Column.of(keys, Validity.allValid(groups), groups),
+      offsets,
+      values,
+      Validity.allValid(values.length),
+    )

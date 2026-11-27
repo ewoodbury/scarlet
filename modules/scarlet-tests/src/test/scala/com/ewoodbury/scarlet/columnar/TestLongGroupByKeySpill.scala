@@ -12,8 +12,8 @@ import com.ewoodbury.scarlet.execution.{ColumnarPlanner, ExecutionModuleSupport}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
- * Long `groupByKey` spill. The estimate charges 8-byte keys. There is no selected kernel. A
- * filter is covered through [[DistCollection]].
+ * Long `groupByKey` spill. The estimate charges 8-byte keys. There is no selected kernel. A filter
+ * is covered through [[DistCollection]].
  */
 class TestLongGroupByKeySpill extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -81,7 +81,9 @@ class TestLongGroupByKeySpill extends AnyFlatSpec with Matchers with BeforeAndAf
 
   "distinct keys" should "spill and keep 1 distinct from 1 << 32" in {
     val keys = Array(1L, 1L << 32, Long.MinValue, 2L, 3L, 4L, 5L, 6L, 7L)
-    val batch = BatchCodec.longPairs(keys.zipWithIndex.map { case (key, index) => (key, index.toLong) })
+    val batch = BatchCodec.longPairs(keys.zipWithIndex.map { case (key, index) =>
+      (key, index.toLong)
+    })
     val memoryRows = rowsOf(inMemory(Vector(batch)))
     memoryRows.map(_._1) shouldBe keys.toSeq
     withConf(enabled = true, budget = morselBudget) { dir =>
@@ -142,7 +144,7 @@ class TestLongGroupByKeySpill extends AnyFlatSpec with Matchers with BeforeAndAf
     val batch = new ColumnBatch(
       Vector(LogicalType.Int64, LogicalType.Int64),
       Vector(
-        Int64Column.of(Array(1L, 0L), Validity.pack(2, row => row != 1), 2),
+        Int64Column.of(Array(1L, 2L), Validity.allValid(2), 2),
         Int64Column.of(Array(10L, 0L), Validity.pack(2, row => row != 1), 2),
       ),
       2,
