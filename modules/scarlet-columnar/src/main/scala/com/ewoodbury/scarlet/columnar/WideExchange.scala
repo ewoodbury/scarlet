@@ -130,5 +130,6 @@ private[scarlet] object WideExchange:
       case LogicalType.Int32 | LogicalType.Int64 | LogicalType.Utf8Dict | LogicalType.Float64 |
           LogicalType.Float32 | LogicalType.Bool =>
         true
+      case LogicalType.Decimal(_, _) => true
       case _ => false
     }

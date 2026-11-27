@@ -10,7 +10,7 @@ import java.util.{Arrays, UUID}
 
 import scala.annotation.tailrec
 
-import com.ewoodbury.scarlet.core.ScarletConf
+import com.ewoodbury.scarlet.core.{DecimalRules, ScarletConf}
 
 /**
  * Writes column batches to a file and reads them back.
@@ -21,9 +21,10 @@ import com.ewoodbury.scarlet.core.ScarletConf
  * batch's bytes. Int32, Int64, Float64, Float32, and Bool columns are stored with their validity
  * words, then the values. A dictionary string column stores its validity words, then the
  * dictionary, then the codes. The dictionary is an int count followed by each entry's UTF-16
- * code-unit count and code units. A zero-row batch is legal. Any other column type is refused. The
- * writer uses version 3. A version-2 file still reads Int32, Int64, and Utf8Dict. A Float64,
- * Float32, or Bool tag in a version-2 file is refused by tag.
+ * code-unit count and code units. A decimal column stores the same validity words and unscaled
+ * longs. Precision and scale ride in the tag. A zero-row batch is legal. Any other column type is
+ * refused. The writer uses version 4. A version-2 file still reads Int32, Int64, and Utf8Dict. A
+ * version-3 file also reads Float64, Float32, and Bool. A decimal tag in an older file is refused.
  *
  * The bytes are written to `<id>.<pid>.tmp`, fsynced, then moved into `<id>.<pid>.spill` with an
  * atomic move. `maxFiles` and `maxBytes` are exclusive upper bounds on the files this store has
@@ -272,6 +273,7 @@ object SpillStore:
     case _: Float64Column => ()
     case _: Float32Column => ()
     case _: BoolColumn => ()
+    case _: DecimalColumn => ()
     case other =>
       throw new IllegalArgumentException(s"${other.logicalType} columns cannot be spilled")
 
@@ -348,8 +350,14 @@ private[columnar] object SpillLayout:
 
   val MagicText: String = "SCRSPILL"
 
-  /** Writer version. Readers also accept version 2, which has no float or bool tags. */
-  val Version: Int = 3
+  /** Writer version. Readers also accept version 2 and version 3. */
+  val Version: Int = 4
+
+  /** Float and bool tags exist from this version on. */
+  val FloatVersion: Int = 3
+
+  /** Decimal tags exist from this version on. */
+  val DecimalVersion: Int = 4
   val Int32Tag: Int = 1
   val Int64Tag: Int = 2
   val Utf8Tag: Int = 3
@@ -359,6 +367,9 @@ private[columnar] object SpillLayout:
   val Float64Tag: Int = 5
   val Float32Tag: Int = 6
   val BoolTag: Int = 7
+
+  /** Low byte of a decimal tag. The next byte is precision. The byte after that is scale. */
+  val DecimalTag: Int = 8
 
   /** Offset, length, row count, and the CRC32 of that batch. */
   val FooterEntryBytes: Int = 24
@@ -380,23 +391,32 @@ private[columnar] object SpillLayout:
     case LogicalType.Float64 => Float64Tag
     case LogicalType.Float32 => Float32Tag
     case LogicalType.Bool => BoolTag
-    case LogicalType.Decimal(_, _) =>
-      throw new IllegalArgumentException("decimal columns cannot be spilled")
+    case LogicalType.Decimal(precision, scale) =>
+      DecimalRules.check(precision, scale)
+      DecimalTag | (precision << 8) | (scale << 16)
 
   /**
-   * Column type of `tag` in a file of `version`. Float and bool tags exist only in version 3, so a
-   * version-2 file that carries one is refused here.
+   * Column type of `tag` in a file of `version`. Float and bool tags need version 3. A decimal tag
+   * needs version 4, so an older file that carries one is refused here.
    */
-  def logicalType(tag: Int, version: Int): LogicalType = tag match
-    case Int32Tag => LogicalType.Int32
-    case Int64Tag | Int64AbsentTag => LogicalType.Int64
-    case Utf8Tag => LogicalType.Utf8Dict
-    case Float64Tag if version >= Version => LogicalType.Float64
-    case Float32Tag if version >= Version => LogicalType.Float32
-    case BoolTag if version >= Version => LogicalType.Bool
-    case other => throw new IllegalArgumentException(s"unknown spill column tag $other")
+  def logicalType(tag: Int, version: Int): LogicalType =
+    if (version >= DecimalVersion && (tag & 0xff) == DecimalTag) then
+      val precision = (tag >>> 8) & 0xff
+      val scale = (tag >>> 16) & 0xff
+      DecimalRules.check(precision, scale)
+      LogicalType.Decimal(precision, scale)
+    else
+      tag match
+        case Int32Tag => LogicalType.Int32
+        case Int64Tag | Int64AbsentTag => LogicalType.Int64
+        case Utf8Tag => LogicalType.Utf8Dict
+        case Float64Tag if version >= FloatVersion => LogicalType.Float64
+        case Float32Tag if version >= FloatVersion => LogicalType.Float32
+        case BoolTag if version >= FloatVersion => LogicalType.Bool
+        case other => throw new IllegalArgumentException(s"unknown spill column tag $other")
 
-  def accepts(version: Int): Boolean = version == 2 || version == Version
+  def accepts(version: Int): Boolean =
+    version == 2 || version == FloatVersion || version == Version
 
 private object SpillCodec:
 
@@ -486,6 +506,9 @@ private object SpillCodec:
       case bools: BoolColumn =>
         writeValidity(channel, crc, bools.validity, bools.length) +
           writeBytes(channel, crc, bools.values, bools.length)
+      case decimal: DecimalColumn =>
+        writeValidity(channel, crc, decimal.validity, decimal.length) +
+          writeLongs(channel, crc, decimal.values, decimal.length)
       case other =>
         throw new IllegalArgumentException(s"${other.logicalType} columns cannot be spilled")
 
@@ -857,6 +880,12 @@ private object SpillCodec:
         Float32Column.of(readFloats(cursor, rows), validity, rows)
       case SpillLayout.BoolTag =>
         BoolColumn.of(readBytes(cursor, rows), validity, rows)
+      case tag if (tag & 0xff) == SpillLayout.DecimalTag =>
+        SpillLayout.logicalType(tag, SpillLayout.Version) match
+          case LogicalType.Decimal(precision, scale) =>
+            DecimalColumn.of(precision, scale, readLongs(cursor, rows), validity, rows)
+          case other =>
+            throw new IllegalArgumentException(s"spill column tag $tag decoded to $other")
       case other =>
         throw new IllegalArgumentException(s"unknown spill column tag $other")
 
