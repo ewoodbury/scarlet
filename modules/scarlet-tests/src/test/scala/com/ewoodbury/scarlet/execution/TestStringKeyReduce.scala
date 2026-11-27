@@ -15,8 +15,8 @@ import com.ewoodbury.scarlet.runtime.local.HashPartitioner
  *
  * The row path is the oracle. Each input partition interns its own dictionary, and the second
  * partition sees the same strings in a different order. A null key is dropped. `""` is kept.
- * Output order inside a bucket is first-seen. `(String, Long)` stays on the row path.
- * `groupByKey` and an inner shuffle-hash join lower.
+ * Output order inside a bucket is first-seen. `(String, Long)` stays on the row path. `groupByKey`
+ * and an inner shuffle-hash join lower.
  */
 class TestStringKeyReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -164,7 +164,10 @@ class TestStringKeyReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
     ColumnarPlanner.lower(nullGrouped.plan).map(_.shape) shouldBe Some(
       "GroupByKey(Exchange(Scan))",
     )
-    ColumnarPlanner.tryRun(nullGrouped.plan) shouldBe None
+    val found = stringGroups(nullGrouped.collect())
+    ColumnarPlanner.tryRun(nullGrouped.plan) shouldBe defined
+    found shouldBe stringGroups(row(nullGrouped.collect()))
+    found should contain theSameElementsAs Seq("blue" -> Seq("null"), "red" -> Seq("1"))
   }
 
   it should "emit one empty string-pair batch per shuffle partition" in {
@@ -312,6 +315,25 @@ class TestStringKeyReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
   private def keepNamed(key: String): Boolean = key match
     case null => false
     case text => text.isEmpty || text == "red" || text == "blue"
+
+  /** A clear value bit is the text `null`. The iterator is read as references. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def stringGroups(rows: Iterable[(String, Iterable[Int])]): Seq[(String, Seq[String])] =
+    rows.toSeq.map { pair =>
+      val raw = pair.asInstanceOf[Product]
+      val values = raw.productElement(1).asInstanceOf[Iterable[Any]]
+      val refs = values.iterator.asInstanceOf[Iterator[AnyRef]]
+      val key = raw.productElement(0) match
+        case null => "null"
+        case text => text.toString
+      key -> refs.map(cell => if (cell == null) "null" else cell.toString).toSeq
+    }
 
   private def row[A](body: => A): A =
     val saved = ScarletConf.get

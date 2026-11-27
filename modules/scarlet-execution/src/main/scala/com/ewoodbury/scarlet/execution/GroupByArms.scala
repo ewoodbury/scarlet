@@ -10,9 +10,10 @@ import ColumnarInterpreter.Columns
  *
  * A key, value, or row filter on an int pair, a long pair, or a string pair scatters survivor ids,
  * including a stack of one. Long-pair `groupByKey` does not read that index, so a whole-row filter
- * and a key or value filter both still reach the dense exchange. A live null string-pair value
- * declines before the kernel. The `None` path is the only one that interprets a child that did not
- * publish a [[com.ewoodbury.scarlet.columnar.Selected]].
+ * and a key or value filter both still reach the dense exchange. A null value on a present key
+ * stays in the group. Spill still refuses that null before a file is opened. The `None` path is
+ * the only one that interprets a child that did not publish a
+ * [[com.ewoodbury.scarlet.columnar.Selected]].
  */
 private[execution] object GroupByArms:
 
@@ -56,7 +57,6 @@ private[execution] object GroupByArms:
           ordinals,
         ) match
           case Some(parts) =>
-            StringPairWalk.refuseSelectedNullValues(parts)
             Columns.GroupedStrings(GroupByKey.stringsSelected(parts, width, workers))
           case None =>
             val input = ColumnarInterpreter.interpretAt(
@@ -67,7 +67,6 @@ private[execution] object GroupByArms:
               ordinals,
             )
             val batches = StringPairWalk.batches(input)
-            StringPairWalk.refuseNullValues(batches)
             Columns.GroupedStrings(GroupByKey.strings(batches, width, workers))
       case ExecutionRoute.PairArm.LongPairs =>
         val input = ColumnarInterpreter.interpretAt(

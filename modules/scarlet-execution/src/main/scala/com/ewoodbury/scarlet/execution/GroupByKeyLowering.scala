@@ -7,19 +7,20 @@ import com.ewoodbury.scarlet.execution.schema.{ColumnBinding, KernelChoice}
  * Lowers int, long, and string `groupByKey`.
  *
  * The child is an exchange, and the kernel performs the shuffle. A null key is dropped. A null
- * value is not dropped: a clear value bit is a planner bug. One grouped batch is published per
- * shuffle partition, including an empty bucket. There is no partial combine and no sort. Spill off
- * keeps the in-memory groups and writes nothing. Spill on slices one over-budget post-exchange
- * bucket in input order. A morsel whose group table does not fit throws
- * [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] before that table. The appended groups
- * are not bounded by the budget. Key order inside a partition is first-seen. Value order inside a
- * key is input order. `values` and `take` stay on the row path. One map directly above the group
- * is [[GroupedDecode]]: the group runs once and the function sees the decoded rows. Int, long, and
- * string `keys` lower separately and do not build value lists. `count` is the number of groups.
- * [[PhysicalOp.Kind.Pairs]], [[PhysicalOp.Kind.LongPairs]], and [[PhysicalOp.Kind.StringPairs]]
- * lower. An int-to-long [[PhysicalOp.IntLongMapValue]] also lowers. A filter of that map does not:
- * its layout is still int-long pairs, and [[ColumnBinding.asked]] refuses it. Every other kind
- * stays on the row path. The int-long group keeps a null value in the list.
+ * value on a present key stays in the group. Spill refuses that null before a file is opened. One
+ * grouped batch is published per shuffle partition, including an empty bucket. There is no partial
+ * combine and no sort. Spill off keeps the in-memory groups and writes nothing. Spill on slices
+ * one over-budget post-exchange bucket in input order. A morsel whose group table does not fit
+ * throws [[com.ewoodbury.scarlet.columnar.ClosedKernelRefusal]] before that table. The appended
+ * groups are not bounded by the budget. Key order inside a partition is first-seen. Value order
+ * inside a key is input order. `values` and `take` stay on the row path. One map directly above
+ * the group is [[GroupedDecode]]: the group runs once and the function sees the decoded rows. Int,
+ * long, and string `keys` lower separately and do not build value lists. `count` is the number of
+ * groups. [[PhysicalOp.Kind.Pairs]], [[PhysicalOp.Kind.LongPairs]], and
+ * [[PhysicalOp.Kind.StringPairs]] lower. An int-to-long [[PhysicalOp.IntLongMapValue]] also
+ * lowers. A filter of that map does not: its layout is still int-long pairs, and
+ * [[ColumnBinding.asked]] refuses it. Every other kind stays on the row path. The int-long group
+ * keeps a null value in the list.
  *
  * [[apply]] asks [[ColumnBinding]] before it builds. [[scala.None]] from the binder stays
  * [[scala.None]]. A [[PhysicalOp.GroupByKey]] child is

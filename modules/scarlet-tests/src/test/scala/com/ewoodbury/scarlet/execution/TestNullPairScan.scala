@@ -113,11 +113,15 @@ class TestNullPairScan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     rows shouldBe Seq("2,7,200", "2,null,200", "5,0,50")
   }
 
-  "groupByKey" should "refuse the null value the scan kept" in {
-    val thrown = the[IllegalArgumentException] thrownBy {
-      source.groupByKey.collect()
-    }
-    thrown.getMessage should include("clear value bit")
+  "groupByKey" should "keep the null value the scan kept" in {
+    val grouped = source.groupByKey
+    val (rows, batches, _) = measured(shownGroups(grouped.collect()))
+
+    ColumnarPlanner.tryRun(grouped.plan) shouldBe defined
+    batches should be > 0L
+    rows shouldBe shownGroups(row(grouped.collect()))
+    rows.map(_._1) should contain("2")
+    rows.find(_._1 == "2").map(_._2) shouldBe Some("null,7")
   }
 
   "an owned array" should "fold a filtered count without a primitive encode" in {
@@ -208,6 +212,37 @@ class TestNullPairScan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
         .map(cellText)
         .mkString(",")
     }
+
+  /**
+   * One group per line. A null value stays the text `null`. Keys are sorted so partition order
+   * does not matter. The value iterator is read as references.
+   */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Any",
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def shownGroups(rows: Iterable[(Int, Iterable[Int])]): Seq[(String, String)] =
+    rows.toSeq
+      .map { pair =>
+        val raw = pair.asInstanceOf[Product]
+        val values = raw.productElement(1).asInstanceOf[Iterable[Any]]
+        val refs = values.iterator.asInstanceOf[Iterator[AnyRef]]
+        cellText(raw.productElement(0)) -> refs.map(cellText).mkString(",")
+      }
+      .sortBy(_._1)
+
+  private def row[A](body: => A): A =
+    val saved = ScarletConf.get
+    try
+      ScarletConf.set(saved.copy(columnarExecution = false))
+      ScarletRuntime.get.shuffle.clear()
+      body
+    finally
+      ScarletConf.set(saved)
+      ScarletRuntime.get.shuffle.clear()
 
   @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
   private def cellText(cell: Any): String = cell match

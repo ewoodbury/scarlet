@@ -63,7 +63,11 @@ class TestStringGroupByKeySpill extends AnyFlatSpec with Matchers with BeforeAnd
       withConf(enabled, budget = 0L) { dir =>
         val missing = GroupByKey.strings(Vector.empty, partitions = 4, parallelism = 2)
         val present =
-          GroupByKey.strings(Vector(ColumnBatches.emptyStringPairs), partitions = 3, parallelism = 1)
+          GroupByKey.strings(
+            Vector(ColumnBatches.emptyStringPairs),
+            partitions = 3,
+            parallelism = 1,
+          )
         missing.length shouldBe 4
         present.length shouldBe 3
         (missing ++ present).foreach { grouped =>
@@ -147,11 +151,14 @@ class TestStringGroupByKeySpill extends AnyFlatSpec with Matchers with BeforeAnd
       Plan.Source(Seq(Partition(Seq("red" -> 1, erasedNullValue("blue"))))),
     )
     val grouped = source.groupByKey
-    withConf(enabled = true, budget = 1L) { dir =>
+    withConf(enabled = true, budget = 1L, partitions = 1) { dir =>
       ColumnarPlanner.lower(grouped.plan).map(_.shape) shouldBe Some(
         "GroupByKey(Exchange(Scan))",
       )
-      ColumnarPlanner.tryRun(grouped.plan) shouldBe None
+      val refused = the[IllegalArgumentException] thrownBy {
+        val _ = ColumnarPlanner.tryRun(grouped.plan)
+      }
+      refused.getMessage should include("clear value bit")
       StringGroupByKeySpill.filesWrittenForTest shouldBe 0L
       StringGroupByKeySpill.lastDirectoryForTest shouldBe ""
       SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
@@ -211,7 +218,9 @@ class TestStringGroupByKeySpill extends AnyFlatSpec with Matchers with BeforeAnd
     }
     BatchCodec.stringIntPairs(rows)
 
-  /** Largest compacted morsel of `batch`. A spill of this batch fits one morsel and not the bucket. */
+  /**
+   * Largest compacted morsel of `batch`. A spill of this batch fits one morsel and not the bucket.
+   */
   private def morselBudget(batch: ColumnBatch): Long =
     ColumnBatches
       .slice(batch, morselRows)

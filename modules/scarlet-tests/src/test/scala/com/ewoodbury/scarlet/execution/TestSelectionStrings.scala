@@ -191,21 +191,21 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
     groupedStrings(GroupByKey.stringsSelected(Vector(dropped), 1, 1)) shouldBe Map(
       "" -> Seq(1),
     )
-    val caught = the[IllegalArgumentException] thrownBy {
-      GroupByKey.stringsSelected(Vector(Selected(values, Array(0), 1)), 1, 1)
-    }
-    caught.getMessage should include("clear value bit")
+    shownStringGroups(
+      GroupByKey.stringsSelected(Vector(Selected(values, Array(0), 1)), 1, 1),
+    ) shouldBe
+      Seq("red" -> Seq("null"))
 
     val both = pairBatch(
       DictUtf8Column.fromIterable(Seq(nullKey(0)._1, "red")),
       Int32Column.of(Array(0, 10), Validity.pack(2, row => row == 1), 2),
       2,
     )
-    val hidden = the[IllegalArgumentException] thrownBy {
-      GroupByKey.stringsSelected(Vector(Selected(both, Array(0), 1)), 1, 1)
-    }
-    hidden.getMessage should include("clear value bit")
-    groupedStrings(GroupByKey.stringsSelected(Vector(Selected(both, Array(1, 0), 1)), 1, 1)) shouldBe
+    GroupByKey.stringsSelected(Vector(Selected(both, Array(0), 1)), 1, 1).flatMap(_.rows) shouldBe
+      empty
+    groupedStrings(
+      GroupByKey.stringsSelected(Vector(Selected(both, Array(1, 0), 1)), 1, 1),
+    ) shouldBe
       Map("red" -> Seq(10))
   }
 
@@ -245,7 +245,13 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
     shape(mapped.plan) shouldBe "MapValue(Scan)"
     shape(bare.plan) shouldBe "GroupByKey(Exchange(Scan))"
     shape(once.plan) shouldBe "FilterValue(Scan)"
-    FilterChain.selected(single.plan, lowered(single.plan), None, false, Set(0, 1)) shouldBe defined
+    FilterChain.selected(
+      single.plan,
+      lowered(single.plan),
+      None,
+      false,
+      Set(0, 1),
+    ) shouldBe defined
     FilterChain.selected(mapped.plan, lowered(mapped.plan), None, false, Set(0, 1)) shouldBe None
     FilterChain.selected(source.plan, lowered(source.plan), None, false, Set(0, 1)) shouldBe None
     FilterChain.selected(once.plan, lowered(once.plan), None, false, Set(0, 1)) shouldBe defined
@@ -472,6 +478,19 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
 
   private def groupedStrings(parts: Vector[GroupedStringBatch]): Map[String, Seq[Int]] =
     parts.flatMap(_.rows).map { case (key, values) => key -> values.toSeq }.toMap
+
+  /** A clear value bit is the text `null`. The iterator is read as references. */
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.AsInstanceOf",
+      "org.wartremover.warts.Null",
+    ),
+  )
+  private def shownStringGroups(parts: Vector[GroupedStringBatch]): Seq[(String, Seq[String])] =
+    parts.flatMap(_.rows).map { (key, values) =>
+      val refs = values.iterator.asInstanceOf[Iterator[AnyRef]]
+      (key, refs.map(cell => if (cell == null) "null" else cell.toString).toSeq)
+    }
 
   private def dictionaryOf(batch: ColumnBatch): Array[String] =
     batch.columns.headOption match

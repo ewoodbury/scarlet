@@ -121,8 +121,10 @@ class TestGroupByKeySpill extends AnyFlatSpec with Matchers with BeforeAndAfterE
       Validity.pack(10, row => row != 1),
       10,
     )
-    val values = Int32Column.of(Array(10, 99, 11, 30, 40, 50, 60, 70, 80, 12), Validity.allValid(10), 10)
-    val batch = new ColumnBatch(Vector(LogicalType.Int32, LogicalType.Int32), Vector(keys, values), 10)
+    val values =
+      Int32Column.of(Array(10, 99, 11, 30, 40, 50, 60, 70, 80, 12), Validity.allValid(10), 10)
+    val batch =
+      new ColumnBatch(Vector(LogicalType.Int32, LogicalType.Int32), Vector(keys, values), 10)
     val memoryRows = rowsOf(inMemory(Vector(batch)))
     memoryRows.flatMap(_._2) should not contain 99
     withConf(enabled = true, budget = morselBudget) { dir =>
@@ -136,7 +138,7 @@ class TestGroupByKeySpill extends AnyFlatSpec with Matchers with BeforeAndAfterE
     val batch = new ColumnBatch(
       Vector(LogicalType.Int32, LogicalType.Int32),
       Vector(
-        Int32Column.of(Array(1, 0), Validity.pack(2, row => row != 1), 2),
+        Int32Column.of(Array(1, 2), Validity.allValid(2), 2),
         Int32Column.of(Array(10, 0), Validity.pack(2, row => row != 1), 2),
       ),
       2,
