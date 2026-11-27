@@ -134,6 +134,41 @@ final case class DistCollection[A](plan: Plan[A]):
     DistCollection.service.sumWideDecimal(widePlan, ordinal)
 
   /**
+   * Minimum of one int column. A null slot is skipped. An empty column, or a column of only nulls,
+   * returns zero. A columnar plan reads that column and does not decode the row.
+   */
+  def minIntColumn(ordinal: Int)(using ev: A =:= WideRow): Int =
+    DistCollection.service.minWideInt(widePlan, ordinal)
+
+  /** Maximum of one int column. The empty rule matches [[minIntColumn]]. */
+  def maxIntColumn(ordinal: Int)(using ev: A =:= WideRow): Int =
+    DistCollection.service.maxWideInt(widePlan, ordinal)
+
+  /** Minimum of one long column. The empty rule matches [[minIntColumn]]. */
+  def minLongColumn(ordinal: Int)(using ev: A =:= WideRow): Long =
+    DistCollection.service.minWideLong(widePlan, ordinal)
+
+  /** Maximum of one long column. The empty rule matches [[minIntColumn]]. */
+  def maxLongColumn(ordinal: Int)(using ev: A =:= WideRow): Long =
+    DistCollection.service.maxWideLong(widePlan, ordinal)
+
+  /** Minimum of one float column. The empty rule matches [[minIntColumn]]. */
+  def minFloatColumn(ordinal: Int)(using ev: A =:= WideRow): Float =
+    DistCollection.service.minWideFloat(widePlan, ordinal)
+
+  /** Maximum of one float column. The empty rule matches [[minIntColumn]]. */
+  def maxFloatColumn(ordinal: Int)(using ev: A =:= WideRow): Float =
+    DistCollection.service.maxWideFloat(widePlan, ordinal)
+
+  /** Minimum of one double column. The empty rule matches [[minIntColumn]]. */
+  def minDoubleColumn(ordinal: Int)(using ev: A =:= WideRow): Double =
+    DistCollection.service.minWideDouble(widePlan, ordinal)
+
+  /** Maximum of one double column. The empty rule matches [[minIntColumn]]. */
+  def maxDoubleColumn(ordinal: Int)(using ev: A =:= WideRow): Double =
+    DistCollection.service.maxWideDouble(widePlan, ordinal)
+
+  /**
    * Filters strings equal to `value`. This explicit form is recognized by the columnar planner,
    * which compares dictionary codes. A null `value` is not recognized and stays on the scalar
    * predicate. A regular `filter(_ == value)` remains a scalar predicate.

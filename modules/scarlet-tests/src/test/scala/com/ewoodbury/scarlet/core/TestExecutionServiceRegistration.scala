@@ -71,6 +71,22 @@ class TestExecutionServiceRegistration extends AnyFlatSpec with Matchers with Be
 
     def sumWideDecimal(plan: Plan[WideRow], ordinal: Int): Long = 0L
 
+    def minWideInt(plan: Plan[WideRow], ordinal: Int): Int = 0
+
+    def maxWideInt(plan: Plan[WideRow], ordinal: Int): Int = 0
+
+    def minWideLong(plan: Plan[WideRow], ordinal: Int): Long = 0L
+
+    def maxWideLong(plan: Plan[WideRow], ordinal: Int): Long = 0L
+
+    def minWideFloat(plan: Plan[WideRow], ordinal: Int): Float = 0.0f
+
+    def maxWideFloat(plan: Plan[WideRow], ordinal: Int): Float = 0.0f
+
+    def minWideDouble(plan: Plan[WideRow], ordinal: Int): Double = 0.0
+
+    def maxWideDouble(plan: Plan[WideRow], ordinal: Int): Double = 0.0
+
     def sumDouble(plan: Plan[Double]): Double = 0.0
 
     def sumFloat(plan: Plan[Float]): Float = 0.0f

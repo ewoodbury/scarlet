@@ -168,6 +168,106 @@ class DefaultExecutionService extends ExecutionService {
       case other =>
         throw new IllegalArgumentException(s"column $ordinal is $other, expected a decimal")
 
+  def minWideInt(plan: Plan[WideRow], ordinal: Int): Int =
+    WideExtremum.minInt(plan, ordinal).getOrElse(foldInt(plan, ordinal, least = true))
+
+  def maxWideInt(plan: Plan[WideRow], ordinal: Int): Int =
+    WideExtremum.maxInt(plan, ordinal).getOrElse(foldInt(plan, ordinal, least = false))
+
+  def minWideLong(plan: Plan[WideRow], ordinal: Int): Long =
+    WideExtremum.minLong(plan, ordinal).getOrElse(foldLong(plan, ordinal, least = true))
+
+  def maxWideLong(plan: Plan[WideRow], ordinal: Int): Long =
+    WideExtremum.maxLong(plan, ordinal).getOrElse(foldLong(plan, ordinal, least = false))
+
+  def minWideFloat(plan: Plan[WideRow], ordinal: Int): Float =
+    WideExtremum.minFloat(plan, ordinal).getOrElse(foldFloat(plan, ordinal, least = true))
+
+  def maxWideFloat(plan: Plan[WideRow], ordinal: Int): Float =
+    WideExtremum.maxFloat(plan, ordinal).getOrElse(foldFloat(plan, ordinal, least = false))
+
+  def minWideDouble(plan: Plan[WideRow], ordinal: Int): Double =
+    WideExtremum.minDouble(plan, ordinal).getOrElse(foldDouble(plan, ordinal, least = true))
+
+  def maxWideDouble(plan: Plan[WideRow], ordinal: Int): Double =
+    WideExtremum.maxDouble(plan, ordinal).getOrElse(foldDouble(plan, ordinal, least = false))
+
+  private def foldInt(plan: Plan[WideRow], ordinal: Int, least: Boolean): Int =
+    rowPartitions(plan)
+      .foldLeft((0, false)) { (state, partition) =>
+        partition.data.foldLeft(state) { (acc, row) =>
+          row.cells(ordinal) match
+            case Cell.Int32(value) => keepInt(acc, value, least)
+            case Cell.Null => acc
+            case other =>
+              throw new IllegalArgumentException(s"column $ordinal is $other, expected an int")
+        }
+      }
+      ._1
+
+  private def foldLong(plan: Plan[WideRow], ordinal: Int, least: Boolean): Long =
+    rowPartitions(plan)
+      .foldLeft((0L, false)) { (state, partition) =>
+        partition.data.foldLeft(state) { (acc, row) =>
+          row.cells(ordinal) match
+            case Cell.Int64(value) => keepLong(acc, value, least)
+            case Cell.Null => acc
+            case other =>
+              throw new IllegalArgumentException(s"column $ordinal is $other, expected a long")
+        }
+      }
+      ._1
+
+  private def foldFloat(plan: Plan[WideRow], ordinal: Int, least: Boolean): Float =
+    rowPartitions(plan)
+      .foldLeft((0.0f, false)) { (state, partition) =>
+        partition.data.foldLeft(state) { (acc, row) =>
+          row.cells(ordinal) match
+            case Cell.Float32(value) => keepFloat(acc, value, least)
+            case Cell.Null => acc
+            case other =>
+              throw new IllegalArgumentException(s"column $ordinal is $other, expected a float")
+        }
+      }
+      ._1
+
+  private def foldDouble(plan: Plan[WideRow], ordinal: Int, least: Boolean): Double =
+    rowPartitions(plan)
+      .foldLeft((0.0, false)) { (state, partition) =>
+        partition.data.foldLeft(state) { (acc, row) =>
+          row.cells(ordinal) match
+            case Cell.Float64(value) => keepDouble(acc, value, least)
+            case Cell.Null => acc
+            case other =>
+              throw new IllegalArgumentException(s"column $ordinal is $other, expected a double")
+        }
+      }
+      ._1
+
+  private def keepInt(state: (Int, Boolean), value: Int, least: Boolean): (Int, Boolean) =
+    val (best, seen) = state
+    if (!seen || (least && value < best) || (!least && value > best)) then (value, true)
+    else (best, true)
+
+  private def keepLong(state: (Long, Boolean), value: Long, least: Boolean): (Long, Boolean) =
+    val (best, seen) = state
+    if (!seen || (least && value < best) || (!least && value > best)) then (value, true)
+    else (best, true)
+
+  private def keepFloat(state: (Float, Boolean), value: Float, least: Boolean): (Float, Boolean) =
+    val (best, seen) = state
+    if (!seen || (least && value < best) || (!least && value > best)) then (value, true)
+    else (best, true)
+
+  private def keepDouble(
+      state: (Double, Boolean),
+      value: Double,
+      least: Boolean,
+  ): (Double, Boolean) =
+    val (best, seen) = state
+    if (!seen || (least && value < best) || (!least && value > best)) then (value, true)
+    else (best, true)
+
   def sumDouble(plan: Plan[Double]): Double =
     ColumnarPlanner.trySumDouble(plan).getOrElse {
       rowPartitions(plan).foldLeft(0.0) { (total, partition) =>

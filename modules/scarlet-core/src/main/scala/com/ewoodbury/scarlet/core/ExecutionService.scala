@@ -45,6 +45,33 @@ trait ExecutionService {
   def sumWideDecimal(plan: Plan[WideRow], ordinal: Int): Long
 
   /**
+   * Minimum of one int column of a wide row. A null slot contributes nothing. An empty column, or
+   * a column of only nulls, returns zero.
+   */
+  def minWideInt(plan: Plan[WideRow], ordinal: Int): Int
+
+  /** Maximum of one int column. The empty rule matches [[minWideInt]]. */
+  def maxWideInt(plan: Plan[WideRow], ordinal: Int): Int
+
+  /** Minimum of one long column. The empty rule matches [[minWideInt]]. */
+  def minWideLong(plan: Plan[WideRow], ordinal: Int): Long
+
+  /** Maximum of one long column. The empty rule matches [[minWideInt]]. */
+  def maxWideLong(plan: Plan[WideRow], ordinal: Int): Long
+
+  /** Minimum of one float column. The empty rule matches [[minWideInt]]. */
+  def minWideFloat(plan: Plan[WideRow], ordinal: Int): Float
+
+  /** Maximum of one float column. The empty rule matches [[minWideInt]]. */
+  def maxWideFloat(plan: Plan[WideRow], ordinal: Int): Float
+
+  /** Minimum of one double column. The empty rule matches [[minWideInt]]. */
+  def minWideDouble(plan: Plan[WideRow], ordinal: Int): Double
+
+  /** Maximum of one double column. The empty rule matches [[minWideInt]]. */
+  def maxWideDouble(plan: Plan[WideRow], ordinal: Int): Double
+
+  /**
    * Sums a `Double` plan. Empty input returns zero.
    */
   def sumDouble(plan: Plan[Double]): Double
@@ -111,6 +138,54 @@ object ExecutionService {
     }
 
     def sumWideDecimal(plan: Plan[WideRow], ordinal: Int): Long = {
+      throw new UnsupportedOperationException(
+        "No execution service registered. Please ensure the execution module is properly initialized.",
+      )
+    }
+
+    def minWideInt(plan: Plan[WideRow], ordinal: Int): Int = {
+      throw new UnsupportedOperationException(
+        "No execution service registered. Please ensure the execution module is properly initialized.",
+      )
+    }
+
+    def maxWideInt(plan: Plan[WideRow], ordinal: Int): Int = {
+      throw new UnsupportedOperationException(
+        "No execution service registered. Please ensure the execution module is properly initialized.",
+      )
+    }
+
+    def minWideLong(plan: Plan[WideRow], ordinal: Int): Long = {
+      throw new UnsupportedOperationException(
+        "No execution service registered. Please ensure the execution module is properly initialized.",
+      )
+    }
+
+    def maxWideLong(plan: Plan[WideRow], ordinal: Int): Long = {
+      throw new UnsupportedOperationException(
+        "No execution service registered. Please ensure the execution module is properly initialized.",
+      )
+    }
+
+    def minWideFloat(plan: Plan[WideRow], ordinal: Int): Float = {
+      throw new UnsupportedOperationException(
+        "No execution service registered. Please ensure the execution module is properly initialized.",
+      )
+    }
+
+    def maxWideFloat(plan: Plan[WideRow], ordinal: Int): Float = {
+      throw new UnsupportedOperationException(
+        "No execution service registered. Please ensure the execution module is properly initialized.",
+      )
+    }
+
+    def minWideDouble(plan: Plan[WideRow], ordinal: Int): Double = {
+      throw new UnsupportedOperationException(
+        "No execution service registered. Please ensure the execution module is properly initialized.",
+      )
+    }
+
+    def maxWideDouble(plan: Plan[WideRow], ordinal: Int): Double = {
       throw new UnsupportedOperationException(
         "No execution service registered. Please ensure the execution module is properly initialized.",
       )
