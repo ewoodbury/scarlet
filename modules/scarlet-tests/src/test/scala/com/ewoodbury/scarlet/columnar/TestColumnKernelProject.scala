@@ -29,7 +29,8 @@ class TestColumnKernelProject extends AnyFlatSpec with Matchers with ColumnKerne
     BatchCodec.decodeNullableFloat64s(
       ColumnKernel.projectFloat64(BatchCodec.nullableFloat64s(floats), 0, _ * 2.0),
     ) shouldBe Seq(None, Some(3.0))
-    val projectedBools = ColumnKernel.projectBool(BatchCodec.nullableBools(bools), 0, value => !value)
+    val projectedBools =
+      ColumnKernel.projectBool(BatchCodec.nullableBools(bools), 0, value => !value)
     BatchCodec.decodeNullableBools(projectedBools) shouldBe Seq(Some(false), None, Some(true))
     at(projectedBools, 0) match
       case column: BoolColumn =>
@@ -89,7 +90,8 @@ class TestColumnKernelProject extends AnyFlatSpec with Matchers with ColumnKerne
     val shortened = ColumnKernel.projectInt32(
       single(column),
       0,
-      value => if (value == 99) then throw new IllegalStateException("read past length") else value + 1,
+      value =>
+        if (value == 99) then throw new IllegalStateException("read past length") else value + 1,
     )
     BatchCodec.decodeInts(shortened) shouldBe Seq(2, 3)
     shortened.length shouldBe 2
@@ -139,7 +141,7 @@ class TestColumnKernelProject extends AnyFlatSpec with Matchers with ColumnKerne
     )
     nullCalls.get() shouldBe 0
     nullOnly.length shouldBe 1
-    BatchCodec.decodeNullableLongs(nullOnly) shouldBe Seq(None)
+    BatchCodec.decodeNullableLongs(nullOnly) shouldBe Seq[Option[Long]](None)
     long64(nullOnly).values(0) shouldBe 0L
   }
 
@@ -209,14 +211,16 @@ class TestColumnKernelProject extends AnyFlatSpec with Matchers with ColumnKerne
     val wholeShort = ColumnKernel.projectInt64(
       shortened,
       0,
-      value => if (value == 99L) then throw new IllegalStateException("read past length") else value + 1L,
+      value =>
+        if (value == 99L) then throw new IllegalStateException("read past length") else value + 1L,
     )
     val rangedShort = ColumnKernel.projectInt64(
       shortened,
       0,
       0,
       shortened.length,
-      value => if (value == 99L) then throw new IllegalStateException("read past length") else value + 1L,
+      value =>
+        if (value == 99L) then throw new IllegalStateException("read past length") else value + 1L,
     )
 
     BatchCodec.decodeLongs(wholeShort) shouldBe Seq(2L, -1L, 9L)

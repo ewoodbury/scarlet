@@ -55,7 +55,7 @@ jobs:
         run: |
           sbt -J-Xmx3g -batch \
             "project scarlet-tests" \
-            "set Test / unmanagedSources / includeFilter := new SimpleFileFilter(f => { val n = f.getName; n == \"PerfCheck.scala\" || n == \"SortChecksum.scala\" || n == \"ClickBenchSlice.scala\" || n == \"TpchSlice.scala\" })" \
+            "set Test / unmanagedSources / includeFilter := new SimpleFileFilter(f => { val n = f.getName; n == \"PerfCheck.scala\" || n == \"SortChecksum.scala\" || n == \"ClickBenchSlice.scala\" || n == \"TpchSlice.scala\" || n == \"Check.scala\" })" \
             "Test/runMain com.ewoodbury.scarlet.execution.PerfCheck" \
             "Test/runMain com.ewoodbury.scarlet.execution.ClickBenchSlice" \
             "Test/runMain com.ewoodbury.scarlet.execution.TpchSlice"

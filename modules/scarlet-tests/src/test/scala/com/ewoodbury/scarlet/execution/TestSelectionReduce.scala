@@ -163,7 +163,7 @@ class TestSelectionReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
     val nullValue = Selected(batch, Array(0), 1)
     val keptValue =
       HashReduce.int32Selected(nullValue, 0, 1, keyOrdinal = 0, valueOrdinal = 1, plus)
-    cells(Vector(keptValue)) shouldBe Seq((Some(1), None))
+    cells(Vector(keptValue)) shouldBe Seq[(Option[Int], Option[Int])]((Some(1), None))
 
     val nullKey = Selected(batch, Array(2), 1)
     val droppedKey =
@@ -296,7 +296,7 @@ class TestSelectionReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
       plus,
     )
 
-    val lone = Seq((Some(7), None))
+    val lone = Seq[(Option[Int], Option[Int])]((Some(7), None))
     cells(viaSelection) shouldBe lone
     cells(viaDense) shouldBe lone
   }

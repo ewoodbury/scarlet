@@ -64,7 +64,7 @@ class TestIntLongHashJoin extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
     shape(joined) shouldBe hashShape
     // Row mapValues unboxes a null int to zero, so that collect is not the oracle.
-    seen shouldBe Seq((Some(1), None, Some(5L)))
+    seen shouldBe Seq[(Option[Int], Option[Long], Option[Long])]((Some(1), None, Some(5L)))
   }
 
   it should "drop a null key on both sides" in {
