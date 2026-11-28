@@ -158,6 +158,60 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     shape shouldBe "WideGroup(Scan)"
   }
 
+  "an expression group" should "match query 35" in {
+    val sql =
+      """select ResolutionWidth - 1, count(*)
+        |from hits group by ResolutionWidth - 1""".stripMargin
+    val (columnar, shape) = listed(sql, columnar = true)
+    val (rows, _) = listed(sql, columnar = false)
+    shape shouldBe "WideProject(WideGroup(WideCompute(WideCompute(Scan))))"
+    columnar.length shouldBe 200
+    rows.length shouldBe 200
+    countFor(columnar, 799) shouldBe 21L
+    countFor(rows, 799) shouldBe 21L
+    countFor(columnar, 895) shouldBe 20L
+    countFor(rows, 895) shouldBe 20L
+    countOnly(columnar) shouldBe ClickBenchSlice.countAll
+    countOnly(rows) shouldBe ClickBenchSlice.countAll
+  }
+
+  "a long expression group" should "keep one row per user" in {
+    val sql = "select UserID - 1, count(*) from hits group by UserID - 1"
+    val (columnar, shape) = listed(sql, columnar = true)
+    val (rows, _) = listed(sql, columnar = false)
+    shape shouldBe "WideProject(WideGroup(WideCompute(WideCompute(Scan))))"
+    columnar.length shouldBe 4096
+    rows.length shouldBe 4096
+    countOnly(columnar) shouldBe ClickBenchSlice.countAll
+    countOnly(rows) shouldBe ClickBenchSlice.countAll
+  }
+
+  "a constant group" should "name the node" in {
+    named("select 1, count(*) from tiny group by 1", "LongValue")
+  }
+
+  "four group keys" should "stay out" in {
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(
+        """select AdvEngineID, ResolutionWidth, UserID, AdvEngineID, count(*)
+          |from hits
+          |group by AdvEngineID, ResolutionWidth, UserID, AdvEngineID""".stripMargin,
+        Map("hits" -> ClickBenchSlice.scan()),
+      )
+    }
+    thrown.getMessage should include("a group needs one or two columns")
+  }
+
+  "a string expression group" should "name the node" in {
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(
+        "select SearchPhrase, count(*) from hits group by length(SearchPhrase)",
+        Map("hits" -> ClickBenchSlice.phrases()),
+      )
+    }
+    thrown.getMessage should include("Function")
+  }
+
   "a group" should "match query 7" in {
     val (result, shape) = grouped(
       """select AdvEngineID, count(*), sum(AdvEngineID), min(AdvEngineID), max(AdvEngineID)
@@ -568,6 +622,16 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       val _ = Sql.run(sql, Map("tiny" -> tiny()))
     }
     thrown.getMessage should include(node)
+
+  private def countFor(rows: List[WideRow], key: Int): Long =
+    rows
+      .collectFirst {
+        case row if row.cells.headOption.contains(Cell.Int32(key)) =>
+          row.cells.lift(1) match
+            case Some(Cell.Int64(count)) => count
+            case _ => fail(s"missing count for $key")
+      }
+      .getOrElse(fail(s"missing group $key"))
 
   private def countOnly(rows: Iterable[WideRow]): Long =
     rows.foldLeft(0L) { (total, row) =>

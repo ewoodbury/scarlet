@@ -6,7 +6,7 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 import com.ewoodbury.scarlet.support.Check
 
 /**
- * Twenty-three ClickBench queries on 4096 generated rows. This is not the hits table.
+ * Twenty-four ClickBench queries on 4096 generated rows. This is not the hits table.
  *
  * Numbers follow the 0-based order of `clickhouse/queries.sql`. An average is the long sum and the
  * count. Query 2's width average is 3679360 / 4096. Query 3's user average is 8386588672 / 4096.
@@ -83,6 +83,13 @@ object ClickBenchSlice:
   /** Ten largest UserIDs whose phrase is greater than `p1`, in engine order. */
   val phraseFilterSortMix: Long = 7829478632560354530L
 
+  /**
+   * Query 35 adapted to one key: `ResolutionWidth - 1`. Two hundred groups. The checker sorts by
+   * count, then by the key. The published statement has four keys.
+   */
+  val exprGroupMix: Long = 9176981150844157028L
+  val exprGroups: Long = 200L
+
   val note: Vector[String] = Vector(
     "0 count. This file.",
     "1 count where AdvEngineID is not 0. This file.",
@@ -119,7 +126,7 @@ object ClickBenchSlice:
     "32 two int keys. This file. The checker applies the order.",
     "33 group by a string. Same key as query 12. Not in this slice.",
     "34 group by a constant and a string. Missing: string group key.",
-    "35 group by a column expression. Missing: expression group key.",
+    "35 group by one int expression. This file. The checker applies the order.",
     "36 date range and a string group. Missing: string group key.",
     "37 string group on a date range. Missing: string group key.",
     "38 string group and a flag filter. Missing: string group key.",
@@ -244,6 +251,16 @@ object ClickBenchSlice:
 
   def widthAsLong(): DistCollection[WideRow] =
     scan().compute(ColumnExpr.Cast(1, ColumnKind.Int64), "width64")
+
+  /**
+   * Query 35: `ResolutionWidth - 1`, then a group on that column. The key is ordinal 4. The
+   * published statement groups four expressions. This slice keeps one.
+   */
+  def widthMinus(): DistCollection[WideRow] =
+    scan()
+      .compute(ColumnExpr.Lit(ColumnLiteral.Int32(1)), "one")
+      .compute(ColumnExpr.Sub(1, 3), "widthMinus")
+      .groupColumns(4, 4)
 
   /** Query 29: `ResolutionWidth + 11`, then a long cast. Columns land at ordinals 3, 4, and 5. */
   def widthPlus(): DistCollection[WideRow] =
@@ -405,6 +422,8 @@ object ClickBenchSlice:
       counted("query 25", sortedPhrases().plan, 10L),
       shaped("query 27", urlLengths().plan, "WideCompute(WideCompute(Scan))"),
       summed("query 27", urlLengths().plan, 5, urlLengthSum),
+      shaped("query 35", widthMinus().plan, "WideGroup(WideCompute(WideCompute(Scan)))"),
+      counted("query 35", widthMinus().plan, exprGroups),
     ).flatten
 
   private def bothPaths(): List[String] =
@@ -432,6 +451,7 @@ object ClickBenchSlice:
       both("query 24", phraseFilterSortMix)(userPhraseChecksum(filteredPhrases().collect())),
       both("query 25", phraseSortMix)(userPhraseChecksum(sortedPhrases().collect())),
       both("query 27", urlLengthSum)(urlLengths().sumLongColumn(5)),
+      both("query 35", exprGroupMix)(groupedChecksum(widthMinus().collect())),
     ).flatten
 
   private def mixExtremum(): Long =
