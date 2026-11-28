@@ -11,7 +11,8 @@ import com.ewoodbury.scarlet.support.Check
  * Money is a long. A date is a long. An average is a sum divided by a count. Query 1 groups by the
  * return flag only. Query 3 multiplies the lineitem price by the discount, joins customer and
  * orders, and groups by the order key. Query 5 joins the local supplier and groups by the nation
- * name. Query 13 keeps a customer that matches no order. [[note]] names every TPC-H query.
+ * name. Query 4 keeps an order whose line commits before it is received. Query 13 keeps a customer
+ * that matches no order. Query 15 keeps the greatest total. [[note]] names every TPC-H query.
  */
 object TpchSlice:
 
@@ -49,29 +50,37 @@ object TpchSlice:
   val outerMix: Long = -1025412830682488009L
   val outerRows: Long = 4L
 
+  /** Priorities 1 and 2. Each count is 1. Priority 1 sums to 1 and priority 2 sums to 2. */
+  val priorityMix: Long = 27320943823874L
+  val priorityGroups: Long = 2L
+
+  /** Supplier 2. Its total is the greatest, 40. */
+  val topMix: Long = 31815L
+  val topRows: Long = 1L
+
   val note: Vector[String] = Vector(
     "1 This file. One group column. The published query also groups by line status.",
-    "2 Missing: subquery.",
+    "2 Missing: correlated min.",
     "3 This file. Joins customer and orders. One group column. The published query groups three columns.",
-    "4 Missing: exists.",
+    "4 This file. Exists keeps an order with a late line. The published query also filters a date literal.",
     "5 This file. Joins supplier and nation. The published query also filters a date literal.",
     "6 This file.",
     "7 Missing: extract year.",
     "8 Missing: case.",
     "9 Missing: extract year.",
     "10 Missing: more than two group columns.",
-    "11 Missing: subquery.",
+    "11 Missing: having.",
     "12 Missing: a conditional count.",
     "13 This file. Left outer join. The published query also filters a comment and groups by count.",
     "14 Missing: string LIKE.",
-    "15 Missing: subquery.",
-    "16 Missing: subquery.",
-    "17 Missing: subquery.",
-    "18 Missing: subquery.",
+    "15 This file. An uncorrelated max. The published query builds that total in a view.",
+    "16 Missing: not in.",
+    "17 Missing: correlated average.",
+    "18 Missing: in subquery.",
     "19 Missing: an in-list.",
-    "20 Missing: subquery.",
-    "21 Missing: exists.",
-    "22 Missing: subquery.",
+    "20 Missing: correlated in.",
+    "21 Missing: not exists.",
+    "22 Missing: substring.",
   )
 
   def main(args: Array[String]): Unit =
@@ -147,6 +156,58 @@ object TpchSlice:
   def custOrderPlan(): DistCollection[WideRow] =
     openCustomers().hashLeftJoinColumns(openOrders(), 0, 1)
 
+  /**
+   * Query 4 reduced to a long date range and one exists. A line counts when commit is before
+   * receipt. The group key is the priority.
+   */
+  def priorityPlan(): DistCollection[WideRow] =
+    val keys = existsLines()
+      .compute(ColumnExpr.Compare(CompareOp.Lt, 1, 2), "late")
+      .filterColumn(3, ColumnCompare(CompareOp.Eq, ColumnLiteral.Bool(true)))
+      .groupColumns(0, 0)
+      .projectColumns(Vector((0, "orderkey")))
+    existsOrders()
+      .filterColumn(1, ColumnCompare(CompareOp.Ge, ColumnLiteral.Int64(10L)))
+      .filterColumn(1, ColumnCompare(CompareOp.Lt, ColumnLiteral.Int64(20L)))
+      .hashJoinColumns(keys, 0, 0)
+      .groupColumns(2, 2)
+
+  /** Query 15 reduced to the row whose total equals the greatest total. */
+  def topPlan(): DistCollection[WideRow] =
+    maxRevenue().filterColumn(1, ColumnCompare(CompareOp.Eq, ColumnLiteral.Int64(40L)))
+
+  /** Orders for query 4. The date is a long. */
+  def existsOrders(): DistCollection[WideRow] =
+    DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("orderkey", Array(0, 1, 2, 3)),
+        WideInput.longs("orderdate", Array(10L, 10L, 40L, 10L)),
+        WideInput.ints("priority", Array(1, 2, 1, 1)),
+      ),
+      partitions,
+    )
+
+  /** Lines for query 4. Commit and receipt are longs. */
+  def existsLines(): DistCollection[WideRow] =
+    DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("orderkey", Array(0, 0, 1, 3, 2)),
+        WideInput.longs("commit", Array(5L, 9L, 4L, 8L, 1L)),
+        WideInput.longs("receipt", Array(7L, 3L, 6L, 8L, 2L)),
+      ),
+      partitions,
+    )
+
+  /** Totals for query 15. Supplier 2 has the greatest total. */
+  def maxRevenue(): DistCollection[WideRow] =
+    DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("suppkey", Array(1, 2, 3)),
+        WideInput.longs("total", Array(10L, 40L, 25L)),
+      ),
+      partitions,
+    )
+
   def pricingChecksum(rows: Iterable[WideRow]): Long =
     rows.toVector.sortWith(byKey).foldLeft(0L)(mixIntMeasure)
 
@@ -158,6 +219,11 @@ object TpchSlice:
 
   def outerChecksum(rows: Iterable[WideRow]): Long =
     rows.toVector.sortWith(byCustomer).foldLeft(0L)(mixOuter)
+
+  def priorityChecksum(rows: Iterable[WideRow]): Long =
+    rows.toVector.sortWith(byKey).foldLeft(0L)(mixIntMeasure)
+
+  def topChecksum(rows: Iterable[WideRow]): Long = rows.toVector.foldLeft(0L)(mixOuter)
 
   private def prove(): List[String] =
     val revenueShape =
@@ -182,6 +248,14 @@ object TpchSlice:
       counted("query 5", localPlan().plan, localGroups),
       shaped("query 13", custOrderPlan().plan, "WideHashLeftJoin(Scan,Scan)"),
       counted("query 13", custOrderPlan().plan, outerRows),
+      shaped(
+        "query 4",
+        priorityPlan().plan,
+        "WideGroup(WideHashJoin(WideFilter1(WideFilter1(Scan)),WideProject(WideGroup(WideFilter3(WideCompute(Scan))))))",
+      ),
+      counted("query 4", priorityPlan().plan, priorityGroups),
+      shaped("query 15", topPlan().plan, "WideFilter1(Scan)"),
+      counted("query 15", topPlan().plan, topRows),
     ).flatten
 
   private def bothPaths(): List[String] =
@@ -191,6 +265,8 @@ object TpchSlice:
       both("query 3", shippingMix)(shippingChecksum(shippingPlan().collect())),
       both("query 5", localMix)(localChecksum(localPlan().collect())),
       both("query 13", outerMix)(outerChecksum(custOrderPlan().collect())),
+      both("query 4", priorityMix)(priorityChecksum(priorityPlan().collect())),
+      both("query 15", topMix)(topChecksum(topPlan().collect())),
     ).flatten
 
   private def lineitem(): DistCollection[WideRow] =

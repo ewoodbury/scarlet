@@ -20,14 +20,15 @@ import com.ewoodbury.scarlet.core.*
 
 /**
  * One SELECT: registered tables, a left-deep chain of int or long equi-joins in the written order.
- * A left outer join keeps an unmatched left row. A right or full join names the node. Comparisons
- * combine with AND, OR, and NOT. Arithmetic, count, sum, min, max, and an exact count of distinct
- * values. A string compares with JVM order. `LIKE` uses `%` and `_`, and it combines with AND and
- * NOT. OR of `LIKE` names the node. `length` is the UTF-16 length. A group is one or two keys. A
- * key is an int, a long, a string, or arithmetic on an int or a long. `extract(minute from` an
- * int64 epoch`)` and `date_trunc('minute',` that epoch`)` are computes. A string measure emits
- * count, min, and max. Order is one int, long, or string column, then a limit. Anything else names
- * its node.
+ * A left outer join keeps an unmatched left row. A right or full join names the node. An exists
+ * joins the distinct inner key. A scalar subquery becomes the value it returns. Not exists and a
+ * correlated scalar name that pattern. Comparisons combine with AND, OR, and NOT. Arithmetic,
+ * count, sum, min, max, and an exact count of distinct values. A string compares with JVM order.
+ * `LIKE` uses `%` and `_`, and it combines with AND and NOT. OR of `LIKE` names the node. `length`
+ * is the UTF-16 length. A group is one or two keys. A key is an int, a long, a string, or
+ * arithmetic on an int or a long. `extract(minute from` an int64 epoch`)` and
+ * `date_trunc('minute',` that epoch`)` are computes. A string measure emits count, min, and max.
+ * Order is one int, long, or string column, then a limit. Anything else names its node.
  */
 private object SqlConvert:
 
@@ -319,6 +320,7 @@ private object SqlConvert:
       val (built, ordinal) = boolExpr(or, frame)
       built.filter(ordinal, ColumnCompare(CompareOp.Eq, ColumnLiteral.Bool(true)))
     case not: NotExpression => negate(not.getExpression, frame)
+    case exists: ExistsExpression => existsFrame(exists, frame)
     case other => compare(other, frame)
 
   private def negate(expr: Expression, frame: Frame): Frame = unwrap(expr) match
@@ -337,6 +339,8 @@ private object SqlConvert:
     case like: LikeExpression =>
       val flipped = if like.isNot then CompareOp.Like else CompareOp.Unlike
       likeFrame(flipped, like, frame)
+    case _: ExistsExpression =>
+      throw new IllegalArgumentException("not exists is not supported")
     case other =>
       val (built, ordinal) = boolExpr(other, frame)
       val (negated, column) = built.bind(ColumnExpr.Not(ordinal))
@@ -354,7 +358,10 @@ private object SqlConvert:
   ): Frame =
     val leftName = tableName(from)
     val left = resolve(tables, leftName)
-    val start = Chain(Frame(left, 0), Vector(Side(leftName, fieldsOf(left).indices.toVector)))
+    val start = Chain(
+      Frame(left, 0, Set(leftName), tables),
+      Vector(Side(leftName, fieldsOf(left).indices.toVector)),
+    )
     val list = if joins == null then Nil else joins.asScala.toList
     list.foldLeft(start)((chain, join) => link(chain, join, tables)).frame
 
@@ -392,7 +399,10 @@ private object SqlConvert:
         if index == rightKey then state else (cursor + 1, found :+ cursor)
       }
       ._2
-    Chain(Frame(joined, chain.frame.next), chain.sides :+ Side(rightName, rightOrdinals))
+    Chain(
+      Frame(joined, chain.frame.next, chain.frame.names + rightName, chain.frame.tables),
+      chain.sides :+ Side(rightName, rightOrdinals),
+    )
 
   private def equiKeys(
       eq: EqualsTo,
@@ -517,15 +527,167 @@ private object SqlConvert:
   ): Option[Frame] =
     plainColumn(left, frame) match
       case Some(ordinal) =>
-        typedLiteral(right, kindAt(frame, ordinal)).map { literal =>
+        comparedLiteral(right, kindAt(frame, ordinal), frame).map { literal =>
           frame.filter(ordinal, ColumnCompare(op, literal))
         }
       case None =>
         plainColumn(right, frame).flatMap { ordinal =>
-          typedLiteral(left, kindAt(frame, ordinal)).map { literal =>
+          comparedLiteral(left, kindAt(frame, ordinal), frame).map { literal =>
             frame.filter(ordinal, ColumnCompare(reflect(op), literal))
           }
         }
+
+  /** A literal, or the one value of an uncorrelated scalar subquery. */
+  private def comparedLiteral(
+      expr: Expression,
+      kind: ColumnKind,
+      frame: Frame,
+  ): Option[ColumnLiteral] =
+    typedLiteral(expr, kind).orElse(scalarLiteral(expr, kind, frame))
+
+  private def scalarLiteral(
+      expr: Expression,
+      kind: ColumnKind,
+      frame: Frame,
+  ): Option[ColumnLiteral] = unwrap(expr) match
+    case select: ParenthesedSelect => Some(literalFor(scalarValue(select, frame), kind))
+    case _ => None
+
+  private def scalarValue(select: ParenthesedSelect, outer: Frame): Long =
+    val plain = select.getPlainSelect
+    if plain == null then unsupported(select)
+    else if correlated(plain, outer) then
+      throw new IllegalArgumentException("a correlated subquery is not supported")
+    else
+      convert(plain, outer.tables) match
+        case SqlResult.Value(result, _) => result
+        case SqlResult.Rows(_) =>
+          throw new IllegalArgumentException("a scalar subquery must be one aggregate")
+
+  /** An outer column that the inner query does not own. */
+  private def correlated(plain: PlainSelect, outer: Frame): Boolean =
+    val from = plain.getFromItem
+    if from == null || plain.getJoins != null && !plain.getJoins.isEmpty then false
+    else
+      val name = tableName(from)
+      val inner = Frame(resolve(outer.tables, name), 0, Set(name), outer.tables)
+      val selected = itemsOf(plain).flatMap { item =>
+        val expression = item.getExpression
+        if expression == null then Nil else columnsIn(expression)
+      }
+      val columns = columnsIn(plain.getWhere) ++ columnsIn(plain.getHaving) ++ selected
+      columns.exists(column => owned(outer, column).isDefined && owned(inner, column).isEmpty)
+
+  /**
+   * Exists keeps each outer row whose key is in the inner rows. The inner key is one group, so a
+   * repeated match does not multiply the outer row.
+   */
+  private def existsFrame(exists: ExistsExpression, frame: Frame): Frame =
+    if exists.isNot then throw new IllegalArgumentException("not exists is not supported")
+    val right = exists.getRightExpression
+    if right == null then unsupported(exists)
+    val plain = unwrap(right) match
+      case select: ParenthesedSelect =>
+        val body = select.getPlainSelect
+        if body == null then unsupported(select) else body
+      case other => unsupported(other)
+    if plain.getDistinct != null then unsupported(plain.getDistinct)
+    val joins = plain.getJoins
+    if joins != null && !joins.isEmpty then unsupported(joins.get(0))
+    if plain.getGroupBy != null then unsupported(plain.getGroupBy)
+    if plain.getHaving != null then unsupported(plain.getHaving)
+    val ordering = plain.getOrderByElements
+    if ordering != null && !ordering.isEmpty then unsupported(ordering.get(0))
+    if plain.getLimit != null then unsupported(plain.getLimit)
+    val from = plain.getFromItem
+    if from == null then unsupported(plain)
+    val innerName = tableName(from)
+    val inner = Frame(resolve(frame.tables, innerName), 0, Set(innerName), frame.tables)
+    if itemsOf(plain).exists(item => aggregate(item).isDefined) then
+      throw new IllegalArgumentException("exists does not aggregate")
+    val where = plain.getWhere
+    if where == null then throw new IllegalArgumentException("exists needs one outer column")
+    val (links, local) =
+      conjuncts(where).foldLeft((Vector.empty[(Int, Int)], Vector.empty[Expression])) {
+        case ((found, rest), part) =>
+          equiLink(part, frame, inner) match
+            case Some(pair) => (found :+ pair, rest)
+            case None =>
+              if mentionsOuter(part, frame) then
+                throw new IllegalArgumentException("exists needs one outer column")
+              else (found, rest :+ part)
+      }
+    val (outerKey, innerKey) = links match
+      case Vector((outerOrdinal, innerOrdinal)) => (outerOrdinal, innerOrdinal)
+      case _ => throw new IllegalArgumentException("exists needs one outer column")
+    if !joinKey(kindAt(frame, outerKey)) || !joinKey(kindAt(inner, innerKey)) then
+      throw new IllegalArgumentException("a join key must be an int or a long")
+    val filtered = local.foldLeft(inner)((current, part) => predicate(part, current))
+    val keyName = schema(inner).lift(innerKey).map(_.name).getOrElse("k")
+    val built = filtered.rows
+      .groupColumns(innerKey, innerKey)
+      .projectColumns(Vector((0, keyName)))
+    frame.copy(rows = frame.rows.joinColumns(built, outerKey, 0))
+
+  private def conjuncts(expr: Expression): List[Expression] = unwrap(expr) match
+    case and: AndExpression =>
+      conjuncts(and.getLeftExpression) ++ conjuncts(and.getRightExpression)
+    case other => List(other)
+
+  /** Outer ordinal, then inner ordinal, when the equality is the exists key. */
+  private def equiLink(expr: Expression, outer: Frame, inner: Frame): Option[(Int, Int)] =
+    unwrap(expr) match
+      case eq: EqualsTo =>
+        (unwrap(eq.getLeftExpression), unwrap(eq.getRightExpression)) match
+          case (left: Column, right: Column) => linkColumns(left, right, outer, inner)
+          case _ => None
+      case _ => None
+
+  private def linkColumns(
+      left: Column,
+      right: Column,
+      outer: Frame,
+      inner: Frame,
+  ): Option[(Int, Int)] =
+    val leftOuter = owned(outer, left)
+    val rightOuter = owned(outer, right)
+    val leftInner = owned(inner, left)
+    val rightInner = owned(inner, right)
+    (leftOuter, rightInner, rightOuter, leftInner) match
+      case (Some(outerKey), Some(innerKey), None, None) => Some((outerKey, innerKey))
+      case (None, None, Some(outerKey), Some(innerKey)) => Some((outerKey, innerKey))
+      case _ =>
+        val shared = (leftOuter.isDefined && leftInner.isDefined) ||
+          (rightOuter.isDefined && rightInner.isDefined)
+        if shared then
+          val name = Option(left.getColumnName).getOrElse(right.getColumnName)
+          throw new IllegalArgumentException(s"column $name is on both sides of the exists")
+        else None
+
+  private def mentionsOuter(expr: Expression, outer: Frame): Boolean =
+    columnsIn(expr).exists(column => owned(outer, column).isDefined)
+
+  private def columnsIn(expr: Expression): List[Column] =
+    if expr == null then Nil
+    else
+      unwrap(expr) match
+        case column: Column => List(column)
+        case binary: BinaryExpression =>
+          columnsIn(binary.getLeftExpression) ++ columnsIn(binary.getRightExpression)
+        case not: NotExpression => columnsIn(not.getExpression)
+        case _ => Nil
+
+  private def owned(frame: Frame, column: Column): Option[Int] =
+    val name = column.getColumnName
+    if name == null then None
+    else
+      val table = column.getTable
+      val qualifier = if table == null then null else table.getName
+      if qualifier != null && !frame.names.exists(known => known.equalsIgnoreCase(qualifier)) then
+        None
+      else
+        val found = schema(frame).indexWhere(field => field.name.equalsIgnoreCase(name))
+        if found < 0 then None else Some(found)
 
   /** A constant on the left is the same compare with the column on the left. */
   private def reflect(op: CompareOp): CompareOp = op match
@@ -925,7 +1087,12 @@ private object SqlConvert:
   private def unsupported(node: AnyRef): Nothing =
     throw new IllegalArgumentException(s"${node.getClass.getSimpleName} is not supported")
 
-  private final case class Frame(rows: DistCollection[WideRow], next: Int):
+  private final case class Frame(
+      rows: DistCollection[WideRow],
+      next: Int,
+      names: Set[String],
+      tables: Map[String, DistCollection[WideRow]],
+  ):
     def bind(expr: ColumnExpr): (Frame, Int) =
       val updated = rows.compute(expr, s"e$next")
       (copy(rows = updated, next = next + 1), nextColumn(updated))
