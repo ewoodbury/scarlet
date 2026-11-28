@@ -7,6 +7,7 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
 import com.ewoodbury.scarlet.sql.{Sql, SqlResult}
+import com.ewoodbury.scarlet.support.Check
 
 /** Three checksummed statements, plus a group, a boolean filter, and a named refusal. */
 class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
@@ -62,6 +63,46 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     )
     result shouldBe TpchSlice.revenue
     shape shouldBe "WideCompute(WideFilter2(WideFilter1(WideFilter1(WideFilter0(WideFilter0(Scan))))))"
+  }
+
+  "an empty phrase" should "match query 10" in {
+    val (result, shape) = value(
+      "select count(*) from hits where SearchPhrase <> ''",
+      Map("hits" -> phraseHits()),
+    )
+    result shouldBe ClickBenchSlice.notEmpty
+    shape shouldBe "WideFilter3(Scan)"
+  }
+
+  "a count by key" should "drop the other aggregates" in {
+    val (result, shape) = grouped(
+      """select AdvEngineID, count(*) from hits
+        |where AdvEngineID <> 0 group by AdvEngineID""".stripMargin,
+      Map("hits" -> ClickBenchSlice.scan()),
+      countOnly,
+    )
+    result shouldBe ClickBenchSlice.countAdv
+    shape shouldBe "WideProject(WideGroup(WideFilter0(Scan)))"
+  }
+
+  "a join" should "match the hand plan" in {
+    val orders = DistCollection.ofColumns(Vector(WideInput.ints("id", Array(1, 2, 3))), 2)
+    val lines = DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("rid", Array(2, 3, 3)),
+        WideInput.ints("amount", Array(10, 20, 30)),
+      ),
+      2,
+    )
+    val hand = orders.joinColumns(lines, 0, 0)
+    val handCount = hand.count()
+    val handShape = ColumnarPlanner.lower(hand.plan).map(_.shape).getOrElse("none")
+    val (result, shape) = value(
+      "select count(*) from orders join lines on orders.id = lines.rid",
+      Map("orders" -> orders, "lines" -> lines),
+    )
+    result shouldBe handCount
+    shape shouldBe handShape
   }
 
   "a group" should "match query 7" in {
@@ -133,14 +174,31 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     named("select top 1 count(*) from tiny", "Top")
   }
 
-  "a join" should "name the node" in {
+  "a left join" should "name the node" in {
     val thrown = the[IllegalArgumentException] thrownBy {
       val _ = Sql.run(
-        "select count(*) from hits join hits on AdvEngineID = UserID",
-        Map("hits" -> ClickBenchSlice.scan()),
+        "select count(*) from tiny left join tiny on id = id",
+        Map("tiny" -> tiny()),
       )
     }
     thrown.getMessage should include("Join")
+  }
+
+  "a string order" should "name the node" in {
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(
+        "select count(*) from hits where SearchPhrase < 'a'",
+        Map("hits" -> phraseHits()),
+      )
+    }
+    thrown.getMessage should include("MinorThan")
+    val negated = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(
+        "select count(*) from hits where not SearchPhrase < 'a'",
+        Map("hits" -> phraseHits()),
+      )
+    }
+    negated.getMessage should include("MinorThan")
   }
 
   "between" should "name the node" in {
@@ -195,6 +253,27 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       val _ = Sql.run(sql, Map("tiny" -> tiny()))
     }
     thrown.getMessage should include(node)
+
+  private def countOnly(rows: Iterable[WideRow]): Long =
+    rows.foldLeft(0L) { (total, row) =>
+      row.cells.lift(1) match
+        case Some(Cell.Int64(count)) => total + count
+        case _ => fail("a grouped count is the second cell")
+    }
+
+  private def phraseHits(): DistCollection[WideRow] =
+    val rows = ClickBenchSlice.rowCount
+    val phrase = WideInput.nullableStrings(
+      "SearchPhrase",
+      Array.tabulate(rows) { index =>
+        if Check.same(index % 5, 0) then "" else "p" + (index % 7).toString
+      },
+      Array.tabulate(rows)(index => !Check.same(index % 5, 1)),
+    )
+    DistCollection.ofColumns(
+      ClickBenchSlice.scanInputs() :+ phrase,
+      ClickBenchSlice.partitions,
+    )
 
   private def lineitem(): DistCollection[WideRow] =
     val rows = TpchSlice.lineitemRows

@@ -118,7 +118,7 @@ object ClickBenchSlice:
   def scan(): DistCollection[WideRow] =
     DistCollection.ofColumns(scanInputs(), partitions)
 
-  private def scanInputs(): Vector[WideInput] =
+  private[execution] def scanInputs(): Vector[WideInput] =
     Vector(
       WideInput.ints("AdvEngineID", Array.tabulate(rowCount)(index => index % 8)),
       WideInput.ints("ResolutionWidth", Array.tabulate(rowCount)(index => 800 + (index % 200))),

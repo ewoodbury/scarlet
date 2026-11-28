@@ -13,14 +13,15 @@ import net.sf.jsqlparser.expression.operators.conditional.{AndExpression, OrExpr
 import net.sf.jsqlparser.expression.operators.relational.*
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
 import net.sf.jsqlparser.schema.{Column, Table}
-import net.sf.jsqlparser.statement.select.{AllColumns, FromItem, PlainSelect, SelectItem}
+import net.sf.jsqlparser.statement.select.{AllColumns, FromItem, Join, PlainSelect, SelectItem}
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
 
 /**
- * One SELECT: a registered table, comparisons combined with AND, OR, and NOT, arithmetic, and
- * count, sum, min, and max. A group is one or two numeric keys. Anything else names its node.
+ * One SELECT: registered tables, one int or long equi-join, comparisons combined with AND, OR, and
+ * NOT, arithmetic, and count, sum, min, and max. A string compares equal or not equal. A group is
+ * one or two numeric keys. Anything else names its node.
  */
 private object SqlConvert:
 
@@ -39,7 +40,8 @@ private object SqlConvert:
       tables: Map[String, DistCollection[WideRow]],
   ): SqlResult =
     if plain.getDistinct != null then unsupported(plain.getDistinct)
-    if plain.getJoins != null && !plain.getJoins.isEmpty then unsupported(plain.getJoins.get(0))
+    val joins = plain.getJoins
+    if joins != null && joins.size > 1 then unsupported(joins.get(1))
     if plain.getLimit != null then unsupported(plain.getLimit)
     if plain.getOffset != null then unsupported(plain.getOffset)
     if plain.getFetch != null then unsupported(plain.getFetch)
@@ -49,8 +51,11 @@ private object SqlConvert:
     if plain.getHaving != null then unsupported(plain.getHaving)
     val from = plain.getFromItem
     if from == null then unsupported(plain)
-    val frame = Frame(resolve(tables, tableName(from)), 0)
-    val filtered = if plain.getWhere == null then frame else predicate(plain.getWhere, frame)
+    val leftName = tableName(from)
+    val opened =
+      if joins == null || joins.isEmpty then Frame(resolve(tables, leftName), 0)
+      else joined(leftName, resolve(tables, leftName), joins.get(0), tables)
+    val filtered = if plain.getWhere == null then opened else predicate(plain.getWhere, opened)
     val grouped = plain.getGroupBy
     if grouped == null then select(plain, filtered)
     else group(plain, keys(grouped.getGroupByExpressionList, filtered), filtered)
@@ -68,47 +73,72 @@ private object SqlConvert:
     if keyOrdinals.isEmpty || keyOrdinals.size > 2 then
       throw new IllegalArgumentException("a group needs one or two numeric columns")
     val items = itemsOf(plain)
-    val measure = groupedSelect(items, keyOrdinals, frame)
-    val rows =
+    val (measure, names) = groupedSelect(items, keyOrdinals, frame)
+    val grouped =
       if keyOrdinals.size == 1 then frame.rows.groupColumns(keyOrdinals.head, measure)
       else frame.rows.groupColumns(keyOrdinals.head, keyOrdinals(1), measure)
-    SqlResult.Rows(rows)
+    SqlResult.Rows(projectGroup(grouped, keyOrdinals.size, names))
 
-  /** Keys, then count(*), sum, min, and max of one measure. */
-  private def groupedSelect(items: List[SelectItem[?]], keys: List[Int], frame: Frame): Int =
-    val expected = keys.size + 4
-    if items.size != expected then
-      throw new IllegalArgumentException(
-        "a grouped select lists the keys, then count, sum, min, and max",
-      )
+  /** Keys, then count, sum, min, and max, in that order, any suffix omitted. */
+  private val aggregateOrder: Vector[String] = Vector("count", "sum", "min", "max")
+
+  private def groupedSelect(
+      items: List[SelectItem[?]],
+      keys: List[Int],
+      frame: Frame,
+  ): (Int, Vector[String]) =
+    if items.size <= keys.size then groupList()
     keys.zipWithIndex.foreach { (ordinal, index) =>
       plainColumn(expressionOf(items(index)), frame) match
         case Some(found) if found == ordinal => ()
-        case _ =>
-          throw new IllegalArgumentException(
-            "a grouped select lists the keys, then count, sum, min, and max",
-          )
+        case _ => groupList()
     }
-    val functions = items.drop(keys.size).map(item => aggregate(item).getOrElse(unsupported(item)))
-    functions.head match
-      case Aggregate.Count => ()
-      case _ =>
-        throw new IllegalArgumentException(
-          "a grouped select lists the keys, then count, sum, min, and max",
-        )
-    val measure = functions.tail.map {
-      case Aggregate.Of("sum" | "min" | "max", expr) =>
-        plainColumn(expr, frame).getOrElse(
-          throw new IllegalArgumentException("a grouped measure must be a column"),
-        )
-      case _ =>
-        throw new IllegalArgumentException(
-          "a grouped select lists the keys, then count, sum, min, and max",
-        )
+    var cursor = 0
+    val chosen = items.drop(keys.size).map { item =>
+      val kind = aggregate(item).getOrElse(groupList())
+      val name = kind match
+        case Aggregate.Count => "count"
+        case Aggregate.Of(function, _) => function
+      val at = aggregateOrder.indexWhere(candidate => candidate == name, cursor)
+      if at < 0 then groupList()
+      cursor = at + 1
+      (name, kind)
     }
-    if measure.distinct.size != 1 then
-      throw new IllegalArgumentException("sum, min, and max must use one column")
-    measure.head
+    val measures = chosen.flatMap {
+      case (_, Aggregate.Of(_, expr)) =>
+        Some(
+          plainColumn(expr, frame).getOrElse(
+            throw new IllegalArgumentException("a grouped measure must be a column"),
+          ),
+        )
+      case _ => None
+    }
+    val measure =
+      if measures.isEmpty then keys.head
+      else if measures.distinct.size == 1 then measures.head
+      else throw new IllegalArgumentException("sum, min, and max must use one column")
+    (measure, chosen.map(_._1).toVector)
+
+  private def groupList(): Nothing =
+    throw new IllegalArgumentException(
+      "a grouped select lists the keys, then count, sum, min, and max",
+    )
+
+  /** The kernel emits every aggregate. A shorter select list drops the rest. */
+  private def projectGroup(
+      rows: DistCollection[WideRow],
+      keyCount: Int,
+      names: Vector[String],
+  ): DistCollection[WideRow] =
+    if names == aggregateOrder then rows
+    else
+      val fields = WideFields.known(rows.plan).getOrElse(groupList())
+      val keys = (0 until keyCount).toVector.map(ordinal => (ordinal, fields(ordinal).name))
+      val kept = names.map { name =>
+        val ordinal = keyCount + aggregateOrder.indexOf(name)
+        (ordinal, fields(ordinal).name)
+      }
+      rows.projectColumns(keys ++ kept)
 
   private def scalar(kind: Aggregate, frame: Frame): SqlResult = kind match
     case Aggregate.Count =>
@@ -176,17 +206,121 @@ private object SqlConvert:
     case ne: NotEqualsTo =>
       wideOrBool(CompareOp.Eq, ne.getLeftExpression, ne.getRightExpression, frame)
     case gt: GreaterThan =>
+      refuseStringOrder(gt, gt.getLeftExpression, gt.getRightExpression, frame)
       wideOrBool(CompareOp.Le, gt.getLeftExpression, gt.getRightExpression, frame)
     case ge: GreaterThanEquals =>
+      refuseStringOrder(ge, ge.getLeftExpression, ge.getRightExpression, frame)
       wideOrBool(CompareOp.Lt, ge.getLeftExpression, ge.getRightExpression, frame)
     case lt: MinorThan =>
+      refuseStringOrder(lt, lt.getLeftExpression, lt.getRightExpression, frame)
       wideOrBool(CompareOp.Ge, lt.getLeftExpression, lt.getRightExpression, frame)
     case le: MinorThanEquals =>
+      refuseStringOrder(le, le.getLeftExpression, le.getRightExpression, frame)
       wideOrBool(CompareOp.Gt, le.getLeftExpression, le.getRightExpression, frame)
     case other =>
       val (built, ordinal) = boolExpr(other, frame)
       val (negated, column) = built.bind(ColumnExpr.Not(ordinal))
       negated.filter(column, ColumnCompare(CompareOp.Eq, ColumnLiteral.Bool(true)))
+
+  private def joined(
+      leftName: String,
+      left: DistCollection[WideRow],
+      join: Join,
+      tables: Map[String, DistCollection[WideRow]],
+  ): Frame =
+    if join.isLeft || join.isRight || join.isFull || join.isOuter || join.isCross ||
+      join.isSemi || join.isNatural || join.isApply
+    then unsupported(join)
+    val rightItem = join.getRightItem
+    if rightItem == null || join.getOnExpression == null then unsupported(join)
+    val rightName = tableName(rightItem)
+    val right = resolve(tables, rightName)
+    val (leftKey, rightKey) = unwrap(join.getOnExpression) match
+      case eq: EqualsTo =>
+        equiKeys(eq, leftName, fieldsOf(left), rightName, fieldsOf(right))
+      case other => unsupported(other)
+    val leftKind = fieldsOf(left)(leftKey).kind
+    val rightKind = fieldsOf(right)(rightKey).kind
+    if !joinKey(leftKind) || !joinKey(rightKind) then
+      throw new IllegalArgumentException("a join key must be an int or a long")
+    Frame(left.joinColumns(right, leftKey, rightKey), 0)
+
+  private def equiKeys(
+      eq: EqualsTo,
+      leftName: String,
+      leftFields: Vector[ColumnField],
+      rightName: String,
+      rightFields: Vector[ColumnField],
+  ): (Int, Int) =
+    val leftExpr = unwrap(eq.getLeftExpression)
+    val rightExpr = unwrap(eq.getRightExpression)
+    (leftExpr, rightExpr) match
+      case (leftColumn: Column, rightColumn: Column) =>
+        val leftSide = place(leftColumn, leftName, leftFields, rightName, rightFields)
+        val rightSide = place(rightColumn, leftName, leftFields, rightName, rightFields)
+        (leftSide, rightSide) match
+          case ((true, leftKey), (false, rightKey)) => (leftKey, rightKey)
+          case ((false, rightKey), (true, leftKey)) => (leftKey, rightKey)
+          case _ => unsupported(eq)
+      case _ => unsupported(eq)
+
+  /** True when the column is on the left input. */
+  private def place(
+      column: Column,
+      leftName: String,
+      leftFields: Vector[ColumnField],
+      rightName: String,
+      rightFields: Vector[ColumnField],
+  ): (Boolean, Int) =
+    val table = column.getTable
+    val qualified = table != null && table.getName != null && table.getName.nonEmpty
+    if qualified && table.getName.equalsIgnoreCase(leftName) then
+      (true, ordinalIn(leftFields, column))
+    else if qualified && table.getName.equalsIgnoreCase(rightName) then
+      (false, ordinalIn(rightFields, column))
+    else if qualified then unsupported(column)
+    else
+      val name = column.getColumnName
+      val onLeft = leftFields.indexWhere(field => field.name.equalsIgnoreCase(name))
+      val onRight = rightFields.indexWhere(field => field.name.equalsIgnoreCase(name))
+      if onLeft >= 0 && onRight >= 0 then
+        throw new IllegalArgumentException(s"column $name is on both sides of the join")
+      else if onLeft >= 0 then (true, onLeft)
+      else if onRight >= 0 then (false, onRight)
+      else throw new IllegalArgumentException(s"column $name is not in the table")
+
+  private def ordinalIn(fields: Vector[ColumnField], column: Column): Int =
+    val name = column.getColumnName
+    val found = fields.indexWhere(field => field.name.equalsIgnoreCase(name))
+    if found < 0 then throw new IllegalArgumentException(s"column $name is not in the table")
+    else found
+
+  private def fieldsOf(rows: DistCollection[WideRow]): Vector[ColumnField] =
+    WideFields
+      .known(rows.plan)
+      .getOrElse(
+        throw new IllegalArgumentException("the table has no wide schema"),
+      )
+
+  private def joinKey(kind: ColumnKind): Boolean = kind match
+    case ColumnKind.Int32 | ColumnKind.Int64 => true
+    case _ => false
+
+  private def refuseStringOrder(
+      node: AnyRef,
+      left: Expression,
+      right: Expression,
+      frame: Frame,
+  ): Unit =
+    if stringOperand(left, frame) || stringOperand(right, frame) then unsupported(node)
+
+  private def stringOperand(expr: Expression, frame: Frame): Boolean = unwrap(expr) match
+    case _: StringValue => true
+    case column: Column =>
+      kindAt(frame, columnOrdinal(frame, column)) match
+        case ColumnKind.Utf8 => true
+        case _ => false
+    case _ => false
 
   private def compare(expr: Expression, frame: Frame): Frame = unwrap(expr) match
     case eq: EqualsTo =>
@@ -194,12 +328,16 @@ private object SqlConvert:
     case ne: NotEqualsTo =>
       wideOrBool(CompareOp.Ne, ne.getLeftExpression, ne.getRightExpression, frame)
     case gt: GreaterThan =>
+      refuseStringOrder(gt, gt.getLeftExpression, gt.getRightExpression, frame)
       wideOrBool(CompareOp.Gt, gt.getLeftExpression, gt.getRightExpression, frame)
     case ge: GreaterThanEquals =>
+      refuseStringOrder(ge, ge.getLeftExpression, ge.getRightExpression, frame)
       wideOrBool(CompareOp.Ge, ge.getLeftExpression, ge.getRightExpression, frame)
     case lt: MinorThan =>
+      refuseStringOrder(lt, lt.getLeftExpression, lt.getRightExpression, frame)
       wideOrBool(CompareOp.Lt, lt.getLeftExpression, lt.getRightExpression, frame)
     case le: MinorThanEquals =>
+      refuseStringOrder(le, le.getLeftExpression, le.getRightExpression, frame)
       wideOrBool(CompareOp.Le, le.getLeftExpression, le.getRightExpression, frame)
     case other => unsupported(other)
 
@@ -367,7 +505,10 @@ private object SqlConvert:
         kind match
           case ColumnKind.Float64 => Some(ColumnLiteral.Float64(value.getValue))
           case _ => None
-      case _: StringValue => unsupported(expr)
+      case value: StringValue =>
+        kind match
+          case ColumnKind.Utf8 => Some(ColumnLiteral.Utf8(value.getValue))
+          case _ => None
       case _ => None
 
   private def literalFor(value: Long, kind: ColumnKind): ColumnLiteral = kind match

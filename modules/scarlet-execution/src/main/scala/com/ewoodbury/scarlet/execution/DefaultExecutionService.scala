@@ -65,6 +65,9 @@ class DefaultExecutionService extends ExecutionService {
     case group: Plan.WideGroupOp =>
       wideGroupPartitions(plan, group)
 
+    case project: Plan.WideProjectOp =>
+      wideProjectPartitions(plan, project)
+
     case _ =>
       ColumnarPlanner.tryRun(plan).orElse(MixedJoin.partitions(plan)).getOrElse(runRow(plan))
   }
@@ -89,6 +92,23 @@ class DefaultExecutionService extends ExecutionService {
   private def wideGroupPartitions[A](plan: Plan[A], group: Plan.WideGroupOp): Seq[Partition[A]] =
     ColumnarPlanner.tryRun(plan).getOrElse {
       WideGroupRows.partitions(group).asInstanceOf[Seq[Partition[A]]]
+    }
+
+  /**
+   * Columnar project when it lowers. A project whose child is a wide group runs that group on rows
+   * and keeps the named columns. Any other project is a stage.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+  private def wideProjectPartitions[A](
+      plan: Plan[A],
+      project: Plan.WideProjectOp,
+  ): Seq[Partition[A]] =
+    ColumnarPlanner.tryRun(plan).getOrElse {
+      project.source match
+        case group: Plan.WideGroupOp =>
+          WideProjectRows.partitions(group, project.spec).asInstanceOf[Seq[Partition[A]]]
+        case _ =>
+          runRow(plan)
     }
 
   def count[A](plan: Plan[A]): Long =
