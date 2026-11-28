@@ -6,7 +6,7 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 import com.ewoodbury.scarlet.support.Check
 
 /**
- * Ten ClickBench queries on 4096 generated rows. This is not the hits table.
+ * Fourteen ClickBench queries on 4096 generated rows. This is not the hits table.
  *
  * Numbers follow the 0-based order of `clickhouse/queries.sql`. An average is the long sum and the
  * count. Query 2's width average is 3679360 / 4096. Query 3's user average is 8386588672 / 4096.
@@ -35,6 +35,21 @@ object ClickBenchSlice:
 
   /** Ten largest UserIDs, each a group of one. Folded in engine order. */
   val topUserMix: Long = -7996923543694224240L
+
+  /** Phrase `p0` to `p3`, each 1024 rows. Sorted by the phrase, then folded. */
+  val phraseMix: Long = 7617713573459572694L
+
+  /** Phone `a` or `b`, model `c`, `d`, or `e`. Six groups. */
+  val twoStringMix: Long = 3618175579426930483L
+
+  /** AdvEngineID with phrase `s0` to `s2`. Twenty-four groups. */
+  val intStringMix: Long = -8865579991621256728L
+
+  /** Each UserID with its phrase. One row per group. */
+  val longStringMix: Long = 4644043001656397824L
+  val phraseGroups: Long = 4L
+  val phoneGroups: Long = 6L
+  val intStringGroups: Long = 24L
   val groups: Long = 7L
   val twoKeyGroups: Long = 200L
   val twoKeyMix: Long = -5517106496331210496L
@@ -51,13 +66,13 @@ object ClickBenchSlice:
     "8 distinct count by one int. Missing: distinct count.",
     "9 several aggregates and a distinct count. Missing: distinct count.",
     "10 string not equal to empty. This file.",
-    "11 two strings in the group key. Missing: multi-column group.",
-    "12 group by a string. Missing: string group key.",
-    "13 distinct count by a string. Missing: string group key.",
-    "14 int and string group key. Missing: multi-column group.",
+    "11 two strings in the group key. This file. The checker applies the order.",
+    "12 group by a string. This file. The checker applies the order.",
+    "13 distinct count by a string. Missing: distinct count.",
+    "14 int and string group key. This file. The checker applies the order.",
     "15 group by a long, then sort and limit. This file.",
-    "16 long and string group key. Missing: multi-column group.",
-    "17 long and string group key. Missing: multi-column group.",
+    "16 long and string group key. This file. The checker applies the order.",
+    "17 long and string group key. Same keys as query 16. Limit without an order waits.",
     "18 minute extracted from a timestamp. Missing: calendar arithmetic.",
     "19 long equality. Same compare as query 1. Not in this slice.",
     "20 string pattern match. Missing: string LIKE.",
@@ -73,7 +88,7 @@ object ClickBenchSlice:
     "30 two-column group and a string filter. Missing: multi-column group.",
     "31 two-column group. Missing: multi-column group.",
     "32 two int keys. This file. The checker applies the order.",
-    "33 group by a string. Missing: string group key.",
+    "33 group by a string. Same key as query 12. Not in this slice.",
     "34 group by a constant and a string. Missing: string group key.",
     "35 group by a column expression. Missing: expression group key.",
     "36 date range and a string group. Missing: string group key.",
@@ -165,6 +180,57 @@ object ClickBenchSlice:
   def groupedTwo(): DistCollection[WideRow] =
     scan().groupColumns(0, 1, 0)
 
+  /** Query 12: one string key, measure AdvEngineID. */
+  def groupedPhrase(): DistCollection[WideRow] =
+    phrases().groupColumns(3, 0)
+
+  /** Query 11: two string keys. */
+  def groupedPhones(): DistCollection[WideRow] =
+    phones().groupColumns(3, 4, 0)
+
+  /** Query 14: an int key and a string key. Measure ResolutionWidth. */
+  def groupedIntString(): DistCollection[WideRow] =
+    tagged().groupColumns(0, 3, 1)
+
+  /** Query 16: a long key and a string key. */
+  def groupedLongString(): DistCollection[WideRow] =
+    phrases().groupColumns(2, 3, 0)
+
+  def phrases(): DistCollection[WideRow] =
+    DistCollection.ofColumns(scanInputs() :+ phraseColumn("p", 4), partitions)
+
+  def phraseChecksum(rows: Iterable[WideRow]): Long =
+    rows.toVector.sortBy(row => textAt(row, 0)).foldLeft(0L)(mixPhrase)
+
+  def phoneChecksum(rows: Iterable[WideRow]): Long =
+    rows.toVector.sortWith(textBefore).foldLeft(0L)(mixTexts)
+
+  def intStringChecksum(rows: Iterable[WideRow]): Long =
+    rows.toVector.sortWith(intTextBefore).foldLeft(0L)(mixIntText)
+
+  def longStringChecksum(rows: Iterable[WideRow]): Long =
+    rows.toVector.sortWith(longTextBefore).foldLeft(0L)(mixLongText)
+
+  private def phones(): DistCollection[WideRow] =
+    val phone = WideInput.strings(
+      "MobilePhone",
+      Array.tabulate(rowCount)(index => if index % 2 == 0 then "a" else "b"),
+    )
+    val model = WideInput.strings(
+      "MobilePhoneModel",
+      Array.tabulate(rowCount)(index => "cde".charAt(index % 3).toString),
+    )
+    DistCollection.ofColumns(scanInputs() :+ phone :+ model, partitions)
+
+  private def tagged(): DistCollection[WideRow] =
+    DistCollection.ofColumns(scanInputs() :+ phraseColumn("s", 3), partitions)
+
+  private def phraseColumn(prefix: String, width: Int): WideInput =
+    WideInput.strings(
+      "SearchPhrase",
+      Array.tabulate(rowCount)(index => prefix + (index % width).toString),
+    )
+
   /**
    * Query 15 shape: group UserID, sort that key descending, then ten rows. The published statement
    * sorts by count. Every count is 1, so this slice sorts the key.
@@ -198,6 +264,14 @@ object ClickBenchSlice:
       counted("query 7", grouped().plan, groups),
       shaped("query 32", groupedTwo().plan, "WideGroup(Scan)"),
       counted("query 32", groupedTwo().plan, twoKeyGroups),
+      shaped("query 12", groupedPhrase().plan, "WideGroup(Scan)"),
+      counted("query 12", groupedPhrase().plan, phraseGroups),
+      shaped("query 11", groupedPhones().plan, "WideGroup(Scan)"),
+      counted("query 11", groupedPhones().plan, phoneGroups),
+      shaped("query 14", groupedIntString().plan, "WideGroup(Scan)"),
+      counted("query 14", groupedIntString().plan, intStringGroups),
+      shaped("query 16", groupedLongString().plan, "WideGroup(Scan)"),
+      counted("query 16", groupedLongString().plan, rowCount.toLong),
       shaped("query 15", topUsers().plan, "WideLimit(WideSort(WideGroup(Scan)))"),
       shaped(
         "query 29",
@@ -217,6 +291,10 @@ object ClickBenchSlice:
       both("query 10", notEmpty)(notEmptyPhrase().count()),
       both("query 7", groupedMix)(groupedChecksum(grouped().collect())),
       both("query 32", twoKeyMix)(twoKeyChecksum(groupedTwo().collect())),
+      both("query 12", phraseMix)(phraseChecksum(groupedPhrase().collect())),
+      both("query 11", twoStringMix)(phoneChecksum(groupedPhones().collect())),
+      both("query 14", intStringMix)(intStringChecksum(groupedIntString().collect())),
+      both("query 16", longStringMix)(longStringChecksum(groupedLongString().collect())),
       both("query 15", topUserMix)(topUserChecksum(topUsers().collect())),
       both("query 29", sumWidthPlus)(widthPlus().sumLongColumn(5)),
     ).flatten
@@ -327,6 +405,81 @@ object ClickBenchSlice:
         min.toLong) * 31L + max.toLong
     case other =>
       refuse(other.size)
+
+  private def mixPhrase(acc: Long, row: WideRow): Long = cells(row) match
+    case Vector(
+          Cell.Utf8(key),
+          Cell.Int64(count),
+          Cell.Int64(sum),
+          Cell.Int32(min),
+          Cell.Int32(max),
+        ) =>
+      finish(foldText(acc, key), count, sum, min.toLong, max.toLong)
+    case other => refuse(other.size)
+
+  private def mixTexts(acc: Long, row: WideRow): Long = cells(row) match
+    case Vector(
+          Cell.Utf8(left),
+          Cell.Utf8(right),
+          Cell.Int64(count),
+          Cell.Int64(sum),
+          Cell.Int32(min),
+          Cell.Int32(max),
+        ) =>
+      finish(foldText(foldText(acc, left), right), count, sum, min.toLong, max.toLong)
+    case other => refuse(other.size)
+
+  private def mixIntText(acc: Long, row: WideRow): Long = cells(row) match
+    case Vector(
+          Cell.Int32(key),
+          Cell.Utf8(text),
+          Cell.Int64(count),
+          Cell.Int64(sum),
+          Cell.Int32(min),
+          Cell.Int32(max),
+        ) =>
+      finish(foldText(acc * 31L + key.toLong, text), count, sum, min.toLong, max.toLong)
+    case other => refuse(other.size)
+
+  private def mixLongText(acc: Long, row: WideRow): Long = cells(row) match
+    case Vector(
+          Cell.Int64(key),
+          Cell.Utf8(text),
+          Cell.Int64(count),
+          Cell.Int64(sum),
+          Cell.Int32(min),
+          Cell.Int32(max),
+        ) =>
+      finish(foldText(acc * 31L + key, text), count, sum, min.toLong, max.toLong)
+    case other => refuse(other.size)
+
+  private def finish(acc: Long, count: Long, sum: Long, min: Long, max: Long): Long =
+    (((acc * 31L + count) * 31L + sum) * 31L + min) * 31L + max
+
+  private def foldText(acc: Long, text: String): Long =
+    text.foldLeft(acc)((hash, ch) => hash * 31L + ch.toLong)
+
+  private def textBefore(left: WideRow, right: WideRow): Boolean =
+    val order = textAt(left, 0).compareTo(textAt(right, 0))
+    order < 0 || (order == 0 && textAt(left, 1).compareTo(textAt(right, 1)) < 0)
+
+  private def intTextBefore(left: WideRow, right: WideRow): Boolean =
+    val leftKey = intAt(left, 0)
+    val rightKey = intAt(right, 0)
+    leftKey < rightKey || (leftKey == rightKey && textAt(left, 1).compareTo(textAt(right, 1)) < 0)
+
+  private def longTextBefore(left: WideRow, right: WideRow): Boolean =
+    val leftKey = longAt(left, 0)
+    val rightKey = longAt(right, 0)
+    leftKey < rightKey || (leftKey == rightKey && textAt(left, 1).compareTo(textAt(right, 1)) < 0)
+
+  private def textAt(row: WideRow, ordinal: Int): String = Check.at(cells(row), ordinal) match
+    case Cell.Utf8(value) => value
+    case _ => refuse(cells(row).size)
+
+  private def longAt(row: WideRow, ordinal: Int): Long = Check.at(cells(row), ordinal) match
+    case Cell.Int64(value) => value
+    case _ => refuse(cells(row).size)
 
   private def intAt(row: WideRow, ordinal: Int): Int = Check.at(cells(row), ordinal) match
     case Cell.Int32(value) => value

@@ -21,8 +21,8 @@ import com.ewoodbury.scarlet.core.*
 /**
  * One SELECT: registered tables, one int or long equi-join, comparisons combined with AND, OR, and
  * NOT, arithmetic, and count, sum, min, and max. A string compares equal or not equal. A group is
- * one or two numeric keys. Order is one int or long column, then a limit. Anything else names its
- * node.
+ * one or two keys, each an int, a long, or a string. Order is one int or long column, then a
+ * limit. Anything else names its node.
  */
 private object SqlConvert:
 
@@ -141,7 +141,7 @@ private object SqlConvert:
 
   private def group(plain: PlainSelect, keyOrdinals: List[Int], frame: Frame): SqlResult =
     if keyOrdinals.isEmpty || keyOrdinals.size > 2 then
-      throw new IllegalArgumentException("a group needs one or two numeric columns")
+      throw new IllegalArgumentException("a group needs one or two columns")
     val items = itemsOf(plain)
     val (measure, names) = groupedSelect(items, keyOrdinals, frame)
     val grouped =
@@ -553,7 +553,7 @@ private object SqlConvert:
           plainColumn(expression, frame) match
             case Some(ordinal) =>
               kindAt(frame, ordinal) match
-                case ColumnKind.Int32 | ColumnKind.Int64 => ordinal
+                case ColumnKind.Int32 | ColumnKind.Int64 | ColumnKind.Utf8 => ordinal
                 case other =>
                   throw new IllegalArgumentException(s"group key $other is not supported")
             case None => unsupported(expression)

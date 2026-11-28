@@ -112,18 +112,18 @@ final case class DistCollection[A](plan: Plan[A]):
     )
 
   /**
-   * Groups by one int or long column and computes count, sum, min, and max of one numeric column.
-   * A null key is dropped. A null measure is counted and skipped by sum, min, and max. One pass.
-   * This does not build value lists.
+   * Groups by one int, long, or string column and computes count, sum, min, and max of one numeric
+   * column. A null key is dropped. A null measure is counted and skipped by sum, min, and max. One
+   * pass. This does not build value lists.
    */
   def groupColumns(key: Int, measure: Int)(using ev: A =:= WideRow): DistCollection[WideRow] =
     DistCollection(Plan.WideGroupOp(widePlan, key, measure, None))
 
   /**
-   * Groups by two int or long columns and aggregates one numeric column. A null in either key is
-   * dropped. The measure follows [[groupColumns]]: count includes nulls, and sum, min, and max
-   * skip them. Output is the two keys, then count, sum, min, and max. This does not call
-   * `groupByKey`.
+   * Groups by two columns, each an int, a long, or a string, and aggregates one numeric column. A
+   * null in either key is dropped. The measure follows [[groupColumns]]: count includes nulls, and
+   * sum, min, and max skip them. Output is the two keys, then count, sum, min, and max. This does
+   * not call `groupByKey`.
    */
   def groupColumns(key: Int, key2: Int, measure: Int)(using
       ev: A =:= WideRow,
