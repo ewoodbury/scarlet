@@ -6,7 +6,7 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 import com.ewoodbury.scarlet.support.Check
 
 /**
- * Twenty-four ClickBench queries on 4096 generated rows. This is not the hits table.
+ * Twenty-six ClickBench queries on 4096 generated rows. This is not the hits table.
  *
  * Numbers follow the 0-based order of `clickhouse/queries.sql`. An average is the long sum and the
  * count. Query 2's width average is 3679360 / 4096. Query 3's user average is 8386588672 / 4096.
@@ -90,6 +90,14 @@ object ClickBenchSlice:
   val exprGroupMix: Long = 9176981150844157028L
   val exprGroups: Long = 200L
 
+  /** Query 18 adapted to one key: minute of an int64 epoch. The checker sorts. */
+  val minuteMix: Long = -4045389298186771610L
+  val minuteGroups: Long = 60L
+
+  /** Query 42 adapted to one key: the epoch truncated to a minute. The checker sorts. */
+  val truncMix: Long = -2455919995862346808L
+  val truncGroups: Long = 69L
+
   val note: Vector[String] = Vector(
     "0 count. This file.",
     "1 count where AdvEngineID is not 0. This file.",
@@ -109,7 +117,7 @@ object ClickBenchSlice:
     "15 group by a long, then sort and limit. This file.",
     "16 long and string group key. This file. The checker applies the order.",
     "17 long and string group key. Same keys as query 16. Limit without an order waits.",
-    "18 minute extracted from a timestamp. Missing: calendar arithmetic.",
+    "18 minute of an int64 epoch. This file. The checker applies the order.",
     "19 long equality. Same compare as query 1. Not in this slice.",
     "20 string pattern match. This file.",
     "21 pattern match and the min of a string. This file. The checker applies the order.",
@@ -127,13 +135,13 @@ object ClickBenchSlice:
     "33 group by a string. Same key as query 12. Not in this slice.",
     "34 group by a constant and a string. Missing: string group key.",
     "35 group by one int expression. This file. The checker applies the order.",
-    "36 date range and a string group. Missing: string group key.",
-    "37 string group on a date range. Missing: string group key.",
-    "38 string group and a flag filter. Missing: string group key.",
+    "36 date range and a string group. Missing: a date literal.",
+    "37 string group on a date range. Missing: a date literal.",
+    "38 string group and a flag filter. Missing: a date literal.",
     "39 several group columns and a case. Missing: multi-column group.",
-    "40 two-column group on a date range. Missing: multi-column group.",
-    "41 two-column group on a date range. Missing: multi-column group.",
-    "42 truncate a timestamp to a minute. Missing: calendar arithmetic.",
+    "40 two-column group on a date range. Missing: a date literal.",
+    "41 two-column group on a date range. Missing: a date literal.",
+    "42 truncate an int64 epoch to a minute. This file. The checker applies the order.",
   )
 
   def main(args: Array[String]): Unit =
@@ -251,6 +259,32 @@ object ClickBenchSlice:
 
   def widthAsLong(): DistCollection[WideRow] =
     scan().compute(ColumnExpr.Cast(1, ColumnKind.Int64), "width64")
+
+  /**
+   * Query 18: minute of `EventTime`, then a group on that column. The published statement has
+   * three keys.
+   */
+  def byMinute(): DistCollection[WideRow] =
+    events().compute(ColumnExpr.Minute(3), "minute").groupColumns(4, 4)
+
+  /**
+   * Query 42: `EventTime` truncated to a minute, then a group. The published statement has a date
+   * filter and an offset.
+   */
+  def byMinuteStart(): DistCollection[WideRow] =
+    events().compute(ColumnExpr.TruncMinute(3), "minuteStart").groupColumns(4, 4)
+
+  def events(): DistCollection[WideRow] =
+    DistCollection.ofColumns(
+      scanInputs() :+ WideInput.longs(
+        "EventTime",
+        Array.tabulate(rowCount)(index => index.toLong),
+      ),
+      partitions,
+    )
+
+  def longGroupChecksum(rows: Iterable[WideRow]): Long =
+    rows.toVector.sortWith(longGroupBefore).foldLeft(0L)(mixLong)
 
   /**
    * Query 35: `ResolutionWidth - 1`, then a group on that column. The key is ordinal 4. The
@@ -424,6 +458,10 @@ object ClickBenchSlice:
       summed("query 27", urlLengths().plan, 5, urlLengthSum),
       shaped("query 35", widthMinus().plan, "WideGroup(WideCompute(WideCompute(Scan)))"),
       counted("query 35", widthMinus().plan, exprGroups),
+      shaped("query 18", byMinute().plan, "WideGroup(WideCompute(Scan))"),
+      counted("query 18", byMinute().plan, minuteGroups),
+      shaped("query 42", byMinuteStart().plan, "WideGroup(WideCompute(Scan))"),
+      counted("query 42", byMinuteStart().plan, truncGroups),
     ).flatten
 
   private def bothPaths(): List[String] =
@@ -452,6 +490,8 @@ object ClickBenchSlice:
       both("query 25", phraseSortMix)(userPhraseChecksum(sortedPhrases().collect())),
       both("query 27", urlLengthSum)(urlLengths().sumLongColumn(5)),
       both("query 35", exprGroupMix)(groupedChecksum(widthMinus().collect())),
+      both("query 18", minuteMix)(groupedChecksum(byMinute().collect())),
+      both("query 42", truncMix)(longGroupChecksum(byMinuteStart().collect())),
     ).flatten
 
   private def mixExtremum(): Long =
@@ -541,6 +581,11 @@ object ClickBenchSlice:
         max.toLong) * 31L + distinct
     case other =>
       refuse(other.size)
+
+  private def longGroupBefore(left: WideRow, right: WideRow): Boolean =
+    val leftCount = longAt(left, 1)
+    val rightCount = longAt(right, 1)
+    leftCount > rightCount || (leftCount == rightCount && longAt(left, 0) < longAt(right, 0))
 
   private def groupBefore(left: WideRow, right: WideRow): Boolean =
     val leftCount = countOf(left)

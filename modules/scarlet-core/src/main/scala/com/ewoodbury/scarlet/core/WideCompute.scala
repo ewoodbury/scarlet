@@ -210,6 +210,10 @@ private[scarlet] object WideCompute:
             case Cell.Utf8(value) => Cell.Int32(value.length)
             case other =>
               throw new IllegalArgumentException(s"length of $other is not supported")
+        case ColumnExpr.Minute(input) =>
+          Cell.Int32(EpochMinute.minute(longAt(columns(input), row)))
+        case ColumnExpr.TruncMinute(input) =>
+          Cell.Int64(EpochMinute.truncate(longAt(columns(input), row)))
 
   private def binary(
       kind: ColumnKind,
@@ -310,6 +314,8 @@ private[scarlet] object WideCompute:
       case ColumnExpr.Not(input) => on(columns, input, row)
       case ColumnExpr.Cast(input, _) => on(columns, input, row)
       case ColumnExpr.Len(input) => on(columns, input, row)
+      case ColumnExpr.Minute(input) => on(columns, input, row)
+      case ColumnExpr.TruncMinute(input) => on(columns, input, row)
 
   private def divInt(left: Int, right: Int): Int =
     if (right == 0) then refuseZero() else left / right
