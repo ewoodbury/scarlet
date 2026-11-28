@@ -122,12 +122,13 @@ private[execution] object WideLowering:
       source: com.ewoodbury.scarlet.core.Plan[WideRow],
       ordinal: Int,
       descending: Boolean,
+      second: Option[Int],
       lowerChild: com.ewoodbury.scarlet.core.Plan[_] => Option[PhysicalOp],
   ): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
       fieldsOf(child) match
-        case Some(fields) if sortable(fields, ordinal) =>
-          Some(PhysicalOp.WideSort(child, ordinal, descending))
+        case Some(fields) if sortable(fields, ordinal) && second.forall(sortable(fields, _)) =>
+          Some(PhysicalOp.WideSort(child, ordinal, descending, second))
         case Some(_) =>
           LoweringTrace.note("WideSortOp", child.kind, "WideLowering")
           None
@@ -204,7 +205,7 @@ private[execution] object WideLowering:
         com.ewoodbury.scarlet.core.WideAggregate
           .output(fields, key, measure, key2, distinct, textMin, sum2)
       }
-    case PhysicalOp.WideSort(child, _, _) => fieldsOf(child)
+    case PhysicalOp.WideSort(child, _, _, _) => fieldsOf(child)
     case PhysicalOp.WideLimit(child, _) => fieldsOf(child)
     case _ =>
       None

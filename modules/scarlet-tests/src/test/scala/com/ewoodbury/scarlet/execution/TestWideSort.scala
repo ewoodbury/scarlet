@@ -8,7 +8,8 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
 
 /**
- * Global sort of one int or string column, then a limit. A null number orders as zero and stays.
+ * Global sort of one int, long, or string column, then an optional second of those kinds. A null
+ * number orders as zero and stays. A null string orders as empty and stays.
  */
 class TestWideSort extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -135,6 +136,91 @@ class TestWideSort extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       Vector(Cell.Utf8("b")),
       Vector(Cell.Utf8("c")),
     )
+  }
+
+  "a second int key" should "break the tie and keep input order" in {
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.ints("n", Array(1, 0, 1, 0)),
+          WideInput.ints("id", Array(2, 0, 1, 0)),
+        ),
+        2,
+      )
+      .sortColumn(0, descending = false, Some(1))
+    ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some("WideSort(Scan)")
+    both(planned) shouldBe List(
+      Vector(Cell.Int32(0), Cell.Int32(0)),
+      Vector(Cell.Int32(0), Cell.Int32(0)),
+      Vector(Cell.Int32(1), Cell.Int32(1)),
+      Vector(Cell.Int32(1), Cell.Int32(2)),
+    )
+  }
+
+  "a descending first key" should "leave the second key ascending" in {
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.ints("n", Array(1, 0, 1, 0)),
+          WideInput.ints("id", Array(2, 0, 1, 3)),
+        ),
+        2,
+      )
+      .sortColumn(0, descending = true, Some(1))
+    both(planned) shouldBe List(
+      Vector(Cell.Int32(1), Cell.Int32(1)),
+      Vector(Cell.Int32(1), Cell.Int32(2)),
+      Vector(Cell.Int32(0), Cell.Int32(0)),
+      Vector(Cell.Int32(0), Cell.Int32(3)),
+    )
+  }
+
+  "a long and a string" should "order the string inside one time" in {
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.longs("t", Array(2L, 1L, 1L, 2L)),
+          WideInput.strings("s", Array("b", "b", "a", "a")),
+        ),
+        2,
+      )
+      .sortColumn(0, descending = false, Some(1))
+    both(planned) shouldBe List(
+      Vector(Cell.Int64(1L), Cell.Utf8("a")),
+      Vector(Cell.Int64(1L), Cell.Utf8("b")),
+      Vector(Cell.Int64(2L), Cell.Utf8("a")),
+      Vector(Cell.Int64(2L), Cell.Utf8("b")),
+    )
+  }
+
+  "a null time and a null phrase" should "order as zero and empty and stay" in {
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.nullableLongs("t", Array(0L, 0L, 1L), Array(false, true, true)),
+          WideInput.nullableStrings("s", Array("b", "", "a"), Array(true, false, true)),
+        ),
+        1,
+      )
+      .sortColumn(0, descending = false, Some(1))
+    both(planned) shouldBe List(
+      Vector(Cell.Int64(0L), Cell.Null),
+      Vector(Cell.Null, Cell.Utf8("b")),
+      Vector(Cell.Int64(1L), Cell.Utf8("a")),
+    )
+  }
+
+  "a float second key" should "be refused" in {
+    val rows = DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("n", Array(1, 0)),
+        WideInput.doubles("x", Array(1.0, 0.0)),
+      ),
+      1,
+    )
+    an[IllegalArgumentException] should be thrownBy {
+      rows.sortColumn(0, descending = false, Some(1))
+    }
   }
 
   "a negative limit" should "be refused" in {

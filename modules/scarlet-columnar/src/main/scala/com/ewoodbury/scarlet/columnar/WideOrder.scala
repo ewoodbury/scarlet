@@ -3,28 +3,31 @@ package com.ewoodbury.scarlet.columnar
 /**
  * Global sort and limit of wide batches.
  *
- * Sort concatenates batches in order, then orders one int, long, or string column. A null number
- * compares as zero and stays null. A null string compares as empty and stays null. Ties keep the
- * input index, and a descending sort does not reverse them. The result is one batch. String
- * dictionaries are rebuilt, because codes belong to one batch. String order is JVM `compareTo`,
- * not dictionary code order.
+ * Sort concatenates batches in order, then orders one int, long, or string column and an optional
+ * second of those kinds. A null number compares as zero and stays null. A null string compares as
+ * empty and stays null. The last key keeps the input index, and a descending first key does not
+ * reverse that index. The result is one batch. String dictionaries are rebuilt, because codes
+ * belong to one batch. String order is JVM `compareTo`, not dictionary code order.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object WideOrder:
 
-  def sort(batches: Seq[ColumnBatch], ordinal: Int, descending: Boolean): ColumnBatch =
+  def sort(
+      batches: Seq[ColumnBatch],
+      ordinal: Int,
+      descending: Boolean,
+      second: Option[Int] = None,
+  ): ColumnBatch =
     require(batches.nonEmpty, "sort needs a batch")
     val indexed = batches.toIndexedSeq
     sameWidth(indexed)
     val key = columnAt(atBatch(indexed, 0), ordinal)
     val total = indexed.foldLeft(0)((sum, batch) => sum + batch.length)
+    second.foreach(next => requireSortable(indexed, next))
     key.logicalType match
-      case LogicalType.Int32 | LogicalType.Int64 =>
+      case LogicalType.Int32 | LogicalType.Int64 | LogicalType.Utf8Dict =>
         if total == 0 then atBatch(indexed, 0)
-        else gather(indexed, orderOf(keysOf(indexed, ordinal, total), descending))
-      case LogicalType.Utf8Dict =>
-        if total == 0 then atBatch(indexed, 0)
-        else gather(indexed, orderOfText(textsOf(indexed, ordinal, total), descending))
+        else gather(indexed, order(indexed, ordinal, descending, second, total))
       case other =>
         throw new IllegalArgumentException(s"sort column $ordinal is $other")
 
@@ -101,6 +104,85 @@ object WideOrder:
           throw new IllegalArgumentException(s"sort column $ordinal is ${other.logicalType}")
       batch += 1
     keys
+
+  private def order(
+      batches: IndexedSeq[ColumnBatch],
+      ordinal: Int,
+      descending: Boolean,
+      second: Option[Int],
+      total: Int,
+  ): Array[Int] =
+    val first = sortKey(batches, ordinal, descending, total)
+    second match
+      case None => orderOfKey(first)
+      case Some(next) =>
+        orderOfPair(first, sortKey(batches, next, descending = false, total))
+
+  private def orderOfKey(key: SortKey): Array[Int] = key match
+    case SortKey.Number(values, descending) => orderOf(values, descending)
+    case SortKey.Text(values, descending) => orderOfText(values, descending)
+
+  private def orderOfPair(first: SortKey, second: SortKey): Array[Int] =
+    val length = keyLength(first)
+    val boxed = new Array[Integer](length)
+    var index = 0
+    while index < length do
+      boxed(index) = Integer.valueOf(index)
+      index += 1
+    java.util.Arrays.sort(boxed, pairComparator(first, second))
+    val order = new Array[Int](length)
+    index = 0
+    while index < length do
+      order(index) = boxed(index).intValue
+      index += 1
+    order
+
+  private def sortKey(
+      batches: IndexedSeq[ColumnBatch],
+      ordinal: Int,
+      descending: Boolean,
+      total: Int,
+  ): SortKey =
+    columnAt(atBatch(batches, 0), ordinal).logicalType match
+      case LogicalType.Int32 | LogicalType.Int64 =>
+        SortKey.Number(keysOf(batches, ordinal, total), descending)
+      case LogicalType.Utf8Dict =>
+        SortKey.Text(textsOf(batches, ordinal, total), descending)
+      case other =>
+        throw new IllegalArgumentException(s"sort column $ordinal is $other")
+
+  private def pairComparator(first: SortKey, second: SortKey): java.util.Comparator[Integer] =
+    new java.util.Comparator[Integer]:
+      def compare(left: Integer, right: Integer): Int =
+        val earlier = left.intValue
+        val later = right.intValue
+        val primary = keyCompare(first, earlier, later)
+        if primary != 0 then primary
+        else
+          val next = keyCompare(second, earlier, later)
+          if next != 0 then next else java.lang.Integer.compare(earlier, later)
+
+  private def keyCompare(key: SortKey, left: Int, right: Int): Int = key match
+    case SortKey.Number(values, descending) =>
+      if descending then java.lang.Long.compare(values(right), values(left))
+      else java.lang.Long.compare(values(left), values(right))
+    case SortKey.Text(values, descending) =>
+      if descending then values(right).compareTo(values(left))
+      else values(left).compareTo(values(right))
+
+  private def keyLength(key: SortKey): Int = key match
+    case SortKey.Number(values, _) => values.length
+    case SortKey.Text(values, _) => values.length
+
+  private def requireSortable(batches: IndexedSeq[ColumnBatch], ordinal: Int): Unit =
+    columnAt(atBatch(batches, 0), ordinal).logicalType match
+      case LogicalType.Int32 | LogicalType.Int64 | LogicalType.Utf8Dict => ()
+      case other =>
+        throw new IllegalArgumentException(s"sort column $ordinal is $other")
+
+  private enum SortKey:
+    case Number(values: Array[Long], descending: Boolean)
+    case Text(values: Array[String], descending: Boolean)
 
   private def orderOfText(keys: Array[String], descending: Boolean): Array[Int] =
     val boxed = new Array[Integer](keys.length)

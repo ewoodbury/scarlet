@@ -38,7 +38,7 @@ private[scarlet] object WideFields:
       known(source).flatMap { fields =>
         WideAggregate.output(fields, key, measure, key2, distinct, textMin, sum2)
       }
-    case Plan.WideSortOp(source, _, _) => known(source)
+    case Plan.WideSortOp(source, _, _, _) => known(source)
     case Plan.WideLimitOp(source, _) => known(source)
     case _ =>
       None

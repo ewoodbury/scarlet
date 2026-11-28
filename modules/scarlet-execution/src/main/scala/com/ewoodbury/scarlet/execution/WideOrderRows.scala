@@ -7,8 +7,8 @@ import com.ewoodbury.scarlet.core.*
  * [[com.ewoodbury.scarlet.columnar.WideOrder]].
  *
  * A null number orders as zero and the row stays. A null string orders as empty and the row stays.
- * Ties keep input order, and a descending sort does not reverse them. String order is JVM
- * `compareTo`. Each result is one partition.
+ * The last key keeps input order, and a descending first key does not reverse that order. String
+ * order is JVM `compareTo`. Each result is one partition.
  */
 private[execution] object WideOrderRows:
 
@@ -16,18 +16,19 @@ private[execution] object WideOrderRows:
     val parts = ExecutionService.get.executePartitions(op.source)
     val rows = parts.flatMap(_.data).toVector
     val fields = schema(op.source, rows)
-    val kind = fields.lift(op.ordinal).map(_.kind).getOrElse {
-      throw new IllegalArgumentException(
-        s"column ${op.ordinal} outside width ${fields.size}",
-      )
-    }
-    kind match
-      case ColumnKind.Int32 | ColumnKind.Int64 =>
-        Seq(Partition(ordered(rows, op.ordinal, op.descending)))
-      case ColumnKind.Utf8 =>
-        Seq(Partition(orderedText(rows, op.ordinal, op.descending)))
-      case other =>
-        throw new IllegalArgumentException(s"sort column ${op.ordinal} is $other")
+    val kind = kindAt(fields, op.ordinal)
+    op.second match
+      case None =>
+        kind match
+          case ColumnKind.Int32 | ColumnKind.Int64 =>
+            Seq(Partition(ordered(rows, op.ordinal, op.descending)))
+          case ColumnKind.Utf8 =>
+            Seq(Partition(orderedText(rows, op.ordinal, op.descending)))
+          case other =>
+            throw new IllegalArgumentException(s"sort column ${op.ordinal} is $other")
+      case Some(next) =>
+        val secondKind = kindAt(fields, next)
+        Seq(Partition(orderedPair(rows, op.ordinal, op.descending, kind, next, secondKind)))
 
   def limit(op: Plan.WideLimitOp): Seq[Partition[WideRow]] =
     require(op.count >= 0, "limit must not be negative")
@@ -58,6 +59,45 @@ private[execution] object WideOrderRows:
     rows.zipWithIndex
       .sortBy((row, index) => (textKey(row, ordinal), index))(ordering)
       .map((row, _) => row)
+
+  private def orderedPair(
+      rows: Vector[WideRow],
+      ordinal: Int,
+      descending: Boolean,
+      kind: ColumnKind,
+      second: Int,
+      secondKind: ColumnKind,
+  ): Vector[WideRow] =
+    rows.zipWithIndex
+      .sortWith { case ((left, leftAt), (right, rightAt)) =>
+        val primary = cellOrder(left, right, ordinal, descending, kind)
+        if primary != 0 then primary < 0
+        else
+          val next = cellOrder(left, right, second, descending = false, secondKind)
+          if next != 0 then next < 0 else leftAt < rightAt
+      }
+      .map((row, _) => row)
+
+  private def cellOrder(
+      left: WideRow,
+      right: WideRow,
+      ordinal: Int,
+      descending: Boolean,
+      kind: ColumnKind,
+  ): Int =
+    val compared = kind match
+      case ColumnKind.Int32 | ColumnKind.Int64 =>
+        java.lang.Long.compare(keyOf(left, ordinal), keyOf(right, ordinal))
+      case ColumnKind.Utf8 =>
+        textKey(left, ordinal).compareTo(textKey(right, ordinal))
+      case other =>
+        throw new IllegalArgumentException(s"sort column $ordinal is $other")
+    if descending then -compared else compared
+
+  private def kindAt(fields: Vector[ColumnField], ordinal: Int): ColumnKind =
+    fields.lift(ordinal).map(_.kind).getOrElse {
+      throw new IllegalArgumentException(s"column $ordinal outside width ${fields.size}")
+    }
 
   private def textKey(row: WideRow, ordinal: Int): String = row.cells.lift(ordinal) match
     case Some(Cell.Utf8(value)) => value

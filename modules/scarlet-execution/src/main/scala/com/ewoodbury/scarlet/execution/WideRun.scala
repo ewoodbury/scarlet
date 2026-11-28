@@ -67,8 +67,8 @@ private[execution] object WideRun:
       Seq(joinLeft(left, right, leftKey, rightKey, broadcast = true))
     case PhysicalOp.WideGroup(child, key, measure, key2, distinct, textMin, sum2) =>
       Seq(group(child, key, measure, key2, distinct, textMin, sum2))
-    case PhysicalOp.WideSort(child, ordinal, descending) =>
-      Seq(sorted(child, ordinal, descending))
+    case PhysicalOp.WideSort(child, ordinal, descending, second) =>
+      Seq(sorted(child, ordinal, descending, second))
     case PhysicalOp.WideLimit(child, count) =>
       Seq(limited(child, count))
     case other =>
@@ -131,10 +131,15 @@ private[execution] object WideRun:
       WideGroup.aggregate(tables.map(_.batch), fields, key, measure, key2, distinct, textMin, sum2)
     Table(outFields, batch)
 
-  private def sorted(child: PhysicalOp, ordinal: Int, descending: Boolean): Table =
+  private def sorted(
+      child: PhysicalOp,
+      ordinal: Int,
+      descending: Boolean,
+      second: Option[Int],
+  ): Table =
     val tables = run(child)
     val fields = schema(tables, child, "wide sort")
-    Table(fields, WideOrder.sort(tables.map(_.batch), ordinal, descending))
+    Table(fields, WideOrder.sort(tables.map(_.batch), ordinal, descending, second))
 
   private def limited(child: PhysicalOp, count: Int): Table =
     val tables = run(child)

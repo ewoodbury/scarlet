@@ -687,7 +687,7 @@ enum PhysicalOp:
     case WideFilter(child, _, _) => child.kind
     case WideProject(child, _) => child.kind
     case WideCompute(child, _, _) => child.kind
-    case WideSort(child, _, _) => child.kind
+    case WideSort(child, _, _, _) => child.kind
     case WideLimit(child, _) => child.kind
     case WideHashJoin(_, _, _, _) | WideBroadcastJoin(_, _, _, _) | WideHashLeftJoin(_, _, _, _) |
         WideBroadcastLeftJoin(_, _, _, _) | WideGroup(_, _, _, _, _, _, _) =>
@@ -860,7 +860,7 @@ enum PhysicalOp:
     case WideBroadcastLeftJoin(left, right, _, _) =>
       s"WideBroadcastLeftJoin(${left.shape},${right.shape})"
     case WideGroup(child, _, _, _, _, _, _) => s"WideGroup(${child.shape})"
-    case WideSort(child, _, _) => s"WideSort(${child.shape})"
+    case WideSort(child, _, _, _) => s"WideSort(${child.shape})"
     case WideLimit(child, _) => s"WideLimit(${child.shape})"
 
   /**
@@ -1054,10 +1054,16 @@ enum PhysicalOp:
   )
 
   /**
-   * Global sort of one int or long column. A null orders as zero and the row stays. Ties keep
-   * input order. Output kind is the child's kind. The result is one partition. There is no spill.
+   * Global sort of an int, long, or string, then an optional second of those kinds. A null number
+   * orders as zero. A null string orders as empty. The row stays. The last key keeps input order.
+   * Output kind is the child's kind. The result is one partition. There is no spill.
    */
-  case WideSort(child: PhysicalOp, columnOrdinal: Int, descending: Boolean)
+  case WideSort(
+      child: PhysicalOp,
+      columnOrdinal: Int,
+      descending: Boolean,
+      second: Option[Int] = None,
+  )
 
   /**
    * First `count` rows of the child, in the child's order. Output kind is the child's kind. The
