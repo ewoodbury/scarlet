@@ -20,9 +20,9 @@ import com.ewoodbury.scarlet.core.*
 
 /**
  * One SELECT: registered tables, one int or long equi-join, comparisons combined with AND, OR, and
- * NOT, arithmetic, and count, sum, min, and max. A string compares equal or not equal. A group is
- * one or two keys, each an int, a long, or a string. Order is one int or long column, then a
- * limit. Anything else names its node.
+ * NOT, arithmetic, count, sum, min, max, and an exact count of distinct values. A string compares
+ * equal or not equal. A group is one or two keys, each an int, a long, or a string. Order is one
+ * int or long column, then a limit. Anything else names its node.
  */
 private object SqlConvert:
 
@@ -106,9 +106,15 @@ private object SqlConvert:
       case ColumnKind.Int32 | ColumnKind.Int64 => ordinal
       case _ => unsupported(element)
 
-  /** `count`, `sum`, `min`, or `max` when that name is an output column. */
+  /** `count`, `sum`, `min`, `max`, or `distinct` when that name is an output column. */
   private def aggregateColumn(function: Function): Option[String] =
-    if function.isDistinct || function.isUnique then None
+    if function.isUnique && !function.isDistinct then None
+    else if function.isDistinct then
+      val name = function.getName
+      if name != null && name.equalsIgnoreCase("count") && !countStar(function) &&
+        arguments(function).size == 1
+      then Some("distinct")
+      else None
     else
       val name = function.getName
       if name == null then None
@@ -143,20 +149,23 @@ private object SqlConvert:
     if keyOrdinals.isEmpty || keyOrdinals.size > 2 then
       throw new IllegalArgumentException("a group needs one or two columns")
     val items = itemsOf(plain)
-    val (measure, names) = groupedSelect(items, keyOrdinals, frame)
-    val grouped =
-      if keyOrdinals.size == 1 then frame.rows.groupColumns(keyOrdinals.head, measure)
-      else frame.rows.groupColumns(keyOrdinals.head, keyOrdinals(1), measure)
+    val (measure, names, distinctOrdinal) = groupedSelect(items, keyOrdinals, frame)
+    val grouped = (keyOrdinals.size, distinctOrdinal) match
+      case (1, None) => frame.rows.groupColumns(keyOrdinals.head, measure)
+      case (1, Some(column)) => frame.rows.groupDistinct(keyOrdinals.head, measure, column)
+      case (_, None) => frame.rows.groupColumns(keyOrdinals.head, keyOrdinals(1), measure)
+      case (_, Some(column)) =>
+        frame.rows.groupDistinct(keyOrdinals.head, keyOrdinals(1), measure, column)
     SqlResult.Rows(projectGroup(grouped, keyOrdinals.size, names))
 
-  /** Keys, then count, sum, min, and max, in that order, any suffix omitted. */
-  private val aggregateOrder: Vector[String] = Vector("count", "sum", "min", "max")
+  /** Keys, then count, sum, min, max, and count(distinct), in that order, any suffix omitted. */
+  private val aggregateOrder: Vector[String] = Vector("count", "sum", "min", "max", "distinct")
 
   private def groupedSelect(
       items: List[SelectItem[?]],
       keys: List[Int],
       frame: Frame,
-  ): (Int, Vector[String]) =
+  ): (Int, Vector[String], Option[Int]) =
     if items.size <= keys.size then groupList()
     keys.zipWithIndex.foreach { (ordinal, index) =>
       plainColumn(expressionOf(items(index)), frame) match
@@ -169,6 +178,10 @@ private object SqlConvert:
       val name = kind match
         case Aggregate.Count => "count"
         case Aggregate.Of(function, _) => function
+        case Aggregate.Distinct(_) =>
+          if cursor > aggregateOrder.indexOf("distinct") then
+            throw new IllegalArgumentException("a group has one distinct count")
+          "distinct"
       val at = aggregateOrder.indexWhere(candidate => candidate == name, cursor)
       if at < 0 then groupList()
       cursor = at + 1
@@ -183,24 +196,42 @@ private object SqlConvert:
         )
       case _ => None
     }
+    val distincts = chosen.flatMap {
+      case (_, Aggregate.Distinct(expr)) =>
+        plainColumn(expr, frame) match
+          case Some(ordinal) => Some(ordinal)
+          case None => unsupported(unwrap(expr))
+      case _ => None
+    }
+    if distincts.size > 1 then throw new IllegalArgumentException("a group has one distinct count")
+    distincts.foreach { ordinal =>
+      kindAt(frame, ordinal) match
+        case ColumnKind.Int32 | ColumnKind.Int64 | ColumnKind.Utf8 => ()
+        case other => throw new IllegalArgumentException(s"distinct of $other is not supported")
+    }
     val measure =
       if measures.isEmpty then keys.head
       else if measures.distinct.size == 1 then measures.head
       else throw new IllegalArgumentException("sum, min, and max must use one column")
-    (measure, chosen.map(_._1).toVector)
+    (measure, chosen.map(_._1).toVector, distincts.headOption)
 
   private def groupList(): Nothing =
     throw new IllegalArgumentException(
-      "a grouped select lists the keys, then count, sum, min, and max",
+      "a grouped select lists the keys, then count, sum, min, max, and count(distinct)",
     )
 
-  /** The kernel emits every aggregate. A shorter select list drops the rest. */
+  /**
+   * The kernel emits count, sum, min, and max, plus distinct when the select asks for it. A
+   * shorter list drops the rest.
+   */
   private def projectGroup(
       rows: DistCollection[WideRow],
       keyCount: Int,
       names: Vector[String],
   ): DistCollection[WideRow] =
-    if names == aggregateOrder then rows
+    val emitted =
+      if names.lastOption.contains("distinct") then aggregateOrder else aggregateOrder.dropRight(1)
+    if names == emitted then rows
     else
       val fields = WideFields.known(rows.plan).getOrElse(groupList())
       val keys = (0 until keyCount).toVector.map(ordinal => (ordinal, fields(ordinal).name))
@@ -213,6 +244,15 @@ private object SqlConvert:
   private def scalar(kind: Aggregate, frame: Frame): SqlResult = kind match
     case Aggregate.Count =>
       SqlResult.Value(frame.rows.count(), frame.rows.plan)
+    case Aggregate.Distinct(expr) =>
+      plainColumn(expr, frame) match
+        case Some(ordinal) =>
+          kindAt(frame, ordinal) match
+            case ColumnKind.Int32 | ColumnKind.Int64 | ColumnKind.Utf8 =>
+              SqlResult.Value(frame.rows.countDistinctColumn(ordinal), frame.rows.plan)
+            case other =>
+              throw new IllegalArgumentException(s"distinct of $other is not supported")
+        case None => unsupported(unwrap(expr))
     case Aggregate.Of(name, expr) =>
       val (placed, ordinal) = side(expr, frame)
       val kindOf = kindAt(placed, ordinal)
@@ -513,22 +553,36 @@ private object SqlConvert:
   private def aggregate(item: SelectItem[?]): Option[Aggregate] =
     unwrap(expressionOf(item)) match
       case function: Function =>
-        if function.isDistinct || function.isUnique then unsupported(function)
-        val name = function.getName
-        if name == null then unsupported(function)
-        else if name.equalsIgnoreCase("count") && countStar(function) then Some(Aggregate.Count)
-        else if name.equalsIgnoreCase("count") then
-          throw new IllegalArgumentException("count of a column is not supported")
-        else if Set("sum", "min", "max").contains(name.toLowerCase) then
-          val args = arguments(function)
-          if args.size != 1 then unsupported(function)
-          else Some(Aggregate.Of(name.toLowerCase, args.head))
-        else unsupported(function)
+        if function.isDistinct then Some(distinctAggregate(function))
+        else if function.isUnique then unsupported(function)
+        else Some(plainAggregate(function))
       case _ => None
+
+  private def distinctAggregate(function: Function): Aggregate =
+    val name = function.getName
+    if name == null || !name.equalsIgnoreCase("count") then unsupported(function)
+    else if countStar(function) then unsupported(function)
+    else
+      val args = arguments(function)
+      if args.size != 1 then unsupported(function)
+      else Aggregate.Distinct(args.head)
+
+  private def plainAggregate(function: Function): Aggregate =
+    val name = function.getName
+    if name == null then unsupported(function)
+    else if name.equalsIgnoreCase("count") && countStar(function) then Aggregate.Count
+    else if name.equalsIgnoreCase("count") then
+      throw new IllegalArgumentException("count of a column is not supported")
+    else if Set("sum", "min", "max").contains(name.toLowerCase) then
+      val args = arguments(function)
+      if args.size != 1 then unsupported(function)
+      else Aggregate.Of(name.toLowerCase, args.head)
+    else unsupported(function)
 
   private enum Aggregate:
     case Count
     case Of(name: String, expr: Expression)
+    case Distinct(expr: Expression)
 
   private def countStar(function: Function): Boolean =
     val args = arguments(function)

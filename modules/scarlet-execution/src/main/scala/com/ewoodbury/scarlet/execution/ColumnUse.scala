@@ -182,7 +182,7 @@ private[execution] object ColumnUse:
     case Plan.WideFilterOp(source, _, _) => Some(source)
     case Plan.WideProjectOp(source, _) => Some(source)
     case Plan.WideComputeOp(source, _, _) => Some(source)
-    case Plan.WideGroupOp(source, _, _, _) => Some(source)
+    case Plan.WideGroupOp(source, _, _, _, _) => Some(source)
     case Plan.WideSortOp(source, _, _) => Some(source)
     case Plan.WideLimitOp(source, _) => Some(source)
     case Plan.ReduceByKeyOp(source, _) => Some(source)

@@ -61,8 +61,8 @@ private[execution] object WideRun:
       Seq(join(left, right, leftKey, rightKey, broadcast = false))
     case PhysicalOp.WideBroadcastJoin(left, right, leftKey, rightKey) =>
       Seq(join(left, right, leftKey, rightKey, broadcast = true))
-    case PhysicalOp.WideGroup(child, key, measure, key2) =>
-      Seq(group(child, key, measure, key2))
+    case PhysicalOp.WideGroup(child, key, measure, key2, distinct) =>
+      Seq(group(child, key, measure, key2, distinct))
     case PhysicalOp.WideSort(child, ordinal, descending) =>
       Seq(sorted(child, ordinal, descending))
     case PhysicalOp.WideLimit(child, count) =>
@@ -85,7 +85,13 @@ private[execution] object WideRun:
       else WideJoin.hash(leftBatches, rightBatches, leftFields, rightFields, leftKey, rightKey)
     Table(fields, batch)
 
-  private def group(child: PhysicalOp, key: Int, measure: Int, key2: Option[Int]): Table =
+  private def group(
+      child: PhysicalOp,
+      key: Int,
+      measure: Int,
+      key2: Option[Int],
+      distinct: Option[Int],
+  ): Table =
     val tables = run(child)
     val fields = tables.headOption
       .map(_.fields)
@@ -94,7 +100,7 @@ private[execution] object WideRun:
         throw new IllegalStateException(s"wide group child ${child.shape} has no schema"),
       )
     val (outFields, batch) =
-      WideGroup.aggregate(tables.map(_.batch), fields, key, measure, key2)
+      WideGroup.aggregate(tables.map(_.batch), fields, key, measure, key2, distinct)
     Table(outFields, batch)
 
   private def sorted(child: PhysicalOp, ordinal: Int, descending: Boolean): Table =

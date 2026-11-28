@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.execution
 
+import scala.collection.mutable
+
 import com.ewoodbury.scarlet.columnar.PairStep
 import com.ewoodbury.scarlet.core.*
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
@@ -231,6 +233,34 @@ class DefaultExecutionService extends ExecutionService {
 
   def maxWideDouble(plan: Plan[WideRow], ordinal: Int): Double =
     WideExtremum.maxDouble(plan, ordinal).getOrElse(foldDouble(plan, ordinal, least = false))
+
+  def countWideDistinct(plan: Plan[WideRow], ordinal: Int): Long =
+    WideDistinctCount.count(plan, ordinal).getOrElse(foldDistinct(plan, ordinal))
+
+  @SuppressWarnings(Array("org.wartremover.warts.MutableDataStructures"))
+  private def foldDistinct(plan: Plan[WideRow], ordinal: Int): Long =
+    val seen = mutable.HashSet.empty[Cell]
+    rowPartitions(plan).foreach { partition =>
+      partition.data.foreach { row =>
+        if (ordinal < 0 || ordinal >= row.cells.size) then
+          throw new IllegalArgumentException(s"column $ordinal outside width ${row.cells.size}")
+        noteDistinct(seen, row, ordinal)
+      }
+    }
+    seen.size.toLong
+
+  private def noteDistinct(seen: mutable.HashSet[Cell], row: WideRow, ordinal: Int): Unit =
+    val kind = row.fields.lift(ordinal).map(_.kind).getOrElse {
+      throw new IllegalArgumentException(s"column $ordinal outside width ${row.fields.size}")
+    }
+    kind match
+      case ColumnKind.Int32 | ColumnKind.Int64 | ColumnKind.Utf8 =>
+        row.cells(ordinal) match
+          case Cell.Null => ()
+          case cell =>
+            val _ = seen.add(cell)
+      case other =>
+        throw new IllegalArgumentException(s"distinct of $other is not supported")
 
   private def foldInt(plan: Plan[WideRow], ordinal: Int, least: Boolean): Int =
     rowPartitions(plan)

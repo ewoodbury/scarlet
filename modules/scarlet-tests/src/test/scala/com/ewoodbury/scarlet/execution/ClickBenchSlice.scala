@@ -6,7 +6,7 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 import com.ewoodbury.scarlet.support.Check
 
 /**
- * Fourteen ClickBench queries on 4096 generated rows. This is not the hits table.
+ * Seventeen ClickBench queries on 4096 generated rows. This is not the hits table.
  *
  * Numbers follow the 0-based order of `clickhouse/queries.sql`. An average is the long sum and the
  * count. Query 2's width average is 3679360 / 4096. Query 3's user average is 8386588672 / 4096.
@@ -54,17 +54,28 @@ object ClickBenchSlice:
   val twoKeyGroups: Long = 200L
   val twoKeyMix: Long = -5517106496331210496L
 
+  /** Every generated UserID is unique, so the distinct count equals the row count. */
+  val distinctUsers: Long = 4096L
+
+  /** Phrase `p0` to `p3`. */
+  val distinctPhrases: Long = 4L
+
+  /** Widths inside one AdvEngineID. The group count is 512. */
+  val distinctWidths: Long = 25L
+  val distinctGroups: Long = 8L
+  val distinctMix: Long = 6945918260932055340L
+
   val note: Vector[String] = Vector(
     "0 count. This file.",
     "1 count where AdvEngineID is not 0. This file.",
     "2 sum of AdvEngineID, count, and sum of ResolutionWidth. This file.",
     "3 sum of UserID. This file.",
-    "4 distinct count of UserID. Missing: distinct count.",
-    "5 distinct count of a string. Missing: string distinct.",
+    "4 distinct count of UserID. This file.",
+    "5 distinct count of a string. This file.",
     "6 min and max of ResolutionWidth. This file.",
     "7 group by AdvEngineID. This file. The checker applies the order.",
-    "8 distinct count by one int. Missing: distinct count.",
-    "9 several aggregates and a distinct count. Missing: distinct count.",
+    "8 distinct count by one int. This file. The checker applies the order.",
+    "9 sums AdvEngineID and averages ResolutionWidth, then a distinct count. Missing: a second measure.",
     "10 string not equal to empty. This file.",
     "11 two strings in the group key. This file. The checker applies the order.",
     "12 group by a string. This file. The checker applies the order.",
@@ -196,6 +207,17 @@ object ClickBenchSlice:
   def groupedLongString(): DistCollection[WideRow] =
     phrases().groupColumns(2, 3, 0)
 
+  /**
+   * Query 8 shape: group AdvEngineID and count distinct ResolutionWidth. The published statement
+   * groups RegionID and orders by the distinct count. This slice has no RegionID. Eight groups
+   * make the limit a no-op. The checker applies the order.
+   */
+  def groupedDistinct(): DistCollection[WideRow] =
+    scan().groupDistinct(0, 1, 1)
+
+  def distinctChecksum(rows: Iterable[WideRow]): Long =
+    rows.toVector.sortWith(distinctBefore).foldLeft(0L)(mixDistinct)
+
   def phrases(): DistCollection[WideRow] =
     DistCollection.ofColumns(scanInputs() :+ phraseColumn("p", 4), partitions)
 
@@ -256,12 +278,16 @@ object ClickBenchSlice:
       summed("query 2 adv", advAsLong().plan, 3, sumAdv),
       summed("query 2 width", widthAsLong().plan, 3, sumWidth),
       summed("query 3", scan().plan, 2, sumUser),
+      distinct("query 4", scan().plan, 2, distinctUsers),
+      distinct("query 5", phrases().plan, 3, distinctPhrases),
       extremum("query 6 min", scan().plan, 1, minWidth, least = true),
       extremum("query 6 max", scan().plan, 1, maxWidth, least = false),
       shaped("query 10", notEmptyPhrase().plan, "WideFilter3(Scan)"),
       counted("query 10", notEmptyPhrase().plan, notEmpty),
       shaped("query 7", grouped().plan, "WideGroup(WideFilter0(Scan))"),
       counted("query 7", grouped().plan, groups),
+      shaped("query 8", groupedDistinct().plan, "WideGroup(Scan)"),
+      counted("query 8", groupedDistinct().plan, distinctGroups),
       shaped("query 32", groupedTwo().plan, "WideGroup(Scan)"),
       counted("query 32", groupedTwo().plan, twoKeyGroups),
       shaped("query 12", groupedPhrase().plan, "WideGroup(Scan)"),
@@ -287,9 +313,12 @@ object ClickBenchSlice:
       both("query 1", countAdv)(filtered().count()),
       both("query 2", mixedSums)(mixSums()),
       both("query 3", sumUser)(scan().sumLongColumn(2)),
+      both("query 4", distinctUsers)(scan().countDistinctColumn(2)),
+      both("query 5", distinctPhrases)(phrases().countDistinctColumn(3)),
       both("query 6", widthExtremum)(mixExtremum()),
       both("query 10", notEmpty)(notEmptyPhrase().count()),
       both("query 7", groupedMix)(groupedChecksum(grouped().collect())),
+      both("query 8", distinctMix)(distinctChecksum(groupedDistinct().collect())),
       both("query 32", twoKeyMix)(twoKeyChecksum(groupedTwo().collect())),
       both("query 12", phraseMix)(phraseChecksum(groupedPhrase().collect())),
       both("query 11", twoStringMix)(phoneChecksum(groupedPhones().collect())),
@@ -337,6 +366,17 @@ object ClickBenchSlice:
       case Some(value) => Some(s"$name columnar sum $value expected $expected")
       case None => Some(s"$name sum did not lower")
 
+  private def distinct(
+      name: String,
+      plan: Plan[WideRow],
+      ordinal: Int,
+      expected: Long,
+  ): Option[String] =
+    WideDistinctCount.count(plan, ordinal) match
+      case Some(value) if value == expected => None
+      case Some(value) => Some(s"$name columnar distinct $value expected $expected")
+      case None => Some(s"$name distinct did not lower")
+
   private def extremum(
       name: String,
       plan: Plan[WideRow],
@@ -356,6 +396,25 @@ object ClickBenchSlice:
       case Some(found) if Check.same(found, shape) => None
       case Some(found) => Some(s"$name shape $found expected $shape")
       case None => Some(s"$name did not lower")
+
+  private def distinctBefore(left: WideRow, right: WideRow): Boolean =
+    val leftCount = longAt(left, 1)
+    val rightCount = longAt(right, 1)
+    leftCount > rightCount || (leftCount == rightCount && intAt(left, 0) < intAt(right, 0))
+
+  private def mixDistinct(acc: Long, row: WideRow): Long = cells(row) match
+    case Vector(
+          Cell.Int32(key),
+          Cell.Int64(count),
+          Cell.Int64(sum),
+          Cell.Int32(min),
+          Cell.Int32(max),
+          Cell.Int64(distinct),
+        ) =>
+      (((((acc * 31L + key.toLong) * 31L + count) * 31L + sum) * 31L + min.toLong) * 31L +
+        max.toLong) * 31L + distinct
+    case other =>
+      refuse(other.size)
 
   private def groupBefore(left: WideRow, right: WideRow): Boolean =
     val leftCount = countOf(left)

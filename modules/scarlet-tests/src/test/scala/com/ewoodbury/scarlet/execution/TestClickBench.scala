@@ -85,6 +85,38 @@ class TestClickBench extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     sameSum(planned, 2, ClickBenchSlice.sumUser)
   }
 
+  "query 4" should "count distinct UserID" in {
+    val planned = ClickBenchSlice.scan()
+    WideDistinctCount.count(planned.plan, 2) shouldBe Some(ClickBenchSlice.distinctUsers)
+    sameDistinct(planned, 2, ClickBenchSlice.distinctUsers)
+  }
+
+  "query 5" should "count a repeating phrase" in {
+    val planned = ClickBenchSlice.phrases()
+    WideDistinctCount.count(planned.plan, 3) shouldBe Some(ClickBenchSlice.distinctPhrases)
+    sameDistinct(planned, 3, ClickBenchSlice.distinctPhrases)
+  }
+
+  "query 8" should "count distinct widths inside each AdvEngineID" in {
+    val planned = ClickBenchSlice.groupedDistinct()
+    ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some("WideGroup(Scan)")
+    ColumnarPlanner.tryCount(planned.plan) shouldBe Some(ClickBenchSlice.distinctGroups)
+    val columnar = collect(planned)
+    columnar.length shouldBe 8
+    cellsOf(columnar, 0) shouldBe Vector(
+      Cell.Int32(0),
+      Cell.Int64(512L),
+      Cell.Int64(458128L),
+      Cell.Int32(800),
+      Cell.Int32(992),
+      Cell.Int64(ClickBenchSlice.distinctWidths),
+    )
+    ClickBenchSlice.distinctChecksum(columnar) shouldBe ClickBenchSlice.distinctMix
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = false))
+    val rows = planned.collect()
+    ClickBenchSlice.distinctChecksum(rows) shouldBe ClickBenchSlice.distinctMix
+  }
+
   "query 7" should "group AdvEngineID without building lists" in {
     val planned = ClickBenchSlice.grouped()
     ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some(
@@ -122,6 +154,14 @@ class TestClickBench extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val columnar = planned.count()
     ScarletConf.set(ScarletConf.get.copy(columnarExecution = false))
     val rows = planned.count()
+    columnar shouldBe expected
+    rows shouldBe expected
+
+  private def sameDistinct(planned: DistCollection[WideRow], ordinal: Int, expected: Long): Unit =
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = true))
+    val columnar = planned.countDistinctColumn(ordinal)
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = false))
+    val rows = planned.countDistinctColumn(ordinal)
     columnar shouldBe expected
     rows shouldBe expected
 
