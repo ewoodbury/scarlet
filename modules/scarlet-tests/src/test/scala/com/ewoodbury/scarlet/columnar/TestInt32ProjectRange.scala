@@ -9,8 +9,8 @@ import org.scalatest.matchers.should.Matchers
  * Int project over a row range. A window can start past row 0, and a tail can be shorter than the
  * batch. Nulls before and inside the window stay null, and the mapper is not called for them. The
  * output column is sized to the range. Other columns are compacted by absolute row index. A
- * full-range scan matches the whole-batch call, including a column whose capacity exceeds its
- * live length.
+ * full-range scan matches the whole-batch call, including a column whose capacity exceeds its live
+ * length.
  */
 class TestInt32ProjectRange extends AnyFlatSpec with Matchers:
 
@@ -58,7 +58,7 @@ class TestInt32ProjectRange extends AnyFlatSpec with Matchers:
     )
     nullCalls.get() shouldBe 0
     nullOnly.length shouldBe 1
-    BatchCodec.decodeNullableInts(nullOnly) shouldBe Seq(None)
+    BatchCodec.decodeNullableInts(nullOnly) shouldBe Seq[Option[Int]](None)
     int32(nullOnly).values(0) shouldBe 0
   }
 
@@ -128,14 +128,16 @@ class TestInt32ProjectRange extends AnyFlatSpec with Matchers:
     val wholeShort = ColumnKernel.projectInt32(
       shortened,
       0,
-      value => if (value == 99) then throw new IllegalStateException("read past length") else value + 1,
+      value =>
+        if (value == 99) then throw new IllegalStateException("read past length") else value + 1,
     )
     val rangedShort = ColumnKernel.projectInt32(
       shortened,
       0,
       0,
       shortened.length,
-      value => if (value == 99) then throw new IllegalStateException("read past length") else value + 1,
+      value =>
+        if (value == 99) then throw new IllegalStateException("read past length") else value + 1,
     )
 
     BatchCodec.decodeInts(wholeShort) shouldBe Seq(2, -1, 9)

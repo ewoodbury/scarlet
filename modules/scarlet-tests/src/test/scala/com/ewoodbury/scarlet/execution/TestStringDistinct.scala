@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -8,6 +7,8 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Columnar string `distinct`: one copy of each string, including one null and one `""`.
@@ -97,8 +98,8 @@ class TestStringDistinct extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     val decoded = BatchCodec.decodeStrings(
       parts.lift(home).getOrElse(fail(s"missing bucket $home")),
     )
-    decoded.count(_ == leftCode) shouldBe 1
-    decoded.count(_ == rightCode) shouldBe 1
+    decoded.count(Check.same(_, leftCode)) shouldBe 1
+    decoded.count(Check.same(_, rightCode)) shouldBe 1
   }
 
   it should "return empty for empty input, including one partition and a prime width" in {
@@ -150,7 +151,7 @@ class TestStringDistinct extends AnyFlatSpec with Matchers with BeforeAndAfterEa
   it should "lower a string filter then distinct" in {
     val values = Seq("red", "blue", "red", "green", "blue")
     val distinct = DistCollection(values, 2)
-      .filter((text: String) => text != "green")
+      .filter((text: String) => !Check.same(text, "green"))
       .distinct()
     ColumnarPlanner.lower(distinct.plan).map(_.shape) shouldBe Some(
       "Dedupe(Exchange(Filter(Scan)))",
@@ -163,7 +164,7 @@ class TestStringDistinct extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     val lowered = ColumnarPlanner.lower(plan).getOrElse(fail("distinct stayed on rows"))
     lowered.shape shouldBe "Dedupe(Exchange(Scan))"
     PartitionPreserving.of(lowered) shouldBe Option.empty[Int]
-    ColumnarPlanner.tryTake(plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(plan, 1).shouldBeEmpty
     an[ColumnarFallback] should be thrownBy {
       ColumnarInterpreter.interpret(plan, lowered, Some(0))
     }
@@ -171,12 +172,13 @@ class TestStringDistinct extends AnyFlatSpec with Matchers with BeforeAndAfterEa
 
   it should "leave an all-null string source on the row path" in {
     val source = Plan.Source(Seq(Partition(Seq(absent, absent))))
-    ColumnarPlanner.lower(source) shouldBe None
-    ColumnarPlanner.lower(Plan.DistinctOp(source)) shouldBe None
+    ColumnarPlanner.lower(source).shouldBeEmpty
+    ColumnarPlanner.lower(Plan.DistinctOp(source)).shouldBeEmpty
     ColumnarPlanner.lower(DistCollection(Seq(1L, 1L), 2).distinct().plan).map(_.shape) shouldBe
       Some("Dedupe(Exchange(Scan))")
-    ColumnarPlanner.lower(DistCollection.ofBools(Array(true, true), 2).distinct().plan) shouldBe
-      None
+    ColumnarPlanner
+      .lower(DistCollection.ofBools(Array(true, true), 2).distinct().plan)
+      .shouldBeEmpty
   }
 
   private def strings(left: Seq[String], right: Seq[String]): DistCollection[String] =

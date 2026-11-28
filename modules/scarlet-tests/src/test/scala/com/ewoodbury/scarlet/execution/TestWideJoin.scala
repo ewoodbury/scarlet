@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -8,6 +7,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.HashJoin
 import com.ewoodbury.scarlet.core.*
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Inner join of wide rows on one int or long key.
@@ -110,7 +110,7 @@ class TestWideJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val left = side(WideInput.strings("k", Array("a")), WideInput.ints("q", Array(1)))
     val right = side(WideInput.strings("k", Array("a")), WideInput.ints("q", Array(2)))
     val joined = left.joinColumns(right, 0, 0)
-    ColumnarPlanner.lower(joined.plan) shouldBe None
+    ColumnarPlanner.lower(joined.plan).shouldBeEmpty
     an[IllegalArgumentException] should be thrownBy joined.collect()
   }
 
@@ -118,7 +118,7 @@ class TestWideJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val left = side(WideInput.ints("k", Array(1)), WideInput.ints("q", Array(1)))
     val right = side(WideInput.longs("k", Array(1L)), WideInput.ints("q", Array(2)))
     val joined = left.joinColumns(right, 0, 0)
-    ColumnarPlanner.lower(joined.plan) shouldBe None
+    ColumnarPlanner.lower(joined.plan).shouldBeEmpty
     an[IllegalArgumentException] should be thrownBy joined.collect()
   }
 

@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -9,6 +8,7 @@ import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.execution.schema.{Describe, KernelChoice}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * `flatMap` keeps a columnar child when the decoded partitions match the row executor.
@@ -101,7 +101,7 @@ class TestRowBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     Describe.describe(mapped.plan) shouldBe Option.empty[Describe.Described]
     mapped.plan match
       case Plan.FlatMapValuesOp(source, f) =>
-        RowBoundary.flatMapValues(source, f) shouldBe None
+        RowBoundary.flatMapValues(source, f).shouldBeEmpty
       case other => fail(s"expected flatMapValues, got $other")
     collect(mapped) shouldBe row(collect(mapped))
   }
@@ -133,7 +133,7 @@ class TestRowBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     Describe.describe(sorted.plan) shouldBe Option.empty[Describe.Described]
     sorted.plan match
       case Plan.SortByOp(source, keyFunc, ordering) =>
-        RowBoundary.sortBy(source, keyFunc, ordering) shouldBe None
+        RowBoundary.sortBy(source, keyFunc, ordering).shouldBeEmpty
       case other => fail(s"expected sortBy, got $other")
     val found = show(collect(sorted))
     found shouldBe row(show(collect(sorted)))
@@ -174,7 +174,7 @@ class TestRowBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     Describe.describe(grouped.plan) shouldBe Option.empty[Describe.Described]
     grouped.plan match
       case Plan.CoGroupOp(leftPlan, rightPlan) =>
-        RowBoundary.cogroup(leftPlan, rightPlan) shouldBe None
+        RowBoundary.cogroup(leftPlan, rightPlan).shouldBeEmpty
       case other => fail(s"expected cogroup, got $other")
     grouped.collect().toSeq shouldBe row(grouped.collect().toSeq)
   }
@@ -260,7 +260,7 @@ class TestRowBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     Describe.describe(mapped.plan) shouldBe Option.empty[Describe.Described]
     mapped.plan match
       case Plan.MapValuesOp(source, f) =>
-        RowBoundary.mapValues(source, f) shouldBe None
+        RowBoundary.mapValues(source, f).shouldBeEmpty
       case other => fail(s"expected mapValues, got $other")
     val found = collect(mapped).map(showCell)
     found shouldBe row(collect(mapped).map(showCell))
@@ -285,7 +285,7 @@ class TestRowBoundary extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     Describe.describe(mapped.plan) shouldBe Option.empty[Describe.Described]
     mapped.plan match
       case Plan.FlatMapOp(source, f) =>
-        RowBoundary.flatMap(source, f) shouldBe None
+        RowBoundary.flatMap(source, f).shouldBeEmpty
       case other => fail(s"expected flatMap, got $other")
 
   private def keep(row: (Int, Int)): Seq[(Int, Int)] = Seq(row)

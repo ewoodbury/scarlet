@@ -76,9 +76,9 @@ class TestActionContracts extends AnyFlatSpec with Matchers {
   "aggregate" should "apply seqOp per partition and combOp across partitions" in {
     val dc = DistCollection(Seq(1, 2, 3, 4), 2)
 
-    val result = dc.aggregate(List.empty[String])(
+    val result = dc.aggregate(Vector.empty[String])(
       seqOp = (acc, element) => acc :+ s"s$element",
-      combOp = (left, right) => left ++ Seq("C") ++ right,
+      combOp = (left, right) => left ++ Vector("C") ++ right,
     )
 
     result shouldEqual Seq("s1", "s2", "C", "s3", "s4")
@@ -102,8 +102,7 @@ class TestActionContracts extends AnyFlatSpec with Matchers {
   it should "aggregate over a wide plan" in {
     val dc = DistCollection(Seq(("a", 1), ("b", 2), ("a", 3)), 2)
 
-    val result = dc
-      .groupByKey
+    val result = dc.groupByKey
       .flatMap { case (_, groupedValues) => groupedValues }
       .aggregate(0)(_ + _, _ + _)
 

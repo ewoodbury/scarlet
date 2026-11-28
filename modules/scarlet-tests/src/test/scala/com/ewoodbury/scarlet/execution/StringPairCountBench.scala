@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.lang.management.ManagementFactory
 
 import com.sun.management.ThreadMXBean
@@ -9,6 +8,7 @@ import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Same-session row and columnar times for a remapped string key.
@@ -68,9 +68,11 @@ object StringPairCountBench:
         .getOrElse(refuse("string pair map did not lower"))
       println(s"arm $shape")
       if (
-        !shape.contains("CountByKey") || !shape.contains("Filter") || !shape.contains("Project") ||
-        shape.contains("row")
-      ) then refuse(s"arm $shape is not CountByKey of a Filter and a Project")
+          !shape.contains("CountByKey") || !shape
+            .contains("Filter") || !shape.contains("Project") ||
+          shape.contains("row")
+        )
+      then refuse(s"arm $shape is not CountByKey of a Filter and a Project")
       val expected = expectedChecksum(rows)
       val row = time("row", counted.plan, warmup, rounds, columnar = false)
       val columnar = time("columnar", counted.plan, warmup, rounds, columnar = true)
@@ -81,8 +83,7 @@ object StringPairCountBench:
       println(s"ratio $ratio")
       if (row.checksum != columnar.checksum) then
         refuse(s"checksums differ row=${row.checksum} columnar=${columnar.checksum}")
-      if (columnar.checksum != expected) then
-        refuse(s"checksum ${columnar.checksum} != $expected")
+      if (columnar.checksum != expected) then refuse(s"checksum ${columnar.checksum} != $expected")
       if (row.batches != 0L || row.decoded != 0L) then
         refuse(s"row published batches=${row.batches} decoded=${row.decoded}")
       if (columnar.batches == 0L) then refuse("columnar published no column batch")
@@ -95,14 +96,16 @@ object StringPairCountBench:
         ScarletConf.set(savedConf)
         ScarletRuntime.set(savedRuntime)
 
-  /** `(row % 1024).toString` with LCG values, then `(k + "!", v)`, drop `"!"`, then `countByKey`. */
+  /**
+   * `(row % 1024).toString` with LCG values, then `(k + "!", v)`, drop `"!"`, then `countByKey`.
+   */
   private def query(rows: Int): DistCollection[(String, Int)] =
     val pool = Array.tabulate(groups)(_.toString)
     val keys = Array.tabulate(rows)(row => pool(row % groups))
     val values = lcgValues(rows)
     DistCollection(keys.zip(values).toSeq, sourcePartitions)
       .map { case (key, value) => (key + "!", value) }
-      .filterKeys((key: String) => key != "!")
+      .filterKeys((key: String) => !Check.same(key, "!"))
       .countByKey
 
   private def time(

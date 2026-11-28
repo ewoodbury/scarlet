@@ -1,9 +1,10 @@
 package com.ewoodbury.scarlet.columnar
-
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.execution.JoinDigest
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Hand-built `(key, left, right)` batches. A clear validity bit is a null value. Decode returns
@@ -16,7 +17,7 @@ class TestOuterDecode extends AnyFlatSpec with Matchers:
   "optional outer decode" should "read a clear bit with no absence mark as Some(null)" in {
     val right = Int32Column.of(Array(0), Validity.pack(1, _ => false), 1)
     val batch = batchOf(present(Array(1)), present(Array(10)), right)
-    right.absence shouldBe None
+    right.absence.shouldBeEmpty
     right.isValid(0) shouldBe false
     right.isAbsent(0) shouldBe false
     right.values(0) shouldBe 0
@@ -58,7 +59,7 @@ class TestOuterDecode extends AnyFlatSpec with Matchers:
   it should "read a present zero as Some(0)" in {
     val right = present(Array(0))
     val batch = batchOf(present(Array(1)), present(Array(10)), right)
-    right.absence shouldBe None
+    right.absence.shouldBeEmpty
     right.isValid(0) shouldBe true
     right.isAbsent(0) shouldBe false
     right.values(0) shouldBe 0
@@ -68,7 +69,7 @@ class TestOuterDecode extends AnyFlatSpec with Matchers:
   it should "keep a clear bit on the present side as null" in {
     val left = Int32Column.of(Array(0), Validity.pack(1, _ => false), 1)
     val batch = batchOf(present(Array(1)), left, present(Array(20)))
-    left.absence shouldBe None
+    left.absence.shouldBeEmpty
     left.isValid(0) shouldBe false
     left.isAbsent(0) shouldBe false
     val decoded = BatchCodec.decodeOuter(batch, AbsentSide.Right)
@@ -127,7 +128,7 @@ class TestOuterDecode extends AnyFlatSpec with Matchers:
     val cells = decoded.map(row => valueAt(row, 1))
     cells.length shouldBe 3
     assertSomeNull(cells.headOption.getOrElse(fail("missing null row")))
-    cells.lift(1).getOrElse(fail("missing absent row")) shouldBe None
+    Check.shouldBeNone(cells.lift(1).getOrElse(fail("missing absent row")))
     cells.lift(2).getOrElse(fail("missing zero row")) shouldBe Some(0)
   }
 
@@ -164,8 +165,8 @@ class TestOuterDecode extends AnyFlatSpec with Matchers:
     case other => fail(s"expected a null int, got $other")
 
   /**
-   * A right value that is null, not `None`. `Tuple2` keeps the null. A pair literal would unbox
-   * it to `0`. [[JoinDigest.fromOuter]] classifies that null as a null value.
+   * A right value that is null, not `None`. `Tuple2` keeps the null. A pair literal would unbox it
+   * to `0`. [[JoinDigest.fromOuter]] classifies that null as a null value.
    */
   @SuppressWarnings(
     Array(

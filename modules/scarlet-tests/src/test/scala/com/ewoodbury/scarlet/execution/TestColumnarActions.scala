@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -11,6 +10,7 @@ import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, NoOpSink}
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.execution.schema.{Describe, KernelChoice}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -217,8 +217,8 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     }
 
     ColumnMetrics.withSink(new CountingSink) {
-      ColumnarPlanner.tryCount(mapped.plan) shouldBe None
-      ColumnarPlanner.trySumInt(mapped.plan) shouldBe None
+      ColumnarPlanner.tryCount(mapped.plan).shouldBeEmpty
+      ColumnarPlanner.trySumInt(mapped.plan).shouldBeEmpty
       hits.get() shouldBe 0
       assertNoColumnarWork()
     }
@@ -239,8 +239,8 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     }
 
     ColumnMetrics.withSink(new CountingSink) {
-      ColumnarPlanner.tryCount(mapped.plan) shouldBe None
-      ColumnarPlanner.trySumInt(mapped.plan) shouldBe None
+      ColumnarPlanner.tryCount(mapped.plan).shouldBeEmpty
+      ColumnarPlanner.trySumInt(mapped.plan).shouldBeEmpty
       hits.get() shouldBe 0
       assertNoColumnarWork()
     }
@@ -272,13 +272,13 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
         value.toString
       }
 
-    ColumnarPlanner.partitioning(direct.plan) shouldBe None
-    ColumnarPlanner.partitioning(pairs.plan) shouldBe None
-    ColumnarPlanner.partitioning(filtered.plan) shouldBe None
-    ColumnarPlanner.partitioning(lengths.plan) shouldBe None
-    ColumnarPlanner.partitioning(chain.plan) shouldBe None
-    ColumnarPlanner.tryRun(direct.plan) shouldBe None
-    ColumnarPlanner.tryRun(chain.plan) shouldBe None
+    ColumnarPlanner.partitioning(direct.plan).shouldBeEmpty
+    ColumnarPlanner.partitioning(pairs.plan).shouldBeEmpty
+    ColumnarPlanner.partitioning(filtered.plan).shouldBeEmpty
+    ColumnarPlanner.partitioning(lengths.plan).shouldBeEmpty
+    ColumnarPlanner.partitioning(chain.plan).shouldBeEmpty
+    ColumnarPlanner.tryRun(direct.plan).shouldBeEmpty
+    ColumnarPlanner.tryRun(chain.plan).shouldBeEmpty
     directHits.get() shouldBe 0
     chainHits.get() shouldBe 0
 
@@ -389,7 +389,7 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
     columnar(empty.groupedSum) shouldBe 0L
     row(empty.groupedSum) shouldBe 0L
-    columnar(ColumnarPlanner.partitioning(empty.plan) shouldBe None)
+    columnar(ColumnarPlanner.partitioning(empty.plan).shouldBeEmpty)
   }
 
   it should "return zero when filterValues keeps no rows" in {
@@ -543,7 +543,7 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     }
 
     columnar(expanded.groupedSum) shouldBe row(expanded.groupedSum)
-    columnar(ColumnarPlanner.partitioning(expanded.plan) shouldBe None)
+    columnar(ColumnarPlanner.partitioning(expanded.plan).shouldBeEmpty)
   }
 
   it should "fold every group sum" in {
@@ -839,7 +839,7 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
         DistCollection.ofIntPairs(Array(1), Array(10), 1).mapValues[Int, Int, Any](overloaded)
 
       armColumnar()
-      ColumnarPlanner.partitioning(mapped.plan) shouldBe None
+      ColumnarPlanner.partitioning(mapped.plan).shouldBeEmpty
       mapped.collect().toList shouldBe List((1, "nope"))
       columnar(mapped.collect().toList) shouldBe row(mapped.collect().toList)
     }
@@ -855,7 +855,7 @@ class TestColumnarActions extends AnyFlatSpec with Matchers with BeforeAndAfterE
     def widened = DistCollection.ofIntPairs(keys, values, 2).mapValues[Int, Int, Long](_.toLong)
 
     armColumnar()
-    ColumnarPlanner.partitioning(strings.plan) shouldBe None
+    ColumnarPlanner.partitioning(strings.plan).shouldBeEmpty
     ColumnarPlanner.partitioning(widened.plan).isDefined shouldBe true
     val described =
       Describe.describe(widened.plan).getOrElse(fail("mapValues to long did not lower"))

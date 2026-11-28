@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -12,6 +11,7 @@ import com.ewoodbury.scarlet.execution.schema.ColumnBinding.{
   ReducerWitness,
   Side,
 }
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Filters ask [[ColumnBinding]] before they build.
@@ -117,9 +117,9 @@ class TestFilterBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     Layout.known(child) shouldBe Layout.AssumedIntLong
     PhysicalSchema.isIntLongProject(child) shouldBe false
     ColumnBinding.resetChooseCallsForTest()
-    FilterBinding.slot(child, PhysicalOp.Slot.Key) shouldBe None
+    FilterBinding.slot(child, PhysicalOp.Slot.Key).shouldBeEmpty
     ColumnBinding.chooseCallsForTest should be > 0
-    ColumnBinding.asked(child, Operator.FilterKeys) shouldBe None
+    ColumnBinding.asked(child, Operator.FilterKeys).shouldBeEmpty
   }
 
   it should "keep one slot above an int-long project the binder refuses" in {
@@ -134,13 +134,15 @@ class TestFilterBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       case Output.Columns(found) => found
       case Output.IntLongPairs(_) => fail("int-long map values are not AssumedIntLong")
       case Output.Opaque(reason) => fail(reason)
-    ColumnBinding.choose(
-      columns,
-      Operator.FilterKeys,
-      ReducerWitness.NotApplicable,
-      NullAdmission.Policy(NullPolicy.Nullable),
-      Side.Inner,
-    ) shouldBe None
+    ColumnBinding
+      .choose(
+        columns,
+        Operator.FilterKeys,
+        ReducerWitness.NotApplicable,
+        NullAdmission.Policy(NullPolicy.Nullable),
+        Side.Inner,
+      )
+      .shouldBeEmpty
     lower(Plan.FilterValuesOp(projected, (value: Long) => value >= 0L)).isDefined shouldBe true
   }
 
@@ -151,20 +153,24 @@ class TestFilterBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       ColumnLayout(ColumnType.Int32, NullPolicy.Nullable),
       ColumnLayout(ColumnType.Int32, NullPolicy.Nullable),
     )
-    ColumnBinding.choose(
-      columns,
-      Operator.FilterKeys,
-      ReducerWitness.NotApplicable,
-      NullAdmission.Policy(NullPolicy.Nullable),
-      Side.Inner,
-    ) shouldBe None
-    ColumnBinding.choose(
-      columns,
-      Operator.FilterValues,
-      ReducerWitness.NotApplicable,
-      NullAdmission.Policy(NullPolicy.Nullable),
-      Side.Inner,
-    ) shouldBe None
+    ColumnBinding
+      .choose(
+        columns,
+        Operator.FilterKeys,
+        ReducerWitness.NotApplicable,
+        NullAdmission.Policy(NullPolicy.Nullable),
+        Side.Inner,
+      )
+      .shouldBeEmpty
+    ColumnBinding
+      .choose(
+        columns,
+        Operator.FilterValues,
+        ReducerWitness.NotApplicable,
+        NullAdmission.Policy(NullPolicy.Nullable),
+        Side.Inner,
+      )
+      .shouldBeEmpty
     ColumnBinding.choose(
       columns,
       Operator.Filter,
@@ -172,7 +178,7 @@ class TestFilterBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       NullAdmission.Policy(NullPolicy.Nullable),
       Side.Inner,
     ) shouldBe Some(KernelChoice.Filter)
-    lower(Plan.FilterKeysOp(joined, (key: Int) => key > 0)) shouldBe None
+    lower(Plan.FilterKeysOp(joined, (key: Int) => key > 0)).shouldBeEmpty
     val row = lower(Plan.FilterOp(joined, (row: (Int, (Int, Int))) => row._1 > 0))
     ColumnBinding.chooseCallsForTest should be > 0
     follows(row, Operator.Filter)

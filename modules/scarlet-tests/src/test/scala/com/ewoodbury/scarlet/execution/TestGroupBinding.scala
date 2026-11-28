@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -7,6 +6,7 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.execution.schema.*
 import com.ewoodbury.scarlet.execution.schema.ColumnBinding.Operator
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * `groupByKey`, `distinct`, `keys`, and `values` ask [[ColumnBinding]] before they build.
@@ -82,7 +82,7 @@ class TestGroupBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
   it should "ask before refusing a column the group does not run" in {
     val rows = Seq[Partition[_]](Partition(Seq(1)))
     val column = PhysicalOp.Scan(PhysicalOp.Kind.Ints, rows)
-    GroupByKeyLowering.apply(column) shouldBe None
+    GroupByKeyLowering.apply(column).shouldBeEmpty
     ColumnBinding.chooseCallsForTest should be > 0
   }
 
@@ -91,9 +91,9 @@ class TestGroupBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       PhysicalOp.MapKey(PhysicalOp.Project(PhysicalOp.Scan(PhysicalOp.Kind.Triples, Seq.empty)))
     child.kind shouldBe PhysicalOp.Kind.Pairs
     ColumnBinding.resetChooseCallsForTest()
-    GroupByKeyLowering.apply(child) shouldBe None
+    GroupByKeyLowering.apply(child).shouldBeEmpty
     ColumnBinding.chooseCallsForTest should be > 0
-    ColumnBinding.asked(child, Operator.GroupByKey) shouldBe None
+    ColumnBinding.asked(child, Operator.GroupByKey).shouldBeEmpty
   }
 
   "distinct" should "ask the binder for an accepted int column" in {
@@ -116,8 +116,8 @@ class TestGroupBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val child = PhysicalOp.GroupedDecode(PhysicalOp.Scan(PhysicalOp.Kind.Ints, Seq.empty))
     child.kind shouldBe PhysicalOp.Kind.Ints
     Layout.known(child) shouldBe Layout.Grouped
-    DistinctLowering.apply(child) shouldBe None
-    ColumnBinding.asked(child, Operator.Distinct) shouldBe None
+    DistinctLowering.apply(child).shouldBeEmpty
+    ColumnBinding.asked(child, Operator.Distinct).shouldBeEmpty
   }
 
   "keys and values" should "ask the binder and keep Column" in {
@@ -138,9 +138,9 @@ class TestGroupBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       PhysicalOp.MapKey(PhysicalOp.Project(PhysicalOp.Scan(PhysicalOp.Kind.Triples, Seq.empty)))
     child.kind shouldBe PhysicalOp.Kind.Pairs
     ColumnBinding.resetChooseCallsForTest()
-    KeyValueLowering.project(intPairs, 0, _ => Some(child)) shouldBe None
+    KeyValueLowering.project(intPairs, 0, _ => Some(child)).shouldBeEmpty
     ColumnBinding.chooseCallsForTest should be > 0
-    ColumnBinding.asked(child, Operator.Keys) shouldBe None
+    ColumnBinding.asked(child, Operator.Keys).shouldBeEmpty
   }
 
   it should "keep keys of groupByKey on the count witness" in {
@@ -193,7 +193,7 @@ class TestGroupBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     root.shape shouldBe "GroupedDecode(GroupByKey(Exchange(Scan)))"
     Layout.known(root) shouldBe Layout.Grouped
     ColumnBinding.chooseCallsForTest should be > 0
-    ColumnarPlanner.lower(Plan.ValuesOp(Plan.GroupByKeyOp(intPairs))) shouldBe None
+    ColumnarPlanner.lower(Plan.ValuesOp(Plan.GroupByKeyOp(intPairs))).shouldBeEmpty
   }
 
   private def keeps(

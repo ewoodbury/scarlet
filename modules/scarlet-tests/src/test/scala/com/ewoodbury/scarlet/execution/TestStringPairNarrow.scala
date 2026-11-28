@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,14 +9,16 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Columnar `keys`, `values`, `mapValues`, `filterKeys`, and `filterValues` on `(String, Int)`.
  *
  * The row path is the oracle. A null key stays in the batch. A null int stays absent. A null int
- * on `reduceByKey`, `groupByKey`, or an inner join stays on the row path.
- * Distinct and a string `mapValues` stay on the row path. `reduceByKey`, `groupByKey`, and an
- * inner shuffle-hash join lower.
+ * on `reduceByKey`, `groupByKey`, or an inner join stays on the row path. Distinct and a string
+ * `mapValues` stay on the row path. `reduceByKey`, `groupByKey`, and an inner shuffle-hash join
+ * lower.
  */
 class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -162,13 +163,13 @@ class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
     columnar(leading) shouldBe Seq(nullKey(1), "red" -> 2)
     ColumnarPlanner.lower(nullValue.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.StringPairs)
     decoded.length shouldBe 2
-    decoded.head shouldBe ("red" -> 1)
-    keyOf(decoded(1)) shouldBe "blue"
-    absentValue(decoded(1)) shouldBe true
-    ColumnarPlanner.lower(bothNull.plan) shouldBe None
-    ColumnarPlanner.lower(onlyNull.plan) shouldBe None
+    Check.first(decoded) shouldBe ("red" -> 1)
+    keyOf(Check.at(decoded, 1)) shouldBe "blue"
+    absentValue(Check.at(decoded, 1)) shouldBe true
+    ColumnarPlanner.lower(bothNull.plan).shouldBeEmpty
+    ColumnarPlanner.lower(onlyNull.plan).shouldBeEmpty
     stayedOnRows(onlyNull) shouldBe Seq(nullKey(1), nullKey(2))
-    ColumnarPlanner.lower(empty.plan) shouldBe None
+    ColumnarPlanner.lower(empty.plan).shouldBeEmpty
   }
 
   it should "decline a value projection that kept a null int" in {
@@ -183,11 +184,11 @@ class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
     ColumnarPlanner.lower(byKey.plan).map(_.shape) shouldBe Some("Value(FilterKey(Scan))")
     ColumnarPlanner.lower(byRow.plan).map(_.shape) shouldBe Some("Value(FilterRow(Scan))")
     ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some("Value(MapValue(Scan))")
-    ColumnarPlanner.tryRun(direct.plan) shouldBe None
-    ColumnarPlanner.tryRun(byKey.plan) shouldBe None
-    ColumnarPlanner.tryRun(byRow.plan) shouldBe None
-    ColumnarPlanner.tryRun(mapped.plan) shouldBe None
-    ColumnarPlanner.tryTake(byKey.plan, 1) shouldBe None
+    ColumnarPlanner.tryRun(direct.plan).shouldBeEmpty
+    ColumnarPlanner.tryRun(byKey.plan).shouldBeEmpty
+    ColumnarPlanner.tryRun(byRow.plan).shouldBeEmpty
+    ColumnarPlanner.tryRun(mapped.plan).shouldBeEmpty
+    ColumnarPlanner.tryTake(byKey.plan, 1).shouldBeEmpty
     columnar(kept) shouldBe rowOf(kept)
   }
 
@@ -207,24 +208,26 @@ class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
   it should "leave a two-field case class on the row path" in {
     val labels = DistCollection(Seq(Label("red", 1), Label("blue", 2)), 1)
 
-    ColumnarPlanner.lower(labels.plan) shouldBe None
+    ColumnarPlanner.lower(labels.plan).shouldBeEmpty
   }
 
   it should "lower reduceByKey, groupByKey, and an inner join, and keep distinct and a string mapValues on the row path" in {
     val rows = source
     val grouped = rows.groupByKey
-    ColumnarPlanner.lower(rows.reduceByKey((left: Int, right: Int) => left + right).plan).map(
-      _.shape,
-    ) shouldBe Some("StringHashAggregate(Exchange(Scan))")
+    ColumnarPlanner
+      .lower(rows.reduceByKey((left: Int, right: Int) => left + right).plan)
+      .map(
+        _.shape,
+      ) shouldBe Some("StringHashAggregate(Exchange(Scan))")
     ColumnarPlanner.lower(grouped.plan).map(_.shape) shouldBe Some("GroupByKey(Exchange(Scan))")
     valuesByKey(columnar(grouped)) shouldBe valuesByKey(rowOf(grouped))
-    ColumnarPlanner.lower(rows.distinct().plan) shouldBe None
+    ColumnarPlanner.lower(rows.distinct().plan).shouldBeEmpty
     ColumnarPlanner.lower(rows.join(rows).plan).map(_.shape) shouldBe Some(
       "StringHashJoin(Exchange(Scan), Exchange(Scan))",
     )
-    ColumnarPlanner.lower(rows.mapValues((value: Int) => value.toString).plan) shouldBe None
-    ColumnarPlanner.groupedSumPeel(rows.filterKeys(isRed).plan) shouldBe None
-    ColumnarPlanner.tryGroupedSum(rows.filterKeys(isRed).plan) shouldBe None
+    ColumnarPlanner.lower(rows.mapValues((value: Int) => value.toString).plan).shouldBeEmpty
+    ColumnarPlanner.groupedSumPeel(rows.filterKeys(isRed).plan).shouldBeEmpty
+    ColumnarPlanner.tryGroupedSum(rows.filterKeys(isRed).plan).shouldBeEmpty
   }
 
   it should "resolve the same strings from dictionaries with different first-seen order" in {
@@ -348,7 +351,7 @@ class TestStringPairNarrow extends AnyFlatSpec with Matchers with BeforeAndAfter
     ),
   )
   private def absentValue(row: (String, Int)): Boolean =
-    row.productElement(1).asInstanceOf[AnyRef] eq null
+    Check.isNull(row.productElement(1).asInstanceOf[AnyRef])
 
   @SuppressWarnings(
     Array(

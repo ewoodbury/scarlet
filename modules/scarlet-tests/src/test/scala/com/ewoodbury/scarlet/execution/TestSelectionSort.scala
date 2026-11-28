@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.nio.file.{Files, Path}
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -11,6 +10,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Int `sortByIntKey` over a filter selection.
@@ -452,7 +452,7 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
         selectedPartition = None,
         preserveAbsence = true,
         ColumnUse.ordinals(sortPlan, project),
-      ) shouldBe None
+      ) shouldBe Option.empty[Vector[Selected]]
     IntPairProject.resetPublishedForTest()
     IntTopN.resetBatchesForTest()
     collect(shifted) shouldBe Seq(2 -> 31, 3 -> 21, 1 -> 11)
@@ -514,7 +514,7 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
         selectedPartition = None,
         preserveAbsence = true,
         ColumnUse.ordinals(sortPlan, mapped),
-      ) shouldBe None
+      ) shouldBe Option.empty[Vector[Selected]]
     MapIntKey.resetPublishedForTest()
     IntTopN.resetBatchesForTest()
     collect(keyedDesc) shouldBe Seq(3 -> 30, 4 -> 20, 2 -> 10)
@@ -597,7 +597,7 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
         selectedPartition = None,
         preserveAbsence = true,
         ColumnUse.ordinals(sortPlan, mapped),
-      ) shouldBe None
+      ) shouldBe Option.empty[Vector[Selected]]
     MapIntKey.resetPublishedForTest()
     IntTopN.resetBatchesForTest()
     collect(slotAboveMap) shouldBe Seq(3 -> 30, 4 -> 20)
@@ -697,7 +697,7 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
         selectedPartition = None,
         preserveAbsence = true,
         ColumnUse.ordinals(sortPlan, mapped),
-      ) shouldBe None
+      ) shouldBe Option.empty[Vector[Selected]]
     MapIntKey.resetPublishedForTest()
     RankSplit.resetForTest()
     collect(mappedKey) shouldBe Seq(3 -> 20, 4 -> 30)
@@ -784,37 +784,37 @@ class TestSelectionSort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       DistCollection(Seq("b" -> 2, "a" -> 1), 1).map((pair: (String, Int)) => (pair._2, pair._2))
     val bad = source.map((pair: (Int, Int)) => stringKey(pair)).sortByIntKey
 
-    ColumnarPlanner.lower(values.plan) shouldBe None
+    ColumnarPlanner.lower(values.plan).shouldBeEmpty
     ColumnarPlanner.lower(twice.plan).map(_.shape) shouldBe Some("Project(Project(Scan))")
-    ColumnarPlanner.lower(twice.sortByIntKey.plan) shouldBe None
-    ColumnarPlanner.lower(above.plan) shouldBe None
-    ColumnarPlanner.lower(twiceDesc.plan) shouldBe None
-    ColumnarPlanner.lower(aboveMap.plan) shouldBe None
-    ColumnarPlanner.lower(twiceMapped.plan) shouldBe None
-    ColumnarPlanner.lower(onProject.plan) shouldBe None
-    ColumnarPlanner.lower(second.plan) shouldBe None
-    ColumnarPlanner.lower(secondAbove.plan) shouldBe None
-    ColumnarPlanner.lower(secondKey.plan) shouldBe None
-    ColumnarPlanner.lower(rowAboveKey.plan) shouldBe None
-    ColumnarPlanner.lower(secondSlot.plan) shouldBe None
-    ColumnarPlanner.lower(rowAboveMap.plan) shouldBe None
-    ColumnarPlanner.lower(slotAboveSecond.plan) shouldBe None
-    ColumnarPlanner.lower(secondMap.plan) shouldBe None
-    ColumnarPlanner.lower(projectUnderMap.plan) shouldBe None
-    ColumnarPlanner.lower(rowAboveProject.plan) shouldBe None
-    ColumnarPlanner.lower(secondAboveProject.plan) shouldBe None
+    ColumnarPlanner.lower(twice.sortByIntKey.plan).shouldBeEmpty
+    ColumnarPlanner.lower(above.plan).shouldBeEmpty
+    ColumnarPlanner.lower(twiceDesc.plan).shouldBeEmpty
+    ColumnarPlanner.lower(aboveMap.plan).shouldBeEmpty
+    ColumnarPlanner.lower(twiceMapped.plan).shouldBeEmpty
+    ColumnarPlanner.lower(onProject.plan).shouldBeEmpty
+    ColumnarPlanner.lower(second.plan).shouldBeEmpty
+    ColumnarPlanner.lower(secondAbove.plan).shouldBeEmpty
+    ColumnarPlanner.lower(secondKey.plan).shouldBeEmpty
+    ColumnarPlanner.lower(rowAboveKey.plan).shouldBeEmpty
+    ColumnarPlanner.lower(secondSlot.plan).shouldBeEmpty
+    ColumnarPlanner.lower(rowAboveMap.plan).shouldBeEmpty
+    ColumnarPlanner.lower(slotAboveSecond.plan).shouldBeEmpty
+    ColumnarPlanner.lower(secondMap.plan).shouldBeEmpty
+    ColumnarPlanner.lower(projectUnderMap.plan).shouldBeEmpty
+    ColumnarPlanner.lower(rowAboveProject.plan).shouldBeEmpty
+    ColumnarPlanner.lower(secondAboveProject.plan).shouldBeEmpty
     ColumnarPlanner.lower(longs.plan).map(_.shape) shouldBe Some("Project(Scan)")
-    ColumnarPlanner.lower(longs.sortByIntKey.plan) shouldBe None
-    ColumnarPlanner.lower(longs.sortByIntValueDesc.plan) shouldBe None
+    ColumnarPlanner.lower(longs.sortByIntKey.plan).shouldBeEmpty
+    ColumnarPlanner.lower(longs.sortByIntValueDesc.plan).shouldBeEmpty
     ColumnarPlanner.lower(strings.plan).map(_.shape) shouldBe Some("Project(Scan)")
-    ColumnarPlanner.lower(strings.sortByIntKey.plan) shouldBe None
-    ColumnarPlanner.lower(strings.sortByIntValueDesc.plan) shouldBe None
+    ColumnarPlanner.lower(strings.sortByIntKey.plan).shouldBeEmpty
+    ColumnarPlanner.lower(strings.sortByIntValueDesc.plan).shouldBeEmpty
     shape(bad) shouldBe "SortByIntKey(Project(Scan))"
     val lowered = ColumnarPlanner.lower(bad.plan).getOrElse(fail("expected a project sort"))
     a[ColumnarFallback] should be thrownBy {
       val _ = ColumnarInterpreter.interpret(bad.plan, lowered)
     }
-    ColumnarPlanner.tryRun(bad.plan) shouldBe None
+    ColumnarPlanner.tryRun(bad.plan).shouldBeEmpty
   }
 
   "sortAndSplitSelected" should "match sortAndSplit of the materialised prefix" in {

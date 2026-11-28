@@ -1,10 +1,10 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.core.ScarletConf
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * The row-arm allowlist is debt. A listed shape that lowers has to leave the list. A scored shape
@@ -58,8 +58,8 @@ class TestCrossEngineRowDebt extends AnyFlatSpec with Matchers with BeforeAndAft
   "a listed shape that lowers" should "have to leave the allowlist" in {
     val lowered = debt(listed = true, Some("FilterKey(Scan)"), "filter-count")
     lowered.map(_.contains("remove it")) shouldBe Some(true)
-    debt(listed = true, None, "still-row") shouldBe None
-    debt(listed = false, Some("FilterKey(Scan)"), "columnar") shouldBe None
+    debt(listed = true, None, "still-row").shouldBeEmpty
+    debt(listed = false, Some("FilterKey(Scan)"), "columnar").shouldBeEmpty
     val missing = debt(listed = false, None, "filter-count")
     missing.map(_.contains("add it")) shouldBe Some(true)
   }
@@ -80,10 +80,10 @@ class TestCrossEngineRowDebt extends AnyFlatSpec with Matchers with BeforeAndAft
       message should include("arm=row")
     }
     CrossEngineBench.rowArms.foreach { entry =>
-      CrossEngineBench.rowArmRefusal(entry.shape, None) shouldBe None
+      CrossEngineBench.rowArmRefusal(entry.shape, None).shouldBeEmpty
     }
-    CrossEngineBench.rowArmRefusal("filter-count", Some("FilterKey(Scan)")) shouldBe None
-    CrossEngineBench.unlistedRow("filter-count", Seq("filter-count")) shouldBe None
+    CrossEngineBench.rowArmRefusal("filter-count", Some("FilterKey(Scan)")).shouldBeEmpty
+    CrossEngineBench.unlistedRow("filter-count", Seq("filter-count")).shouldBeEmpty
     CrossEngineBench.unlistedRow("filter-count", Seq.empty[String]) shouldBe defined
   }
 

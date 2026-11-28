@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.nio.file.Path
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Columnar rank split of a long-pair scan. A null key orders as zero and stays null. A null value
@@ -176,15 +176,15 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.lower(above.plan).map(_.shape) shouldBe Some(
       "FilterRow(SortByLongKey(Scan))",
     )
-    ColumnarPlanner.tryTake(above.plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(above.plan, 1).shouldBeEmpty
     collect(above) shouldBe rowCollect(above)
     collect(above) shouldBe Seq(1L -> 10L, 2L -> 21L, 3L -> 30L)
     // A long-pair row filter under the sort still sorts the survivor index.
     ColumnarPlanner.lower(below.plan).map(_.shape) shouldBe Some("SortByLongKey(FilterRow(Scan))")
     collect(below) shouldBe rowCollect(below)
-    ColumnarPlanner.lower(twice.plan) shouldBe None
+    ColumnarPlanner.lower(twice.plan).shouldBeEmpty
     collect(twice) shouldBe rowCollect(twice)
-    ColumnarPlanner.lower(byValue.plan) shouldBe None
+    ColumnarPlanner.lower(byValue.plan).shouldBeEmpty
     collect(byValue) shouldBe rowCollect(byValue)
     ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some(
       "SortByLongKey(Project(Scan))",
@@ -266,7 +266,7 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     )
     direct.flatMap(batch => BatchCodec.decodeLongPairs(batch)) shouldBe again
     ColumnarPlanner.lower(twice.plan).map(_.shape) shouldBe Some("Project(Project(Scan))")
-    ColumnarPlanner.lower(twice.sortByLongKey.plan) shouldBe None
+    ColumnarPlanner.lower(twice.sortByLongKey.plan).shouldBeEmpty
     ColumnarPlanner.lower(byKey.plan).map(_.shape) shouldBe Some(
       "SortByLongKey(FilterKey(Project(Scan)))",
     )
@@ -285,7 +285,7 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     )
     collect(onStack) shouldBe rowCollect(onStack)
     collect(onStack) shouldBe Seq(3L -> 20L, 4L -> 30L)
-    ColumnarPlanner.lower(second.plan) shouldBe None
+    ColumnarPlanner.lower(second.plan).shouldBeEmpty
     val filteredPlan = byKey.plan match
       case Plan.SortByLongKeyOp(child) => child
       case _ => fail("expected SortByLongKeyOp")
@@ -307,8 +307,8 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     publishedSort shouldBe Seq(3L -> 20L, 4L -> 30L)
     LongPairProject.publishedForTest should be > 0
     RankSplitLongRuns.filesWrittenForTest shouldBe 0L
-    ColumnarPlanner.lower(above.plan) shouldBe None
-    ColumnarPlanner.lower(values.plan) shouldBe None
+    ColumnarPlanner.lower(above.plan).shouldBeEmpty
+    ColumnarPlanner.lower(values.plan).shouldBeEmpty
     ColumnarPlanner.lower(keyed.plan).map(_.shape) shouldBe Some("MapKey(Scan)")
     val keyedSort = keyed.sortByIntKey
     ColumnarPlanner.lower(keyedSort.plan).map(_.shape) shouldBe Some(
@@ -324,13 +324,15 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       ColumnarPlanner.lower(keyedSort.plan).getOrElse(fail("expected a key sort")) match
         case PhysicalOp.SortByIntKey(child) => child
         case _ => fail("expected SortByIntKey")
-    FilterChain.selected(
-      sortPlan,
-      mappedChild,
-      selectedPartition = None,
-      preserveAbsence = true,
-      ColumnUse.ordinals(sortPlan, mappedChild),
-    ) shouldBe None
+    FilterChain
+      .selected(
+        sortPlan,
+        mappedChild,
+        selectedPartition = None,
+        preserveAbsence = true,
+        ColumnUse.ordinals(sortPlan, mappedChild),
+      )
+      .shouldBeEmpty
     MapIntKey.resetPublishedForTest()
     RankSplit.resetForTest()
     collect(keyedSort) shouldBe Seq(2 -> 10, 3 -> 20, 4 -> 30)
@@ -352,7 +354,7 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       val _ = ColumnarInterpreter.interpret(bad.plan, lowered)
     }
     thrown.getMessage should startWith("pair map did not stay (Long, Long)")
-    ColumnarPlanner.tryRun(bad.plan) shouldBe None
+    ColumnarPlanner.tryRun(bad.plan).shouldBeEmpty
   }
 
   it should "order a null key from a long-pair project as zero and keep the null" in {
@@ -401,8 +403,8 @@ class TestSortByLongKey extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val row = rowCollect(filtered)
     val keptNull = row.lift(1).getOrElse(fail("missing null-key row"))
 
-    ColumnarPlanner.lower(filtered.plan) shouldBe None
-    ColumnarPlanner.partitioning(filtered.plan) shouldBe None
+    ColumnarPlanner.lower(filtered.plan).shouldBeEmpty
+    ColumnarPlanner.partitioning(filtered.plan).shouldBeEmpty
     collect(filtered) shouldBe row
     row shouldBe Seq(
       longPair(boxedLong(-4L), boxedLong(1L)),

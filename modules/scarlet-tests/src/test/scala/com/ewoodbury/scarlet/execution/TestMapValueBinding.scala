@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -12,6 +11,7 @@ import com.ewoodbury.scarlet.execution.schema.ColumnBinding.{
   ReducerWitness,
   Side,
 }
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Same-type `mapValues` asks [[ColumnBinding]] before it builds.
@@ -111,15 +111,15 @@ class TestMapValueBinding extends AnyFlatSpec with Matchers with BeforeAndAfterE
   }
 
   it should "leave a string pair widened to long unasked" in {
-    lower(Plan.MapValuesOp(stringPairs, (value: Int) => value.toLong)) shouldBe None
+    lower(Plan.MapValuesOp(stringPairs, (value: Int) => value.toLong)).shouldBeEmpty
     ColumnBinding.chooseCallsForTest shouldBe 0
   }
 
   it should "leave mapValues above an int key map unasked" in {
     val keyed = Plan.MapIntKeyOp(intPairs, (key: Int) => key + 1)
-    lower(Plan.MapValuesOp(keyed, (value: Int) => value + 1)) shouldBe None
+    lower(Plan.MapValuesOp(keyed, (value: Int) => value + 1)).shouldBeEmpty
     ColumnBinding.chooseCallsForTest shouldBe 0
-    lower(Plan.MapValuesOp(keyed, (value: Int) => value.toLong)) shouldBe None
+    lower(Plan.MapValuesOp(keyed, (value: Int) => value.toLong)).shouldBeEmpty
     ColumnBinding.chooseCallsForTest shouldBe 0
   }
 
@@ -130,13 +130,13 @@ class TestMapValueBinding extends AnyFlatSpec with Matchers with BeforeAndAfterE
     Layout.known(child) shouldBe Layout.AssumedIntLong
     PhysicalSchema.isIntLongProject(child) shouldBe false
     ColumnBinding.resetChooseCallsForTest()
-    MapValueBinding.value(child) shouldBe None
+    MapValueBinding.value(child).shouldBeEmpty
     ColumnBinding.chooseCallsForTest should be > 0
-    ColumnBinding.asked(child, Operator.MapValues) shouldBe None
+    ColumnBinding.asked(child, Operator.MapValues).shouldBeEmpty
     ColumnBinding.resetChooseCallsForTest()
-    IntLongMapBinding.value(child) shouldBe None
+    IntLongMapBinding.value(child).shouldBeEmpty
     ColumnBinding.chooseCallsForTest should be > 0
-    ColumnBinding.asked(child, Operator.IntLongMapValue) shouldBe None
+    ColumnBinding.asked(child, Operator.IntLongMapValue).shouldBeEmpty
   }
 
   /**

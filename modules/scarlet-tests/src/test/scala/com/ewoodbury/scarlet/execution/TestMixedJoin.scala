@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -8,16 +7,17 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, HashJoin}
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * One lowered join side and one `flatMap` side.
  *
- * The lowered side publishes a batch and [[HashJoin]] does not run. A whole-plan row rerun
- * matches the rows and publishes nothing. A null key or null value on the lowered side has to
- * collect the same rows as the row join: [[ColumnarPlanner.tryRun]] throws on a null `Int32`
- * pair, and a lowered `filterKeys` drops a null the row predicate would unbox. [[MixedJoin]]
- * returns `None` for that side. Outer joins keep unmatched keys that sit on the `flatMap` side,
- * including a `flatMap` that emits nothing and one that emits two rows.
+ * The lowered side publishes a batch and [[HashJoin]] does not run. A whole-plan row rerun matches
+ * the rows and publishes nothing. A null key or null value on the lowered side has to collect the
+ * same rows as the row join: [[ColumnarPlanner.tryRun]] throws on a null `Int32` pair, and a
+ * lowered `filterKeys` drops a null the row predicate would unbox. [[MixedJoin]] returns `None`
+ * for that side. Outer joins keep unmatched keys that sit on the `flatMap` side, including a
+ * `flatMap` that emits nothing and one that emits two rows.
  */
 class TestMixedJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -95,12 +95,12 @@ class TestMixedJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     thrown.getMessage should include("null Int32 pair")
     val partner = others.flatMap(keep)
     val inner = nullKey.join(partner)
-    MixedJoin.partitions(inner.plan) shouldBe None
+    MixedJoin.partitions(inner.plan).shouldBeEmpty
     val innerRows = agree(inner, published = false)
     innerRows.exists(_.contains("null")) shouldBe false
 
     val full = partner.fullOuterJoin(nullKey)
-    MixedJoin.partitions(full.plan) shouldBe None
+    MixedJoin.partitions(full.plan).shouldBeEmpty
     val fullRows = agree(full, published = false)
     fullRows.exists(_.contains("null")) shouldBe true
   }
@@ -109,7 +109,7 @@ class TestMixedJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val thrown = the[IllegalArgumentException] thrownBy ColumnarPlanner.tryRun(nullValue.plan)
     thrown.getMessage should include("null Int32 pair")
     val joined = DistCollection.ofIntPairs(Array(2), Array(200), 1).flatMap(keep).join(nullValue)
-    MixedJoin.partitions(joined.plan) shouldBe None
+    MixedJoin.partitions(joined.plan).shouldBeEmpty
     val rows = agree(joined, published = false)
     rows.exists(_.contains("null")) shouldBe true
   }
@@ -117,7 +117,7 @@ class TestMixedJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   "filterKeys of a null key" should "keep the key the row predicate unboxes" in {
     val filtered = nullKey.filterKeys((key: Int) => key >= 0)
     val joined = others.flatMap(keep).rightOuterJoin(filtered)
-    MixedJoin.partitions(joined.plan) shouldBe None
+    MixedJoin.partitions(joined.plan).shouldBeEmpty
     val rows = agree(joined, published = false)
     rows.exists(_.contains("null")) shouldBe true
   }
@@ -125,14 +125,14 @@ class TestMixedJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   "filterKeys of a null value" should "keep the value the row join keeps" in {
     val filtered = nullValue.filterKeys((key: Int) => key >= 0)
     val joined = DistCollection.ofIntPairs(Array(2), Array(200), 1).flatMap(keep).join(filtered)
-    MixedJoin.partitions(joined.plan) shouldBe None
+    MixedJoin.partitions(joined.plan).shouldBeEmpty
     val rows = agree(joined, published = false)
     rows.exists(_.contains("null")) shouldBe true
   }
 
   "two flatMap sides" should "stay on the row executor" in {
     val joined = pairs.flatMap(keep).join(others.flatMap(twice))
-    MixedJoin.partitions(joined.plan) shouldBe None
+    MixedJoin.partitions(joined.plan).shouldBeEmpty
     agree(joined, published = false)
   }
 

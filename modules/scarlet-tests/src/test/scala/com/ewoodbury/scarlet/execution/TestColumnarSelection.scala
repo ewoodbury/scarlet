@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,7 @@ import com.ewoodbury.scarlet.api.{DictionaryStringPredicate, DistCollection}
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Pins which plans select the columnar kernels, and that the row path still owns everything else.
@@ -204,7 +204,7 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     longFound shouldBe row(longReduced.collect().toMap)
 
     val strings = DistCollection(Seq("red" -> 1, "" -> 2, "no" -> 9, "red" -> 4), 1)
-    val stringFiltered = strings.filterKeys((key: String) => key != "no")
+    val stringFiltered = strings.filterKeys((key: String) => !Check.same(key, "no"))
     // Survivors are ("red", 1), ("", 2), and ("red", 4). "no" is the dropped row.
     columnar {
       ColumnarPlanner.lower(stringFiltered.plan).map(_.shape) shouldBe Some("FilterKey(Scan)")
@@ -677,12 +677,12 @@ class TestColumnarSelection extends AnyFlatSpec with Matchers with BeforeAndAfte
     val actual = columnar(DistCollection(values, 2).filterStringEquals("US"))
 
     assertUtf8(actual, 2)
-    actual.collect() shouldBe row(DistCollection(values, 2).filter(_ == "US").collect())
+    actual.collect() shouldBe row(DistCollection(values, 2).filter(Check.same(_, "US")).collect())
     actual.collect() shouldBe texts(Some("US"), Some("US"))
 
     val missing = columnar(DistCollection(values, 2).filterStringEquals("GB"))
     assertUtf8(missing, 2)
-    missing.collect() shouldBe row(DistCollection(values, 2).filter(_ == "GB").collect())
+    missing.collect() shouldBe row(DistCollection(values, 2).filter(Check.same(_, "GB")).collect())
     missing.collect() shouldBe empty
   }
 

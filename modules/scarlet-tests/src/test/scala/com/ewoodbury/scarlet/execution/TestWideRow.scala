@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -7,6 +6,8 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Wide-row scan, filter, and project through the engine.
@@ -78,17 +79,17 @@ class TestWideRow extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   it should "rerun a compare the set does not name" in {
     val planned = source.filterColumn(2, ColumnCompare(CompareOp.Gt, ColumnLiteral.Int32(1)))
-    ColumnarPlanner.lower(planned.plan) shouldBe None
+    ColumnarPlanner.lower(planned.plan).shouldBeEmpty
     same(planned, List.empty[WideRow])
   }
 
   it should "rerun a predicate the set does not name" in {
     val planned = source.filter { row =>
-      row.cells.head match
+      Check.first(row.cells) match
         case Cell.Int32(value) => value > 1
         case _ => false
     }
-    ColumnarPlanner.lower(planned.plan) shouldBe None
+    ColumnarPlanner.lower(planned.plan).shouldBeEmpty
     planned.plan match
       case _: Plan.FilterOp[?] => succeed
       case other => fail(s"expected a row filter, found $other")

@@ -1,11 +1,12 @@
 package com.ewoodbury.scarlet.columnar
-
 import java.nio.file.{Files, Path}
 import java.nio.{ByteBuffer, ByteOrder}
 import java.util.zip.CRC32
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
+
+import com.ewoodbury.scarlet.support.Check
 
 final class TestSpillStore extends AnyFunSuite with Matchers:
 
@@ -227,7 +228,7 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
         val iterator = file.batches()
         try
           val first = iterator.next()
-          assertSame(Vector(first), Vector(batches.head))
+          assertSame(Vector(first), Vector(Check.first(batches)))
           an[IllegalStateException] should be thrownBy iterator.next()
         finally iterator.close()
       finally store.close()
@@ -354,19 +355,19 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
       try
         val read = store.write(Vector(batch)).read()
         read should have length 1
-        val columns = read.head.columns
+        val columns = Check.first(read).columns
         columns.length shouldBe 3
-        columns(0) match
+        Check.at(columns, 0) match
           case column: Float64Column =>
             column.values(0) shouldBe 1.5
             column.isValid(1) shouldBe false
           case other => fail(s"expected Float64, got ${other.logicalType}")
-        columns(1) match
+        Check.at(columns, 1) match
           case column: Float32Column =>
             column.values(0) shouldBe 1.25f
             column.isValid(0) shouldBe true
           case other => fail(s"expected Float32, got ${other.logicalType}")
-        columns(2) match
+        Check.at(columns, 2) match
           case column: BoolColumn =>
             column.values(0) shouldBe 1.toByte
             column.isValid(1) shouldBe false
@@ -395,7 +396,7 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
       try
         val read = store.write(Vector(batch)).read()
         read should have length 1
-        read.head.columns.head match
+        Check.first(Check.first(read).columns) match
           case values: DecimalColumn =>
             values.precision shouldBe 4
             values.scale shouldBe 2
@@ -466,7 +467,7 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
 
   test("enforces the byte cap at the boundary") {
     withDir { dir =>
-      val batch = intBatch((0 until 100).toSeq)
+      val batch = intBatch((0 until 100))
       val store = SpillStore.open(dir, maxFiles = 100, maxBytes = 64L)
       try an[IllegalStateException] should be thrownBy store.write(Vector(batch))
       finally store.close()
@@ -476,7 +477,7 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
 
   test("the byte cap is exclusive at the exact file size") {
     withDir { dir =>
-      val batch = intBatch((0 until 100).toSeq)
+      val batch = intBatch((0 until 100))
       val probe = SpillStore.open(dir, maxFiles = 100, maxBytes = 1L << 20)
       val size =
         try Files.size(probe.write(Vector(batch)).location)
@@ -484,7 +485,7 @@ final class TestSpillStore extends AnyFunSuite with Matchers:
       SpillStore.listForTest(dir).foreach(path => Files.deleteIfExists(path))
 
       val fits = SpillStore.open(dir, maxFiles = 100, maxBytes = size + 1L)
-      try fits.write(Vector(batch)) should not be null
+      try Check.isNull(fits.write(Vector(batch))) shouldBe false
       finally fits.close()
 
       val exact = SpillStore.open(dir, maxFiles = 100, maxBytes = size)

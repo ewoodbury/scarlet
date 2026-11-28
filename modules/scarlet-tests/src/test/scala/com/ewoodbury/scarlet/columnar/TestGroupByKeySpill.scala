@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.columnar
-
 import java.nio.file.{Files, Path}
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.execution.{ColumnarPlanner, ExecutionModuleSupport}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Int `groupByKey` spill. Groups are compared with the in-memory kernel. Spill off matches that
@@ -159,8 +159,8 @@ class TestGroupByKeySpill extends AnyFlatSpec with Matchers with BeforeAndAfterE
     withConf(enabled = true, budget = morselBudget) { dir =>
       val parts = GroupByKey.int32(Vector(batch), partitions = 4, parallelism = 2)
       parts.length shouldBe 4
-      rowsOf(Vector(parts(0))) shouldBe Seq((Int.MinValue, values))
-      parts.tail.foreach(_.groups shouldBe 0)
+      rowsOf(Vector(Check.at(parts, 0))) shouldBe Seq((Int.MinValue, values))
+      parts.drop(1).foreach(_.groups shouldBe 0)
       GroupByKeySpill.filesWrittenForTest should be > 0L
       SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
     }

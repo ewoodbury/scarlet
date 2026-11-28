@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -8,6 +7,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.GroupByKey
 import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Int, long, and string `keys` of `groupByKey` against the row path.
@@ -118,9 +118,9 @@ class TestGroupByKeyKeys extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     val grouped = DistCollection.ofIntPairs(Array(5, 1, 5), Array(1, 2, 3), 2).groupByKey
     val mapped = grouped.map((row: (Int, Iterable[Int])) => row._1)
 
-    ColumnarPlanner.partitioning(grouped.values.plan) shouldBe None
-    ColumnarPlanner.lower(grouped.values.plan) shouldBe None
-    ColumnarPlanner.tryTake(grouped.plan, 1) shouldBe None
+    ColumnarPlanner.partitioning(grouped.values.plan).shouldBeEmpty
+    ColumnarPlanner.lower(grouped.values.plan).shouldBeEmpty
+    ColumnarPlanner.tryTake(grouped.plan, 1).shouldBeEmpty
     ColumnarPlanner.lower(mapped.plan).map(_.shape) shouldBe Some(
       "GroupedDecode(GroupByKey(Exchange(Scan)))",
     )
@@ -330,8 +330,8 @@ class TestGroupByKeyKeys extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     Tuple2(left, right).asInstanceOf[(Long, Long)]
 
   /**
-   * A present pair is first, so the scan classifies as string pairs. The null key is dropped.
-   * Key `c` has a null value and must still appear. `""` is kept.
+   * A present pair is first, so the scan classifies as string pairs. The null key is dropped. Key
+   * `c` has a null value and must still appear. `""` is kept.
    */
   @SuppressWarnings(
     Array(

@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -8,6 +7,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Long inner sort-merge against the row path.
@@ -131,7 +131,7 @@ class TestLongSortMergeJoin extends AnyFlatSpec with Matchers with BeforeAndAfte
     ColumnarPlanner.lower(left.broadcastJoin(right).plan).map(_.shape) shouldBe Some(
       "LongBroadcastJoin(Scan, Scan)",
     )
-    ColumnarPlanner.tryTake(left.sortMergeJoin(right).plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(left.sortMergeJoin(right).plan, 1).shouldBeEmpty
   }
 
   it should "throw on an over-budget sort-merge and write no spill file" in {

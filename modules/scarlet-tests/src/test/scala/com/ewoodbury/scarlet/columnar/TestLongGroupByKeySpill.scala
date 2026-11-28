@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.columnar
-
 import java.nio.file.{Files, Path}
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.execution.{ColumnarPlanner, ExecutionModuleSupport}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Long `groupByKey` spill. The estimate charges 8-byte keys. There is no selected kernel. A filter
@@ -165,7 +165,7 @@ class TestLongGroupByKeySpill extends AnyFlatSpec with Matchers with BeforeAndAf
     withConf(enabled = true, budget = morselBudget) { dir =>
       val parts = GroupByKey.int64(Vector(batch), partitions = 4, parallelism = 2)
       parts.length shouldBe 4
-      rowsOf(Vector(parts(slot))) shouldBe Seq((Long.MinValue, values.map(_.toLong)))
+      rowsOf(Vector(Check.at(parts, slot))) shouldBe Seq((Long.MinValue, values.map(_.toLong)))
       parts.zipWithIndex.foreach { (grouped, index) =>
         if (index != slot) then grouped.groups shouldBe 0
       }

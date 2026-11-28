@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -7,6 +6,7 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Inner hash join of `mapValues` from `(Int, Int)` to `(Int, Long)` on both sides.
@@ -64,7 +64,7 @@ class TestIntLongHashJoin extends AnyFlatSpec with Matchers with BeforeAndAfterE
 
     shape(joined) shouldBe hashShape
     // Row mapValues unboxes a null int to zero, so that collect is not the oracle.
-    seen shouldBe Seq((Some(1), None, Some(5L)))
+    seen shouldBe Seq[(Option[Int], Option[Long], Option[Long])]((Some(1), None, Some(5L)))
   }
 
   it should "drop a null key on both sides" in {
@@ -99,7 +99,7 @@ class TestIntLongHashJoin extends AnyFlatSpec with Matchers with BeforeAndAfterE
       Plan.FullOuterJoinOp(left.plan, right.plan, Some(Plan.JoinStrategy.SortMerge)),
     ) shouldBe
       "IntLongSortMergeFullOuter(Exchange(IntLongMapValue(Scan)), Exchange(IntLongMapValue(Scan)))"
-    ColumnarPlanner.lower(left.join(ints).plan) shouldBe None
+    ColumnarPlanner.lower(left.join(ints).plan).shouldBeEmpty
     shape(ints.join(other)) shouldBe "BroadcastJoin(Scan, Scan)"
     shape(ints.broadcastJoin(other)) shouldBe "BroadcastJoin(Scan, Scan)"
     shape(ints.sortMergeJoin(other)) shouldBe "SortMergeJoin(Exchange(Scan), Exchange(Scan))"

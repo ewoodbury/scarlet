@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -9,6 +8,7 @@ import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.execution.schema.{Describe, KernelChoice}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * A numeric array child is kept without a second run. A boxed null still falls back.
@@ -99,7 +99,7 @@ class TestBoundaryOracle extends AnyFlatSpec with Matchers with BeforeAndAfterEa
         .mapValues[Int, Int, String](value => value.toString)
     mapped.plan match
       case Plan.MapValuesOp(source, f) =>
-        RowBoundary.mapValues(source, f) shouldBe None
+        RowBoundary.mapValues(source, f).shouldBeEmpty
       case other => fail(s"expected mapValues, got $other")
     RowBoundary.childOracleRunsForTest should be > 0L
     val found = collectShown(mapped)

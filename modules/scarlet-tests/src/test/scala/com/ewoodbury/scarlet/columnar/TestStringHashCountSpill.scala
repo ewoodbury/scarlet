@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.columnar
-
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 
@@ -8,6 +7,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.core.ScarletConf
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * String `countByKey` spill. Counts are compared as decoded pairs. A budget that holds eight rows
@@ -126,7 +126,7 @@ class TestStringHashCountSpill extends AnyFlatSpec with Matchers with BeforeAndA
         selected.length shouldBe 4
         selected.map(_.length) shouldBe Seq(0, 0, 0, 0)
         fresh(selected)
-        dense.head should not be theSameInstanceAs(selected.head)
+        Check.first(dense) should not be theSameInstanceAs(Check.first(selected))
         StringHashCountSpill.filesWrittenForTest shouldBe 0L
         SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
       }
@@ -295,8 +295,8 @@ class TestStringHashCountSpill extends AnyFlatSpec with Matchers with BeforeAndA
     StringHashCount.inputRowBytes(rows, entries, text)
 
   private def fresh(batches: Vector[ColumnBatch]): Unit =
-    batches.indices.tail.foreach { index =>
-      batches(index) should not be theSameInstanceAs(batches(index - 1))
+    batches.indices.drop(1).foreach { index =>
+      Check.at(batches, index) should not be theSameInstanceAs(Check.at(batches, index - 1))
     }
 
   private def withConf[A](enabled: Boolean, budget: Long)(body: Path => A): A =

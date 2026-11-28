@@ -57,7 +57,7 @@ class TestDistinct extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   }
 
   it should "keep every value when all are distinct" in {
-    val values = (0 until 500).toSeq
+    val values = (0 until 500)
     columnar(values, 4).length shouldBe 500
   }
 

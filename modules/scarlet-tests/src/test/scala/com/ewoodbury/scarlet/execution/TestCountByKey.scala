@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,8 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Row and columnar `countByKey`. Equality is by key, because the two engines do not share
@@ -82,7 +83,7 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   it should "drop null keys on both engines" in {
     val source = DistCollection(Plan.Source(Seq(Partition(Seq(nullKey(1), nullKey(2))))))
     val counted = source.countByKey
-    ColumnarPlanner.lower(counted.plan) shouldBe None
+    ColumnarPlanner.lower(counted.plan).shouldBeEmpty
     countsOf(counted.collect()) shouldBe Map.empty[String, Int]
     countsOf(row(counted.collect())) shouldBe Map.empty[String, Int]
   }
@@ -92,7 +93,7 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       Plan.Source(Seq(Partition(Seq(nullValue(1), (1, "kept"), nullValue(2))))),
     )
     val counted = source.countByKey
-    ColumnarPlanner.lower(counted.plan) shouldBe None
+    ColumnarPlanner.lower(counted.plan).shouldBeEmpty
     countsOf(counted.collect()) shouldBe Map(1 -> 2, 2 -> 1)
     countsOf(row(counted.collect())) shouldBe Map(1 -> 2, 2 -> 1)
   }
@@ -225,7 +226,7 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val strings = DistCollection(
       Plan.Source(Seq(Partition(Seq("a" -> 1, "b" -> 2)), Partition(Seq("a" -> 3)))),
     )
-    val wholeRow = strings.filter((pair: (String, Int)) => pair._1 != "b").countByKey
+    val wholeRow = strings.filter((pair: (String, Int)) => !Check.same(pair._1, "b")).countByKey
     foldsOf(wholeRow.plan) shouldBe false
     FoldedCount.resetPassesForTest()
     countsOf(wholeRow.collect()) shouldBe Map("a" -> 2)
@@ -456,7 +457,7 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
     val widened = source.map((pair: (Long, Long)) => (pair._1.toInt, pair._2))
     ColumnarPlanner.lower(widened.plan).map(_.shape) shouldBe Some("Project(Scan)")
-    ColumnarPlanner.tryRun(widened.plan) shouldBe None
+    ColumnarPlanner.tryRun(widened.plan).shouldBeEmpty
   }
 
   it should "pin the filter-countbykey checksum" in {
@@ -511,7 +512,7 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
     FoldedCount.admits(Nil) shouldBe false
     FoldedCount.admitsUnmapped(Nil) shouldBe true
-    FoldedCount.count(Vector(batch), Nil, 1, 1, 8) shouldBe None
+    FoldedCount.count(Vector(batch), Nil, 1, 1, 8).shouldBeEmpty
     val unmapped = FoldedCount.countUnmapped(Vector(batch), Nil, 2, 1, 4)
     kernelCounts(unmapped.getOrElse(fail("unmapped count declined"))) shouldBe kernelCounts(
       HashCount.byKey(Vector(batch), 2, 1, 4),
@@ -519,7 +520,7 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val wholeRow: PairKernel.IntPairPredicate = (key, value) => key > value
     val rowStep = List(Selection.Step.IntPair(wholeRow))
     FoldedCount.admits(rowStep) shouldBe false
-    FoldedCount.count(Vector(batch), rowStep, 1, 1, 8) shouldBe None
+    FoldedCount.count(Vector(batch), rowStep, 1, 1, 8).shouldBeEmpty
 
     val empty =
       FoldedCount.count(Vector.empty, one, numPartitions = 4, parallelism = 1, batchSize = 8)
@@ -530,7 +531,7 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       ScarletConf.get
         .copy(spillEnabled = false, spillBudgetBytes = FoldedCount.chargedBytes(4) - 1L),
     )
-    FoldedCount.count(Vector(batch), one, 1, 1, 8) shouldBe None
+    FoldedCount.count(Vector(batch), one, 1, 1, 8).shouldBeEmpty
     ScarletConf.set(
       ScarletConf.get.copy(
         spillEnabled = false,
@@ -592,7 +593,7 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       ),
     )
     val counted = source
-      .filterKeys((key: String) => key != "b")
+      .filterKeys((key: String) => !Check.same(key, "b"))
       .filterValues((value: Int) => value > 0)
       .countByKey
     val lowered = ColumnarPlanner.lower(counted.plan)
@@ -1058,6 +1059,8 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   private def longRef(value: Long): java.lang.Long = java.lang.Long.valueOf(value)
 
+  private type LongPairMap = ((Long, Long)) => (Long, Long)
+
   /**
    * A null key becomes `nullKey`. A present key is incremented. `productElement` keeps a null
    * value, so both paths count it. The row path and the long-pair project call this once per row.
@@ -1070,7 +1073,7 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       "org.wartremover.warts.Throw",
     ),
   )
-  private def shiftNullLongKey(calls: AtomicInteger, nullKey: Long): ((Long, Long)) => (Long, Long) =
+  private def shiftNullLongKey(calls: AtomicInteger, nullKey: Long): LongPairMap =
     pair => {
       val _ = calls.incrementAndGet()
       val product = pair.asInstanceOf[Product]
@@ -1092,14 +1095,14 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   private def nullLongKeySource(): DistCollection[(Long, Long)] =
     def cell(key: Any, value: Long): (Long, Long) =
       Tuple2(key, Long.box(value)).asInstanceOf[(Long, Long)]
-    DistCollection(
-      Plan.Source(
-        Seq(
-          Partition(Seq(cell(longRef(1L), 4L), cell(null, 9L), cell(longRef(1L), 5L), cell(longRef(2L), -1L))),
-          Partition(Seq(cell(longRef(2L), 6L), cell(null, 8L))),
-        ),
-      ),
+    val first = Seq(
+      cell(longRef(1L), 4L),
+      cell(null, 9L),
+      cell(longRef(1L), 5L),
+      cell(longRef(2L), -1L),
     )
+    val second = Seq(cell(longRef(2L), 6L), cell(null, 8L))
+    DistCollection(Plan.Source(Seq(Partition(first), Partition(second))))
 
   @SuppressWarnings(
     Array(
@@ -1113,6 +1116,7 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       Tuple2(Long.box(key), value).asInstanceOf[(Long, Long)]
     DistCollection(Plan.Source(Seq(Partition(Seq(cell(4L, longRef(4L)), cell(1L, null))))))
 
+  @SuppressWarnings(Array("org.wartremover.warts.Null"))
   private def nullKey(value: Int): (String, Int) = (null: String) -> value
 
   @SuppressWarnings(Array("org.wartremover.warts.Null"))
@@ -1178,7 +1182,7 @@ class TestCountByKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       ),
     )
 
-  /** Low 14 bits of [[com.ewoodbury.scarlet.columnar.ColumnHash.mix]]. A 16384-slot table uses them. */
+  /** Low 14 bits of [[com.ewoodbury.scarlet.columnar.ColumnHash.mix]] for a 16384-slot table. */
   private def mixSlot(key: Int): Int =
     val first = (key ^ (key >>> 16)) * 0x7feb352d
     val second = (first ^ (first >>> 15)) * 0x846ca68b

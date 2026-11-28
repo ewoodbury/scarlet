@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.lang.management.ManagementFactory
 import java.util.{Arrays, Locale}
 
@@ -12,6 +11,7 @@ import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Phase split for a real `filter.count` and `filter.countByKey`. Not a test, and not part of
@@ -396,14 +396,19 @@ object CountKeyPhaseBench:
     finally ColumnMetrics.restore(previous)
 
   private def acceptPhase(query: String, phase: String, notes: ActionNotes): Unit =
-    if (query == "filter-countbykey" && phase == "action" && notes.passes != 1) then
-      refuse(s"action fold passes ${notes.passes}, expected 1")
-    if (query == "filter-countbykey" && phase == "kernel" && notes.passes != 1) then
-      refuse(s"kernel fold passes ${notes.passes}, expected 1")
-    if (phase == "encode" && notes.encodes != sourcePartitions.toLong) then
+    if (Check.same(query, "filter-countbykey") && Check.same(phase, "action") && notes.passes != 1)
+    then refuse(s"action fold passes ${notes.passes}, expected 1")
+    if (Check.same(query, "filter-countbykey") && Check.same(phase, "kernel") && notes.passes != 1)
+    then refuse(s"kernel fold passes ${notes.passes}, expected 1")
+    if (Check.same(phase, "encode") && notes.encodes != sourcePartitions.toLong) then
       refuse(s"encode notes ${notes.encodes}, expected $sourcePartitions")
-    if (phase == "action" && query == "filter-count" && notes.checksum != countChecksum) then
-      refuse(s"count checksum ${notes.checksum}")
+    if (
+        Check.same(phase, "action") && Check.same(
+          query,
+          "filter-count",
+        ) && notes.checksum != countChecksum
+      )
+    then refuse(s"count checksum ${notes.checksum}")
 
   private def acceptRows(batches: Vector[ColumnBatch]): Unit =
     val total = batches.foldLeft(0L)((sum, batch) => sum + batch.length.toLong)
@@ -455,7 +460,7 @@ object CountKeyPhaseBench:
 
   private def lowered(plan: Plan[_], shape: String): PhysicalOp =
     ColumnarPlanner.lower(plan) match
-      case Some(op) if op.shape == shape => op
+      case Some(op) if Check.same(op.shape, shape) => op
       case Some(op) => refuse(s"lower shape ${op.shape} != $shape")
       case None => refuse(s"lower refused, expected $shape")
 

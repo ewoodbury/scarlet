@@ -1,8 +1,8 @@
 package com.ewoodbury.scarlet.execution
-
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Timed phases of [[JoinBuildBench]]. Phase names and `keep` order stay in the bench main.
@@ -128,7 +128,7 @@ private[execution] object JoinBuildCases:
       threads: Int,
   ): Option[Reading] =
     val counted = side.keys.length
-    if (keys == "unique" && policy == "exact64" && counted >= rows) then
+    if (Check.same(keys, "unique") && Check.same(policy, "exact64") && counted >= rows) then
       val slots = capacity(policy, counted)
       val load = counted.toDouble / slots.toDouble
       val steps = expectedProbe(load)
@@ -215,13 +215,16 @@ private[execution] object JoinBuildCases:
         val slots = capacity(policy, part.build.keys.length)
         val table = OpenTable.build(part.build, slots, pow2(policy), stepBudget * rows)
         table.insert()
-        mode match
+        val outcome: Either[Tally, Written] = mode match
           case WriteMode.Count =>
-            Left(table.count(part.probe.keys, part.probe.values, 0, part.probe.keys.length))
+            Left[Tally, Written](
+              table.count(part.probe.keys, part.probe.values, 0, part.probe.keys.length),
+            )
           case WriteMode.Grown =>
-            Right(table.write(part.probe.keys, part.probe.values, 0))
+            Right[Tally, Written](table.write(part.probe.keys, part.probe.values, 0))
           case WriteMode.Exact =>
-            Right(table.write(part.probe.keys, part.probe.values, part.matches))
+            Right[Tally, Written](table.write(part.probe.keys, part.probe.values, part.matches))
+        outcome
       }
     } { results =>
       val matched = results.foldLeft(0L) { (total, result) =>

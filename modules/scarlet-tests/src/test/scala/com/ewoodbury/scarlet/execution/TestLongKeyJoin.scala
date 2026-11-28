@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -8,6 +7,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -153,8 +153,8 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       "LongHashJoin(Exchange(Scan), Exchange(Scan))",
     )
     ColumnarPlanner.lower(joined.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.LongTriples)
-    ColumnarPlanner.tryTake(joined.plan, 1) shouldBe None
-    ColumnarPlanner.tryTake(hinted.plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(joined.plan, 1).shouldBeEmpty
+    ColumnarPlanner.tryTake(hinted.plan, 1).shouldBeEmpty
     joined.take(1) shouldBe row(joined.take(1))
     longTripleBatches(joined.plan).foreach(assertPresent)
   }
@@ -279,7 +279,7 @@ class TestLongKeyJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       ColumnarPlanner.lower(broadcast.plan).getOrElse(fail("broadcast was refused"))
     lowered.shape should not include "Exchange"
     PartitionPreserving.of(lowered) shouldBe Option.empty[Int]
-    ColumnarPlanner.tryTake(broadcast.plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(broadcast.plan, 1).shouldBeEmpty
   }
 
   it should "fail an over-budget broadcast build without a columnar fallback or a spill file" in {

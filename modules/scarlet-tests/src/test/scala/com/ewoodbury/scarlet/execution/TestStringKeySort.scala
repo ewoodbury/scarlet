@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -8,6 +7,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, PlanWide, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * In-memory rank split of a string-pair scan. A present key orders by `String.compareTo` (UTF-16
@@ -89,9 +89,9 @@ class TestStringKeySort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
 
   it should "leave an empty source on the row path and split empty batches in the kernel" in {
     val empty = DistCollection(Seq.empty[(String, Int)], 4).sortByStringKey
-    ColumnarPlanner.lower(empty.plan) shouldBe None
-    collect(empty) shouldBe Nil
-    rowOf(empty) shouldBe Nil
+    ColumnarPlanner.lower(empty.plan).shouldBeEmpty
+    collect(empty) shouldBe List.empty[(String, Int)]
+    rowOf(empty) shouldBe List.empty[(String, Int)]
 
     val blanks = Vector(
       BatchCodec.stringIntPairs(Seq.empty[(String, Int)]),
@@ -177,11 +177,11 @@ class TestStringKeySort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.lower(above.plan).map(_.shape) shouldBe Some(
       "FilterRow(SortByStringKey(Scan))",
     )
-    ColumnarPlanner.tryTake(above.plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(above.plan, 1).shouldBeEmpty
     collect(above) shouldBe rowOf(above)
     collect(above) shouldBe Seq("" -> 4, "a" -> 3, "b" -> 2)
     stayed.foreach { collection =>
-      ColumnarPlanner.lower(collection.plan) shouldBe None
+      ColumnarPlanner.lower(collection.plan).shouldBeEmpty
       collect(collection) shouldBe rowOf(collection)
     }
     collect(sorted.values) shouldBe Seq(5, 6, 12, 13, 2, 8, 14, 1, 3, 9, 10, 4, 7, 11)
@@ -244,8 +244,8 @@ class TestStringKeySort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       ColumnarPlanner.parallelism,
     )
     direct.flatMap(batch => BatchCodec.decodeStringPairs(batch)) shouldBe again
-    ColumnarPlanner.lower(twice.plan) shouldBe None
-    ColumnarPlanner.lower(above.plan) shouldBe None
+    ColumnarPlanner.lower(twice.plan).shouldBeEmpty
+    ColumnarPlanner.lower(above.plan).shouldBeEmpty
     collect(twice) shouldBe rowOf(twice)
     collect(above) shouldBe rowOf(above)
   }
@@ -261,10 +261,10 @@ class TestStringKeySort extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       "SortByStringKey(FilterKey(Scan))",
     )
     collect(sorted) shouldBe rowOf(sorted)
-    ColumnarPlanner.lower(above.plan) shouldBe None
+    ColumnarPlanner.lower(above.plan).shouldBeEmpty
     collect(above) shouldBe rowOf(above)
     ColumnarPlanner.lower(underMap.plan).map(_.shape) shouldBe Some("FilterKey(MapValue(Scan))")
-    ColumnarPlanner.lower(underMap.sortByStringKey.plan) shouldBe None
+    ColumnarPlanner.lower(underMap.sortByStringKey.plan).shouldBeEmpty
   }
 
   it should "report range distribution, ascending order, and SortByStringKey(Scan)" in {

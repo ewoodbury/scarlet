@@ -12,8 +12,8 @@ import org.scalatest.matchers.should.Matchers
  *
  * The function runs on every row in the slice, including a null key. An empty slice does not call
  * it. A result that is not a pair of longs declines before the batch is published. Each column
- * owns its validity words, and [[Validity.allValid]] is not the array those words come from when
- * a cell is null.
+ * owns its validity words, and [[Validity.allValid]] is not the array those words come from when a
+ * cell is null.
  */
 class TestLongPairProject extends AnyFlatSpec with Matchers:
 
@@ -108,7 +108,7 @@ class TestLongPairProject extends AnyFlatSpec with Matchers:
     LongPairProject.visitPairs(dense, 0, 2, counting(denseCalls, shift), denseSink)
     denseCalls.get() shouldBe 2
     denseSink.present.toSeq shouldBe Seq((2L, 11L), (3L, 21L))
-    denseSink.missing shouldBe empty
+    denseSink.missing.toList shouldBe List.empty[Long]
     LongPairProject.visitPairs(dense, 2, 0, counting(denseCalls, shift), denseSink)
     denseCalls.get() shouldBe 2
     LongPairProject.publishedForTest shouldBe 0
@@ -122,7 +122,7 @@ class TestLongPairProject extends AnyFlatSpec with Matchers:
       dropped,
     )
     dropped.present.toSeq shouldBe Seq((1L, 10L))
-    dropped.missing shouldBe empty
+    dropped.missing.toList shouldBe List.empty[Long]
 
     val thrown = intercept[ColumnarFallback] {
       LongPairProject.visitPairs(dense, 0, 1, constant(nullResult), new RecordingSink)
@@ -147,6 +147,8 @@ class TestLongPairProject extends AnyFlatSpec with Matchers:
       case present: Long => erased(present + 1L, value)
       case other => throw new IllegalArgumentException(s"pair map saw $other")
 
+  // The sink interface is imperative: add and addMissing append.
+  @SuppressWarnings(Array("org.wartremover.warts.MutableDataStructures"))
   private final class RecordingSink extends LongPairProject.LongPairSink:
     val present: ListBuffer[(Long, Long)] = ListBuffer.empty
     val missing: ListBuffer[Long] = ListBuffer.empty

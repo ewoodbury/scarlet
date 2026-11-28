@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.io.{ByteArrayOutputStream, PrintStream}
 import java.nio.charset.StandardCharsets
 
@@ -10,6 +9,7 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * `SCARLET_TRACE_LOWERING` prints one refusal line and nothing for a plan that lowers. The flag
@@ -39,7 +39,7 @@ class TestLoweringTrace extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val widened = DistCollection(Seq(1, 2, 3), 1).map(_.toLong).plan
     val offKept = withFlag(false)(values(kept))
 
-    withFlag(false)(ColumnarPlanner.lower(sorted)) shouldBe None
+    withFlag(false)(ColumnarPlanner.lower(sorted)).shouldBeEmpty
     linesOf(withFlag(false)(stderr {
       val _ = ColumnarPlanner.lower(sorted)
       val _ = ColumnarPlanner.lower(widened)
@@ -65,7 +65,7 @@ class TestLoweringTrace extends AnyFlatSpec with Matchers with BeforeAndAfterEac
 
     linesOf(withFlag(true)(stderr { val _ = values(kept) })) shouldBe Vector.empty[String]
     withFlag(true)(values(kept)) shouldBe offKept
-    withFlag(true)(ColumnarPlanner.lower(sorted)) shouldBe None
+    withFlag(true)(ColumnarPlanner.lower(sorted)).shouldBeEmpty
     withFlag(false)(values(kept)) shouldBe offKept
   }
 
@@ -73,7 +73,7 @@ class TestLoweringTrace extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val kept = DistCollection(Seq(1, 2, 3), 1).filter(_ > 0).plan
     ScarletConf.set(originalConf.copy(columnarExecution = false, traceLowering = true))
     linesOf(stderr { val _ = ColumnarPlanner.lower(kept) }) shouldBe Vector.empty[String]
-    ColumnarPlanner.lower(kept) shouldBe None
+    ColumnarPlanner.lower(kept).shouldBeEmpty
   }
 
   private def withFlag[A](enabled: Boolean)(body: => A): A =

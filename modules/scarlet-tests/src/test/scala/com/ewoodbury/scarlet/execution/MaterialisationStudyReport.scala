@@ -1,7 +1,8 @@
 package com.ewoodbury.scarlet.execution
-
 import java.lang.management.ManagementFactory
 import java.util.Locale
+
+import com.ewoodbury.scarlet.support.Check
 
 import MaterialisationStudySupport.*
 
@@ -293,9 +294,9 @@ private[execution] object MaterialisationStudyReport:
   private val jsonSchema: String = "materialisation-grouped-1"
 
   /**
-   * Shuffled p50 minus repeating p50, for the query, the five stages, and the replay. The
-   * sentence names a stage only when that stage's gap is larger than the absolute sum of the
-   * other stage gaps. Otherwise the split does not isolate the difference.
+   * Shuffled p50 minus repeating p50, for the query, the five stages, and the replay. The sentence
+   * names a stage only when that stage's gap is larger than the absolute sum of the other stage
+   * gaps. Otherwise the split does not isolate the difference.
    */
   private def orderComparison(
       queries: Vector[Row],
@@ -385,12 +386,15 @@ private[execution] object MaterialisationStudyReport:
       s"threads=$threads shuffled minus repeat: $listed. " +
         s"Sum of stage gaps ${signedMs(sum)} ms. " +
         s"REPLAY gap ${signedMs(replay.gapNs)} ms. Query gap ${signedMs(query.gapNs)} ms."
-    val lead = stageGaps.foldLeft(stageGaps(0)) { (best, line) =>
+    val lead = stageGaps.foldLeft(Check.at(stageGaps, 0)) { (best, line) =>
       if (line.gapNs > best.gapNs) then line else best
     }
-    val rest = stageGaps.filterNot(line => sameText(line.stage, lead.stage)).map { line =>
-      math.abs(line.gapNs)
-    }.sum
+    val rest = stageGaps
+      .filterNot(line => sameText(line.stage, lead.stage))
+      .map { line =>
+        math.abs(line.gapNs)
+      }
+      .sum
     val verdict =
       if (lead.gapNs > 0L && lead.gapNs > rest) then
         s" ${lead.stage} carries the difference: ${signedMs(lead.gapNs)} ms, " +

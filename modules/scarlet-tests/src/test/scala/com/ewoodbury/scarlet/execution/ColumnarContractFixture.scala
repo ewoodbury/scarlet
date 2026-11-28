@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.matchers.should.Matchers
@@ -8,6 +7,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.BatchCodec
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /** Oracle helpers, sources, and per-family assertions for the columnar contract suites. */
 trait ColumnarContractFixture extends Matchers:
@@ -301,8 +301,8 @@ trait ColumnarContractFixture extends Matchers:
       ColumnarPlanner.groupedSumPeel(plan) shouldBe peel
       groupedSum.isDefined shouldBe peel.isDefined
     else
-      groupedSum shouldBe None
-      ColumnarPlanner.tryGroupedSum(plan) shouldBe None
+      groupedSum.shouldBeEmpty
+      ColumnarPlanner.tryGroupedSum(plan).shouldBeEmpty
 
   protected def sumsInts(op: PhysicalOp): Boolean = op.kind match
     case PhysicalOp.Kind.Ints => true
@@ -404,13 +404,13 @@ trait ColumnarContractFixture extends Matchers:
   protected def assertRowPath[A](plan: Plan[A]): Unit =
     ColumnarPlanner.partitioning(plan) shouldBe Option.empty[PartitioningInfo]
     ColumnarPlanner.lower(plan) shouldBe Option.empty[PhysicalOp]
-    ColumnarPlanner.tryRun(plan) shouldBe None
-    ColumnarPlanner.tryCount(plan) shouldBe None
-    ColumnarPlanner.trySumInt(plan) shouldBe None
-    ColumnarPlanner.trySumLong(plan) shouldBe None
-    ColumnarPlanner.trySumDouble(plan) shouldBe None
-    ColumnarPlanner.tryTake(plan, 1) shouldBe None
-    ColumnarPlanner.tryGroupedSum(plan) shouldBe None
+    ColumnarPlanner.tryRun(plan).shouldBeEmpty
+    ColumnarPlanner.tryCount(plan).shouldBeEmpty
+    ColumnarPlanner.trySumInt(plan).shouldBeEmpty
+    ColumnarPlanner.trySumLong(plan).shouldBeEmpty
+    ColumnarPlanner.trySumDouble(plan).shouldBeEmpty
+    ColumnarPlanner.tryTake(plan, 1).shouldBeEmpty
+    ColumnarPlanner.tryGroupedSum(plan).shouldBeEmpty
 
   protected def collected[A](plan: Plan[A]): Seq[A] =
     ScarletRuntime.get.shuffle.clear()

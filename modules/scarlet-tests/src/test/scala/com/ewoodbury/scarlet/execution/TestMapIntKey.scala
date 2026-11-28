@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{FoldedCount, HashReduce}
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * `mapIntKey` is the typed witness for an int key change.
@@ -175,21 +175,32 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       .lower(mapped.filterValues((value: Int) => value >= 0).values.plan)
       .map(_.shape) shouldBe
       Some("Value(FilterValue(MapKey(Scan)))")
-    ColumnarPlanner.lower(mapped.mapValues((value: Int) => value + 1).plan) shouldBe None
-    ColumnarPlanner.lower(mapped.filterKeys((key: Int) => key > 0).mapIntKey(_ + 1).plan) shouldBe
-      None
-    ColumnarPlanner.lower(mapped.filter { case (key, _) => key > 0 }.plan) shouldBe None
-    ColumnarPlanner.lower(mapped.filter { case (key, _) => key > 0 }.keys.plan) shouldBe None
-    ColumnarPlanner.lower(
-      mapped.filterKeys((key: Int) => key > 0).filterValues((value: Int) => value > 0).plan,
-    ) shouldBe None
-    ColumnarPlanner.lower(
-      mapped.filterKeys((key: Int) => key > 0).filterValues((value: Int) => value > 0).keys.plan,
-    ) shouldBe None
-    ColumnarPlanner.lower(mapped.mapValues((value: Int) => value + 1).keys.plan) shouldBe None
-    ColumnarPlanner.lower(
-      mapped.filterKeys((key: Int) => key > 0).union(mapped).plan,
-    ) shouldBe None
+    ColumnarPlanner.lower(mapped.mapValues((value: Int) => value + 1).plan).shouldBeEmpty
+    ColumnarPlanner
+      .lower(mapped.filterKeys((key: Int) => key > 0).mapIntKey(_ + 1).plan)
+      .shouldBeEmpty
+    ColumnarPlanner.lower(mapped.filter { case (key, _) => key > 0 }.plan).shouldBeEmpty
+    ColumnarPlanner.lower(mapped.filter { case (key, _) => key > 0 }.keys.plan).shouldBeEmpty
+    ColumnarPlanner
+      .lower(
+        mapped.filterKeys((key: Int) => key > 0).filterValues((value: Int) => value > 0).plan,
+      )
+      .shouldBeEmpty
+    ColumnarPlanner
+      .lower(
+        mapped.filterKeys((key: Int) => key > 0).filterValues((value: Int) => value > 0).keys.plan,
+      )
+      .shouldBeEmpty
+    ColumnarPlanner
+      .lower(
+        mapped.mapValues((value: Int) => value + 1).keys.plan,
+      )
+      .shouldBeEmpty
+    ColumnarPlanner
+      .lower(
+        mapped.filterKeys((key: Int) => key > 0).union(mapped).plan,
+      )
+      .shouldBeEmpty
   }
 
   it should "collect keys and values of one slot above the map" in {
@@ -473,7 +484,7 @@ class TestMapIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       .partitionBy(width)
       .mapIntKey(key => key % 2)
       .countByKey
-    ColumnarPlanner.lower(counted.plan) shouldBe None
+    ColumnarPlanner.lower(counted.plan).shouldBeEmpty
 
     def check(): Unit =
       val rows = counted.collect()

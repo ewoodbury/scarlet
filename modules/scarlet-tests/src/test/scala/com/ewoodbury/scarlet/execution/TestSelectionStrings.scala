@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,8 @@ import com.ewoodbury.scarlet.api.{DictionaryStringPredicate, DistCollection}
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * A string-pair stack of `filterKeys` / `filterValues`, including one filter, publishes one
@@ -252,8 +253,24 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
       false,
       Set(0, 1),
     ) shouldBe defined
-    FilterChain.selected(mapped.plan, lowered(mapped.plan), None, false, Set(0, 1)) shouldBe None
-    FilterChain.selected(source.plan, lowered(source.plan), None, false, Set(0, 1)) shouldBe None
+    FilterChain
+      .selected(
+        mapped.plan,
+        lowered(mapped.plan),
+        None,
+        false,
+        Set(0, 1),
+      )
+      .shouldBeEmpty
+    FilterChain
+      .selected(
+        source.plan,
+        lowered(source.plan),
+        None,
+        false,
+        Set(0, 1),
+      )
+      .shouldBeEmpty
     FilterChain.selected(once.plan, lowered(once.plan), None, false, Set(0, 1)) shouldBe defined
 
     val encode = published {
@@ -351,7 +368,7 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
     val composed = "é"
     val decomposed = "e\u0301"
     val rows = DistCollection(Seq(composed -> 1, decomposed -> 2, "" -> 3, nullKey(4)), 1)
-    val filtered = rows.filter((row: (String, Int)) => row._1 != decomposed)
+    val filtered = rows.filter((row: (String, Int)) => !Check.same(row._1, decomposed))
     val op = lowered(filtered.plan)
     val steps = PredicatePlan
       .selectionSteps(
@@ -376,7 +393,7 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
     )
     val input = DistCollection(rows, 1)
     val filtered = input.filter { (row: (String, Int)) =>
-      BatchCodec.isAbsent(row._1) || row._1 == "a" || row._1 == ""
+      BatchCodec.isAbsent(row._1) || Check.same(row._1, "a") || Check.same(row._1, "")
     }
     val op = ColumnarPlanner.lower(filtered.plan).getOrElse(fail("null int filter did not lower"))
     op.shape shouldBe "FilterRow(Scan)"
@@ -384,11 +401,11 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
 
     sameStringInts(got, row(filtered.collect().toList))
     got.length shouldBe 3
-    absentComponent(got.head, 1) shouldBe true
-    absentComponent(got(1), 0) shouldBe true
-    intComponent(got(1), 1) shouldBe 2
-    stringComponent(got(2), 0) shouldBe ""
-    intComponent(got(2), 1) shouldBe 0
+    absentComponent(Check.first(got), 1) shouldBe true
+    absentComponent(Check.at(got, 1), 0) shouldBe true
+    intComponent(Check.at(got, 1), 1) shouldBe 2
+    stringComponent(Check.at(got, 2), 0) shouldBe ""
+    intComponent(Check.at(got, 2), 1) shouldBe 0
     filtered.count() shouldBe row(filtered.count())
   }
 
@@ -449,7 +466,7 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
       }
 
   private def keeps(key: String): Boolean =
-    BatchCodec.isAbsent(key) || key != "no"
+    BatchCodec.isAbsent(key) || !Check.same(key, "no")
 
   private def shape(plan: Plan[_]): String =
     ColumnarPlanner.lower(plan).map(_.shape).getOrElse(fail("expected a columnar plan"))
@@ -489,7 +506,7 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
   private def shownStringGroups(parts: Vector[GroupedStringBatch]): Seq[(String, Seq[String])] =
     parts.flatMap(_.rows).map { (key, values) =>
       val refs = values.iterator.asInstanceOf[Iterator[AnyRef]]
-      (key, refs.map(cell => if (cell == null) "null" else cell.toString).toSeq)
+      (key, refs.map(cell => if (Check.isNull(cell)) "null" else Check.text(cell)).toSeq)
     }
 
   private def dictionaryOf(batch: ColumnBatch): Array[String] =
@@ -547,7 +564,7 @@ class TestSelectionStrings extends AnyFlatSpec with Matchers with BeforeAndAfter
     ),
   )
   private def absentComponent(row: (String, Int), ordinal: Int): Boolean =
-    row.productElement(ordinal).asInstanceOf[AnyRef] eq null
+    Check.isNull(row.productElement(ordinal).asInstanceOf[AnyRef])
 
   @SuppressWarnings(Array("org.wartremover.warts.Any"))
   private def intComponent(row: (String, Int), ordinal: Int): Int =

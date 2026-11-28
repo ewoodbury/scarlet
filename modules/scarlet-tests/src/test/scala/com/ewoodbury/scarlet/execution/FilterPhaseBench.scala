@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.lang.management.ManagementFactory
 import java.util.{Arrays, Locale}
 
@@ -12,6 +11,7 @@ import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Phase split for a real `filter.count` and `filter.values.sum`. Not a test, and not part of
@@ -20,15 +20,14 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
  * The input matches [[CrossEngineBench]]: 1e6 int pairs, keys `row % 1024`, the same LCG values,
  * two source partitions, batch 8192, two filters (`key % 3 != 0`, `value >= 0`), spill on. The
  * pool width is `CROSS_THREADS`, default 4. `CROSS_WARMUP` and `CROSS_ROUNDS` default to 5 and
- * 30. p50 is the upper median, index `n/2` after sorting, the same pick as [[CrossEngineBench]].
- * Allocation is a later pass, five rounds, summed across live threads, and is not inside those
- * samples. `filter-countbykey` is timed as a guard action.
+ *   30. p50 is the upper median, index `n/2` after sorting, the same pick as [[CrossEngineBench]].
+ *       Allocation is a later pass, five rounds, summed across live threads, and is not inside
+ *       those samples. `filter-countbykey` is timed as a guard action.
  *
  * [[PhaseBench]] times [[Selection.applySelected]] and an id-copy assemble. Those are not this
  * action. `tryCount` and `trySumInt` fold the source columns in [[FusedPairFold]] and do not
- * encode. The encode, filter, and kernel phases below still time the old pieces:
- * [[SourceEncode]] and [[Selection.count]] or [[Selection.sumInt32]]. Nothing builds a survivor
- * index.
+ * encode. The encode, filter, and kernel phases below still time the old pieces: [[SourceEncode]]
+ * and [[Selection.count]] or [[Selection.sumInt32]]. Nothing builds a survivor index.
  *
  * Each line is its own p50. Phases are not subtracted from each other or from the action.
  *
@@ -136,7 +135,7 @@ object FilterPhaseBench:
     val countOp = lowered(countPlan, countShape)
     val sumOp = lowered(sumPlan, sumShape)
     val filterOp = sumOp match
-      case PhysicalOp.Column(child, 1) if child.kind == PhysicalOp.Kind.Pairs => child
+      case PhysicalOp.Column(child, 1) if Check.same(child.kind, PhysicalOp.Kind.Pairs) => child
       case other => refuse(s"sum child ${other.shape} is not an int-pair value column")
     oracle(keys, values)
     val count = countPrepared(countPlan, countOp, () => filtered.count())
@@ -150,7 +149,8 @@ object FilterPhaseBench:
   ): Prepared =
     val steps = countSteps(plan, op)
     val ordinals = ColumnUse.ordinals(plan, op)
-    if (ordinals != Set(0, 1)) then refuse(s"count ordinals $ordinals, expected both columns")
+    if (!Check.same(ordinals, Set(0, 1))) then
+      refuse(s"count ordinals $ordinals, expected both columns")
     val partitions = scanPartitions(plan, op)
     val evaluate: Morsel => Long = morsel =>
       Selection.count(morsel.batch, morsel.start, morsel.length, steps)
@@ -242,7 +242,7 @@ object FilterPhaseBench:
       time(prepared.name, "lower", 1, warmup, rounds)(ready())(
         lower(prepared.plan, prepared.shape),
       ) { (shape, _) =>
-        if (shape != prepared.shape) then
+        if (!Check.same(shape, prepared.shape)) then
           refuse(s"${prepared.name} lower $shape != ${prepared.shape}")
       },
       time(prepared.name, "compile", 1, warmup, rounds)(ready())(prepared.compile()) {
@@ -359,7 +359,7 @@ object FilterPhaseBench:
 
   private def lowered(plan: Plan[_], shape: String): PhysicalOp =
     ColumnarPlanner.lower(plan) match
-      case Some(op) if op.shape == shape => op
+      case Some(op) if Check.same(op.shape, shape) => op
       case Some(op) => refuse(s"lower shape ${op.shape} != $shape")
       case None => refuse(s"lower refused, expected $shape")
 

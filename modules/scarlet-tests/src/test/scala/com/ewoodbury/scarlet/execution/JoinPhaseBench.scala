@@ -567,7 +567,7 @@ object JoinPhaseBench:
       flat: Vector[Selected],
   ): Vector[Vector[Selected]] =
     val sizes = groupSizes(batches)
-    val seed: (Vector[Selected], Vector[Vector[Selected]]) = (flat, Vector.empty)
+    val seed: (Vector[Selected], Vector[Vector[Selected]]) = (flat, Vector.empty[Vector[Selected]])
     val (left, groups) = sizes.foldLeft(seed) { (state, count) =>
       val (rest, acc) = state
       val (group, tail) = rest.splitAt(count)

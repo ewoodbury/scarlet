@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -9,6 +8,7 @@ import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.execution.schema.*
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Pins the finished foundation contract.
@@ -106,7 +106,7 @@ class TestFoundationLock extends AnyFlatSpec with Matchers with BeforeAndAfterEa
 
   "an int-pair mapValues to string" should "keep the row boundary and publish a batch" in {
     val mapped = intPairs.mapValues((value: Int) => value.toString)
-    ColumnarPlanner.lower(mapped.plan) shouldBe None
+    ColumnarPlanner.lower(mapped.plan).shouldBeEmpty
     mapped.plan match
       case Plan.MapValuesOp(source, f) =>
         RowBoundary.mapValues(source, f).isDefined shouldBe true
@@ -124,7 +124,7 @@ class TestFoundationLock extends AnyFlatSpec with Matchers with BeforeAndAfterEa
   "an element map from int to long" should "stay empty and not ask the binder" in {
     val mapped = DistCollection.ofInts(Array(1, 2, 3, 4), 2).map((value: Int) => value.toLong)
     ColumnBinding.resetChooseCallsForTest()
-    ColumnarPlanner.lower(mapped.plan) shouldBe None
+    ColumnarPlanner.lower(mapped.plan).shouldBeEmpty
     ColumnBinding.chooseCallsForTest shouldBe 0
   }
 
@@ -175,7 +175,7 @@ class TestFoundationLock extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     child.kind shouldBe PhysicalOp.Kind.Pairs
     Layout.known(child) shouldBe Layout.AssumedIntLong
     ColumnBinding.resetChooseCallsForTest()
-    IntLongMapBinding.value(child) shouldBe None
+    IntLongMapBinding.value(child).shouldBeEmpty
     ColumnBinding.chooseCallsForTest should be > 0
   }
 

@@ -12,18 +12,17 @@ import com.ewoodbury.scarlet.sql.{Sql, SqlResult}
 class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   private val original = ScarletConf.get
-  private var base = original
+  private val base = original.copy(
+    columnarExecution = true,
+    columnarBatchSize = 4,
+    threadPoolSize = 2,
+    defaultShufflePartitions = 2,
+    spillEnabled = false,
+  )
 
   override def beforeEach(): Unit =
     super.beforeEach()
     ExecutionModuleSupport.initialize()
-    base = original.copy(
-      columnarExecution = true,
-      columnarBatchSize = 4,
-      threadPoolSize = 2,
-      defaultShufflePartitions = 2,
-      spillEnabled = false,
-    )
     ScarletConf.set(base)
 
   override def afterEach(): Unit =

@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * One int `mapValues` under `sortByIntValueDesc`.
@@ -79,7 +79,8 @@ class TestMappedValueSort extends AnyFlatSpec with Matchers with BeforeAndAfterE
         selectedPartition = None,
         preserveAbsence = true,
         ColumnUse.ordinals(sortPlan, mapped),
-      ) shouldBe None
+      )
+      .shouldBeEmpty
     val filteredPlan = under.plan match
       case Plan.SortByIntValueDescOp(sourcePlan) => sourcePlan
       case _ => fail("expected SortByIntValueDescOp")
@@ -94,7 +95,8 @@ class TestMappedValueSort extends AnyFlatSpec with Matchers with BeforeAndAfterE
         selectedPartition = None,
         preserveAbsence = true,
         ColumnUse.ordinals(filteredPlan, filteredMap),
-      ) shouldBe None
+      )
+      .shouldBeEmpty
     IntTopN.resetBatchesForTest()
     collect(shifted) shouldBe Seq(2 -> 31, 3 -> 21, 1 -> 11)
     IntTopN.batchCallsForTest should be > 0

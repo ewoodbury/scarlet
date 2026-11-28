@@ -38,7 +38,9 @@ class TestIntPairEncode extends AnyFlatSpec with Matchers:
     values.values(63) shouldBe 70
     keys.isValid(64) shouldBe true
     values.isValid(64) shouldBe false
-    BatchCodec.decodeNullableIntPairs(batch).lift(64) shouldBe Some((Some(64), None))
+    BatchCodec.decodeNullableIntPairs(batch).lift(64) shouldBe Some(
+      (Some(64), Option.empty[Int]),
+    )
   }
 
   it should "grow the hole list past the first eight nulls" in {

@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -7,6 +6,7 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Key sort and value sort of `mapValues` from `(Int, Int)` to `(Int, Long)`.
@@ -75,7 +75,7 @@ class TestIntLongSort extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       .mapValues((value: Int) => value.toLong)
     val mapped = widened.mapValues((value: Long) => value + 1L).sortByIntLongKey
 
-    ColumnarPlanner.lower(mapped.plan) shouldBe None
+    ColumnarPlanner.lower(mapped.plan).shouldBeEmpty
   }
 
   "sortByIntLongValueDesc" should "order the long, then the int, and match present rows" in {
@@ -91,7 +91,7 @@ class TestIntLongSort extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
     shape(sorted) shouldBe "SortByIntLongValueDesc(IntLongMapValue(Scan))"
     shape(mapped) shouldBe "SortByIntLongValueDesc(MapValue(IntLongMapValue(Scan)))"
-    ColumnarPlanner.lower(above.plan) shouldBe None
+    ColumnarPlanner.lower(above.plan).shouldBeEmpty
     columnar(sorted) shouldBe row(sorted.collect().toList)
     columnar(mapped) shouldBe row(mapped.collect().toList)
   }

@@ -1,19 +1,19 @@
 package com.ewoodbury.scarlet.execution
-
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{ColumnBatch, Int32Column}
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Sum of a join's value pair: `left * 31 + right` over every match.
  *
  * The plan is the same int shuffle-hash join `filter-join` counts. [[MatchCount]] sums chain
  * lengths and does not write the match columns. An int [[PhysicalOp.HashJoin]] of two exchanges
- * folds the same pair from the probe: each present hit adds `build * 31 + probe`, and a null
- * value is skipped, which is what `SUM` does. That path does not write the match columns.
- * [[ofColumns]] still sums triples a caller already wrote. Any other plan is interpreted, and a
- * plan that does not run as int triples uses the collected rows and the same arithmetic. Addition
- * is commutative, including overflow, so partition order does not change the result.
+ * folds the same pair from the probe: each present hit adds `build * 31 + probe`, and a null value
+ * is skipped, which is what `SUM` does. That path does not write the match columns. [[ofColumns]]
+ * still sums triples a caller already wrote. Any other plan is interpreted, and a plan that does
+ * not run as int triples uses the collected rows and the same arithmetic. Addition is commutative,
+ * including overflow, so partition order does not change the result.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var", "org.wartremover.warts.Equals"))
 private[execution] object JoinValueSum:
@@ -67,7 +67,7 @@ private[execution] object JoinValueSum:
     var index = 0
     var sum = 0L
     while (index < parts.length) {
-      sum += add(parts(index))
+      sum += add(Check.at(parts, index))
       index += 1
     }
     sum

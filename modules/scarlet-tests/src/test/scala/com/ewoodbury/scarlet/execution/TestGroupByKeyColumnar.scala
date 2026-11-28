@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -8,6 +7,8 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{ExecutionService, Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Int, long, and string `groupByKey` on the columnar path, compared with the row engine per key.
@@ -117,12 +118,12 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     ColumnarPlanner.lower(grouped.keys.plan).map(_.shape) shouldBe Some(
       "Key(CountByKey(Exchange(Scan)))",
     )
-    ColumnarPlanner.partitioning(grouped.values.plan) shouldBe None
-    ColumnarPlanner.lower(grouped.values.plan) shouldBe None
+    ColumnarPlanner.partitioning(grouped.values.plan).shouldBeEmpty
+    ColumnarPlanner.lower(grouped.values.plan).shouldBeEmpty
     ColumnarPlanner
       .lower(grouped.map((row: (Int, Iterable[Int])) => row._1).plan)
       .map(_.shape) shouldBe Some("GroupedDecode(GroupByKey(Exchange(Scan)))")
-    ColumnarPlanner.tryTake(grouped.plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(grouped.plan, 1).shouldBeEmpty
     grouped.take(2) shouldBe row(grouped.take(2))
   }
 
@@ -187,7 +188,7 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     val right = DistCollection.ofIntPairs(Array(1, 3), Array(11, 30), 2).groupByKey
     val union = left.union(right)
 
-    ColumnarPlanner.lower(union.plan) shouldBe None
+    ColumnarPlanner.lower(union.plan).shouldBeEmpty
     valuesByKey(union.collect()) shouldBe valuesByKey(row(union.collect()))
   }
 
@@ -254,7 +255,7 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     val grouped = DistCollection(Seq.empty[(String, Int)], 2).groupByKey
     val parts = ExecutionService.get.executePartitions(grouped.plan)
 
-    ColumnarPlanner.lower(grouped.plan) shouldBe None
+    ColumnarPlanner.lower(grouped.plan).shouldBeEmpty
     parts.size shouldBe ScarletConf.get.defaultShufflePartitions
     parts.foreach(_.data shouldBe empty)
     grouped.collect() shouldBe empty
@@ -295,11 +296,11 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
       "Key(CountByKey(Exchange(Scan)))",
     )
     assertKeysMatch(grouped.keys)
-    ColumnarPlanner.lower(grouped.values.plan) shouldBe None
+    ColumnarPlanner.lower(grouped.values.plan).shouldBeEmpty
     ColumnarPlanner
       .lower(grouped.map((row: (String, Iterable[Int])) => row._1).plan)
       .map(_.shape) shouldBe Some("GroupedDecode(GroupByKey(Exchange(Scan)))")
-    ColumnarPlanner.tryTake(grouped.plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(grouped.plan, 1).shouldBeEmpty
     grouped.take(2) shouldBe row(grouped.take(2))
   }
 
@@ -308,7 +309,7 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     val right = DistCollection(Seq("a" -> 3, "c" -> 4), 2).groupByKey
     val union = left.union(right)
 
-    ColumnarPlanner.lower(union.plan) shouldBe None
+    ColumnarPlanner.lower(union.plan).shouldBeEmpty
     stringValues(union.collect()) shouldBe stringValues(row(union.collect()))
   }
 
@@ -388,7 +389,7 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     val parts = GroupByKey.int64(Vector(batch), partitions = 4, parallelism = 1)
 
     parts.length shouldBe 4
-    longRows(parts(1)) shouldBe Seq(1L -> Seq(10L, 11L))
+    longRows(Check.at(parts, 1)) shouldBe Seq(1L -> Seq(10L, 11L))
     parts.zipWithIndex.foreach { (grouped, index) =>
       if (index == 1) then grouped.groups shouldBe 1
       else grouped.groups shouldBe 0
@@ -460,11 +461,11 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
       "Key(CountByKey(Exchange(Scan)))",
     )
     assertKeysMatch(grouped.keys)
-    ColumnarPlanner.lower(grouped.values.plan) shouldBe None
+    ColumnarPlanner.lower(grouped.values.plan).shouldBeEmpty
     ColumnarPlanner
       .lower(grouped.map((row: (Long, Iterable[Long])) => row._1).plan)
       .map(_.shape) shouldBe Some("GroupedDecode(GroupByKey(Exchange(Scan)))")
-    ColumnarPlanner.tryTake(grouped.plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(grouped.plan, 1).shouldBeEmpty
     grouped.take(2) shouldBe row(grouped.take(2))
   }
 
@@ -473,7 +474,7 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
     val right = DistCollection.ofLongPairs(Array(1L, 3L), Array(11L, 30L), 2).groupByKey
     val union = left.union(right)
 
-    ColumnarPlanner.lower(union.plan) shouldBe None
+    ColumnarPlanner.lower(union.plan).shouldBeEmpty
     longByKey(union.collect()) shouldBe longByKey(row(union.collect()))
   }
 
@@ -556,7 +557,7 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
   private def shownInts(parts: Vector[GroupedIntBatch]): Seq[(Int, Seq[String])] =
     parts.flatMap(_.rows).map { (key, values) =>
       val refs = values.iterator.asInstanceOf[Iterator[AnyRef]]
-      (key, refs.map(cell => if (cell == null) "null" else cell.toString).toSeq)
+      (key, refs.map(cell => if (Check.isNull(cell)) "null" else Check.text(cell)).toSeq)
     }
 
   @SuppressWarnings(
@@ -568,7 +569,7 @@ class TestGroupByKeyColumnar extends AnyFlatSpec with Matchers with BeforeAndAft
   private def shownLongs(parts: Vector[GroupedLongBatch]): Seq[(Long, Seq[String])] =
     parts.flatMap(_.rows).map { (key, values) =>
       val refs = values.iterator.asInstanceOf[Iterator[AnyRef]]
-      (key, refs.map(cell => if (cell == null) "null" else cell.toString).toSeq)
+      (key, refs.map(cell => if (Check.isNull(cell)) "null" else Check.text(cell)).toSeq)
     }
 
   private def longByKey(rows: Iterable[(Long, Iterable[Long])]): Map[Long, Seq[Long]] =

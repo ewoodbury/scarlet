@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.columnar
-
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 
@@ -9,6 +8,7 @@ import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.columnar.StringHashJoin.StringJoinInput
 import com.ewoodbury.scarlet.core.ScarletConf
+import com.ewoodbury.scarlet.support.Check
 
 class TestStringHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -55,7 +55,7 @@ class TestStringHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAf
     val probe = pairs(Seq("" -> 1, accent -> 2, decomposed -> 3))
     val memory = join(build, probe, width)
     val buckets = HashExchange.partitionAllUtf8(build, keyOrdinal = 0, width, parallelism = 1)
-    val budget = buckets.map(estimate).max
+    val budget = Check.maximum(buckets.map(estimate))
     buckets.map(estimate).foreach(bytes => bytes should be <= budget)
     buckets.map(estimate) should contain(budget)
 
@@ -82,7 +82,7 @@ class TestStringHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAf
     )
     val probe = pairs(Seq("" -> 10, "" -> 11, accent -> 20, decomposed -> 30))
     val memory = join(build, probe, partitions = 1)
-    val batch = build.head
+    val batch = Check.first(build)
     val entries = StringHashJoinSpill.dictionaryEntries(batch)
     val dictionary = StringHashJoinSpill.dictionaryBytes(batch)
     entries shouldBe 3
@@ -98,9 +98,9 @@ class TestStringHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAf
 
       spilled.length shouldBe 1
       matches shouldBe ordered(pairsOf(memory))
-      matches.count(_._1 == "") shouldBe half * 2
-      matches.count(_._1 == accent) shouldBe half
-      matches.count(_._1 == decomposed) shouldBe 1
+      matches.count(pair => Check.same(pair._1, "")) shouldBe half * 2
+      matches.count(pair => Check.same(pair._1, accent)) shouldBe half
+      matches.count(pair => Check.same(pair._1, decomposed)) shouldBe 1
       matches.collect { case (`accent`, left, _) => left } should not contain 7
       // Five morsels of the larger piece share one file. The probe is not written.
       StringHashJoinSpill.filesWrittenForTest shouldBe 2L
@@ -126,7 +126,7 @@ class TestStringHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAf
     val probe = pairs(Seq(leftKey -> 1, rightKey -> 2))
     val memory = join(build, probe, parent)
     val buckets = HashExchange.partitionAllUtf8(build, keyOrdinal = 0, parent, parallelism = 1)
-    val hot = buckets.maxBy(_.length)
+    val hot = Check.maximumBy(buckets)(_.length)
     hot.length shouldBe half * 2
     val budget = StringHashJoinSpill.retainedBytes(
       half,
@@ -142,8 +142,8 @@ class TestStringHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAf
 
       spilled.length shouldBe parent
       matches shouldBe ordered(pairsOf(memory))
-      matches.count(_._1 == leftKey) shouldBe half
-      matches.count(_._1 == rightKey) shouldBe half
+      matches.count(pair => Check.same(pair._1, leftKey)) shouldBe half
+      matches.count(pair => Check.same(pair._1, rightKey)) shouldBe half
       StringHashJoinSpill.filesWrittenForTest shouldBe 2L
       StringHashJoinSpill.openTablesForTest shouldBe 1
       SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
@@ -167,7 +167,7 @@ class TestStringHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAf
     val probe = pairs(Seq(leftKey -> 1, rightKey -> 2))
     val memory = join(build, probe, parent)
     val buckets = HashExchange.partitionAllUtf8(build, keyOrdinal = 0, parent, parallelism = 1)
-    val hot = buckets.maxBy(_.length)
+    val hot = Check.maximumBy(buckets)(_.length)
     hot.length shouldBe half * 2
     StringHashJoinSpill.dictionaryEntries(hot) shouldBe 2
     val budget = math.max(
@@ -189,8 +189,8 @@ class TestStringHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAf
 
       spilled.length shouldBe parent
       matches shouldBe ordered(pairsOf(memory))
-      matches.count(_._1 == leftKey) shouldBe half
-      matches.count(_._1 == rightKey) shouldBe half
+      matches.count(pair => Check.same(pair._1, leftKey)) shouldBe half
+      matches.count(pair => Check.same(pair._1, rightKey)) shouldBe half
       StringHashJoinSpill.filesWrittenForTest shouldBe 2L
       StringHashJoinSpill.openTablesForTest shouldBe 1
       SpillStore.listForTest(dir) shouldBe Vector.empty[Path]
@@ -227,7 +227,7 @@ class TestStringHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAf
     val rows = 8
     val build = pairs(rowsOf("hot", rows, identity))
     val probe = pairs(Seq("hot" -> 7))
-    val batch = build.head
+    val batch = Check.first(build)
     val entries = StringHashJoinSpill.dictionaryEntries(batch)
     val dictionary = StringHashJoinSpill.dictionaryBytes(batch)
     val budget = StringHashJoinSpill.retainedBytes(1, entries, dictionary)
@@ -257,7 +257,7 @@ class TestStringHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAf
     val build = pairs(buildRows)
     val probe = pairs(probeRows)
     val memory = join(build, probe, partitions = 1)
-    val batch = build.head
+    val batch = Check.first(build)
     val entries = StringHashJoinSpill.dictionaryEntries(batch)
     val dictionary = StringHashJoinSpill.dictionaryBytes(batch)
     entries shouldBe 2
@@ -281,7 +281,7 @@ class TestStringHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAf
     val build = pairs(rowsOf("", half * 2, identity))
     val probe = pairs(Seq("b" -> 7))
     val memory = join(build, probe, width)
-    val batch = build.head
+    val batch = Check.first(build)
     val budget = StringHashJoinSpill.retainedBytes(
       half,
       StringHashJoinSpill.dictionaryEntries(batch),
@@ -350,7 +350,7 @@ class TestStringHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAf
     )
     val probe = pairs(Seq("" -> 1, "c" -> 2, "d" -> 3, "a" -> 4))
     val memory = join(build, probe, partitions = 3)
-    val batch = build.head
+    val batch = Check.first(build)
     val entries = StringHashJoinSpill.dictionaryEntries(batch)
     val dictionary = StringHashJoinSpill.dictionaryBytes(batch)
     val budget = StringHashJoinSpill.retainedBytes(half, entries, dictionary)
@@ -388,7 +388,7 @@ class TestStringHashJoinSpill extends AnyFlatSpec with Matchers with BeforeAndAf
         rowsOf("a", half, row => 3000 + row),
     )
     val probe = pairs(Seq("" -> 1, "c" -> 2, "d" -> 3, "a" -> 4))
-    val batch = build.head
+    val batch = Check.first(build)
     val budget = StringHashJoinSpill.retainedBytes(
       half,
       StringHashJoinSpill.dictionaryEntries(batch),

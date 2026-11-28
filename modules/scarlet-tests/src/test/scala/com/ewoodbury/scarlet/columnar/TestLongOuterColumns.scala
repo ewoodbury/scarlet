@@ -1,9 +1,11 @@
 package com.ewoodbury.scarlet.columnar
-
 import java.nio.file.{Files, Path}
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /** Absence on an `Int64` column: decode, slice, concat, and the spill tag. */
 @SuppressWarnings(Array("org.wartremover.warts.Any"))
@@ -29,7 +31,7 @@ class TestLongOuterColumns extends AnyFlatSpec with Matchers:
   it should "reject a clear bit that is not an absence mark" in {
     val right = Int64Column.of(Array(0L), Validity.pack(1, _ => false), 1)
     val batch = triple(present(Array(1L)), present(Array(10L)), right)
-    right.absence shouldBe None
+    right.absence.shouldBeEmpty
     val thrown = intercept[IllegalArgumentException] {
       val _ = LongOuterDecode.decode(batch, AbsentSide.Right)
     }
@@ -41,7 +43,7 @@ class TestLongOuterColumns extends AnyFlatSpec with Matchers:
     val batch = triple(keys, present(Array(10L)), present(Array(20L)))
     val decoded = LongOuterDecode.decode(batch, AbsentSide.Right)
     decoded.length shouldBe 1
-    nullKey(decoded.head) shouldBe true
+    nullKey(Check.first(decoded)) shouldBe true
   }
 
   "long absence" should "survive slice, concat, and a spill round trip" in {
@@ -54,11 +56,11 @@ class TestLongOuterColumns extends AnyFlatSpec with Matchers:
     val batch = new ColumnBatch(Vector(LogicalType.Int64), Vector(marked), 2)
     val pieces = ColumnBatches.slice(batch, 1)
     pieces.length shouldBe 2
-    int64(pieces(0)).isAbsent(0) shouldBe true
-    int64(pieces(1)).isAbsent(0) shouldBe false
+    int64(Check.at(pieces, 0)).isAbsent(0) shouldBe true
+    int64(Check.at(pieces, 1)).isAbsent(0) shouldBe false
     val plain = Int64Column.of(Array(3L), Validity.allValid(1), 1)
     val plainBatch = new ColumnBatch(Vector(LogicalType.Int64), Vector(plain), 1)
-    val joined = ColumnBatches.concat(Vector(pieces(0), plainBatch))
+    val joined = ColumnBatches.concat(Vector(Check.at(pieces, 0), plainBatch))
     int64(joined).isAbsent(0) shouldBe true
     int64(joined).isAbsent(1) shouldBe false
     int64(joined).isValid(0) shouldBe true
@@ -66,7 +68,7 @@ class TestLongOuterColumns extends AnyFlatSpec with Matchers:
       SpillStore.withSpill(dir) { store =>
         val read = store.write(Vector(batch)).read()
         read.length shouldBe 1
-        val column = int64(read.head)
+        val column = int64(Check.first(read))
         column.isAbsent(0) shouldBe true
         column.isAbsent(1) shouldBe false
         column.isValid(0) shouldBe true
@@ -74,7 +76,7 @@ class TestLongOuterColumns extends AnyFlatSpec with Matchers:
         column.values(0) shouldBe 1L
         column.values(1) shouldBe 2L
         val plainRead = store.write(Vector(plainBatch)).read()
-        int64(plainRead.head).absence shouldBe None
+        int64(Check.first(plainRead)).absence.shouldBeEmpty
       }
     }
     SpillLayout.Version shouldBe 4
@@ -94,10 +96,10 @@ class TestLongOuterColumns extends AnyFlatSpec with Matchers:
       SpillStore.withSpill(dir) { store =>
         val read = store.write(Vector(absentBatch, plainBatch)).read()
         read.length shouldBe 2
-        int64(read.head).isAbsent(0) shouldBe true
-        int64(read.head).isValid(0) shouldBe false
-        int64(read(1)).absence shouldBe None
-        int64(read(1)).values(0) shouldBe 2L
+        int64(Check.first(read)).isAbsent(0) shouldBe true
+        int64(Check.first(read)).isValid(0) shouldBe false
+        int64(Check.at(read, 1)).absence.shouldBeEmpty
+        int64(Check.at(read, 1)).values(0) shouldBe 2L
       }
     }
   }

@@ -1,9 +1,9 @@
 package com.ewoodbury.scarlet.execution
-
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Nine ClickBench queries on 4096 generated rows. This is not the hits table.
@@ -260,7 +260,7 @@ object ClickBenchSlice:
 
   private def shaped(name: String, plan: Plan[WideRow], shape: String): Option[String] =
     ColumnarPlanner.lower(plan).map(_.shape) match
-      case Some(found) if found == shape => None
+      case Some(found) if Check.same(found, shape) => None
       case Some(found) => Some(s"$name shape $found expected $shape")
       case None => Some(s"$name did not lower")
 
@@ -301,7 +301,7 @@ object ClickBenchSlice:
     case other =>
       refuse(other.size)
 
-  private def intAt(row: WideRow, ordinal: Int): Int = cells(row)(ordinal) match
+  private def intAt(row: WideRow, ordinal: Int): Int = Check.at(cells(row), ordinal) match
     case Cell.Int32(value) => value
     case _ => refuse(cells(row).size)
 

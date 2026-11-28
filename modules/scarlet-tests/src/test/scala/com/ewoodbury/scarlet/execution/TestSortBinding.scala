@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -12,6 +11,7 @@ import com.ewoodbury.scarlet.execution.schema.ColumnBinding.{
   ReducerWitness,
   Side,
 }
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Typed sorts ask [[ColumnBinding]] before they build.
@@ -80,9 +80,9 @@ class TestSortBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     child.kind shouldBe PhysicalOp.Kind.Pairs
     Layout.known(child) shouldBe Layout.AssumedIntLong
     ColumnBinding.resetChooseCallsForTest()
-    SortLowering.lowerInt(intPairs, _ => Some(child)) shouldBe None
+    SortLowering.lowerInt(intPairs, _ => Some(child)).shouldBeEmpty
     ColumnBinding.chooseCallsForTest should be > 0
-    ColumnBinding.asked(child, Operator.SortByIntKey) shouldBe None
+    ColumnBinding.asked(child, Operator.SortByIntKey).shouldBeEmpty
   }
 
   it should "return None for a layout the int sort refuses" in {
@@ -96,13 +96,13 @@ class TestSortBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     ColumnBinding.resetChooseCallsForTest()
     val rows = Seq[Partition[_]](Partition(Seq(1L -> 2L)))
     val longScan = PhysicalOp.Scan(PhysicalOp.Kind.LongPairs, rows)
-    SortLowering.lowerInt(intPairs, _ => Some(longScan)) shouldBe None
+    SortLowering.lowerInt(intPairs, _ => Some(longScan)).shouldBeEmpty
     ColumnBinding.chooseCallsForTest should be > 0
   }
 
   it should "keep mapValues off an int key sort and on the value sort" in {
     val mapped = Plan.MapValuesOp(intPairs, (value: Int) => value + 1)
-    ColumnarPlanner.lower(Plan.SortByIntKeyOp(mapped)) shouldBe None
+    ColumnarPlanner.lower(Plan.SortByIntKeyOp(mapped)).shouldBeEmpty
     ColumnBinding.chooseCallsForTest should be > 0
     val valueSort = ColumnarPlanner.lower(Plan.SortByIntValueDescOp(mapped))
     sortClass(valueSort, "SortByIntValueDesc")
@@ -110,13 +110,15 @@ class TestSortBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   }
 
   private def refuse(layout: Vector[ColumnLayout]): Unit =
-    ColumnBinding.choose(
-      layout,
-      Operator.SortByIntKey,
-      ReducerWitness.NotApplicable,
-      NullAdmission.Policy(NullPolicy.Nullable),
-      Side.Inner,
-    ) shouldBe None
+    ColumnBinding
+      .choose(
+        layout,
+        Operator.SortByIntKey,
+        ReducerWitness.NotApplicable,
+        NullAdmission.Policy(NullPolicy.Nullable),
+        Side.Inner,
+      )
+      .shouldBeEmpty
 
   private def pair(key: ColumnType, value: ColumnType): Vector[ColumnLayout] =
     Vector(ColumnLayout(key, NullPolicy.Nullable), ColumnLayout(value, NullPolicy.Nullable))

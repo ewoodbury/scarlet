@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -7,6 +6,7 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Unhinted inner joins broadcast when the build side's stored row count is at or under the
@@ -90,7 +90,7 @@ class TestJoinCost extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     ColumnarPlanner.lower(plan).map(_.shape).getOrElse(fail(s"did not lower $plan"))
 
   private def rows(joined: DistCollection[WideRow]): List[String] =
-    joined.collect().map(_.toString).toList.sorted
+    joined.collect().map(Check.text(_)).toList.sorted
 
   private def withThreshold(threshold: Long)(body: => Unit): Unit =
     val saved = ScarletConf.get

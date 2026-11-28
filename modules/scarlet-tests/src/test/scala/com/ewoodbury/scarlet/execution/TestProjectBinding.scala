@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -12,6 +11,7 @@ import com.ewoodbury.scarlet.execution.schema.ColumnBinding.{
   ReducerWitness,
   Side,
 }
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Same-type element maps ask [[ColumnBinding]] before they build.
@@ -115,18 +115,18 @@ class TestProjectBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEa
   }
 
   it should "leave an int value widened to long unasked" in {
-    lower(Plan.MapOp(ints, (value: Int) => value.toLong)) shouldBe None
+    lower(Plan.MapOp(ints, (value: Int) => value.toLong)).shouldBeEmpty
     ColumnBinding.chooseCallsForTest shouldBe 0
     choose(Vector(ColumnLayout(ColumnType.Int32, NullPolicy.Nullable)), Operator.Project) shouldBe
       Some(KernelChoice.Project)
   }
 
   it should "leave a boolean map empty" in {
-    lower(Plan.MapOp(bools, (value: Boolean) => !value)) shouldBe None
+    lower(Plan.MapOp(bools, (value: Boolean) => !value)).shouldBeEmpty
     ColumnBinding.chooseCallsForTest shouldBe 0
     val column = Vector(ColumnLayout(ColumnType.Bool, NullPolicy.Nullable))
-    choose(column, Operator.Project) shouldBe None
-    choose(column, Operator.Pipeline) shouldBe None
+    choose(column, Operator.Project).shouldBeEmpty
+    choose(column, Operator.Pipeline).shouldBeEmpty
   }
 
   it should "not build a project from Kind.Pairs when the binder returns None" in {
@@ -136,13 +136,13 @@ class TestProjectBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     Layout.known(child) shouldBe Layout.AssumedIntLong
     PhysicalSchema.isIntLongProject(child) shouldBe false
     ColumnBinding.resetChooseCallsForTest()
-    ProjectBinding.project(child) shouldBe None
+    ProjectBinding.project(child).shouldBeEmpty
     ColumnBinding.chooseCallsForTest should be > 0
-    ColumnBinding.asked(child, Operator.Project) shouldBe None
+    ColumnBinding.asked(child, Operator.Project).shouldBeEmpty
     ColumnBinding.resetChooseCallsForTest()
-    ProjectBinding.pipeline(child, 2) shouldBe None
+    ProjectBinding.pipeline(child, 2).shouldBeEmpty
     ColumnBinding.chooseCallsForTest should be > 0
-    ColumnBinding.asked(child, Operator.Pipeline) shouldBe None
+    ColumnBinding.asked(child, Operator.Pipeline).shouldBeEmpty
   }
 
   it should "keep an int-pair project off this ask" in {
