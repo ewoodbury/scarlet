@@ -428,14 +428,47 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     named("select top 1 count(*) from tiny", "Top")
   }
 
-  "a left join" should "name the node" in {
-    val thrown = the[IllegalArgumentException] thrownBy {
-      val _ = Sql.run(
-        "select count(*) from tiny left join tiny on id = id",
-        Map("tiny" -> tiny()),
-      )
-    }
-    thrown.getMessage should include("Join")
+  "a left join" should "keep an unmatched row" in {
+    val customers = DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("custkey", Array(1, 2)),
+        WideInput.longs("balance", Array(0L, 20L)),
+      ),
+      1,
+    )
+    val orders = DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("orderkey", Array(10)),
+        WideInput.ints("custkey", Array(1)),
+      ),
+      1,
+    )
+    val hand = customers.leftJoinColumns(orders, 0, 1)
+    val handCount = hand.count()
+    val handShape = ColumnarPlanner.lower(hand.plan).map(_.shape).getOrElse("none")
+    val tables = Map("customer" -> customers, "orders" -> orders)
+    val (result, shape) = value(
+      "select count(*) from customer left join orders on customer.custkey = orders.custkey",
+      tables,
+    )
+    result shouldBe 2L
+    result shouldBe handCount
+    shape shouldBe handShape
+    shape shouldBe "WideBroadcastLeftJoin(Scan,Scan)"
+    val (outerCount, outerShape) = value(
+      "select count(*) from customer left outer join orders on customer.custkey = orders.custkey",
+      tables,
+    )
+    outerCount shouldBe 2L
+    outerShape shouldBe shape
+  }
+
+  "a right join" should "name the node" in {
+    named("select count(*) from tiny right join tiny on id = id", "Join")
+  }
+
+  "a full join" should "name the node" in {
+    named("select count(*) from tiny full join tiny on id = id", "Join")
   }
 
   "an ordered string" should "sort one string column" in {

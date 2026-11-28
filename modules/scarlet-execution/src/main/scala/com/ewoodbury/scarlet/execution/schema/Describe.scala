@@ -123,8 +123,9 @@ private[execution] object Describe:
     case _: PhysicalOp.WideFilter => KernelChoice.Filter
     case _: PhysicalOp.WideProject => KernelChoice.Project
     case _: PhysicalOp.WideCompute => KernelChoice.Project
-    case _: PhysicalOp.WideHashJoin => KernelChoice.HashJoin
-    case _: PhysicalOp.WideBroadcastJoin => KernelChoice.BroadcastJoin
+    case _: PhysicalOp.WideHashJoin | _: PhysicalOp.WideHashLeftJoin => KernelChoice.HashJoin
+    case _: PhysicalOp.WideBroadcastJoin | _: PhysicalOp.WideBroadcastLeftJoin =>
+      KernelChoice.BroadcastJoin
     case _: PhysicalOp.WideGroup => KernelChoice.IntHashAggregate
     case _: PhysicalOp.WideSort => KernelChoice.SortByLongKey
     case _: PhysicalOp.WideLimit => KernelChoice.Project

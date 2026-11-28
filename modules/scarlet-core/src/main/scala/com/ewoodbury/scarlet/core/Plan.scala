@@ -672,6 +672,21 @@ object Plan {
   ) extends Plan[WideRow]
 
   /**
+   * Left outer join of two wide rows on one int or long column. The right side is the build. An
+   * empty `broadcast` lets the cost rule choose. `Some(true)` broadcasts and `Some(false)` hashes.
+   * A null key is dropped. Each unmatched left row is kept once. A missing partner is invalid. A
+   * stored zero stays present. Output is every left column, then every right column except the
+   * key. Right and full outer wait.
+   */
+  case class WideLeftJoinOp(
+      left: Plan[WideRow],
+      right: Plan[WideRow],
+      leftKey: Int,
+      rightKey: Int,
+      broadcast: Option[Boolean],
+  ) extends Plan[WideRow]
+
+  /**
    * Groups by one int or long column, or by two, and aggregates one numeric column: count, sum,
    * min, and max. A null in either key is dropped. A null measure is counted and skipped by sum,
    * min, and max. A key whose measures are all null still emits a row. `key2` empty is the one-key

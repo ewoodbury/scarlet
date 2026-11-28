@@ -61,6 +61,10 @@ private[execution] object WideRun:
       Seq(join(left, right, leftKey, rightKey, broadcast = false))
     case PhysicalOp.WideBroadcastJoin(left, right, leftKey, rightKey) =>
       Seq(join(left, right, leftKey, rightKey, broadcast = true))
+    case PhysicalOp.WideHashLeftJoin(left, right, leftKey, rightKey) =>
+      Seq(joinLeft(left, right, leftKey, rightKey, broadcast = false))
+    case PhysicalOp.WideBroadcastLeftJoin(left, right, leftKey, rightKey) =>
+      Seq(joinLeft(left, right, leftKey, rightKey, broadcast = true))
     case PhysicalOp.WideGroup(child, key, measure, key2, distinct) =>
       Seq(group(child, key, measure, key2, distinct))
     case PhysicalOp.WideSort(child, ordinal, descending) =>
@@ -83,6 +87,28 @@ private[execution] object WideRun:
       if (broadcast) then
         WideJoin.broadcast(leftBatches, rightBatches, leftFields, rightFields, leftKey, rightKey)
       else WideJoin.hash(leftBatches, rightBatches, leftFields, rightFields, leftKey, rightKey)
+    Table(fields, batch)
+
+  private def joinLeft(
+      left: PhysicalOp,
+      right: PhysicalOp,
+      leftKey: Int,
+      rightKey: Int,
+      broadcast: Boolean,
+  ): Table =
+    val (leftFields, leftBatches) = side(left)
+    val (rightFields, rightBatches) = side(right)
+    val (fields, batch) =
+      if (broadcast) then
+        WideJoin.broadcastLeft(
+          leftBatches,
+          rightBatches,
+          leftFields,
+          rightFields,
+          leftKey,
+          rightKey,
+        )
+      else WideJoin.hashLeft(leftBatches, rightBatches, leftFields, rightFields, leftKey, rightKey)
     Table(fields, batch)
 
   private def group(

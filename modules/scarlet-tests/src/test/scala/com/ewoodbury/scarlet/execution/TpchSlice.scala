@@ -11,7 +11,7 @@ import com.ewoodbury.scarlet.support.Check
  * Money is a long. A date is a long. An average is a sum divided by a count. Query 1 groups by the
  * return flag only. Query 3 multiplies the lineitem price by the discount, joins customer and
  * orders, and groups by the order key. Query 5 joins the local supplier and groups by the nation
- * name. [[note]] names every TPC-H query.
+ * name. Query 13 keeps a customer that matches no order. [[note]] names every TPC-H query.
  */
 object TpchSlice:
 
@@ -42,6 +42,13 @@ object TpchSlice:
   val localMix: Long = 516785584372771424L
   val localGroups: Long = 2L
 
+  /**
+   * Customers 0, 1, and 2. Customer 1 matches nothing. Customer 0 keeps a stored zero balance.
+   * Customer 2 keeps a stored zero total.
+   */
+  val outerMix: Long = -1025412830682488009L
+  val outerRows: Long = 4L
+
   val note: Vector[String] = Vector(
     "1 This file. One group column. The published query also groups by line status.",
     "2 Missing: subquery.",
@@ -55,7 +62,7 @@ object TpchSlice:
     "10 Missing: more than two group columns.",
     "11 Missing: subquery.",
     "12 Missing: a conditional count.",
-    "13 Missing: outer join.",
+    "13 This file. Left outer join. The published query also filters a comment and groups by count.",
     "14 Missing: string LIKE.",
     "15 Missing: subquery.",
     "16 Missing: subquery.",
@@ -136,6 +143,10 @@ object TpchSlice:
       .filterColumn(12, ColumnCompare(CompareOp.Eq, ColumnLiteral.Bool(true)))
       .groupColumns(3, 10)
 
+  /** Query 13 reduced to one left outer join. A customer with no order stays. */
+  def custOrderPlan(): DistCollection[WideRow] =
+    openCustomers().hashLeftJoinColumns(openOrders(), 0, 1)
+
   def pricingChecksum(rows: Iterable[WideRow]): Long =
     rows.toVector.sortWith(byKey).foldLeft(0L)(mixIntMeasure)
 
@@ -144,6 +155,9 @@ object TpchSlice:
 
   def localChecksum(rows: Iterable[WideRow]): Long =
     rows.toVector.sortWith(byNation).foldLeft(0L)(mixNation)
+
+  def outerChecksum(rows: Iterable[WideRow]): Long =
+    rows.toVector.sortWith(byCustomer).foldLeft(0L)(mixOuter)
 
   private def prove(): List[String] =
     val revenueShape =
@@ -166,6 +180,8 @@ object TpchSlice:
         "WideGroup(WideFilter12(WideCompute(WideHashJoin(WideHashJoin(WideHashJoin(WideHashJoin(WideHashJoin(WideFilter1(Scan),Scan),Scan),WideFilter2(Scan)),WideCompute(Scan)),Scan))))",
       ),
       counted("query 5", localPlan().plan, localGroups),
+      shaped("query 13", custOrderPlan().plan, "WideHashLeftJoin(Scan,Scan)"),
+      counted("query 13", custOrderPlan().plan, outerRows),
     ).flatten
 
   private def bothPaths(): List[String] =
@@ -174,6 +190,7 @@ object TpchSlice:
       both("query 1", pricingMix)(pricingChecksum(pricingPlan().collect())),
       both("query 3", shippingMix)(shippingChecksum(shippingPlan().collect())),
       both("query 5", localMix)(localChecksum(localPlan().collect())),
+      both("query 13", outerMix)(outerChecksum(custOrderPlan().collect())),
     ).flatten
 
   private def lineitem(): DistCollection[WideRow] =
@@ -403,6 +420,64 @@ object TpchSlice:
 
   private def finish(acc: Long, count: Long, sum: Long, min: Long, max: Long): Long =
     (((acc * 31L + count) * 31L + sum) * 31L + min) * 31L + max
+
+  private def openCustomers(): DistCollection[WideRow] =
+    DistCollection.ofColumns(
+      Vector(
+        WideInput.nullableInts("custkey", Array(0, 0, 1, 2), Array(true, false, true, true)),
+        WideInput.longs("balance", Array(0L, 99L, 20L, 30L)),
+      ),
+      partitions,
+    )
+
+  private def openOrders(): DistCollection[WideRow] =
+    DistCollection.ofColumns(
+      Vector(
+        WideInput.nullableInts(
+          "orderkey",
+          Array(100, 101, 103, 0, 102, 104),
+          Array(true, true, true, false, true, true),
+        ),
+        WideInput.nullableInts(
+          "custkey",
+          Array(0, 2, 0, 7, 9, 0),
+          Array(true, true, true, true, true, false),
+        ),
+        WideInput.nullableLongs(
+          "total",
+          Array(5L, 0L, 0L, 9L, 1L, 8L),
+          Array(true, true, false, true, true, true),
+        ),
+      ),
+      partitions,
+    )
+
+  private def byCustomer(left: WideRow, right: WideRow): Boolean =
+    val leftCust = custOf(left)
+    val rightCust = custOf(right)
+    if (Check.same(leftCust, rightCust)) then orderOf(left) < orderOf(right)
+    else leftCust < rightCust
+
+  private def mixOuter(acc: Long, row: WideRow): Long =
+    row.cells.foldLeft(acc)(mixCell)
+
+  private def mixCell(acc: Long, cell: Cell): Long = cell match
+    case Cell.Null => step(step(acc, 0L), 0L)
+    case Cell.Int32(number) => step(step(acc, 1L), number.toLong)
+    case Cell.Int64(number) => step(step(acc, 2L), number)
+    case Cell.Float64(_) | Cell.Float32(_) | Cell.Bool(_) | Cell.Utf8(_) | Cell.Decimal(_, _, _) =>
+      throw new IllegalArgumentException("outer cell is not an int or a long")
+
+  private def step(acc: Long, value: Long): Long = acc * 31L + value
+
+  private def custOf(row: WideRow): Long = row.cells.headOption match
+    case Some(Cell.Int32(key)) => key.toLong
+    case _ => throw new IllegalArgumentException("outer key is not an int")
+
+  private def orderOf(row: WideRow): Long = row.cells.drop(2).headOption match
+    case Some(Cell.Int32(key)) => key.toLong
+    case Some(Cell.Null) => Long.MaxValue
+    case _ => throw new IllegalArgumentException("outer order is not an int")
 
   private def keyOf(row: WideRow): Long = cells(row) match
     case Vector(Cell.Int32(key), _, _, _, _) => key.toLong

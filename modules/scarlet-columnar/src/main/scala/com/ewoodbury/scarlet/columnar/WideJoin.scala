@@ -13,7 +13,8 @@ import com.ewoodbury.scarlet.core.{ColumnField, ColumnKind, ScarletConf}
  * long build estimate is over the spill budget is written with the existing spill store and read
  * back. Float, bool, and float32 columns stay in memory. Spill off writes nothing. Broadcast mode
  * hashes the right side once and probes every left batch. Output is every left column, then every
- * right column except the key.
+ * right column except the key. A left outer join keeps each present left key. A missing partner is
+ * invalid. A stored zero stays present.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object WideJoin:
@@ -60,6 +61,54 @@ object WideJoin:
       concat(matched, leftFields, rightFields, rightKey),
     )
 
+  /**
+   * Left outer hash join. Hash and broadcast name the same multiset. A null key is dropped. A
+   * missing partner is invalid, and a stored zero stays present.
+   */
+  def hashLeft(
+      left: Seq[ColumnBatch],
+      right: Seq[ColumnBatch],
+      leftFields: Vector[ColumnField],
+      rightFields: Vector[ColumnField],
+      leftKey: Int,
+      rightKey: Int,
+  ): (Vector[ColumnField], ColumnBatch) =
+    val kind = keyKind(leftFields, rightFields, leftKey, rightKey)
+    val longKey = kind == ColumnKind.Int64
+    val width = math.max(ScarletConf.get.defaultShufflePartitions, 1)
+    val prototype = concat(right, rightFields, Vector.empty, -1)
+    val leftParts = WideExchange.hold(split(left, leftKey, kind, width), longKey)
+    val rightParts = WideExchange.hold(split(right, rightKey, kind, width), longKey)
+    val matched = (0 until width).iterator.flatMap { part =>
+      localLeft(leftParts(part), rightParts(part), prototype, leftKey, rightKey, kind)
+    }.toSeq
+    (
+      outputFields(leftFields, rightFields, rightKey),
+      concat(matched, leftFields, rightFields, rightKey),
+    )
+
+  /** Left outer broadcast join. The build is hashed once and probed from every left batch. */
+  def broadcastLeft(
+      left: Seq[ColumnBatch],
+      right: Seq[ColumnBatch],
+      leftFields: Vector[ColumnField],
+      rightFields: Vector[ColumnField],
+      leftKey: Int,
+      rightKey: Int,
+  ): (Vector[ColumnField], ColumnBatch) =
+    val kind = keyKind(leftFields, rightFields, leftKey, rightKey)
+    val prototype = concat(right, rightFields, Vector.empty, -1)
+    val matched = left.iterator
+      .filter(_.length > 0)
+      .flatMap { probe =>
+        localLeft(Seq(probe), Seq(prototype), prototype, leftKey, rightKey, kind)
+      }
+      .toSeq
+    (
+      outputFields(leftFields, rightFields, rightKey),
+      concat(matched, leftFields, rightFields, rightKey),
+    )
+
   /** Left columns, then right columns except the key. */
   def outputFields(
       left: Vector[ColumnField],
@@ -80,12 +129,37 @@ object WideJoin:
     if (probe.length == 0 || build.length == 0) then Seq.empty
     else Seq(matchRows(probe, build, leftKey, rightKey, kind))
 
+  private def localLeft(
+      left: Seq[ColumnBatch],
+      right: Seq[ColumnBatch],
+      prototype: ColumnBatch,
+      probeKey: Int,
+      buildKey: Int,
+      kind: ColumnKind,
+  ): Seq[ColumnBatch] =
+    val probe = concat(left, Vector.empty, Vector.empty, -1)
+    if (probe.length == 0) then Seq.empty
+    else
+      val build = concat(right, Vector.empty, Vector.empty, -1)
+      val hits = new Array[Boolean](probe.length)
+      val matched =
+        if (build.length == 0) then None
+        else Some(matchRows(probe, build, probeKey, buildKey, kind, Some(hits)))
+      val extra = preserve(probe, prototype, probeKey, buildKey, hits)
+      val pieces = Vector.newBuilder[ColumnBatch]
+      matched.foreach { batch =>
+        if (batch.length > 0) then pieces += batch
+      }
+      if (extra.length > 0) then pieces += extra
+      pieces.result()
+
   private def matchRows(
       probe: ColumnBatch,
       build: ColumnBatch,
       probeKey: Int,
       buildKey: Int,
       kind: ColumnKind,
+      hit: Option[Array[Boolean]] = None,
   ): ColumnBatch =
     val joined = kind match
       case ColumnKind.Int32 =>
@@ -121,6 +195,13 @@ object WideJoin:
         probeAt(row) = probeRows(row)
         row += 1
       }
+    hit.foreach { flags =>
+      var mark = 0
+      while (mark < rows) {
+        flags(probeAt(mark)) = true
+        mark += 1
+      }
+    }
     val columns = Vector.newBuilder[Column]
     var ordinal = 0
     while (ordinal < probe.columns.size) {
@@ -200,6 +281,58 @@ object WideJoin:
 
   private def present(batch: ColumnBatch, ordinal: Int, row: Int): Boolean =
     batch.columns(ordinal).isValid(row)
+
+  /** Present probe keys with no build hit. Right non-key columns are invalid. */
+  private def preserve(
+      probe: ColumnBatch,
+      prototype: ColumnBatch,
+      probeKey: Int,
+      buildKey: Int,
+      hit: Array[Boolean],
+  ): ColumnBatch =
+    val keep = new scala.collection.mutable.ArrayBuffer[Int]
+    var row = 0
+    while (row < probe.length) {
+      if (!hit(row) && present(probe, probeKey, row)) then keep += row
+      row += 1
+    }
+    val chosen = keep.toArray
+    val length = chosen.length
+    if (length == 0) then new ColumnBatch(Vector.empty, Vector.empty, 0)
+    else
+      val columns = Vector.newBuilder[Column]
+      var ordinal = 0
+      while (ordinal < probe.columns.size) {
+        columns += gather(probe.columns(ordinal), chosen, length)
+        ordinal += 1
+      }
+      ordinal = 0
+      while (ordinal < prototype.columns.size) {
+        if (ordinal != buildKey) then columns += absent(prototype.columns(ordinal), length)
+        ordinal += 1
+      }
+      val out = columns.result()
+      new ColumnBatch(out.map(_.logicalType), out, length)
+
+  private def absent(column: Column, length: Int): Column =
+    val missing = Validity.pack(length, _ => false)
+    column match
+      case _: Int32Column =>
+        Int32Column.of(new Array[Int](length), missing, length)
+      case _: Int64Column =>
+        Int64Column.of(new Array[Long](length), missing, length)
+      case _: Float64Column =>
+        Float64Column.of(new Array[Double](length), missing, length)
+      case _: Float32Column =>
+        Float32Column.of(new Array[Float](length), missing, length)
+      case _: BoolColumn =>
+        BoolColumn.of(new Array[Byte](length), missing, length)
+      case source: DictUtf8Column =>
+        DictUtf8Column.of(source.dictionary, new Array[Int](length), missing, length)
+      case source: DecimalColumn =>
+        DecimalColumn.of(source.precision, source.scale, new Array[Long](length), missing, length)
+      case other =>
+        throw new IllegalArgumentException(s"${other.logicalType} is not supported here")
 
   private def gatherRows(batch: ColumnBatch, rows: Array[Int]): ColumnBatch =
     val columns = batch.columns.map(column => gather(column, rows, rows.length))

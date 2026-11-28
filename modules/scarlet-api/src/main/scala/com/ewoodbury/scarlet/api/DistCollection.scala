@@ -112,6 +112,35 @@ final case class DistCollection[A](plan: Plan[A]):
     )
 
   /**
+   * Left outer join on one int or long column. The right side is the build. A known build count at
+   * or under the broadcast threshold broadcasts. Anything else hashes. A null key is dropped. Each
+   * unmatched left row is kept once. A missing partner is invalid. A stored zero stays present.
+   */
+  def leftJoinColumns(right: DistCollection[WideRow], leftKey: Int, rightKey: Int)(using
+      ev: A =:= WideRow,
+  ): DistCollection[WideRow] =
+    DistCollection(Plan.WideLeftJoinOp(widePlan, right.plan, leftKey, rightKey, broadcast = None))
+
+  /** Left outer hash join on one int or long column. The right side is the build. */
+  def hashLeftJoinColumns(right: DistCollection[WideRow], leftKey: Int, rightKey: Int)(using
+      ev: A =:= WideRow,
+  ): DistCollection[WideRow] =
+    DistCollection(
+      Plan.WideLeftJoinOp(widePlan, right.plan, leftKey, rightKey, broadcast = Some(false)),
+    )
+
+  /**
+   * Broadcasts `right` as the build and keeps unmatched rows of this collection. The rows are the
+   * same multiset as [[hashLeftJoinColumns]].
+   */
+  def broadcastLeftJoinColumns(right: DistCollection[WideRow], leftKey: Int, rightKey: Int)(using
+      ev: A =:= WideRow,
+  ): DistCollection[WideRow] =
+    DistCollection(
+      Plan.WideLeftJoinOp(widePlan, right.plan, leftKey, rightKey, broadcast = Some(true)),
+    )
+
+  /**
    * Groups by one int, long, or string column. A numeric measure emits count, sum, min, and max. A
    * string measure emits count, min, and max, and has no sum. A null key is dropped. A null
    * measure is counted and skipped by the other aggregates. One pass. This does not build value

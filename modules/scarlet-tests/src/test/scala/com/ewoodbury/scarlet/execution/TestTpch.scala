@@ -96,6 +96,27 @@ class TestTpch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     TpchSlice.shippingChecksum(planned.collect()) shouldBe TpchSlice.shippingMix
   }
 
+  "query 13" should "keep a customer that matches nothing" in {
+    val planned = TpchSlice.custOrderPlan()
+    ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some("WideHashLeftJoin(Scan,Scan)")
+    ColumnarPlanner.tryCount(planned.plan) shouldBe Some(TpchSlice.outerRows)
+    val columnar = planned.collect().toSeq
+    columnar.length shouldBe 4
+    columnar.collectFirst {
+      case row if row.cells.headOption.contains(Cell.Int32(1)) => row.cells
+    } shouldBe Some(Vector(Cell.Int32(1), Cell.Int64(20L), Cell.Null, Cell.Null))
+    columnar.collectFirst {
+      case row if row.cells.headOption.contains(Cell.Int32(2)) => row.cells
+    } shouldBe Some(Vector(Cell.Int32(2), Cell.Int64(30L), Cell.Int32(101), Cell.Int64(0L)))
+    columnar.exists { row =>
+      row.cells.headOption.contains(Cell.Int32(0)) &&
+      row.cells.drop(1).headOption.contains(Cell.Int64(0L))
+    } shouldBe true
+    TpchSlice.outerChecksum(columnar) shouldBe TpchSlice.outerMix
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = false))
+    TpchSlice.outerChecksum(planned.collect()) shouldBe TpchSlice.outerMix
+  }
+
   "the slice" should "agree with the row path" in {
     TpchSlice.failures() shouldBe Nil
   }

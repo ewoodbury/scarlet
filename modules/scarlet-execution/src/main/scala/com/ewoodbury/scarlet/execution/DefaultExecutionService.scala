@@ -64,6 +64,9 @@ class DefaultExecutionService extends ExecutionService {
     case join: Plan.WideJoinOp =>
       wideJoinPartitions(plan, join)
 
+    case join: Plan.WideLeftJoinOp =>
+      wideLeftJoinPartitions(plan, join)
+
     case group: Plan.WideGroupOp =>
       wideGroupPartitions(plan, group)
 
@@ -110,6 +113,16 @@ class DefaultExecutionService extends ExecutionService {
   private def wideJoinPartitions[A](plan: Plan[A], join: Plan.WideJoinOp): Seq[Partition[A]] =
     ColumnarPlanner.tryRun(plan).getOrElse {
       WideJoinRows.partitions(join).asInstanceOf[Seq[Partition[A]]]
+    }
+
+  /** Columnar left outer join when it lowers. Otherwise [[WideJoinRows.leftPartitions]]. */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+  private def wideLeftJoinPartitions[A](
+      plan: Plan[A],
+      join: Plan.WideLeftJoinOp,
+  ): Seq[Partition[A]] =
+    ColumnarPlanner.tryRun(plan).getOrElse {
+      WideJoinRows.leftPartitions(join).asInstanceOf[Seq[Partition[A]]]
     }
 
   /**
