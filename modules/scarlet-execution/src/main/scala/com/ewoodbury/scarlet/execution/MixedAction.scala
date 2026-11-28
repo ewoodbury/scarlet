@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.execution
 
-import com.ewoodbury.scarlet.core.{Partition, Plan}
+import com.ewoodbury.scarlet.core.{Partition, Plan, PlanWide, WideRow}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 
 /**
@@ -16,7 +16,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
  * `filterValues` drops a null the row predicate unboxes to `0` and keeps. A non-source child is
  * kept only when every decoded partition equals the row executor's partition, in order. A refused
  * decode, a rejected null pair, or a different partition runs on rows. A decode that ran has
- * already published its batches. [[MixedJoin]] still owns a join. This is not a kernel and it does
+ * already published its batches. [[MixedJoin]] still owns a join. A filter or compute above a join
+ * packs those rows. A filter or compute of a scan stays a stage. This is not a kernel and it does
  * not build a [[PhysicalOp]].
  */
 @SuppressWarnings(
@@ -69,8 +70,29 @@ private[execution] object MixedAction:
           .getOrElse(WideOrderRows.limit(limit))
           .asInstanceOf[Seq[Partition[A]]],
       )
+    case filter: Plan.WideFilterOp =>
+      aboveWide(filter, filter.source, WideStepRows.filter(filter))
+    case compute: Plan.WideComputeOp =>
+      aboveWide(compute, compute.source, WideStepRows.compute(compute))
     case other =>
       freeze(MixedJoin.partitions(other).getOrElse(runRow(other)))
+
+  /**
+   * Columnar filter or compute when it lowers. Above a join, the row step packs the joined rows. A
+   * filter or compute of a scan stays a stage.
+   */
+  private def aboveWide[A](
+      plan: Plan[A],
+      source: Plan[WideRow],
+      rows: => Seq[Partition[WideRow]],
+  ): Seq[Partition[A]] =
+    if (PlanWide.isWide(source)) then
+      freeze(
+        ColumnarPlanner
+          .tryRun(plan)
+          .getOrElse(rows.asInstanceOf[Seq[Partition[A]]]),
+      )
+    else freeze(MixedJoin.partitions(plan).getOrElse(runRow(plan)))
 
   /**
    * Child partitions under one `mapPartitions`. A nested tail is split again. A source is not

@@ -21,14 +21,15 @@ import com.ewoodbury.scarlet.core.*
 /**
  * One SELECT: registered tables, a left-deep chain of int or long equi-joins in the written order.
  * A left outer join keeps an unmatched left row. A right or full join names the node. An exists
- * joins the distinct inner key. A scalar subquery becomes the value it returns. Not exists and a
- * correlated scalar name that pattern. Comparisons combine with AND, OR, and NOT. Arithmetic,
- * count, sum, min, max, and an exact count of distinct values. A string compares with JVM order.
- * `LIKE` uses `%` and `_`, and it combines with AND and NOT. OR of `LIKE` names the node. `length`
- * is the UTF-16 length. A group is one or two keys. A key is an int, a long, a string, or
- * arithmetic on an int or a long. `extract(minute from` an int64 epoch`)` and
- * `date_trunc('minute',` that epoch`)` are computes. A string measure emits count, min, and max.
- * Order is one int, long, or string column, then a limit. Anything else names its node.
+ * joins the distinct inner key. A scalar subquery becomes the value it returns. A correlated min
+ * joins that grouped min. Not exists and any other correlated scalar name that pattern.
+ * Comparisons combine with AND, OR, and NOT. Arithmetic, count, sum, min, max, and an exact count
+ * of distinct values. A string compares with JVM order. `LIKE` uses `%` and `_`, and it combines
+ * with AND and NOT. OR of `LIKE` names the node. `length` is the UTF-16 length. A group is one or
+ * two keys. A key is an int, a long, a string, or arithmetic on an int or a long.
+ * `extract(minute from` an int64 epoch`)` and `date_trunc('minute',` that epoch`)` are computes. A
+ * string measure emits count, min, and max. Order is one int, long, or string column, then a
+ * limit. Anything else names its node.
  */
 private object SqlConvert:
 
@@ -313,7 +314,7 @@ private object SqlConvert:
     }
     built.copy(rows = built.rows.projectColumns(spec))
 
-  private def predicate(expr: Expression, frame: Frame): Frame = unwrap(expr) match
+  private[sql] def predicate(expr: Expression, frame: Frame): Frame = unwrap(expr) match
     case and: AndExpression =>
       predicate(and.getRightExpression, predicate(and.getLeftExpression, frame))
     case or: OrExpression =>
@@ -481,7 +482,7 @@ private object SqlConvert:
         throw new IllegalArgumentException("the table has no wide schema"),
       )
 
-  private def joinKey(kind: ColumnKind): Boolean = kind match
+  private[sql] def joinKey(kind: ColumnKind): Boolean = kind match
     case ColumnKind.Int32 | ColumnKind.Int64 => true
     case _ => false
 
@@ -527,15 +528,28 @@ private object SqlConvert:
   ): Option[Frame] =
     plainColumn(left, frame) match
       case Some(ordinal) =>
-        comparedLiteral(right, kindAt(frame, ordinal), frame).map { literal =>
-          frame.filter(ordinal, ColumnCompare(op, literal))
+        minOn(op, right, frame, ordinal).orElse {
+          comparedLiteral(right, kindAt(frame, ordinal), frame).map { literal =>
+            frame.filter(ordinal, ColumnCompare(op, literal))
+          }
         }
       case None =>
         plainColumn(right, frame).flatMap { ordinal =>
-          comparedLiteral(left, kindAt(frame, ordinal), frame).map { literal =>
-            frame.filter(ordinal, ColumnCompare(reflect(op), literal))
+          minOn(reflect(op), left, frame, ordinal).orElse {
+            comparedLiteral(left, kindAt(frame, ordinal), frame).map { literal =>
+              frame.filter(ordinal, ColumnCompare(reflect(op), literal))
+            }
           }
         }
+
+  /** Equality with one correlated minimum. Every other comparison stays a literal. */
+  private def minOn(
+      op: CompareOp,
+      expr: Expression,
+      frame: Frame,
+      ordinal: Int,
+  ): Option[Frame] =
+    if op == CompareOp.Eq then MinMatch(expr, frame, ordinal) else None
 
   /** A literal, or the one value of an uncorrelated scalar subquery. */
   private def comparedLiteral(
@@ -631,13 +645,13 @@ private object SqlConvert:
       .projectColumns(Vector((0, keyName)))
     frame.copy(rows = frame.rows.joinColumns(built, outerKey, 0))
 
-  private def conjuncts(expr: Expression): List[Expression] = unwrap(expr) match
+  private[sql] def conjuncts(expr: Expression): List[Expression] = unwrap(expr) match
     case and: AndExpression =>
       conjuncts(and.getLeftExpression) ++ conjuncts(and.getRightExpression)
     case other => List(other)
 
   /** Outer ordinal, then inner ordinal, when the equality is the exists key. */
-  private def equiLink(expr: Expression, outer: Frame, inner: Frame): Option[(Int, Int)] =
+  private[sql] def equiLink(expr: Expression, outer: Frame, inner: Frame): Option[(Int, Int)] =
     unwrap(expr) match
       case eq: EqualsTo =>
         (unwrap(eq.getLeftExpression), unwrap(eq.getRightExpression)) match
@@ -666,7 +680,7 @@ private object SqlConvert:
           throw new IllegalArgumentException(s"column $name is on both sides of the exists")
         else None
 
-  private def mentionsOuter(expr: Expression, outer: Frame): Boolean =
+  private[sql] def mentionsOuter(expr: Expression, outer: Frame): Boolean =
     columnsIn(expr).exists(column => owned(outer, column).isDefined)
 
   private def columnsIn(expr: Expression): List[Column] =
@@ -884,7 +898,7 @@ private object SqlConvert:
       case _ => false
     }
 
-  private def arguments(function: Function): List[Expression] =
+  private[sql] def arguments(function: Function): List[Expression] =
     val parameters = function.getParameters
     if parameters == null then Nil
     else parameters.asScala.toList.collect { case expression: Expression => expression }
@@ -1060,7 +1074,7 @@ private object SqlConvert:
     if value >= Int.MinValue && value <= Int.MaxValue then ColumnLiteral.Int32(value.toInt)
     else ColumnLiteral.Int64(value)
 
-  private def unwrap(expr: Expression): Expression = expr match
+  private[sql] def unwrap(expr: Expression): Expression = expr match
     case wrapped: Parenthesis =>
       val inner = wrapped.getExpression
       if inner == null then expr else unwrap(inner)
@@ -1070,11 +1084,11 @@ private object SqlConvert:
         case _ => expr
     case _ => expr
 
-  private def itemsOf(plain: PlainSelect): List[SelectItem[?]] =
+  private[sql] def itemsOf(plain: PlainSelect): List[SelectItem[?]] =
     val items = plain.getSelectItems
     if items == null then Nil else items.asScala.toList
 
-  private def expressionOf(item: SelectItem[?]): Expression =
+  private[sql] def expressionOf(item: SelectItem[?]): Expression =
     val expression = item.getExpression
     if expression == null then unsupported(item) else expression
 
@@ -1086,7 +1100,7 @@ private object SqlConvert:
   private def kindName(frame: Frame, ordinal: Int): String =
     schema(frame).lift(ordinal).map(_.name).getOrElse(s"e${frame.next}")
 
-  private def columnOrdinal(frame: Frame, column: Column): Int =
+  private[sql] def columnOrdinal(frame: Frame, column: Column): Int =
     val name = column.getColumnName
     if name == null then unsupported(column)
     else
@@ -1094,7 +1108,7 @@ private object SqlConvert:
       if found < 0 then throw new IllegalArgumentException(s"column $name is not in the table")
       else found
 
-  private def kindAt(frame: Frame, ordinal: Int): ColumnKind =
+  private[sql] def kindAt(frame: Frame, ordinal: Int): ColumnKind =
     schema(frame)
       .lift(ordinal)
       .map(_.kind)
@@ -1102,20 +1116,20 @@ private object SqlConvert:
         throw new IllegalArgumentException(s"column $ordinal is not in the table"),
       )
 
-  private def schema(frame: Frame): Vector[ColumnField] =
+  private[sql] def schema(frame: Frame): Vector[ColumnField] =
     WideFields
       .known(frame.rows.plan)
       .getOrElse(
         throw new IllegalArgumentException("the table has no wide schema"),
       )
 
-  private def tableName(from: FromItem): String = from match
+  private[sql] def tableName(from: FromItem): String = from match
     case table: Table =>
       val name = table.getName
       if name == null || name.isEmpty then unsupported(table) else name
     case other => unsupported(other)
 
-  private def resolve(
+  private[sql] def resolve(
       tables: Map[String, DistCollection[WideRow]],
       name: String,
   ): DistCollection[WideRow] =
@@ -1128,7 +1142,7 @@ private object SqlConvert:
   private def unsupported(node: AnyRef): Nothing =
     throw new IllegalArgumentException(s"${node.getClass.getSimpleName} is not supported")
 
-  private final case class Frame(
+  private[sql] final case class Frame(
       rows: DistCollection[WideRow],
       next: Int,
       names: Set[String],

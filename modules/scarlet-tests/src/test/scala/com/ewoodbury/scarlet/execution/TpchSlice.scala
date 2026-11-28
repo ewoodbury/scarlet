@@ -12,7 +12,8 @@ import com.ewoodbury.scarlet.support.Check
  * return flag only. Query 3 multiplies the lineitem price by the discount, joins customer and
  * orders, and groups by the order key. Query 5 joins the local supplier and groups by the nation
  * name. Query 4 keeps an order whose line commits before it is received. Query 13 keeps a customer
- * that matches no order. Query 15 keeps the greatest total. [[note]] names every TPC-H query.
+ * that matches no order. Query 15 keeps the greatest total. Query 2 keeps a cost equal to the
+ * minimum for its part. [[note]] names every TPC-H query.
  */
 object TpchSlice:
 
@@ -58,9 +59,13 @@ object TpchSlice:
   val topMix: Long = 31815L
   val topRows: Long = 1L
 
+  /** Parts 1, 2, and 3. Each kept cost is the minimum offer at or above 8. */
+  val minCostMix: Long = 37932693L
+  val minCostRows: Long = 3L
+
   val note: Vector[String] = Vector(
     "1 This file. One group column. The published query also groups by line status.",
-    "2 Missing: correlated min.",
+    "2 This file. A correlated min. The published query also joins region and limits.",
     "3 This file. Joins customer and orders. One group column. The published query groups three columns.",
     "4 This file. Exists keeps an order with a late line. The published query also filters a date literal.",
     "5 This file. Joins supplier and nation. The published query also filters a date literal.",
@@ -177,6 +182,40 @@ object TpchSlice:
   def topPlan(): DistCollection[WideRow] =
     maxRevenue().filterColumn(1, ColumnCompare(CompareOp.Eq, ColumnLiteral.Int64(40L)))
 
+  /**
+   * Query 2 reduced to a cost that equals the minimum offer for the same part. Offers below 8 stay
+   * out of that minimum.
+   */
+  def minCostPlan(): DistCollection[WideRow] =
+    val mins = offers()
+      .filterColumn(1, ColumnCompare(CompareOp.Ge, ColumnLiteral.Int64(8L)))
+      .groupColumns(0, 1)
+      .projectColumns(Vector((0, "k"), (3, "least")))
+    supply()
+      .joinColumns(mins, 0, 0)
+      .compute(ColumnExpr.Compare(CompareOp.Eq, 1, 2), "m")
+      .filterColumn(3, ColumnCompare(CompareOp.Eq, ColumnLiteral.Bool(true)))
+
+  /** Supply rows for query 2. Part 2's cost 4 is below the filtered minimum. */
+  def supply(): DistCollection[WideRow] =
+    DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("part", Array(1, 1, 2, 2, 3, 3)),
+        WideInput.longs("cost", Array(10L, 30L, 9L, 4L, 8L, 20L)),
+      ),
+      partitions,
+    )
+
+  /** Offers for query 2. The minimum for part 2 is 4 until the filter drops it. */
+  def offers(): DistCollection[WideRow] =
+    DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("part", Array(1, 1, 2, 2, 3, 3, 4)),
+        WideInput.longs("cost", Array(10L, 40L, 4L, 9L, 8L, 12L, 1L)),
+      ),
+      partitions,
+    )
+
   /** Orders for query 4. The date is a long. */
   def existsOrders(): DistCollection[WideRow] =
     DistCollection.ofColumns(
@@ -226,6 +265,9 @@ object TpchSlice:
 
   def topChecksum(rows: Iterable[WideRow]): Long = rows.toVector.foldLeft(0L)(mixOuter)
 
+  def minCostChecksum(rows: Iterable[WideRow]): Long =
+    rows.toVector.sortWith(byPartCost).foldLeft(0L)(mixPartCost)
+
   private def prove(): List[String] =
     val revenueShape =
       "WideCompute(WideFilter2(WideFilter1(WideFilter1(WideFilter0(WideFilter0(Scan))))))"
@@ -257,6 +299,12 @@ object TpchSlice:
       counted("query 4", priorityPlan().plan, priorityGroups),
       shaped("query 15", topPlan().plan, "WideFilter1(Scan)"),
       counted("query 15", topPlan().plan, topRows),
+      shaped(
+        "query 2",
+        minCostPlan().plan,
+        "WideFilter3(WideCompute(WideHashJoin(Scan,WideProject(WideGroup(WideFilter1(Scan))))))",
+      ),
+      counted("query 2", minCostPlan().plan, minCostRows),
     ).flatten
 
   private def bothPaths(): List[String] =
@@ -268,6 +316,7 @@ object TpchSlice:
       both("query 13", outerMix)(outerChecksum(custOrderPlan().collect())),
       both("query 4", priorityMix)(priorityChecksum(priorityPlan().collect())),
       both("query 15", topMix)(topChecksum(topPlan().collect())),
+      both("query 2", minCostMix)(minCostChecksum(minCostPlan().collect())),
     ).flatten
 
   private def lineitem(): DistCollection[WideRow] =
@@ -435,6 +484,20 @@ object TpchSlice:
       case None => Some(s"$name did not lower")
 
   private def byKey(left: WideRow, right: WideRow): Boolean = keyOf(left) < keyOf(right)
+
+  private def byPartCost(left: WideRow, right: WideRow): Boolean =
+    val (leftPart, leftCost) = partCost(left)
+    val (rightPart, rightCost) = partCost(right)
+    leftPart < rightPart || (leftPart == rightPart && leftCost < rightCost)
+
+  private def mixPartCost(acc: Long, row: WideRow): Long = cells(row) match
+    case Vector(Cell.Int32(part), Cell.Int64(cost), _, _) =>
+      (acc * 31L + part.toLong) * 31L + cost
+    case other => refuse(other.size)
+
+  private def partCost(row: WideRow): (Int, Long) = cells(row) match
+    case Vector(Cell.Int32(part), Cell.Int64(cost), _, _) => (part, cost)
+    case other => refuse(other.size)
 
   private def byNation(left: WideRow, right: WideRow): Boolean =
     val leftCount = countOf(left)

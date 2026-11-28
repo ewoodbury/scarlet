@@ -128,6 +128,17 @@ class TestTpch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     TpchSlice.priorityChecksum(planned.collect()) shouldBe TpchSlice.priorityMix
   }
 
+  "query 2" should "keep a cost equal to the minimum offer" in {
+    val planned = TpchSlice.minCostPlan()
+    val shape =
+      "WideFilter3(WideCompute(WideHashJoin(Scan,WideProject(WideGroup(WideFilter1(Scan))))))"
+    ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some(shape)
+    ColumnarPlanner.tryCount(planned.plan) shouldBe Some(TpchSlice.minCostRows)
+    TpchSlice.minCostChecksum(planned.collect()) shouldBe TpchSlice.minCostMix
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = false))
+    TpchSlice.minCostChecksum(planned.collect()) shouldBe TpchSlice.minCostMix
+  }
+
   "query 15" should "keep the greatest total" in {
     val planned = TpchSlice.topPlan()
     ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some("WideFilter1(Scan)")
