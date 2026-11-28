@@ -1,5 +1,6 @@
 # BenchSlice medians in milliseconds.
 # Recorded from the bench workflow on e58bc34984f84fea0028f496e742a68de9333a35.
+# clickbench-15 replaced 9.089 with the median from e31b4d6ee3a37b0aae0d999458764d5331776c2c.
 # A later run fails when a median is above twice its budget.
 clickbench-0 2.123
 clickbench-1 1.752
@@ -18,7 +19,7 @@ clickbench-12 2.118
 clickbench-11 2.534
 clickbench-14 1.940
 clickbench-16 8.664
-clickbench-15 9.089
+clickbench-15 6.958
 clickbench-29 1.179
 clickbench-20 1.505
 clickbench-21 3.969
