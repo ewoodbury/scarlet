@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import com.ewoodbury.scarlet.core.HostText
+
 /**
  * UTF-16 length of a string column.
  *
@@ -22,3 +24,16 @@ object WideText:
       Int32Column.of(values, Validity.pack(count, at => present(at)), count)
     case other =>
       throw new IllegalArgumentException(s"length of ${other.logicalType} is not supported")
+
+  def host(column: Column, count: Int): DictUtf8Column = column match
+    case texts: DictUtf8Column =>
+      val values = new Array[Option[String]](count)
+      var row = 0
+      while row < count do
+        values(row) =
+          if texts.isValid(row) then Some(HostText.extract(texts.dictionary(texts.codes(row))))
+          else None
+        row += 1
+      DictUtf8Column.fromNullable(values.toSeq)
+    case other =>
+      throw new IllegalArgumentException(s"replace of ${other.logicalType} is not supported")

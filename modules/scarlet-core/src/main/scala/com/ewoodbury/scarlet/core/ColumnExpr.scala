@@ -6,9 +6,9 @@ package com.ewoodbury.scarlet.core
  * Arithmetic uses the wider input: double, then float, then long, then int. A compare yields bool.
  * Null in an input yields null, including `true OR null`. Divide uses that same widening and
  * refuses a present zero divisor. A decimal add, subtract, or multiply stays exact. Decimal divide
- * is not in this set. `length` of a string is that string's UTF-16 length. Other string
- * expressions are not in this set. `minute` and a truncation to a minute read an int64 epoch in
- * seconds. A date compare is a long compare.
+ * is not in this set. `length` of a string is that string's UTF-16 length. The one host replace
+ * keeps the captured host, and any other pattern stays out. `minute` and a truncation to a minute
+ * read an int64 epoch in seconds. A date compare is a long compare.
  */
 enum ColumnExpr:
   case Add(left: Int, right: Int)
@@ -22,6 +22,7 @@ enum ColumnExpr:
   case Not(input: Int)
   case Cast(input: Int, to: ColumnKind)
   case Len(input: Int)
+  case Host(input: Int)
   case Minute(input: Int)
   case TruncMinute(input: Int)
 
@@ -47,6 +48,10 @@ object ColumnExpr:
       field(fields, input)
         .filter(column => column.kind == ColumnKind.Utf8)
         .map(_ => ColumnKind.Int32)
+    case ColumnExpr.Host(input) =>
+      field(fields, input)
+        .filter(column => column.kind == ColumnKind.Utf8)
+        .map(_ => ColumnKind.Utf8)
     case ColumnExpr.Minute(input) =>
       field(fields, input)
         .filter(column => column.kind == ColumnKind.Int64)

@@ -249,6 +249,39 @@ class TestStringText extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     )
   }
 
+  "a host replace" should "keep the host and leave another string" in {
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.nullableStrings(
+            "s",
+            Array(
+              "https://www.example.com/a",
+              "http://example.com/b",
+              "https://example.com/c",
+              "bare",
+              "http://example.com",
+              "x",
+            ),
+            Array(true, true, true, true, true, false),
+          ),
+        ),
+        2,
+      )
+      .compute(ColumnExpr.Host(0), "k")
+    ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some("WideCompute(Scan)")
+    cells(both(planned)) shouldBe cellsOf(
+      List(
+        Vector(Cell.Utf8("https://www.example.com/a"), Cell.Utf8("example.com")),
+        Vector(Cell.Utf8("http://example.com/b"), Cell.Utf8("example.com")),
+        Vector(Cell.Utf8("https://example.com/c"), Cell.Utf8("example.com")),
+        Vector(Cell.Utf8("bare"), Cell.Utf8("bare")),
+        Vector(Cell.Utf8("http://example.com"), Cell.Utf8("http://example.com")),
+        Vector(Cell.Null, Cell.Null),
+      ),
+    )
+  }
+
   "like" should "match wildcards and drop a null" in {
     val planned = texts.filterColumn(1, ColumnCompare(CompareOp.Like, ColumnLiteral.Utf8("%")))
     ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some("WideFilter1(Scan)")
