@@ -515,6 +515,30 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     thrown.getMessage should include("correlated")
   }
 
+  "an outer column inside a scalar" should "name the pattern" in {
+    val tables = Map("orders" -> TpchSlice.existsOrders(), "lineitem" -> TpchSlice.existsLines())
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(
+        "select count(*) from orders where orderkey = (select max(orders.orderkey) from lineitem)",
+        tables,
+      )
+    }
+    thrown.getMessage should include("correlated")
+  }
+
+  "a joined scalar" should "name the pattern" in {
+    val tables = Map("orders" -> TpchSlice.existsOrders(), "lineitem" -> TpchSlice.existsLines())
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(
+        """select count(*) from orders where orderkey = (
+          |select max(lineitem.orderkey) from lineitem
+          |join orders on lineitem.orderkey = orders.orderkey)""".stripMargin,
+        tables,
+      )
+    }
+    thrown.getMessage should include("correlated")
+  }
+
   "an in subquery" should "name the node" in {
     named("select count(*) from tiny where id in (select id from tiny)", "InExpression")
   }

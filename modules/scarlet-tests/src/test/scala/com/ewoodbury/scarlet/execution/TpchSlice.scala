@@ -158,7 +158,8 @@ object TpchSlice:
 
   /**
    * Query 4 reduced to a long date range and one exists. A line counts when commit is before
-   * receipt. The group key is the priority.
+   * receipt. Order 0 has two late lines, and the group keeps one key. The group key is the
+   * priority.
    */
   def priorityPlan(): DistCollection[WideRow] =
     val keys = existsLines()
@@ -187,13 +188,13 @@ object TpchSlice:
       partitions,
     )
 
-  /** Lines for query 4. Commit and receipt are longs. */
+  /** Lines for query 4. Commit and receipt are longs. Order 0 has two late lines. */
   def existsLines(): DistCollection[WideRow] =
     DistCollection.ofColumns(
       Vector(
-        WideInput.ints("orderkey", Array(0, 0, 1, 3, 2)),
-        WideInput.longs("commit", Array(5L, 9L, 4L, 8L, 1L)),
-        WideInput.longs("receipt", Array(7L, 3L, 6L, 8L, 2L)),
+        WideInput.ints("orderkey", Array(0, 0, 1, 3, 2, 0)),
+        WideInput.longs("commit", Array(5L, 9L, 4L, 8L, 1L, 1L)),
+        WideInput.longs("receipt", Array(7L, 3L, 6L, 8L, 2L, 4L)),
       ),
       partitions,
     )

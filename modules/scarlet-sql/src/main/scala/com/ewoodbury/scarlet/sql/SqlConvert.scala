@@ -564,10 +564,12 @@ private object SqlConvert:
         case SqlResult.Rows(_) =>
           throw new IllegalArgumentException("a scalar subquery must be one aggregate")
 
-  /** An outer column that the inner query does not own. */
+  /** An outer column that the inner query does not own. A join is that pattern too. */
   private def correlated(plain: PlainSelect, outer: Frame): Boolean =
     val from = plain.getFromItem
-    if from == null || plain.getJoins != null && !plain.getJoins.isEmpty then false
+    val joins = plain.getJoins
+    if from == null then false
+    else if joins != null && !joins.isEmpty then true
     else
       val name = tableName(from)
       val inner = Frame(resolve(outer.tables, name), 0, Set(name), outer.tables)
@@ -672,6 +674,22 @@ private object SqlConvert:
     else
       unwrap(expr) match
         case column: Column => List(column)
+        case function: Function => arguments(function).flatMap(columnsIn)
+        case casted: CastExpression => columnsIn(casted.getLeftExpression)
+        case extract: ExtractExpression => columnsIn(extract.getExpression)
+        case signed: SignedExpression => columnsIn(signed.getExpression)
+        case choice: CaseExpression =>
+          val clauses = choice.getWhenClauses
+          columnsIn(choice.getSwitchExpression) ++ columnsIn(choice.getElseExpression) ++
+            (if clauses == null then Nil else clauses.asScala.toList.flatMap(columnsIn))
+        case when: WhenClause =>
+          columnsIn(when.getWhenExpression) ++ columnsIn(when.getThenExpression)
+        case between: Between =>
+          columnsIn(between.getLeftExpression) ++
+            columnsIn(between.getBetweenExpressionStart) ++
+            columnsIn(between.getBetweenExpressionEnd)
+        case included: InExpression =>
+          columnsIn(included.getLeftExpression) ++ columnsIn(included.getRightExpression)
         case binary: BinaryExpression =>
           columnsIn(binary.getLeftExpression) ++ columnsIn(binary.getRightExpression)
         case not: NotExpression => columnsIn(not.getExpression)
