@@ -6,7 +6,7 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 import com.ewoodbury.scarlet.support.Check
 
 /**
- * Thirty-one ClickBench queries on 4096 generated rows. This is not the hits table.
+ * Thirty-two ClickBench queries on 4096 generated rows. This is not the hits table.
  *
  * Numbers follow the 0-based order of `clickhouse/queries.sql`. An average is the long sum and the
  * count. Query 2's width average is 3679360 / 4096. Query 3's user average is 8386588672 / 4096.
@@ -88,6 +88,10 @@ object ClickBenchSlice:
   val timedPhraseMix: Long = 2159987004469666056L
   val timedPhraseRows: Long = 3024L
 
+  /** Non-empty referers. The host replace keeps the captured host. */
+  val hostMix: Long = 5023100965988891828L
+  val hostRows: Long = 3024L
+
   /** Present URLs matching `%google%`. Null URLs are dropped. */
   val likeUrlsCount: Long = 2315L
 
@@ -150,7 +154,7 @@ object ClickBenchSlice:
     "25 sort by a string. This file.",
     "26 This file. The engine applies the order. The published query also limits.",
     "27 length of a string. This file.",
-    "28 regular expression replace. Missing: regex.",
+    "28 This file. The published query also averages, filters by count, orders, and limits.",
     "29 add a literal to a column. This file.",
     "30 two-column group and a string filter. Missing: multi-column group.",
     "31 two-column group. Missing: multi-column group.",
@@ -299,6 +303,16 @@ object ClickBenchSlice:
       .filterColumn(1, ColumnCompare(CompareOp.Ne, ColumnLiteral.Utf8("")))
       .sortColumn(0, descending = false, Some(1))
 
+  /**
+   * Query 28: a non-empty referer, then the one host replace. The published statement also
+   * averages, filters by count, orders, and limits.
+   */
+  def hostReferers(): DistCollection[WideRow] =
+    DistCollection
+      .ofColumns(Vector(refererColumn()), partitions)
+      .filterColumn(0, ColumnCompare(CompareOp.Ne, ColumnLiteral.Utf8("")))
+      .compute(ColumnExpr.Host(0), "k")
+
   /** Query 27: sum of the UTF-16 length. Average and HAVING stay out. */
   def urlLengths(): DistCollection[WideRow] =
     urls()
@@ -351,6 +365,9 @@ object ClickBenchSlice:
 
   def timedPhraseChecksum(rows: Iterable[WideRow]): Long =
     rows.foldLeft(0L)((acc, row) => foldText(acc * 31L + longAt(row, 0), textAt(row, 1)))
+
+  def hostChecksum(rows: Iterable[WideRow]): Long =
+    rows.foldLeft(0L)((acc, row) => foldText(acc, textAt(row, 1)))
 
   def userChecksum(rows: Iterable[WideRow]): Long =
     rows.foldLeft(0L)((acc, row) => acc * 31L + longAt(row, 2))
@@ -488,6 +505,22 @@ object ClickBenchSlice:
   private def searchPhraseText(index: Int): String =
     if (index % 5 == 0) then "" else "p" + (index % 4).toString
 
+  private def refererColumn(): WideInput =
+    WideInput.nullableStrings(
+      "Referer",
+      Array.tabulate(rowCount)(refererText),
+      Array.tabulate(rowCount)(index => index % 13 != 0),
+    )
+
+  private def refererText(index: Int): String =
+    if index % 5 == 0 then ""
+    else
+      index % 4 match
+        case 0 => s"https://www.h${index % 3}.example/a"
+        case 1 => s"http://h${index % 3}.example/b"
+        case 2 => s"https://h${index % 3}.example/c"
+        case _ => "bare"
+
   private def searchUrl(): WideInput =
     WideInput.nullableStrings(
       "URL",
@@ -616,6 +649,8 @@ object ClickBenchSlice:
       counted("query 25", sortedPhrases().plan, 10L),
       shaped("query 26", timedPhrases().plan, "WideSort(WideFilter1(Scan))"),
       counted("query 26", timedPhrases().plan, timedPhraseRows),
+      shaped("query 28", hostReferers().plan, "WideCompute(WideFilter0(Scan))"),
+      counted("query 28", hostReferers().plan, hostRows),
       shaped("query 27", urlLengths().plan, "WideCompute(WideCompute(Scan))"),
       summed("query 27", urlLengths().plan, 5, urlLengthSum),
       shaped("query 35", widthMinus().plan, "WideGroup(WideCompute(WideCompute(Scan)))"),
@@ -655,6 +690,7 @@ object ClickBenchSlice:
       both("query 24", phraseFilterSortMix)(userPhraseChecksum(filteredPhrases().collect())),
       both("query 25", phraseSortMix)(userPhraseChecksum(sortedPhrases().collect())),
       both("query 26", timedPhraseMix)(timedPhraseChecksum(timedPhrases().collect())),
+      both("query 28", hostMix)(hostChecksum(hostReferers().collect())),
       both("query 27", urlLengthSum)(urlLengths().sumLongColumn(5)),
       both("query 35", exprGroupMix)(groupedChecksum(widthMinus().collect())),
       both("query 18", minuteMix)(groupedChecksum(byMinute().collect())),

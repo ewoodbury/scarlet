@@ -770,7 +770,9 @@ private object SqlConvert:
     case div: Division => binary(div, frame, ColumnExpr.Div.apply)
     case extract: ExtractExpression => minuteOf(extract, frame)
     case function: Function =>
-      if dateTrunc(function) then truncMinute(function, frame) else lengthOf(function, frame)
+      if dateTrunc(function) then truncMinute(function, frame)
+      else if exactHost(function) then replaceHost(function, frame)
+      else lengthOf(function, frame)
     case other => unsupported(other)
 
   private def minuteOf(extract: ExtractExpression, frame: Frame): (Frame, Int) =
@@ -801,6 +803,27 @@ private object SqlConvert:
       case ColumnKind.Int64 => placed.bind(ColumnExpr.TruncMinute(ordinal))
       case other => throw new IllegalArgumentException(s"minute of $other is not supported")
 
+  private def exactHost(function: Function): Boolean =
+    val name = function.getName
+    if name == null || !name.equalsIgnoreCase("regexp_replace") then false
+    else if function.isDistinct || function.isUnique then false
+    else
+      val args = arguments(function)
+      args.size == 3 &&
+      textIs(args.lift(1), HostText.pattern) &&
+      textIs(args.lift(2), HostText.replacement)
+
+  private def textIs(expr: Option[Expression], text: String): Boolean = expr match
+    case Some(value: StringValue) => value.getValue.equals(text)
+    case _ => false
+
+  private def replaceHost(function: Function, frame: Frame): (Frame, Int) =
+    val column = arguments(function).headOption.getOrElse(unsupported(function))
+    val (placed, ordinal) = side(column, frame)
+    kindAt(placed, ordinal) match
+      case ColumnKind.Utf8 => placed.bind(ColumnExpr.Host(ordinal))
+      case other => throw new IllegalArgumentException(s"replace of $other is not supported")
+
   private def lengthOf(function: Function, frame: Frame): (Frame, Int) =
     val name = function.getName
     if function.isDistinct || function.isUnique || name == null || !name.equalsIgnoreCase("length")
@@ -821,7 +844,7 @@ private object SqlConvert:
 
   private def aggregate(item: SelectItem[?]): Option[Aggregate] =
     unwrap(expressionOf(item)) match
-      case function: Function if dateTrunc(function) => None
+      case function: Function if dateTrunc(function) || exactHost(function) => None
       case function: Function =>
         if function.isDistinct then Some(distinctAggregate(function))
         else if function.isUnique then unsupported(function)

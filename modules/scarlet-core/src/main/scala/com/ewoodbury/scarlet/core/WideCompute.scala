@@ -21,8 +21,7 @@ private[scarlet] object WideCompute:
       case ColumnKind.Float32 => floats(columns, expr, field, length)
       case ColumnKind.Float64 => doubles(columns, expr, field, length)
       case ColumnKind.Bool => bools(columns, expr, field, length)
-      case ColumnKind.Utf8 =>
-        throw new IllegalArgumentException(s"${field.name} cannot be a string")
+      case ColumnKind.Utf8 => texts(columns, expr, field, length)
       case ColumnKind.Decimal(_, _) =>
         decimals(columns, expr, field, length)
 
@@ -46,6 +45,28 @@ private[scarlet] object WideCompute:
       row += 1
     }
     new WideInt32(field, values, present)
+
+  @SuppressWarnings(Array("org.wartremover.warts.Var"))
+  private def texts(
+      columns: Vector[WideColumn],
+      expr: ColumnExpr,
+      field: ColumnField,
+      length: Int,
+  ): WideColumn =
+    val values = new Array[String](length)
+    val present = new Array[Boolean](length)
+    var row = 0
+    while (row < length) {
+      eval(columns, expr, field.kind, row) match
+        case Cell.Utf8(value) =>
+          present(row) = true
+          values(row) = value
+        case Cell.Null =>
+          values(row) = ""
+        case other => reject(field, other)
+      row += 1
+    }
+    new WideUtf8(field, values, present)
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def longs(
@@ -210,6 +231,11 @@ private[scarlet] object WideCompute:
             case Cell.Utf8(value) => Cell.Int32(value.length)
             case other =>
               throw new IllegalArgumentException(s"length of $other is not supported")
+        case ColumnExpr.Host(input) =>
+          columns(input).cell(row) match
+            case Cell.Utf8(value) => Cell.Utf8(HostText.extract(value))
+            case other =>
+              throw new IllegalArgumentException(s"replace of $other is not supported")
         case ColumnExpr.Minute(input) =>
           Cell.Int32(EpochMinute.minute(longAt(columns(input), row)))
         case ColumnExpr.TruncMinute(input) =>
@@ -314,6 +340,7 @@ private[scarlet] object WideCompute:
       case ColumnExpr.Not(input) => on(columns, input, row)
       case ColumnExpr.Cast(input, _) => on(columns, input, row)
       case ColumnExpr.Len(input) => on(columns, input, row)
+      case ColumnExpr.Host(input) => on(columns, input, row)
       case ColumnExpr.Minute(input) => on(columns, input, row)
       case ColumnExpr.TruncMinute(input) => on(columns, input, row)
 

@@ -681,6 +681,28 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     found shouldBe Some(Vector(Cell.Utf8("p0"), Cell.Int64(578L), Cell.Utf8("agoogle")))
   }
 
+  "the host replace" should "keep the host" in {
+    val hits = DistCollection.ofColumns(
+      Vector(
+        WideInput.strings(
+          "Referer",
+          Array("https://www.example.com/a", "bare"),
+        ),
+      ),
+      1,
+    )
+    val (rows, shape) = listed(
+      """select regexp_replace(Referer, '^https?://(?:www\.)?([^/]+)/.*$', '\1') from hits""",
+      columnar = true,
+      Map("hits" -> hits),
+    )
+    shape shouldBe "WideProject(WideCompute(Scan))"
+    rows.map(row => row.cells.lift(0)) shouldBe List(
+      Some(Cell.Utf8("example.com")),
+      Some(Cell.Utf8("bare")),
+    )
+  }
+
   "a regex replace" should "name the node" in {
     val thrown = the[IllegalArgumentException] thrownBy {
       val _ = Sql.run(

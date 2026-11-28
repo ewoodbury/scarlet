@@ -249,6 +249,56 @@ class TestStringText extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     )
   }
 
+  "a host replace" should "keep the host and leave another string" in {
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.nullableStrings(
+            "s",
+            Array(
+              "https://www.example.com/a",
+              "http://example.com/b",
+              "https://example.com/c",
+              "bare",
+              "http://example.com",
+              "https://www./a",
+              "https://www./",
+              "http://www./x",
+              "https://www.//a",
+              "https://example.com/a\nb",
+              "https://www.example.com/a\nb",
+              "https://example.com/a\n",
+              "x",
+            ),
+            Array(true, true, true, true, true, true, true, true, true, true, true, true, false),
+          ),
+        ),
+        2,
+      )
+      .compute(ColumnExpr.Host(0), "k")
+    ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some("WideCompute(Scan)")
+    cells(both(planned)) shouldBe cellsOf(
+      List(
+        Vector(Cell.Utf8("https://www.example.com/a"), Cell.Utf8("example.com")),
+        Vector(Cell.Utf8("http://example.com/b"), Cell.Utf8("example.com")),
+        Vector(Cell.Utf8("https://example.com/c"), Cell.Utf8("example.com")),
+        Vector(Cell.Utf8("bare"), Cell.Utf8("bare")),
+        Vector(Cell.Utf8("http://example.com"), Cell.Utf8("http://example.com")),
+        Vector(Cell.Utf8("https://www./a"), Cell.Utf8("www.")),
+        Vector(Cell.Utf8("https://www./"), Cell.Utf8("www.")),
+        Vector(Cell.Utf8("http://www./x"), Cell.Utf8("www.")),
+        Vector(Cell.Utf8("https://www.//a"), Cell.Utf8("www.")),
+        Vector(Cell.Utf8("https://example.com/a\nb"), Cell.Utf8("https://example.com/a\nb")),
+        Vector(
+          Cell.Utf8("https://www.example.com/a\nb"),
+          Cell.Utf8("https://www.example.com/a\nb"),
+        ),
+        Vector(Cell.Utf8("https://example.com/a\n"), Cell.Utf8("https://example.com/a\n")),
+        Vector(Cell.Null, Cell.Null),
+      ),
+    )
+  }
+
   "like" should "match wildcards and drop a null" in {
     val planned = texts.filterColumn(1, ColumnCompare(CompareOp.Like, ColumnLiteral.Utf8("%")))
     ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some("WideFilter1(Scan)")
