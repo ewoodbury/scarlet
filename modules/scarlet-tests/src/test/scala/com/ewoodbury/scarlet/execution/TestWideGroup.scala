@@ -196,15 +196,148 @@ class TestWideGroup extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     both(planned) shouldBe List.empty[WideRow]
   }
 
-  it should "refuse a string key and a bool measure" in {
-    val strings = table(WideInput.strings("k", Array("a")), WideInput.ints("q", Array(1)))
-      .groupColumns(0, 1)
-    ColumnarPlanner.lower(strings.plan).shouldBeEmpty
-    an[IllegalArgumentException] should be thrownBy strings.collect()
+  it should "refuse a bool measure" in {
     val bools = table(WideInput.ints("k", Array(1)), WideInput.bools("q", Array(true)))
       .groupColumns(0, 1)
     ColumnarPlanner.lower(bools.plan).shouldBeEmpty
     an[IllegalArgumentException] should be thrownBy bools.collect()
+  }
+
+  it should "group one string across batches" in {
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.strings("k", Array("a", "a")),
+          WideInput.ints("q", Array(1, 10)),
+        ),
+        2,
+      )
+      .groupColumns(0, 1)
+    ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some("WideGroup(Scan)")
+    cells(both(planned)) shouldBe cellsOf(
+      List(
+        Vector(Cell.Utf8("a"), Cell.Int64(2L), Cell.Int64(11L), Cell.Int32(1), Cell.Int32(10)),
+      ),
+    )
+  }
+
+  it should "drop a null string key and keep an empty one" in {
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.nullableStrings("k", Array("a", "", "b"), Array(true, true, false)),
+          WideInput.ints("q", Array(2, 5, 8)),
+        ),
+        2,
+      )
+      .groupColumns(0, 1)
+    cells(both(planned)) shouldBe cellsOf(
+      List(
+        Vector(Cell.Utf8(""), Cell.Int64(1L), Cell.Int64(5L), Cell.Int32(5), Cell.Int32(5)),
+        Vector(Cell.Utf8("a"), Cell.Int64(1L), Cell.Int64(2L), Cell.Int32(2), Cell.Int32(2)),
+      ),
+    )
+  }
+
+  it should "group a long with a string" in {
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.longs("n", Array(7L, 7L, 8L)),
+          WideInput.strings("s", Array("a", "a", "b")),
+          WideInput.ints("q", Array(1, 2, 3)),
+        ),
+        2,
+      )
+      .groupColumns(0, 1, 2)
+    cells(both(planned)) shouldBe cellsOf(
+      List(
+        Vector(
+          Cell.Int64(7L),
+          Cell.Utf8("a"),
+          Cell.Int64(2L),
+          Cell.Int64(3L),
+          Cell.Int32(1),
+          Cell.Int32(2),
+        ),
+        Vector(
+          Cell.Int64(8L),
+          Cell.Utf8("b"),
+          Cell.Int64(1L),
+          Cell.Int64(3L),
+          Cell.Int32(3),
+          Cell.Int32(3),
+        ),
+      ),
+    )
+  }
+
+  it should "group an int with a string and two strings" in {
+    val rows = DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("n", Array(1, 1, 2)),
+        WideInput.strings("s", Array("a", "b", "a")),
+        WideInput.strings("t", Array("x", "x", "y")),
+        WideInput.ints("q", Array(3, 4, 5)),
+      ),
+      2,
+    )
+    cells(both(rows.groupColumns(0, 1, 3))) shouldBe cellsOf(
+      List(
+        Vector(
+          Cell.Int32(1),
+          Cell.Utf8("a"),
+          Cell.Int64(1L),
+          Cell.Int64(3L),
+          Cell.Int32(3),
+          Cell.Int32(3),
+        ),
+        Vector(
+          Cell.Int32(1),
+          Cell.Utf8("b"),
+          Cell.Int64(1L),
+          Cell.Int64(4L),
+          Cell.Int32(4),
+          Cell.Int32(4),
+        ),
+        Vector(
+          Cell.Int32(2),
+          Cell.Utf8("a"),
+          Cell.Int64(1L),
+          Cell.Int64(5L),
+          Cell.Int32(5),
+          Cell.Int32(5),
+        ),
+      ),
+    )
+    cells(both(rows.groupColumns(1, 2, 3))) shouldBe cellsOf(
+      List(
+        Vector(
+          Cell.Utf8("a"),
+          Cell.Utf8("x"),
+          Cell.Int64(1L),
+          Cell.Int64(3L),
+          Cell.Int32(3),
+          Cell.Int32(3),
+        ),
+        Vector(
+          Cell.Utf8("a"),
+          Cell.Utf8("y"),
+          Cell.Int64(1L),
+          Cell.Int64(5L),
+          Cell.Int32(5),
+          Cell.Int32(5),
+        ),
+        Vector(
+          Cell.Utf8("b"),
+          Cell.Utf8("x"),
+          Cell.Int64(1L),
+          Cell.Int64(4L),
+          Cell.Int32(4),
+          Cell.Int32(4),
+        ),
+      ),
+    )
   }
 
   private def table(key: WideInput, measure: WideInput): DistCollection[WideRow] =

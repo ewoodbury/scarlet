@@ -147,6 +147,17 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     shape shouldBe "WideLimit(WideSort(WideProject(Scan)))"
   }
 
+  "a string group" should "match query 12" in {
+    val (result, shape) = grouped(
+      """select SearchPhrase, count(*), sum(AdvEngineID), min(AdvEngineID), max(AdvEngineID)
+        |from hits group by SearchPhrase""".stripMargin,
+      Map("hits" -> ClickBenchSlice.phrases()),
+      ClickBenchSlice.phraseChecksum,
+    )
+    result shouldBe ClickBenchSlice.phraseMix
+    shape shouldBe "WideGroup(Scan)"
+  }
+
   "a group" should "match query 7" in {
     val (result, shape) = grouped(
       """select AdvEngineID, count(*), sum(AdvEngineID), min(AdvEngineID), max(AdvEngineID)

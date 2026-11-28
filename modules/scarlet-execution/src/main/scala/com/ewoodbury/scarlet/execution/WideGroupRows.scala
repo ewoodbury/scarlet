@@ -135,7 +135,7 @@ private[execution] object WideGroupRows:
   ): Vector[WideRow] =
     val groups = mutable.LinkedHashMap.empty[(Cell, Cell), Acc]
     rows.foreach { row =>
-      (numericKey(row, key), numericKey(row, key2)) match
+      (keptKey(row, key), keptKey(row, key2)) match
         case (Some(left), Some(right)) =>
           val acc = groups.getOrElseUpdate((left, right), new Acc)
           acc.count += 1L
@@ -149,12 +149,12 @@ private[execution] object WideGroupRows:
       )
     }.toVector
 
-  private def numericKey(row: WideRow, ordinal: Int): Option[Cell] =
+  private def keptKey(row: WideRow, ordinal: Int): Option[Cell] =
     cellAt(row, ordinal) match
       case Cell.Null => None
-      case value @ (Cell.Int32(_) | Cell.Int64(_)) => Some(value)
+      case value @ (Cell.Int32(_) | Cell.Int64(_) | Cell.Utf8(_)) => Some(value)
       case other =>
-        throw new IllegalArgumentException(s"group key $other is not int or long")
+        throw new IllegalArgumentException(s"group key $other is not int, long, or string")
 
   private def addMeasure(acc: Acc, cell: Cell): Unit = cell match
     case Cell.Null => ()

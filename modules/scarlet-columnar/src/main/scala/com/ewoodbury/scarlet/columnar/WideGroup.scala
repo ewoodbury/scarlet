@@ -5,7 +5,7 @@ import java.util.Arrays
 import com.ewoodbury.scarlet.core.{ColumnField, ColumnKind, WideAggregate}
 
 /**
- * Groups one int or long column and aggregates one numeric column.
+ * Groups one int, long, or string column and aggregates one numeric column.
  *
  * One pass over each batch. A null key is dropped. A null measure increments count and does not
  * change sum, min, or max. A key whose measures are all null still emits a row, with those three
@@ -21,9 +21,16 @@ object WideGroup:
       key: Int,
       measure: Int,
       key2: Option[Int] = None,
-  ): (Vector[ColumnField], ColumnBatch) = key2 match
-    case Some(second) => WideGroupPair.aggregate(batches, fields, key, second, measure)
-    case None => aggregateOne(batches, fields, key, measure)
+  ): (Vector[ColumnField], ColumnBatch) =
+    val text = textKey(fields, key) || key2.exists(second => textKey(fields, second))
+    if text then WideGroupText.aggregate(batches, fields, key, measure, key2)
+    else
+      key2 match
+        case Some(second) => WideGroupPair.aggregate(batches, fields, key, second, measure)
+        case None => aggregateOne(batches, fields, key, measure)
+
+  private def textKey(fields: Vector[ColumnField], ordinal: Int): Boolean =
+    ordinal >= 0 && ordinal < fields.size && fields(ordinal).kind == ColumnKind.Utf8
 
   private def aggregateOne(
       batches: Seq[ColumnBatch],
