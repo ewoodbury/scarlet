@@ -3,8 +3,9 @@ package com.ewoodbury.scarlet.core
 /**
  * The one host replace from ClickBench 28.
  *
- * The pattern is `^https?://(?:www\.)?([^/]+)/.*$` and the replacement is the captured host. A
- * string that does not match stays as it is. Any other pattern stays out.
+ * The pattern is `^https?://(?:www\.)?([^/]+)/.*$` and the replacement is the captured host. The
+ * optional `www.` is taken only when a host remains after it. A line break after the slash does
+ * not match, and that string stays as it is. Any other pattern stays out.
  */
 object HostText:
 
@@ -14,10 +15,17 @@ object HostText:
   def extract(text: String): String =
     val scheme = schemeEnd(text)
     if scheme == 0 then text
-    else
-      val body = if text.startsWith("www.", scheme) then scheme + 4 else scheme
-      val slash = text.indexOf('/', body)
-      if slash <= body then text else text.substring(body, slash)
+    else hostAt(text, scheme).getOrElse(text)
+
+  private def hostAt(text: String, scheme: Int): Option[String] =
+    val preferred =
+      if text.startsWith("www.", scheme) then capture(text, scheme + 4) else None
+    preferred.orElse(capture(text, scheme))
+
+  private def capture(text: String, from: Int): Option[String] =
+    val slash = text.indexOf('/', from)
+    if slash <= from || text.indexOf('\n', slash + 1) >= 0 then None
+    else Some(text.substring(from, slash))
 
   private def schemeEnd(text: String): Int =
     if text.startsWith("https://") then 8
