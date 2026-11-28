@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -7,6 +6,7 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Long and string value sorts against the row path.
@@ -81,19 +81,25 @@ class TestLongStringValueSort extends AnyFlatSpec with Matchers with BeforeAndAf
       "SortByLongValueDesc(FilterKey(Project(Scan)))"
     shape(data.filterValues((value: Long) => value > 0L).sortByLongValueDesc) shouldBe
       "SortByLongValueDesc(FilterValue(Scan))"
-    ColumnarPlanner.lower(
-      data
-        .mapValues((value: Long) => value + 1L)
-        .mapValues((value: Long) => value + 1L)
-        .sortByLongValueDesc
-        .plan,
-    ) shouldBe None
-    ColumnarPlanner.lower(
-      mapped.filterValues((value: Long) => value > 0L).sortByLongValueDesc.plan,
-    ) shouldBe None
-    ColumnarPlanner.lower(
-      projected.filter((pair: (Long, Long)) => pair._2 > 0L).sortByLongValueDesc.plan,
-    ) shouldBe None
+    ColumnarPlanner
+      .lower(
+        data
+          .mapValues((value: Long) => value + 1L)
+          .mapValues((value: Long) => value + 1L)
+          .sortByLongValueDesc
+          .plan,
+      )
+      .shouldBeEmpty
+    ColumnarPlanner
+      .lower(
+        mapped.filterValues((value: Long) => value > 0L).sortByLongValueDesc.plan,
+      )
+      .shouldBeEmpty
+    ColumnarPlanner
+      .lower(
+        projected.filter((pair: (Long, Long)) => pair._2 > 0L).sortByLongValueDesc.plan,
+      )
+      .shouldBeEmpty
     agrees(mapped.sortByLongValueDesc) shouldBe Seq(1L -> 4L, 3L -> 3L, 2L -> 2L)
     ColumnarPlanner.tryTake(data.sortByLongValueDesc.plan, 1).map(_.size) shouldBe Some(1)
   }
@@ -128,13 +134,15 @@ class TestLongStringValueSort extends AnyFlatSpec with Matchers with BeforeAndAf
     val mapped = data.mapValues((value: Int) => value + 1)
     shape(projected.sortByStringValueDesc) shouldBe "SortByStringValueDesc(Project(Scan))"
     shape(mapped.sortByStringValueDesc) shouldBe "SortByStringValueDesc(MapValue(Scan))"
-    ColumnarPlanner.lower(
-      data
-        .map((pair: (String, Int)) => (pair._1, pair._2))
-        .map((pair: (String, Int)) => (pair._1, pair._2))
-        .sortByStringValueDesc
-        .plan,
-    ) shouldBe None
+    ColumnarPlanner
+      .lower(
+        data
+          .map((pair: (String, Int)) => (pair._1, pair._2))
+          .map((pair: (String, Int)) => (pair._1, pair._2))
+          .sortByStringValueDesc
+          .plan,
+      )
+      .shouldBeEmpty
     agrees(mapped.sortByStringValueDesc) shouldBe Seq("a" -> 4, "b" -> 2)
   }
 

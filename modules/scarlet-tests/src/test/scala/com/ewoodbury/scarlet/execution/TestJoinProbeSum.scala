@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Probe-time join sums against the row path.
@@ -129,7 +129,7 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       val joined = pairs(Array(1, 2), Array(10, 20)).join(pairs(Array(1, 2), Array(3, 4)))
       val summed = joined.sumJoinLeft
       ColumnarPlanner.lower(summed.plan).isDefined shouldBe true
-      ColumnarPlanner.tryRun(summed.plan) shouldBe None
+      ColumnarPlanner.tryRun(summed.plan).shouldBeEmpty
       summed.collect().toMap shouldBe rowMap(summed)
       val sorted = pairs(Array(1, 2), Array(10, 20))
         .sortMergeJoin(pairs(Array(1, 2), Array(3, 4)))
@@ -285,7 +285,7 @@ class TestJoinProbeSum extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       ColumnarPlanner.lower(summed.plan).map(_.shape) shouldBe Some(
         "JoinProbeSumLeft(Scan, Scan)",
       )
-      ColumnarPlanner.tryRun(summed.plan) shouldBe None
+      ColumnarPlanner.tryRun(summed.plan).shouldBeEmpty
       summed.collect().toMap shouldBe rowMap(summed)
       val emptyLeft = pairs(Array.empty[Int], Array.empty[Int]).broadcastJoin(right).sumJoinLeft
       ColumnarPlanner.tryRun(emptyLeft.plan).isDefined shouldBe true

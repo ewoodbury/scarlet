@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -7,6 +6,7 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Group one int or long column of a wide row.
@@ -193,17 +193,17 @@ class TestWideGroup extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       WideInput.ints("q", Array.emptyIntArray),
     ).groupColumns(0, 1)
     ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some("WideGroup(Scan)")
-    both(planned) shouldBe Nil
+    both(planned) shouldBe List.empty[WideRow]
   }
 
   it should "refuse a string key and a bool measure" in {
     val strings = table(WideInput.strings("k", Array("a")), WideInput.ints("q", Array(1)))
       .groupColumns(0, 1)
-    ColumnarPlanner.lower(strings.plan) shouldBe None
+    ColumnarPlanner.lower(strings.plan).shouldBeEmpty
     an[IllegalArgumentException] should be thrownBy strings.collect()
     val bools = table(WideInput.ints("k", Array(1)), WideInput.bools("q", Array(true)))
       .groupColumns(0, 1)
-    ColumnarPlanner.lower(bools.plan) shouldBe None
+    ColumnarPlanner.lower(bools.plan).shouldBeEmpty
     an[IllegalArgumentException] should be thrownBy bools.collect()
   }
 

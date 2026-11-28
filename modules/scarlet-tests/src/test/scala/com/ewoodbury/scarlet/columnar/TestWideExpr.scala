@@ -1,9 +1,9 @@
 package com.ewoodbury.scarlet.columnar
-
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.core.*
+import com.ewoodbury.scarlet.support.Check
 
 /** Row fold and batch evaluation of one wide expression. */
 class TestWideExpr extends AnyFlatSpec with Matchers:
@@ -19,7 +19,11 @@ class TestWideExpr extends AnyFlatSpec with Matchers:
       ColumnExpr.Mul(0, 1),
       "revenue",
     )
-    rows.map(_.cells.last) shouldBe Vector(Cell.Int64(20L), Cell.Null, Cell.Int64(20L))
+    rows.map(row => Check.last(row.cells)) shouldBe Vector(
+      Cell.Int64(20L),
+      Cell.Null,
+      Cell.Int64(20L),
+    )
   }
 
   it should "add an int and a long as a long" in {
@@ -33,7 +37,7 @@ class TestWideExpr extends AnyFlatSpec with Matchers:
       ColumnExpr.Add(0, 1),
       "sum",
     )
-    rows.map(_.cells.last) shouldBe Vector(Cell.Int64(Int.MaxValue.toLong + 1L))
+    rows.map(row => Check.last(row.cells)) shouldBe Vector(Cell.Int64(Int.MaxValue.toLong + 1L))
   }
 
   it should "add a long and a float as a float" in {
@@ -47,8 +51,8 @@ class TestWideExpr extends AnyFlatSpec with Matchers:
       ColumnExpr.Add(0, 1),
       "sum",
     )
-    rows.head.fields.last.kind shouldBe ColumnKind.Float32
-    rows.map(_.cells.last) shouldBe Vector(Cell.Float32(1.5f))
+    Check.last(Check.first(rows).fields).kind shouldBe ColumnKind.Float32
+    rows.map(row => Check.last(row.cells)) shouldBe Vector(Cell.Float32(1.5f))
   }
 
   it should "compare an int with a long" in {
@@ -62,7 +66,11 @@ class TestWideExpr extends AnyFlatSpec with Matchers:
       ColumnExpr.Compare(CompareOp.Gt, 0, 1),
       "keep",
     )
-    rows.map(_.cells.last) shouldBe Vector(Cell.Bool(false), Cell.Null, Cell.Bool(true))
+    rows.map(row => Check.last(row.cells)) shouldBe Vector(
+      Cell.Bool(false),
+      Cell.Null,
+      Cell.Bool(true),
+    )
   }
 
   it should "keep null out of bool and, or, and not" in {
@@ -72,17 +80,17 @@ class TestWideExpr extends AnyFlatSpec with Matchers:
         WideInput.bools("b", Array(false, true, true)),
       ),
     )
-    agree(table, ColumnExpr.Or(0, 1), "or").map(_.cells.last) shouldBe Vector(
+    agree(table, ColumnExpr.Or(0, 1), "or").map(row => Check.last(row.cells)) shouldBe Vector(
       Cell.Bool(true),
       Cell.Bool(true),
       Cell.Null,
     )
-    agree(table, ColumnExpr.And(0, 1), "and").map(_.cells.last) shouldBe Vector(
+    agree(table, ColumnExpr.And(0, 1), "and").map(row => Check.last(row.cells)) shouldBe Vector(
       Cell.Bool(false),
       Cell.Bool(false),
       Cell.Null,
     )
-    agree(table, ColumnExpr.Not(0), "not").map(_.cells.last) shouldBe Vector(
+    agree(table, ColumnExpr.Not(0), "not").map(row => Check.last(row.cells)) shouldBe Vector(
       Cell.Bool(false),
       Cell.Bool(true),
       Cell.Null,
@@ -96,26 +104,32 @@ class TestWideExpr extends AnyFlatSpec with Matchers:
         WideInput.doubles("x", Array(1.9)),
       ),
     )
-    agree(table, ColumnExpr.Cast(0, ColumnKind.Int32), "n").map(_.cells.last) shouldBe Vector(
+    agree(table, ColumnExpr.Cast(0, ColumnKind.Int32), "n")
+      .map(row => Check.last(row.cells)) shouldBe Vector(
       Cell.Int32(5),
     )
-    agree(table, ColumnExpr.Cast(1, ColumnKind.Int32), "n").map(_.cells.last) shouldBe Vector(
+    agree(table, ColumnExpr.Cast(1, ColumnKind.Int32), "n")
+      .map(row => Check.last(row.cells)) shouldBe Vector(
       Cell.Int32(1),
     )
   }
 
   it should "append a literal on both paths" in {
     val base = WideColumns(Vector(WideInput.ints("n", Array(1))))
-    agree(base, ColumnExpr.Lit(ColumnLiteral.Int32(11)), "k").map(_.cells.last) shouldBe Vector(
+    agree(base, ColumnExpr.Lit(ColumnLiteral.Int32(11)), "k")
+      .map(row => Check.last(row.cells)) shouldBe Vector(
       Cell.Int32(11),
     )
-    agree(base, ColumnExpr.Lit(ColumnLiteral.Int64(11L)), "k").map(_.cells.last) shouldBe Vector(
+    agree(base, ColumnExpr.Lit(ColumnLiteral.Int64(11L)), "k")
+      .map(row => Check.last(row.cells)) shouldBe Vector(
       Cell.Int64(11L),
     )
-    agree(base, ColumnExpr.Lit(ColumnLiteral.Float64(1.5)), "k").map(_.cells.last) shouldBe Vector(
+    agree(base, ColumnExpr.Lit(ColumnLiteral.Float64(1.5)), "k")
+      .map(row => Check.last(row.cells)) shouldBe Vector(
       Cell.Float64(1.5),
     )
-    agree(base, ColumnExpr.Lit(ColumnLiteral.Bool(false)), "k").map(_.cells.last) shouldBe Vector(
+    agree(base, ColumnExpr.Lit(ColumnLiteral.Bool(false)), "k")
+      .map(row => Check.last(row.cells)) shouldBe Vector(
       Cell.Bool(false),
     )
   }
@@ -129,7 +143,7 @@ class TestWideExpr extends AnyFlatSpec with Matchers:
     val summed = rowLit.compute(ColumnExpr.Add(0, 1), "sum")
     val (sumFields, sumBatch) = WideExpr.append(batch, fields, ColumnExpr.Add(0, 1), "sum")
     WideBatch.decode(sumBatch, sumFields) shouldBe summed.rows
-    summed.rows.map(_.cells.last) shouldBe Vector(Cell.Int32(12), Cell.Int32(13))
+    summed.rows.map(row => Check.last(row.cells)) shouldBe Vector(Cell.Int32(12), Cell.Int32(13))
   }
 
   it should "divide integers toward zero" in {
@@ -143,7 +157,11 @@ class TestWideExpr extends AnyFlatSpec with Matchers:
       ColumnExpr.Div(0, 1),
       "q",
     )
-    rows.map(_.cells.last) shouldBe Vector(Cell.Int32(-2), Cell.Int32(-2), Cell.Int32(3))
+    rows.map(row => Check.last(row.cells)) shouldBe Vector(
+      Cell.Int32(-2),
+      Cell.Int32(-2),
+      Cell.Int32(3),
+    )
     val longs = agree(
       WideColumns(
         Vector(
@@ -154,7 +172,7 @@ class TestWideExpr extends AnyFlatSpec with Matchers:
       ColumnExpr.Div(0, 1),
       "q",
     )
-    longs.map(_.cells.last) shouldBe Vector(Cell.Int64(-2L))
+    longs.map(row => Check.last(row.cells)) shouldBe Vector(Cell.Int64(-2L))
   }
 
   it should "leave a null divisor null" in {
@@ -168,7 +186,7 @@ class TestWideExpr extends AnyFlatSpec with Matchers:
       ColumnExpr.Div(0, 1),
       "q",
     )
-    rows.map(_.cells.last) shouldBe Vector(Cell.Null, Cell.Int32(2))
+    rows.map(row => Check.last(row.cells)) shouldBe Vector(Cell.Null, Cell.Int32(2))
   }
 
   it should "divide a double" in {
@@ -182,8 +200,8 @@ class TestWideExpr extends AnyFlatSpec with Matchers:
       ColumnExpr.Div(0, 1),
       "q",
     )
-    rows.head.fields.last.kind shouldBe ColumnKind.Float64
-    rows.map(_.cells.last) shouldBe Vector(Cell.Float64(3.0))
+    Check.last(Check.first(rows).fields).kind shouldBe ColumnKind.Float64
+    rows.map(row => Check.last(row.cells)) shouldBe Vector(Cell.Float64(3.0))
   }
 
   it should "refuse a present zero divisor" in {
@@ -232,6 +250,6 @@ class TestWideExpr extends AnyFlatSpec with Matchers:
     val rows = table.compute(expr, name).rows
     val (fields, batch) = WideExpr.append(WideBatch.encode(table), table.fields, expr, name)
     WideBatch.decode(batch, fields) shouldBe rows
-    val kind = rows.head.fields.last.kind
-    rows.foreach(row => row.fields.last shouldBe ColumnField(name, kind))
+    val kind = Check.last(Check.first(rows).fields).kind
+    rows.foreach(row => Check.last(row.fields) shouldBe ColumnField(name, kind))
     rows

@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -8,6 +7,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * String inner sort-merge against the row path.
@@ -152,7 +152,7 @@ class TestStringSortMergeJoin extends AnyFlatSpec with Matchers with BeforeAndAf
     ColumnarPlanner.lower(left.broadcastJoin(right).plan).map(_.shape) shouldBe Some(
       "StringBroadcastJoin(Scan, Scan)",
     )
-    ColumnarPlanner.tryTake(left.sortMergeJoin(right).plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(left.sortMergeJoin(right).plan, 1).shouldBeEmpty
   }
 
   it should "throw on an over-budget sort-merge and write no spill file" in {
@@ -231,15 +231,17 @@ class TestStringSortMergeJoin extends AnyFlatSpec with Matchers with BeforeAndAf
       rows: Seq[(String, Int)],
       width: Int,
   ): DistCollection[(String, Int)] =
-    val buckets = Array.fill(width)(Seq.newBuilder[(String, Int)])
-    rows.zipWithIndex.foreach { (entry, index) =>
-      val _ = buckets(index % width) += entry
+    val bySlot = rows.zipWithIndex.groupBy((_, index) => index % width)
+    val partitions = (0 until width).map { slot =>
+      val entries = bySlot.getOrElse(slot, Seq.empty[((String, Int), Int)]).map { (entry, _) =>
+        entry
+      }
+      Partition(entries)
     }
-    DistCollection(Plan.Source(buckets.toIndexedSeq.map(builder => Partition(builder.result()))))
+    DistCollection(Plan.Source(partitions))
 
-  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
   private def pair[A, B](key: A, value: B): (A, B) =
-    Tuple2(key, value).asInstanceOf[(A, B)]
+    (key, value)
 
   /**
    * A `(String, Int)` cell. The cast is on the tuple, so a null `Integer` is not unboxed to `0`.

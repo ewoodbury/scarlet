@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,8 @@ import com.ewoodbury.scarlet.api.{DistCollection, IntJoinTriplePredicate}
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Plan-level proof of where a stack of unfused filters compacts. Counts are
@@ -569,7 +570,7 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
       PhysicalOp.Filter(scan, PhysicalOp.Slot.Element),
       PhysicalOp.Slot.Element,
     )
-    ColumnarPlanner.runLowered(logical, op) shouldBe None
+    ColumnarPlanner.runLowered(logical, op).shouldBeEmpty
     calls.get() shouldBe 0
   }
 
@@ -671,8 +672,8 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
 
     val widened = source.map { case (key, value) => (key.toLong, value) }
     ColumnarPlanner.lower(widened.plan).map(_.shape) shouldBe Some("Project(Scan)")
-    ColumnarPlanner.tryRun(widened.plan) shouldBe None
-    ColumnarPlanner.tryGroupedSum(widened.plan) shouldBe None
+    ColumnarPlanner.tryRun(widened.plan).shouldBeEmpty
+    ColumnarPlanner.tryGroupedSum(widened.plan).shouldBeEmpty
     val batch = BatchCodec.intPairs(Seq((1, 4), (2, 5)))
     val (_, steps) = ColumnarPlanner.peelPairOps(widened.plan)
     val thrown = intercept[ColumnarFallback] {
@@ -911,7 +912,7 @@ class TestSelectionBoundary extends AnyFlatSpec with Matchers with BeforeAndAfte
     BatchCodec.isAbsent(value) || isUs(value)
 
   private def isUs(value: String): Boolean =
-    !BatchCodec.isAbsent(value) && value.equals("US")
+    !BatchCodec.isAbsent(value) && Check.same(value, "US")
 
   private def onlyBatch(columns: ColumnarInterpreter.Columns): ColumnBatch =
     ColumnarInterpreter

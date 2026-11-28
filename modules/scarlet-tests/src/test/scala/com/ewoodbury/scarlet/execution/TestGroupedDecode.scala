@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.GroupByKey
 import com.ewoodbury.scarlet.core.{ExecutionService, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * One map directly above `groupByKey` decodes the grouped batch once.
@@ -66,9 +66,9 @@ class TestGroupedDecode extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.lower(grouped.keys.plan).map(_.shape) shouldBe Some(
       "Key(CountByKey(Exchange(Scan)))",
     )
-    ColumnarPlanner.lower(grouped.values.plan) shouldBe None
-    ColumnarPlanner.tryTake(grouped.plan, 1) shouldBe None
-    ColumnarPlanner.tryTake(mapped.plan, 1) shouldBe None
+    ColumnarPlanner.lower(grouped.values.plan).shouldBeEmpty
+    ColumnarPlanner.tryTake(grouped.plan, 1).shouldBeEmpty
+    ColumnarPlanner.tryTake(mapped.plan, 1).shouldBeEmpty
     val found = mapped.collect().toMap
     found shouldBe row(mapped.collect().toMap)
     found shouldBe Map(1 -> Seq(10, 11, 12), 2 -> Seq(20))
@@ -154,7 +154,7 @@ class TestGroupedDecode extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .map { case (key, values) => (key, values.sum) }
       .map { case (key, total) => key + total }
 
-    ColumnarPlanner.lower(twice.plan) shouldBe None
+    ColumnarPlanner.lower(twice.plan).shouldBeEmpty
     twice.collect().toSeq should contain theSameElementsAs Seq(10)
     twice.collect().toSeq should contain theSameElementsAs row(twice.collect().toSeq)
   }
@@ -166,7 +166,7 @@ class TestGroupedDecode extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .map { case (key, values) => (key, values.sum) }
       .filter { case (_, total) => total > 0 }
 
-    ColumnarPlanner.lower(filtered.plan) shouldBe None
+    ColumnarPlanner.lower(filtered.plan).shouldBeEmpty
     filtered.collect().toMap shouldBe row(filtered.collect().toMap)
   }
 
@@ -176,7 +176,7 @@ class TestGroupedDecode extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       .sortByIntKey
       .map { case (key, value) => (key, value + 1) }
 
-    ColumnarPlanner.lower(mapped.plan) shouldBe None
+    ColumnarPlanner.lower(mapped.plan).shouldBeEmpty
     mapped.collect().toSeq shouldBe row(mapped.collect().toSeq)
   }
 
@@ -196,7 +196,7 @@ class TestGroupedDecode extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val right = DistCollection.ofLongPairs(Array(1L, 2L), Array(100L, 200L), 2)
     val mapped = left.join(right).map { case (key, pair) => (key, pair._1 + pair._2) }
 
-    ColumnarPlanner.lower(mapped.plan) shouldBe None
+    ColumnarPlanner.lower(mapped.plan).shouldBeEmpty
     mapped.collect().toMap shouldBe row(mapped.collect().toMap)
   }
 

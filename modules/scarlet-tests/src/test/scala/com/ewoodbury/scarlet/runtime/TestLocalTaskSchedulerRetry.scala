@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.runtime
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import scala.concurrent.duration.FiniteDuration
@@ -11,6 +10,7 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.core.{Partition, RetryPolicy, ScarletConf}
 import com.ewoodbury.scarlet.runtime.api.RunnableTask
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
+import com.ewoodbury.scarlet.support.Check
 
 class TestLocalTaskSchedulerRetry extends AnyFlatSpec with Matchers with BeforeAndAfterEach {
 
@@ -50,7 +50,7 @@ class TestLocalTaskSchedulerRetry extends AnyFlatSpec with Matchers with BeforeA
 
     val result = scheduler.submit(Seq(flakyTask(failuresBeforeSuccess = 2, attempts)))
 
-    result.head.data.toSeq shouldEqual Seq(42)
+    Check.first(result).data.toSeq shouldEqual Seq(42)
     attempts.get shouldEqual 3
   }
 
@@ -60,7 +60,6 @@ class TestLocalTaskSchedulerRetry extends AnyFlatSpec with Matchers with BeforeA
 
     an[IllegalStateException] should be thrownBy scheduler
       .submit(Seq(alwaysFailingTask(attempts)))
-      
 
     attempts.get shouldEqual 3
   }
@@ -73,7 +72,6 @@ class TestLocalTaskSchedulerRetry extends AnyFlatSpec with Matchers with BeforeA
 
     an[IllegalStateException] should be thrownBy scheduler
       .submit(Seq(alwaysFailingTask(attempts)))
-      
 
     // fastConf allows 2 retries, so exactly 3 attempts - not the 4 that the
     // construction-time default policy (maxTaskRetries = 3) would produce.
@@ -92,9 +90,12 @@ class TestLocalTaskSchedulerRetry extends AnyFlatSpec with Matchers with BeforeA
     )
 
     val result =
-      scheduler.submitWithRetry(Seq(flakyTask(failuresBeforeSuccess = 3, attempts)), explicitPolicy)
+      scheduler.submitWithRetry(
+        Seq(flakyTask(failuresBeforeSuccess = 3, attempts)),
+        explicitPolicy,
+      )
 
-    result.head.data.toSeq shouldEqual Seq(42)
+    Check.first(result).data.toSeq shouldEqual Seq(42)
     attempts.get shouldEqual 4
   }
 
@@ -108,6 +109,6 @@ class TestLocalTaskSchedulerRetry extends AnyFlatSpec with Matchers with BeforeA
 
     val result = scheduler.submit(tasks)
 
-    result.map(partition => partition.data.head).toSeq shouldEqual Seq(1, 2, 3)
+    result.map(partition => Check.first(partition.data)) shouldEqual Seq(1, 2, 3)
   }
 }

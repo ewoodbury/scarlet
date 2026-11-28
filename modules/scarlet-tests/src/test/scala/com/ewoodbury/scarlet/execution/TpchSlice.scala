@@ -1,9 +1,9 @@
 package com.ewoodbury.scarlet.execution
-
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * TPC-H queries 6, 1, and 3 on generated rows. This is not a downloaded scale factor.
@@ -222,7 +222,7 @@ object TpchSlice:
 
   private def shaped(name: String, plan: Plan[WideRow], shape: String): Option[String] =
     ColumnarPlanner.lower(plan).map(_.shape) match
-      case Some(found) if found == shape => None
+      case Some(found) if Check.same(found, shape) => None
       case Some(found) => Some(s"$name shape $found expected $shape")
       case None => Some(s"$name did not lower")
 

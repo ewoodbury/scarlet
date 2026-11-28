@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -8,6 +7,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.execution.schema.{Describe, KernelChoice}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Checksums for the aggregate admissions.
@@ -70,11 +70,11 @@ class TestAggregateAdmission extends AnyFlatSpec with Matchers with BeforeAndAft
     ColumnarPlanner.lower(Plan.CountByKeyOp(widened.plan)).map(_.shape) shouldBe Some(
       "CountByKey(Exchange(IntLongMapValue(Scan)))",
     )
-    ColumnarPlanner.lower(Plan.CountByKeyOp(stacked)) shouldBe None
+    ColumnarPlanner.lower(Plan.CountByKeyOp(stacked)).shouldBeEmpty
     ColumnarPlanner.lower(Plan.ReduceByKeyOp(widened.plan, keep)).map(_.shape) shouldBe Some(
       "IntLongHashAggregate(Exchange(IntLongMapValue(Scan)))",
     )
-    ColumnarPlanner.lower(Plan.ReduceByKeyOp(stacked, add)) shouldBe None
+    ColumnarPlanner.lower(Plan.ReduceByKeyOp(stacked, add)).shouldBeEmpty
   }
 
   "a slot stack above long mapValues" should "match the row path" in {

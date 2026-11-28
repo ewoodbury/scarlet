@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.columnar
-
 import com.ewoodbury.scarlet.core.ScarletConf
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Component timings for the folded int `countByKey`. Not a test.
@@ -118,7 +118,9 @@ private[scarlet] object CountKeyPhases:
     }
     parts.foldLeft(0L)(_ ^ _)
 
-  /** Hash-insert the survivors. `fit` sizes the table for [[fitRows]] groups instead of the morsel. */
+  /**
+   * Hash-insert the survivors. `fit` sizes the table for [[fitRows]] groups instead of the morsel.
+   */
   def insert(work: Work, threads: Int, fit: Boolean): Long =
     val parts = MorselScheduler.map(work.morsels, threads) { (index, morsel) =>
       val rows = if (fit) then fitRows else morsel.length
@@ -169,7 +171,7 @@ private[scarlet] object CountKeyPhases:
     val grouped = morsels.iterator
     while (grouped.hasNext) {
       val batch = grouped.next().batch
-      if ((current eq null) || (current eq batch)) then
+      if ((Check.isNull(current)) || (Check.ref(current, batch))) then
         current = batch
         count += 1
       else
@@ -368,7 +370,7 @@ private[scarlet] object CountKeyPhases:
 
   private def directPartial(morsel: Morsel, captured: Captured): ColumnBatch =
     val dense = directFill(morsel, captured)
-    if (dense == null) then hashPartial(morsel, captured, small = false) else dense
+    if (Check.isNull(dense)) then hashPartial(morsel, captured, small = false) else dense
 
   private def directFill(morsel: Morsel, captured: Captured): ColumnBatch | Null =
     if (morsel.length == 0) then ColumnBatches.emptyIntPairs

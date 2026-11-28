@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Columnar rank split of an int-pair scan. A null key orders as zero and stays null. A null value
@@ -301,7 +301,7 @@ class TestSortByIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.lower(above.plan).map(_.shape) shouldBe Some(
       "FilterRow(SortByIntKey(Scan))",
     )
-    ColumnarPlanner.tryTake(above.plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(above.plan, 1).shouldBeEmpty
     collect(above) shouldBe rowCollect(above)
     collect(above) shouldBe Seq(1 -> 10, 2 -> 21, 3 -> 30)
     // One row filter under the sort still sorts the survivor index.
@@ -321,8 +321,8 @@ class TestSortByIntKey extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     val row = rowCollect(filtered)
     val keptNull = row.lift(1).getOrElse(fail("missing null-key row"))
 
-    ColumnarPlanner.lower(filtered.plan) shouldBe None
-    ColumnarPlanner.partitioning(filtered.plan) shouldBe None
+    ColumnarPlanner.lower(filtered.plan).shouldBeEmpty
+    ColumnarPlanner.partitioning(filtered.plan).shouldBeEmpty
     collect(filtered) shouldBe row
     row shouldBe Seq(
       intPair(boxedInt(-4), boxedInt(1)),

@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -7,6 +6,8 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * TPC-H Q6 shape: filter long columns, multiply two of them, and sum the product.
@@ -60,7 +61,7 @@ class TestWideQuery extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
         Vector(Cell.Int64(2L), Cell.Int64(5L), Cell.Int64(10L)),
       ),
     )
-    collect(planned).filter(row => row.cells.last != Cell.Null) shouldBe kept
+    collect(planned).filter(row => !Check.same(Check.last(row.cells), Cell.Null)) shouldBe kept
   }
 
   it should "match a row fold of the Q6 filters" in {
@@ -70,9 +71,7 @@ class TestWideQuery extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val discountPresent = new Array[Boolean](rows)
     val quantity = new Array[Long](rows)
     val ship = new Array[Long](rows)
-    var index = 0
-    var expected = 0L
-    while (index < rows) {
+    val expected = (0 until rows).foldLeft(0L) { (sum, index) =>
       price(index) = (index * 17L) % 1000L
       pricePresent(index) = index % 17 != 0
       discount(index) = (index % 11).toLong
@@ -83,8 +82,8 @@ class TestWideQuery extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       val discountOk = discountPresent(index) && discount(index) >= 5L && discount(index) <= 7L
       val quantityOk = quantity(index) < 24L
       if (shipOk && discountOk && quantityOk && pricePresent(index)) then
-        expected += price(index) * discount(index)
-      index += 1
+        sum + price(index) * discount(index)
+      else sum
     }
     val planned = lineitem(price, pricePresent, discount, discountPresent, quantity, ship)
     ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some(
@@ -105,7 +104,7 @@ class TestWideQuery extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       source.compute(ColumnExpr.Mul(0, 1), "bad")
     }
     val planned = DistCollection(Plan.WideComputeOp(source.plan, ColumnExpr.Mul(0, 1), "bad"))
-    ColumnarPlanner.lower(planned.plan) shouldBe None
+    ColumnarPlanner.lower(planned.plan).shouldBeEmpty
   }
 
   private def lineitem(

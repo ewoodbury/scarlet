@@ -1,9 +1,10 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf, StageId}
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Tests for the new Operation ADT and normalized InputSource modeling.
@@ -52,7 +53,7 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
 
     // Single-input shuffle should have no side
     val singleShuffle = ShuffleInput(StageId(1), None, defaultPartitions)
-    singleShuffle.side shouldBe None
+    singleShuffle.side.shouldBeEmpty
 
     // Multi-input shuffle should have sides
     val leftShuffle = ShuffleInput(StageId(1), Some(Side.Left), defaultPartitions)
@@ -475,7 +476,7 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
     // Find the left and right stage IDs
     val leftStageId = stageGraph.stages
       .find(_._2.inputSources.exists {
-        case StageBuilder.SourceInput(parts) => parts == createSource().partitions
+        case StageBuilder.SourceInput(parts) => Check.same(parts, createSource().partitions)
         case _ => false
       })
       .get
@@ -483,7 +484,7 @@ class TestOperationsAndInputSources extends AnyFlatSpec with Matchers:
 
     val rightStageId = stageGraph.stages
       .find(_._2.inputSources.exists {
-        case StageBuilder.SourceInput(parts) => parts == createSource().partitions
+        case StageBuilder.SourceInput(parts) => Check.same(parts, createSource().partitions)
         case _ => false
       })
       .get

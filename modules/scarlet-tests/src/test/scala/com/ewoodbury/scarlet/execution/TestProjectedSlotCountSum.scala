@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountSum, CountingSink, IntPairProject}
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * One int slot above an int-pair `Project`, counted and summed without a pair batch.
@@ -490,7 +490,7 @@ class TestProjectedSlotCountSum extends AnyFlatSpec with Matchers with BeforeAnd
       .mapIntKey((key: Int) => key + 1)
       .filter((pair: (Int, Int)) => pair._1 > 2 && pair._2 >= 20)
       .countSumByKey
-    ColumnarPlanner.lower(rowFilter.plan) shouldBe None
+    ColumnarPlanner.lower(rowFilter.plan).shouldBeEmpty
     rowFilter.collect().map { case (key, count, sum) => key -> (count, sum) }.toMap shouldBe
       row(groups(rowFilter))
   }

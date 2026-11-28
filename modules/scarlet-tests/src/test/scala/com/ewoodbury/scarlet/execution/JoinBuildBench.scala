@@ -69,44 +69,44 @@ object JoinBuildBench:
     val data = prepare()
     verify(data)
     preamble(data)
-    val readings = Vector.newBuilder[Reading]
-    def keep(reading: Reading): Unit =
+    def note(reading: Reading): Reading =
       println(line(reading))
-      val _ = readings += reading
-    threadCounts.foreach { threads =>
-      keep(timeE2E(saved, data, threads))
-      keep(timeKernel(saved, data, threads))
-    }
-    val buildSides = Vector(
-      ("join", data.joinSide),
-      ("survivors", data.survivors),
-    ) ++ forcedRows.map(count => (s"forced-$count", forced(count, unique = false)))
-    buildSides.foreach { (label, side) =>
-      threadCounts.foreach(threads => keep(timeOpen(saved, label, side, threads)))
-    }
-    threadCounts.foreach { threads =>
-      keep(timeProbe(saved, data, threads, engine = false))
-      keep(timeProbe(saved, data, threads, engine = true))
-      keep(timeOutput(saved, data, threads, grown = false))
-      keep(timeOutput(saved, data, threads, grown = true))
-    }
-    policySides(data).foreach { (keys, side) =>
-      Vector("current", "load75", "exact64").foreach { policy =>
-        threadCounts.foreach { threads =>
-          timePolicy(saved, keys, side, policy, threads).foreach(keep)
+      reading
+    val readings =
+      threadCounts.flatMap { threads =>
+        Vector(note(timeE2E(saved, data, threads)), note(timeKernel(saved, data, threads)))
+      } ++ {
+        val buildSides = Vector(
+          ("join", data.joinSide),
+          ("survivors", data.survivors),
+        ) ++ forcedRows.map(count => (s"forced-$count", forced(count, unique = false)))
+        buildSides.flatMap { (label, side) =>
+          threadCounts.map(threads => note(timeOpen(saved, label, side, threads)))
         }
+      } ++ threadCounts.flatMap { threads =>
+        Vector(
+          note(timeProbe(saved, data, threads, engine = false)),
+          note(timeProbe(saved, data, threads, engine = true)),
+          note(timeOutput(saved, data, threads, grown = false)),
+          note(timeOutput(saved, data, threads, grown = true)),
+        )
+      } ++ policySides(data).flatMap { (keys, side) =>
+        Vector("current", "load75", "exact64").flatMap { policy =>
+          threadCounts.flatMap { threads =>
+            timePolicy(saved, keys, side, policy, threads).toVector.map(note)
+          }
+        }
+      } ++ Vector("current", "load75", "exact64").flatMap { policy =>
+        threadCounts.flatMap { threads =>
+          Vector(
+            note(timeJoined(saved, data, threads, policy, WriteMode.Count)),
+            note(timeJoined(saved, data, threads, policy, WriteMode.Grown)),
+          )
+        }
+      } ++ threadCounts.map { threads =>
+        note(timeJoined(saved, data, threads, "current", WriteMode.Exact))
       }
-    }
-    Vector("current", "load75", "exact64").foreach { policy =>
-      threadCounts.foreach { threads =>
-        keep(timeJoined(saved, data, threads, policy, WriteMode.Count))
-        keep(timeJoined(saved, data, threads, policy, WriteMode.Grown))
-      }
-    }
-    threadCounts.foreach { threads =>
-      keep(timeJoined(saved, data, threads, "current", WriteMode.Exact))
-    }
-    System.err.println(table(readings.result()))
+    System.err.println(table(readings))
 
   private def preamble(data: Prepared): Unit =
     val runtime = ManagementFactory.getRuntimeMXBean

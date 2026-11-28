@@ -14,8 +14,8 @@ import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import SortMergeOuterFixture.{canonical, collect}
 
 /**
- * Left outer join against the row-path `leftOuterJoin`. The row executor ignores the strategy
- * hint and always shuffle-hashes, so turning columnar execution off is the oracle.
+ * Left outer join against the row-path `leftOuterJoin`. The row executor ignores the strategy hint
+ * and always shuffle-hashes, so turning columnar execution off is the oracle.
  */
 class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -46,8 +46,14 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
         Seq(Seq(1 -> 100, 1 -> 101, 2 -> 200)),
       ),
       "null keys on both sides" -> (
-        Seq(Seq(pair(Some(1), Some(10)), pair(None, Some(4))), Seq(pair(None, Some(5)), pair(Some(2), Some(20)))),
-        Seq(Seq(pair(Some(1), Some(100)), pair(None, Some(9))), Seq(pair(None, Some(8)), pair(Some(3), Some(30)))),
+        Seq(
+          Seq(pair(Some(1), Some(10)), pair(None, Some(4))),
+          Seq(pair(None, Some(5)), pair(Some(2), Some(20))),
+        ),
+        Seq(
+          Seq(pair(Some(1), Some(100)), pair(None, Some(9))),
+          Seq(pair(None, Some(8)), pair(Some(3), Some(30))),
+        ),
       ),
     )
     cases.foreach { case (label, (leftParts, rightParts)) =>
@@ -90,7 +96,8 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
 
   it should "keep a null value columnar and match the row path" in {
     val noRows = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 1).plan
-    // A present pair comes first, so the source still witnesses int pairs. The null value is later.
+    /* A present pair comes first, so the source still witnesses int pairs. The null value is
+     * later. */
     val nullProbe = source(
       Seq(Seq(pair(Some(2), Some(0)), pair(Some(1), None), pair(None, Some(7)))),
     )
@@ -125,8 +132,7 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
         ColumnarPlanner.tryRun(plan).isDefined shouldBe true
         val columnar = collect(plan, columnar = true)
         agree(columnar, collect(plan, columnar = false))
-        if (label.contains("dropped null build")) then
-          containsInt(columnar, 99) shouldBe false
+        if (label.contains("dropped null build")) then containsInt(columnar, 99) shouldBe false
       }
     }
     withClue("empty build keeps a null probe value: ") {
@@ -209,7 +215,9 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     rows.find(_._1.contains(4)).getOrElse(fail("missing matched row")) shouldBe
       ((Some(4), true, true, false, false))
 
-    canonical(BatchCodec.decodeOuter(batch, AbsentSide.Right)) should contain theSameElementsAs Seq(
+    canonical(
+      BatchCodec.decodeOuter(batch, AbsentSide.Right),
+    ) should contain theSameElementsAs Seq(
       (Some(1), Some(10), Some(100)),
       (Some(2), Some(11), None),
       (Some(3), Some(30), None),
@@ -368,7 +376,8 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
 
   it should "keep a null value columnar and match the row path" in {
     val noRows = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 4).plan
-    // A present pair comes first, so the source still witnesses int pairs. The null value is later.
+    /* A present pair comes first, so the source still witnesses int pairs. The null value is
+     * later. */
     val nullProbe = source(
       Seq(Seq(pair(Some(2), Some(0)), pair(Some(1), None), pair(None, Some(7)))),
     )
@@ -415,8 +424,7 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
           val columnar = collect(plan, columnar = true)
           val row = collect(plan, columnar = false)
           agree(columnar, row)
-          if (label.contains("dropped null build")) then
-            containsInt(columnar, 99) shouldBe false
+          if (label.contains("dropped null build")) then containsInt(columnar, 99) shouldBe false
         }
       }
       withClue(s"$hint empty build keeps a null probe value: ") {
@@ -487,14 +495,18 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     rows.find(_._2.contains(4)).getOrElse(fail("missing unmatched key 4")) shouldBe
       ((0, Some(4), true, false, false, true))
     rows.find(_._2.isEmpty).getOrElse(fail("missing null probe key")) shouldBe
-      ((0, None, true, false, false, true))
+      ((0, Option.empty[Int], true, false, false, true))
     rows.exists(_._2.contains(8)) shouldBe false
     val unmatched = parts.lift(Math.floorMod(2, 4)).getOrElse(fail("missing partition"))
-    canonical(BatchCodec.decodeOuter(unmatched, AbsentSide.Right)) should contain theSameElementsAs Seq(
+    canonical(
+      BatchCodec.decodeOuter(unmatched, AbsentSide.Right),
+    ) should contain theSameElementsAs Seq(
       (Some(2), Some(20), None),
     )
     val carried = parts.headOption.getOrElse(fail("missing partition 0"))
-    canonical(BatchCodec.decodeOuter(carried, AbsentSide.Right)) should contain theSameElementsAs Seq(
+    canonical(
+      BatchCodec.decodeOuter(carried, AbsentSide.Right),
+    ) should contain theSameElementsAs Seq(
       (None, Some(7), None),
       (Some(4), Some(40), None),
     )
@@ -557,7 +569,8 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
   "hash full outer" should "keep a null value columnar and match the row path" in {
     // Key 1 matches with a null left value. Key 2 matches with a null right value.
     // Key 3 has no partner. Key 4 is only on the right.
-    // A present pair comes first, so the source still witnesses int pairs. The null value is later.
+    /* A present pair comes first, so the source still witnesses int pairs. The null value is
+     * later. */
     val left = source(Seq(Seq(2 -> 20, pair(Some(1), None), 3 -> 30)))
     val right = source(Seq(Seq(1 -> 100, pair(Some(2), None), 4 -> 40)))
     val plan = Plan.FullOuterJoinOp(left, right, Some(Plan.JoinStrategy.ShuffleHash))
@@ -646,7 +659,8 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
 
     ScarletConf.set(shuffledConf)
     SortMergeRuns.resetForTest()
-    val lowered = ColumnarPlanner.lower(plan).getOrElse(fail("sort-merge left outer did not lower"))
+    val lowered =
+      ColumnarPlanner.lower(plan).getOrElse(fail("sort-merge left outer did not lower"))
     lowered.kind shouldBe PhysicalOp.Kind.Triples
     lowered.shape shouldBe "SortMergeLeftOuter(Exchange(Scan), Exchange(Scan))"
     val memory = canonical(collect(plan, columnar = true))
@@ -661,7 +675,8 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     val spilled = withSpill(budget) { dir =>
       val rows = canonical(collectCurrent(plan))
       assertOuterBits(plan, AbsentSide.Right, rows)
-      // 96/32 covers two executions (collectCurrent and assertOuterBits's interpret). 20/8 and 2/0 are single executions.
+      /* 96/32 covers two executions (collectCurrent and assertOuterBits's interpret). 20/8 and 2/0
+       * are single executions. */
       SortMergeOuterFixture.assertSpill(dir, 96L, 32L)
       rows
     }
@@ -696,7 +711,8 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
     val spilledKept = withSpill(budget) { dir =>
       val rows = canonical(collectCurrent(emptyRight))
       assertOuterBits(emptyRight, AbsentSide.Right, rows)
-      // 40/16 covers two executions (collectCurrent and assertOuterBits's interpret). 20/8 and 2/0 are single executions.
+      /* 40/16 covers two executions (collectCurrent and assertOuterBits's interpret). 20/8 and 2/0
+       * are single executions. */
       SortMergeOuterFixture.assertSpill(dir, 40L, 16L)
       rows
     }
@@ -714,7 +730,8 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
 
   it should "keep a null value columnar and match the row path" in {
     val noRows = DistCollection.ofIntPairs(Array.empty[Int], Array.empty[Int], 4).plan
-    // A present pair comes first, so the source still witnesses int pairs. The null value is later.
+    /* A present pair comes first, so the source still witnesses int pairs. The null value is
+     * later. */
     val nullProbe = source(
       Seq(Seq(pair(Some(2), Some(0)), pair(Some(1), None), pair(None, Some(7)))),
     )
@@ -1045,4 +1062,3 @@ class TestLeftOuterColumnar extends AnyFlatSpec with Matchers with BeforeAndAfte
 
   private def withSpill[A](budget: Long)(body: Path => A): A =
     SortMergeOuterFixture.withSpill(shuffledConf, budget)(body)
-

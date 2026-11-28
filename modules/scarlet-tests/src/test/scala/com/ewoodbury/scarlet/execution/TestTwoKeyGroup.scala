@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -7,6 +6,8 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Group by two int or long columns. A null in either key is dropped. The plan is not `GroupByKey`.
@@ -46,9 +47,9 @@ class TestTwoKeyGroup extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val table = ints(left, leftPresent, right, rightPresent, measure, measurePresent)
     table.plan match
       case Plan.WideGroupOp(_, _, _, Some(_)) =>
-        table.plan.toString.contains("GroupByKey") shouldBe false
+        Check.text(table.plan).contains("GroupByKey") shouldBe false
       case other =>
-        fail(other.toString)
+        fail(Check.text(other))
     ColumnarPlanner.lower(table.plan).map(_.shape) shouldBe Some("WideGroup(Scan)")
     val expected = foldInts(left, leftPresent, right, rightPresent, measure, measurePresent)
     both(table) shouldBe expected
@@ -182,7 +183,7 @@ class TestTwoKeyGroup extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
         1,
       )
       .groupColumns(0, 1, 2)
-    ColumnarPlanner.lower(table.plan) shouldBe None
+    ColumnarPlanner.lower(table.plan).shouldBeEmpty
     an[IllegalArgumentException] should be thrownBy table.collect()
   }
 
@@ -234,26 +235,26 @@ class TestTwoKeyGroup extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       measure: Array[Int],
       measurePresent: Array[Boolean],
   ): Vector[Vector[Cell]] =
-    val groups =
-      scala.collection.mutable.LinkedHashMap.empty[(Int, Int), (Long, Long, Int, Int, Boolean)]
-    left.indices.foreach { index =>
-      if (leftPresent(index) && rightPresent(index)) then
-        val key = (left(index), right(index))
-        val (count, sum, min, max, seen) =
-          groups.getOrElse(key, (0L, 0L, 0, 0, false))
-        val next =
-          if (!measurePresent(index)) then (count + 1L, sum, min, max, seen)
-          else if (!seen) then
-            (count + 1L, measure(index).toLong, measure(index), measure(index), true)
-          else
-            (
-              count + 1L,
-              sum + measure(index).toLong,
-              math.min(min, measure(index)),
-              math.max(max, measure(index)),
-              true,
-            )
-        groups.update(key, next)
+    val groups = left.indices.foldLeft(Map.empty[(Int, Int), (Long, Long, Int, Int, Boolean)]) {
+      (acc, index) =>
+        if (leftPresent(index) && rightPresent(index)) then
+          val key = (left(index), right(index))
+          val (count, sum, min, max, seen) =
+            acc.getOrElse(key, (0L, 0L, 0, 0, false))
+          val next =
+            if (!measurePresent(index)) then (count + 1L, sum, min, max, seen)
+            else if (!seen) then
+              (count + 1L, measure(index).toLong, measure(index), measure(index), true)
+            else
+              (
+                count + 1L,
+                sum + measure(index).toLong,
+                math.min(min, measure(index)),
+                math.max(max, measure(index)),
+                true,
+              )
+          acc + (key -> next)
+        else acc
     }
     groups.toVector.sortBy((key, _) => key).map {
       case ((key, key2), (count, sum, min, max, seen)) =>

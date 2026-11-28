@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * `groupByKey` after `mapValues` to long builds the lists on columns.
@@ -113,7 +113,7 @@ class TestIntLongGroup extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       .map { (key, values) =>
         val raw = values.asInstanceOf[Iterable[AnyRef]]
         val texts = raw.iterator.map { cell =>
-          if (cell == null) "null" else cell.toString
+          if (Check.isNull(cell)) "null" else Check.text(cell)
         }.toList
         (key, texts)
       }

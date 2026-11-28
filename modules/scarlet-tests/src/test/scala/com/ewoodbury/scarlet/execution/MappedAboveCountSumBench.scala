@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.lang.management.ManagementFactory
 
 import com.sun.management.ThreadMXBean
@@ -9,6 +8,7 @@ import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountSum, CountingSink}
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Same-session row and columnar times for one slot above `mapIntKey`, then `countSumByKey`.
@@ -77,7 +77,7 @@ object MappedAboveCountSumBench:
         .map(_.shape)
         .getOrElse(refuse("mapIntKey slot count-sum did not lower"))
       val expected = expectedShape(filters)
-      if (shape != expected) then refuse(s"shape $shape is not $expected")
+      if (!Check.same(shape, expected)) then refuse(s"shape $shape is not $expected")
       println(s"arm $shape")
       val row = time("row", summed.plan, warmup, rounds, columnar = false)
       println(render(row))

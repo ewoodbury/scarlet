@@ -1,7 +1,9 @@
 package com.ewoodbury.scarlet.columnar
-
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Hand-built string outer batches. A clear key bit is null and is not `dictionary(0)`. An absence
@@ -31,7 +33,7 @@ class TestStringOuterColumns extends AnyFlatSpec with Matchers:
   it should "reject a clear bit that is not an absence mark" in {
     val right = Int32Column.of(Array(0), Validity.pack(1, _ => false), 1)
     val batch = triple(presentKey(Array("a")), present(Array(10)), right)
-    right.absence shouldBe None
+    right.absence.shouldBeEmpty
     val thrown = intercept[IllegalArgumentException] {
       val _ = StringOuterDecode.decode(batch, AbsentSide.Right)
     }
@@ -73,7 +75,7 @@ class TestStringOuterColumns extends AnyFlatSpec with Matchers:
       val _ = StringOuterDecode.decode(longs, AbsentSide.Right)
     }
     thrown.getMessage should include(longs.schema.toString)
-    (thrown.getMessage == "outer join output is not three Int32 columns") shouldBe false
+    (Check.same(thrown.getMessage, "outer join output is not three Int32 columns")) shouldBe false
   }
 
   "string outer concat" should "keep a missing partner and a null key" in {

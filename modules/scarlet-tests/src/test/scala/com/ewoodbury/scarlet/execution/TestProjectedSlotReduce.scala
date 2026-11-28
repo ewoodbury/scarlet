@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,8 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * One int slot above an int-pair `Project`, reduced without publishing the pair batch.
@@ -481,7 +482,7 @@ class TestProjectedSlotReduce extends AnyFlatSpec with Matchers with BeforeAndAf
       .mapIntKey((key: Int) => key + 1)
       .filter((pair: (Int, Int)) => pair._1 > 2 && pair._2 >= 20)
       .reduceByKey[Int, Int](_ + _)
-    ColumnarPlanner.lower(whole.plan) shouldBe None
+    ColumnarPlanner.lower(whole.plan).shouldBeEmpty
     whole.collect().toMap shouldBe row(whole.collect().toMap)
   }
 
@@ -561,7 +562,7 @@ class TestProjectedSlotReduce extends AnyFlatSpec with Matchers with BeforeAndAf
       .map { pair =>
         val raw = pair.asInstanceOf[Product]
         val value = raw.productElement(1)
-        val text = if (value == null) "null" else value.toString
+        val text = if (Check.isNull(value)) "null" else Check.text(value)
         (raw.productElement(0).asInstanceOf[Int], text)
       }
       .toSeq

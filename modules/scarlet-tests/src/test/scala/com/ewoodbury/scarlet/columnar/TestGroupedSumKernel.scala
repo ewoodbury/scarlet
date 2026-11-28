@@ -61,7 +61,7 @@ class TestGroupedSumKernel extends AnyFlatSpec with Matchers:
     sizes shouldBe Vector(2)
     partials match
       case Vector(first, second) =>
-        sums(Vector(first)) shouldBe Map(1 -> None)
+        sums(Vector(first)) shouldBe Map(1 -> Option.empty[Long])
         sums(Vector(second)) shouldBe Map(4 -> Some(8L), 5 -> None)
       case other => fail(s"expected two partials, got ${other.length}")
   }

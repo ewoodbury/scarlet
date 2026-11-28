@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -15,6 +14,7 @@ import com.ewoodbury.scarlet.execution.schema.ColumnBinding.{
   Side,
 }
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Joins feed [[ColumnBinding]].
@@ -94,14 +94,14 @@ class TestJoinAdmission extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     checksum shouldBe CrossEngineShapes.sumChecksum(row(summed.collect()))
     val longest =
       projected.reduceByKey((leftSum: Long, rightSum: Long) => math.max(leftSum, rightSum))
-    ColumnarPlanner.lower(longest.plan) shouldBe None
+    ColumnarPlanner.lower(longest.plan).shouldBeEmpty
     longest.collect().toMap shouldBe row(longest.collect().toMap)
     val nested = joined
       .map { case (key, pair) => (key, pair) }
       .reduceByKey((leftPair: (Int, Int), rightPair: (Int, Int)) =>
         (leftPair._1 + rightPair._1, leftPair._2 + rightPair._2),
       )
-    ColumnarPlanner.lower(nested.plan) shouldBe None
+    ColumnarPlanner.lower(nested.plan).shouldBeEmpty
     nested.collect().toMap shouldBe row(nested.collect().toMap)
   }
 
@@ -110,12 +110,14 @@ class TestJoinAdmission extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val right = pairs(Array(1, 2), Array(100, 200))
     val joined = left.join(right).plan
     val child = lowered(joined)
-    AggregateBinding.choiceFor(
-      joined,
-      child,
-      Operator.ReduceByKey,
-      ReducerWitness.AddsLongs,
-    ) shouldBe None
+    AggregateBinding
+      .choiceFor(
+        joined,
+        child,
+        Operator.ReduceByKey,
+        ReducerWitness.AddsLongs,
+      )
+      .shouldBeEmpty
     AggregateBinding.choiceFor(
       joined,
       child,
@@ -136,28 +138,32 @@ class TestJoinAdmission extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       case Output.IntLongPairs(_) => fail("int-long map values are not join columns")
       case Output.Opaque(reason) => fail(reason)
     columns.exists(absent) shouldBe true
-    ColumnBinding.choose(
-      columns,
-      Operator.CountByKey,
-      ReducerWitness.NotApplicable,
-      Bound.nulls(bound),
-      Bound.side(bound),
-    ) shouldBe None
-    ColumnarPlanner.lower(outer.countByKey.plan) shouldBe None
-    AggregateBinding.choiceFor(
-      outer.plan,
-      bound.op,
-      Operator.CountByKey,
-      ReducerWitness.NotApplicable,
-    ) shouldBe None
+    ColumnBinding
+      .choose(
+        columns,
+        Operator.CountByKey,
+        ReducerWitness.NotApplicable,
+        Bound.nulls(bound),
+        Bound.side(bound),
+      )
+      .shouldBeEmpty
+    ColumnarPlanner.lower(outer.countByKey.plan).shouldBeEmpty
+    AggregateBinding
+      .choiceFor(
+        outer.plan,
+        bound.op,
+        Operator.CountByKey,
+        ReducerWitness.NotApplicable,
+      )
+      .shouldBeEmpty
   }
 
   "a source ScanLowering refuses" should "not count through a join" in {
     val refused = DistCollection(Plan.Source(Seq(Partition(Seq(nullPair)))))
     val right = pairs(Array(1), Array(10))
-    ColumnarPlanner.lower(refused.plan) shouldBe None
-    ColumnarPlanner.lower(refused.join(right).plan) shouldBe None
-    ColumnarPlanner.lower(refused.join(right).countByKey.plan) shouldBe None
+    ColumnarPlanner.lower(refused.plan).shouldBeEmpty
+    ColumnarPlanner.lower(refused.join(right).plan).shouldBeEmpty
+    ColumnarPlanner.lower(refused.join(right).countByKey.plan).shouldBeEmpty
   }
 
   "sumJoinLeft" should "stay JoinProbeSum" in {

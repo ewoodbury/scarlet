@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -9,6 +8,8 @@ import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.HashPartitioner
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Columnar `reduceByKey` on `(String, Int)`.
@@ -45,8 +46,8 @@ class TestStringKeyReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
   "reduceByKey" should "match the row path for string keys from two dictionaries" in {
     val leftDictionary = dictionaryOf(leftRows)
     val rightDictionary = dictionaryOf(rightRows)
-    leftDictionary.head shouldBe ""
-    rightDictionary.head shouldBe emoji
+    Check.first(leftDictionary) shouldBe ""
+    Check.first(rightDictionary) shouldBe emoji
     leftDictionary.indexOf(accent) should not be rightDictionary.indexOf(accent)
     leftDictionary.indexOf("") should not be rightDictionary.indexOf("")
 
@@ -145,9 +146,11 @@ class TestStringKeyReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
       Plan.Source(Seq(Partition(Seq(erasedNullValue("blue"), "red" -> 1)))),
     )
 
-    ColumnarPlanner.lower(
-      longs.reduceByKey[String, Long]((left, right) => left + right).plan,
-    ) shouldBe None
+    ColumnarPlanner
+      .lower(
+        longs.reduceByKey[String, Long]((left, right) => left + right).plan,
+      )
+      .shouldBeEmpty
     ColumnarPlanner.lower(grouped.plan).map(_.shape) shouldBe Some("GroupByKey(Exchange(Scan))")
     grouped.collect().map { case (key, values) => key -> values.toSeq }.toMap shouldBe row(
       grouped.collect().map { case (key, values) => key -> values.toSeq }.toMap,
@@ -160,7 +163,7 @@ class TestStringKeyReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
     ColumnarPlanner.lower(reduced.plan).map(_.shape) shouldBe Some(
       "StringHashAggregate(Exchange(Scan))",
     )
-    ColumnarPlanner.tryRun(reduced.plan) shouldBe None
+    ColumnarPlanner.tryRun(reduced.plan).shouldBeEmpty
     ColumnarPlanner.lower(nullGrouped.plan).map(_.shape) shouldBe Some(
       "GroupByKey(Exchange(Scan))",
     )
@@ -216,21 +219,25 @@ class TestStringKeyReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
   private def grouped(op: (Int, Int) => Int): Vector[Seq[(String, Int)]] =
     val parts = ScarletConf.get.defaultShufflePartitions
     val partitioner = new HashPartitioner
-    val seed = Vector.fill(parts)(Vector.empty[(String, Int)])
-    Seq(leftRows, rightRows).flatten.foldLeft(seed) { (buckets, pair) =>
-      val (key, value) = pair
-      if (hasNullKey(Seq(key))) then buckets
-      else
-        val index = partitioner.partition(key, parts)
-        val bucket = buckets(index)
-        val at = bucket.indexWhere { case (found, _) => sameKey(found, key) }
-        val updated =
-          if (at < 0) then bucket :+ (key, value)
-          else
-            val (found, current) = bucket(at)
-            bucket.updated(at, (found, op(current, value)))
-        buckets.updated(index, updated)
+    val rows = Seq(leftRows, rightRows).flatten.filterNot { (key, _) =>
+      hasNullKey(Seq(key))
     }
+    val byPart = rows.groupBy { (key, _) =>
+      partitioner.partition(key, parts)
+    }
+    (0 until parts).iterator.map { index =>
+      val inBucket = byPart.getOrElse(index, Seq.empty[(String, Int)])
+      inBucket.foldLeft(Vector.empty[(String, Int)]) { (bucket, pair) =>
+        val (key, value) = pair
+        val at = bucket.indexWhere { (found, _) => sameKey(found, key) }
+        if (at < 0) then bucket :+ (key, value)
+        else
+          bucket.iterator.zipWithIndex.map { (entry, slot) =>
+            val (found, current) = entry
+            if slot == at then (found, op(current, value)) else (found, current)
+          }.toVector
+      }
+    }.toVector
 
   private def assertBuckets(plan: Plan[_], expected: Vector[Seq[(String, Int)]]): Unit =
     val parts = stringPairs(plan)
@@ -331,8 +338,8 @@ class TestStringKeyReduce extends AnyFlatSpec with Matchers with BeforeAndAfterE
       val refs = values.iterator.asInstanceOf[Iterator[AnyRef]]
       val key = raw.productElement(0) match
         case null => "null"
-        case text => text.toString
-      key -> refs.map(cell => if (cell == null) "null" else cell.toString).toSeq
+        case text => Check.text(text)
+      key -> refs.map(cell => if (Check.isNull(cell)) "null" else Check.text(cell)).toSeq
     }
 
   private def row[A](body: => A): A =

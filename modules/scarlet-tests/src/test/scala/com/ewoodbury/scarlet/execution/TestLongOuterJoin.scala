@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -8,6 +7,8 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Long outer joins. A null value stays on the row path. A missing partner is an absence bit. Order
@@ -47,8 +48,8 @@ class TestLongOuterJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
         val op = ColumnarPlanner.lower(plan).getOrElse(fail(s"$side $strategy did not lower"))
         op.shape shouldBe expectedShape(side, strategy)
         op.kind shouldBe PhysicalOp.Kind.LongOuter
-        (op.kind == PhysicalOp.Kind.LongTriples) shouldBe false
-        (op.kind == PhysicalOp.Kind.Triples) shouldBe false
+        (Check.same(op.kind, PhysicalOp.Kind.LongTriples)) shouldBe false
+        (Check.same(op.kind, PhysicalOp.Kind.Triples)) shouldBe false
         ColumnarPlanner.tryTake(plan, 1).isDefined shouldBe false
       }
     }
@@ -122,7 +123,7 @@ class TestLongOuterJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
         val _ = ColumnarInterpreter.interpret(plan, op)
       }
       thrown.getMessage shouldBe s"a null value on a $side outer join stays on the row path"
-      ColumnarPlanner.tryRun(plan) shouldBe None
+      ColumnarPlanner.tryRun(plan).shouldBeEmpty
       same(DistCollection(plan))
     }
   }
@@ -228,7 +229,7 @@ class TestLongOuterJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val estimate = LongHashJoin.retainedBuildBytes(1)
     thrown.getMessage shouldBe
       s"broadcast build table retains about $estimate bytes for 1 rows, " +
-        "above the budget of 1 bytes"
+      "above the budget of 1 bytes"
     LongHashJoinSpill.filesWrittenForTest shouldBe 0L
     LongHashJoinSpill.lastDirectoryForTest shouldBe ""
     val hashed = outerPlan("left", left, right, Some(Plan.JoinStrategy.ShuffleHash))
@@ -334,9 +335,9 @@ class TestLongOuterJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val zero = rows.collect { case (0L, partner) => partner }
     zero should not be empty
     zero.foreach {
-      case (_: Long, None) if side == "left" => ()
-      case (None, _: Long) if side == "right" => ()
-      case (Some(_: Long), None) if side == "full" => ()
+      case (_: Long, None) if Check.same(side, "left") => ()
+      case (None, _: Long) if Check.same(side, "right") => ()
+      case (Some(_: Long), None) if Check.same(side, "full") => ()
       case other => fail(s"$side paired key 0 with $other")
     }
     val nullKey = rows.exists {
@@ -344,13 +345,13 @@ class TestLongOuterJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       case _ => false
     }
     // Right outer drops an unmatched left row, so a null key on the left is not preserved.
-    if (side == "full") then nullKey shouldBe true else nullKey shouldBe false
+    if (Check.same(side, "full")) then nullKey shouldBe true else nullKey shouldBe false
 
   @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
   private def assertNullKeyPartner(side: String, row: Any): Unit =
     row match
-      case (null, (_, None)) if side == "left" || side == "full" => ()
-      case (null, (None, _)) if side == "right" || side == "full" => ()
+      case (null, (_, None)) if Check.same(side, "left") || Check.same(side, "full") => ()
+      case (null, (None, _)) if Check.same(side, "right") || Check.same(side, "full") => ()
       case (null, _) => fail(s"$side matched a null key: $row")
       case _ => ()
 

@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -7,6 +6,7 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.columnar.{ColumnMetrics, NoOpSink}
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Proves the join harness oracle and the bookkeeping around it. The full sizes stay in
@@ -83,12 +83,15 @@ class TestJoinBench extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val beforeThreshold = ScarletConf.get.broadcastJoinThreshold
     val beforeSort = ScarletConf.get.enableSortMergeJoin
     intercept[IllegalStateException] {
-      JoinBench.withJoinSettings(threshold = 1L, sortMerge = false, threads = 1, columnar = true) {
-        ScarletConf.get.broadcastJoinThreshold shouldBe 1L
-        ScarletConf.get.enableSortMergeJoin shouldBe false
-        ScarletConf.set(ScarletConf.get.copy(broadcastJoinThreshold = 42L, enableSortMergeJoin = true))
-        throw new IllegalStateException("stop")
-      }
+      JoinBench
+        .withJoinSettings[Unit](threshold = 1L, sortMerge = false, threads = 1, columnar = true) {
+          ScarletConf.get.broadcastJoinThreshold shouldBe 1L
+          ScarletConf.get.enableSortMergeJoin shouldBe false
+          ScarletConf.set(
+            ScarletConf.get.copy(broadcastJoinThreshold = 42L, enableSortMergeJoin = true),
+          )
+          throw new IllegalStateException("stop")
+        }
     }
     ScarletConf.get.broadcastJoinThreshold shouldBe beforeThreshold
     ScarletConf.get.enableSortMergeJoin shouldBe beforeSort
@@ -117,7 +120,7 @@ class TestJoinBench extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     )
     specs.foreach { spec =>
       withClue(s"${spec.name}: ") {
-        JoinCases.hint(spec) shouldBe None
+        JoinCases.hint(spec).shouldBeEmpty
         JoinCases.rowStrategy(spec) shouldBe "shuffle-hash"
         JoinBench.columnarShape(spec).isDefined shouldBe true
         val row = JoinBench.digestOf(spec, threads = 1, columnar = false)
@@ -157,7 +160,7 @@ class TestJoinBench extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val full = JoinCases.fullOuter(8)
     val duplicates = JoinCases.outerDuplicates(rows = 12, distinct = 3)
 
-    JoinCases.hint(left) shouldBe None
+    JoinCases.hint(left).shouldBeEmpty
     JoinCases.hintLabel(left) shouldBe "unhinted"
     JoinCases.rowStrategy(left) shouldBe "shuffle-hash"
     JoinBench.columnarShape(left) shouldBe Some("HashLeftOuter(Exchange(Scan), Exchange(Scan))")
@@ -172,7 +175,7 @@ class TestJoinBench extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     JoinCases.rowStrategy(full) shouldBe "shuffle-hash"
     JoinBench.columnarShape(full) shouldBe Some("HashFullOuter(Exchange(Scan), Exchange(Scan))")
 
-    JoinCases.hint(duplicates) shouldBe None
+    JoinCases.hint(duplicates).shouldBeEmpty
     JoinBench.columnarShape(duplicates) shouldBe Some(
       "HashLeftOuter(Exchange(Scan), Exchange(Scan))",
     )

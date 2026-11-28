@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -9,6 +8,7 @@ import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{LongPairArrays, Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.HashPartitioner
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 class TestLongPairReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -46,7 +46,7 @@ class TestLongPairReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     ColumnarPlanner.lower(reduced.plan).map(_.shape) shouldBe Some(
       "LongHashAggregate(Exchange(Scan))",
     )
-    ColumnarPlanner.tryTake(reduced.plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(reduced.plan, 1).shouldBeEmpty
     val parts = longPairBatches(reduced.plan)
     parts.length shouldBe 4
     val partitioner = new HashPartitioner
@@ -86,7 +86,9 @@ class TestLongPairReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEa
       pair(longRef(4L), longRef(0L)),
     )
 
-    columnar should contain theSameElementsAs row(rows.reduceByKey[Long, Long](_ + _).collect().toList)
+    columnar should contain theSameElementsAs row(
+      rows.reduceByKey[Long, Long](_ + _).collect().toList,
+    )
     columnar should contain theSameElementsAs expected
     longPairBatches(reduced.plan).foreach(assertValidity)
   }
@@ -203,7 +205,7 @@ class TestLongPairReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEa
       rows.reduceByKey[Long, Long](combine).collect().toList,
     )
     longPairBatches(reduced.plan).foreach(assertValidity)
-    ColumnarPlanner.tryTake(reduced.plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(reduced.plan, 1).shouldBeEmpty
   }
 
   it should "merge two missing values that arrive in separate input partitions" in {
@@ -234,7 +236,7 @@ class TestLongPairReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEa
       rows.reduceByKey[Long, Long](combine).collect().toList,
     )
     longPairBatches(reduced.plan).foreach(assertValidity)
-    ColumnarPlanner.tryTake(reduced.plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(reduced.plan, 1).shouldBeEmpty
   }
 
   "two key filters" should "keep a lone null, unbox one null against a value, and unbox two nulls" in {
@@ -380,7 +382,7 @@ class TestLongPairReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEa
       rows.reduceByKey[Long, Long](combine).collect().toList,
     )
     longPairBatches(reduced.plan).foreach(assertValidity)
-    ColumnarPlanner.tryTake(reduced.plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(reduced.plan, 1).shouldBeEmpty
   }
 
   it should "match the row path for a dense key domain and a sparse one without copying" in {
@@ -510,7 +512,8 @@ class TestLongPairReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     }
 
   private def longPairBatches(plan: Plan[_]): Vector[ColumnBatch] =
-    val lowered = ColumnarPlanner.lower(plan).getOrElse(fail(s"expected a lowered plan, got $plan"))
+    val lowered =
+      ColumnarPlanner.lower(plan).getOrElse(fail(s"expected a lowered plan, got $plan"))
     ColumnarInterpreter.interpret(plan, lowered) match
       case ColumnarInterpreter.Columns.LongPairs(parts) => parts
       case other => fail(s"expected long pairs, got $other")

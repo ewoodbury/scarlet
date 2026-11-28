@@ -1,14 +1,14 @@
 package com.ewoodbury.scarlet.core
-
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
+import com.ewoodbury.scarlet.support.Check
 
 class TestSourcePartitioning extends AnyFlatSpec with Matchers {
 
   private def partitionSizes[A](dc: DistCollection[A]): Seq[Int] = dc.plan match {
-    case Plan.Source(partitions, _) => partitions.map(partition => partition.data.size).toSeq
+    case Plan.Source(partitions, _) => partitions.map(partition => partition.data.size)
     case other => fail(s"Expected Plan.Source, got $other")
   }
 
@@ -49,8 +49,8 @@ class TestSourcePartitioning extends AnyFlatSpec with Matchers {
 
     dc.plan match {
       case Plan.Source(partitions, _) =>
-        partitions.head.data.toSeq shouldEqual Seq(1, 2, 3)
-        partitions.drop(1).head.data.toSeq shouldEqual Seq(4, 5)
+        Check.first(partitions).data.toSeq shouldEqual Seq(1, 2, 3)
+        Check.first(partitions.drop(1)).data.toSeq shouldEqual Seq(4, 5)
       case other => fail(s"Expected Plan.Source, got $other")
     }
   }

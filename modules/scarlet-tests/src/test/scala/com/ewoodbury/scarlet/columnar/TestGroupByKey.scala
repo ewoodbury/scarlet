@@ -1,7 +1,8 @@
 package com.ewoodbury.scarlet.columnar
-
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+
+import com.ewoodbury.scarlet.support.Check
 
 class TestGroupByKey extends AnyFlatSpec with Matchers:
 
@@ -14,13 +15,13 @@ class TestGroupByKey extends AnyFlatSpec with Matchers:
     val parts = group(partitions = 4, parallelism = 2)
 
     parts.length shouldBe 4
-    rowsOf(parts(0)) shouldBe Seq((4, Seq(40, 41)), (Int.MinValue, Seq(50)))
-    rowsOf(parts(1)) shouldBe Seq((1, Seq(10, 11, 12)))
-    rowsOf(parts(2)) shouldBe Seq((2, Seq(20, 21)))
-    rowsOf(parts(3)) shouldBe Seq((-1, Seq(30)))
+    rowsOf(Check.at(parts, 0)) shouldBe Seq((4, Seq(40, 41)), (Int.MinValue, Seq(50)))
+    rowsOf(Check.at(parts, 1)) shouldBe Seq((1, Seq(10, 11, 12)))
+    rowsOf(Check.at(parts, 2)) shouldBe Seq((2, Seq(20, 21)))
+    rowsOf(Check.at(parts, 3)) shouldBe Seq((-1, Seq(30)))
     Math.floorMod(Int.MinValue, 4) shouldBe 0
     parts.foreach(assertBatch)
-    val repeated = parts(1).valuesFor(0)
+    val repeated = Check.at(parts, 1).valuesFor(0)
     repeated shouldBe List(10, 11, 12)
     repeated.toList shouldBe List(10, 11, 12)
   }
@@ -61,7 +62,7 @@ class TestGroupByKey extends AnyFlatSpec with Matchers:
     val parts = GroupByKey.int32(Vector(batch), partitions = 4, parallelism = 1)
 
     parts.length shouldBe 4
-    rowsOf(parts(1)) shouldBe Seq((1, Seq(10, 11)))
+    rowsOf(Check.at(parts, 1)) shouldBe Seq((1, Seq(10, 11)))
     parts.zipWithIndex.foreach { (grouped, index) =>
       if (index == 1) then grouped.groups shouldBe 1
       else grouped.groups shouldBe 0
@@ -89,12 +90,12 @@ class TestGroupByKey extends AnyFlatSpec with Matchers:
 
     val present = GroupByKey.int32(Vector(presentKey), partitions = 2, parallelism = 1)
     Math.floorMod(1, 2) shouldBe 1
-    texts(present(1)) shouldBe Seq((1, Seq("10", "null")))
-    present(0).groups shouldBe 0
+    texts(Check.at(present, 1)) shouldBe Seq((1, Seq("10", "null")))
+    Check.at(present, 0).groups shouldBe 0
 
     val absent = GroupByKey.int32(Vector(nullKey), partitions = 2, parallelism = 1)
-    texts(absent(1)) shouldBe Seq((1, Seq("10")))
-    absent(0).groups shouldBe 0
+    texts(Check.at(absent, 1)) shouldBe Seq((1, Seq("10")))
+    Check.at(absent, 0).groups shouldBe 0
   }
 
   it should "publish an empty batch for every partition of an empty input" in {
@@ -119,7 +120,7 @@ class TestGroupByKey extends AnyFlatSpec with Matchers:
     val parts = GroupByKey.int32(Vector(batch), partitions = 4, parallelism = 2)
 
     parts.length shouldBe 4
-    rowsOf(parts(0)) shouldBe Seq((4, Seq(40, 41)), (8, Seq(80)))
+    rowsOf(Check.at(parts, 0)) shouldBe Seq((4, Seq(40, 41)), (8, Seq(80)))
     parts.drop(1).foreach { grouped =>
       grouped.groups shouldBe 0
       grouped.offsets.toSeq shouldBe Seq(0)
@@ -127,7 +128,7 @@ class TestGroupByKey extends AnyFlatSpec with Matchers:
   }
 
   it should "expose each group as a view of the values array" in {
-    val batch = group(partitions = 4, parallelism = 1)(0)
+    val batch = Check.at(group(partitions = 4, parallelism = 1), 0)
     val view = batch.valuesFor(0)
     val start = batch.offsets(0)
     val before = batch.values(start)
@@ -135,13 +136,13 @@ class TestGroupByKey extends AnyFlatSpec with Matchers:
     view shouldBe List(40, 41)
     view.toList shouldBe view.toList
     batch.values(start) = before + 7
-    view(0) shouldBe before + 7
+    Check.at(view, 0) shouldBe before + 7
     batch.values(start) = before
-    view(0) shouldBe before
+    Check.at(view, 0) shouldBe before
     an[IllegalArgumentException] should be thrownBy batch.valuesFor(-1)
     an[IllegalArgumentException] should be thrownBy batch.valuesFor(batch.groups)
-    an[IndexOutOfBoundsException] should be thrownBy view(-1)
-    an[IndexOutOfBoundsException] should be thrownBy view(view.length)
+    an[IllegalArgumentException] should be thrownBy Check.at(view, -1)
+    an[IllegalArgumentException] should be thrownBy Check.at(view, view.length)
   }
 
   "string groupByKey" should "merge unlike dictionaries by string and keep value order" in {
@@ -239,13 +240,13 @@ class TestGroupByKey extends AnyFlatSpec with Matchers:
     view shouldBe List(1, 8)
     view.toList shouldBe view.toList
     batch.values(start) = before + 7
-    view(0) shouldBe before + 7
+    Check.at(view, 0) shouldBe before + 7
     batch.values(start) = before
-    view(0) shouldBe before
+    Check.at(view, 0) shouldBe before
     an[IllegalArgumentException] should be thrownBy batch.valuesFor(-1)
     an[IllegalArgumentException] should be thrownBy batch.valuesFor(batch.groups)
-    an[IndexOutOfBoundsException] should be thrownBy view(-1)
-    an[IndexOutOfBoundsException] should be thrownBy view(view.length)
+    an[IllegalArgumentException] should be thrownBy Check.at(view, -1)
+    an[IllegalArgumentException] should be thrownBy Check.at(view, view.length)
   }
 
   // `1L << 32` and `0L` share `toInt`. `1L << 32` and `1L` share `Long.hashCode`. Storing either
@@ -288,7 +289,7 @@ class TestGroupByKey extends AnyFlatSpec with Matchers:
   private def texts(batch: GroupedIntBatch): Seq[(Int, Seq[String])] =
     batch.rows.map { (key, values) =>
       val refs = values.iterator.asInstanceOf[Iterator[AnyRef]]
-      (key, refs.map(cell => if (cell == null) "null" else cell.toString).toSeq)
+      (key, refs.map(cell => if (Check.isNull(cell)) "null" else Check.text(cell)).toSeq)
     }
 
   @SuppressWarnings(
@@ -300,7 +301,7 @@ class TestGroupByKey extends AnyFlatSpec with Matchers:
   private def stringTexts(parts: Vector[GroupedStringBatch]): Seq[(String, Seq[String])] =
     parts.flatMap(_.rows).map { (key, values) =>
       val refs = values.iterator.asInstanceOf[Iterator[AnyRef]]
-      (key, refs.map(cell => if (cell == null) "null" else cell.toString).toSeq)
+      (key, refs.map(cell => if (Check.isNull(cell)) "null" else Check.text(cell)).toSeq)
     }
 
   private def assertBatch(batch: GroupedIntBatch): Unit =

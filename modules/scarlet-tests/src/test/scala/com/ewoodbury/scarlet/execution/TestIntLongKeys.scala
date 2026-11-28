@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -9,6 +8,8 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Keys, values, filters, and `Long => Long` `mapValues` of an int value widened to long.
@@ -142,10 +143,14 @@ class TestIntLongKeys extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       .mapValues((value: Int) => value.toLong)
     val filtered = widened.filterValues((value: Long) => value > 0L)
 
-    ColumnarPlanner.lower(widened.mapValues((value: Long) => value.toInt).plan) shouldBe None
-    ColumnarPlanner.lower(widened.mapValues((value: Long) => value.toDouble).plan) shouldBe None
-    ColumnarPlanner.lower(filtered.countByKey.plan) shouldBe None
-    ColumnarPlanner.lower(filtered.groupByKey.plan) shouldBe None
+    ColumnarPlanner.lower(widened.mapValues((value: Long) => value.toInt).plan).shouldBeEmpty
+    ColumnarPlanner
+      .lower(
+        widened.mapValues((value: Long) => value.toDouble).plan,
+      )
+      .shouldBeEmpty
+    ColumnarPlanner.lower(filtered.countByKey.plan).shouldBeEmpty
+    ColumnarPlanner.lower(filtered.groupByKey.plan).shouldBeEmpty
     ColumnarPlanner
       .lower(
         widened.reduceByKey[Int, Long]((left: Long, _: Long) => left).plan,
@@ -215,7 +220,7 @@ class TestIntLongKeys extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
   private def absent(value: Any): Boolean =
-    value.asInstanceOf[AnyRef] eq null
+    Check.isNull(value.asInstanceOf[AnyRef])
 
   private def intComponent(values: Seq[Int], index: Int): Int = component(values, index) match
     case value: Int => value

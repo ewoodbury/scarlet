@@ -1,9 +1,10 @@
 package com.ewoodbury.scarlet.columnar
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+
+import com.ewoodbury.scarlet.support.Check
 
 /** Survivor index for a stack of filters. One compact, and nulls stay off the predicate. */
 class TestSelection extends AnyFlatSpec with Matchers:
@@ -223,7 +224,8 @@ class TestSelection extends AnyFlatSpec with Matchers:
   it should "skip a null bool, keep a present false, and normalize a set byte" in {
     val bytes = Array[Byte](2, 0, 1)
     val present = Array(true, true, false)
-    val column = BoolColumn.of(bytes, Validity.pack(bytes.length, row => present(row)), bytes.length)
+    val column =
+      BoolColumn.of(bytes, Validity.pack(bytes.length, row => present(row)), bytes.length)
     val firstCalls = new AtomicInteger
     val secondCalls = new AtomicInteger
     val selected = Selection(
@@ -432,7 +434,10 @@ class TestSelection extends AnyFlatSpec with Matchers:
 
     keyCalls.get() shouldBe 3
     valueCalls.get() shouldBe 2
-    BatchCodec.decodeNullableIntPairs(selected) shouldBe Seq((Some(4), Some(8)), (Some(0), Some(3)))
+    BatchCodec.decodeNullableIntPairs(selected) shouldBe Seq(
+      (Some(4), Some(8)),
+      (Some(0), Some(3)),
+    )
   }
 
   it should "not call a row predicate on a null value that a key filter kept" in {
@@ -455,7 +460,10 @@ class TestSelection extends AnyFlatSpec with Matchers:
     )
 
     rowCalls.get() shouldBe 2
-    BatchCodec.decodeNullableIntPairs(selected) shouldBe Seq((Some(4), Some(8)), (Some(0), Some(3)))
+    BatchCodec.decodeNullableIntPairs(selected) shouldBe Seq(
+      (Some(4), Some(8)),
+      (Some(0), Some(3)),
+    )
   }
 
   it should "call a general string predicate on an empty cell and leave that cell absent" in {
@@ -725,7 +733,7 @@ class TestSelection extends AnyFlatSpec with Matchers:
     outKeys.codes(1) shouldBe 0
     outKeys.dictionary(outKeys.codes(2)) shouldBe composed
     outKeys.dictionary(outKeys.codes(3)) shouldBe decomposed
-    assert(composed != decomposed)
+    assert(!Check.same(composed, decomposed))
     outValues.isValid(0) shouldBe false
     outValues.values(0) shouldBe 0
     outValues.isValid(1) shouldBe true
@@ -760,7 +768,7 @@ class TestSelection extends AnyFlatSpec with Matchers:
       value > 0
 
   private def isUs(value: String): Boolean =
-    !BatchCodec.isAbsent(value) && value.equals("US")
+    !BatchCodec.isAbsent(value) && Check.same(value, "US")
 
   private def columnAt(batch: ColumnBatch, ordinal: Int): Column =
     batch.columns.lift(ordinal).getOrElse(fail(s"missing column $ordinal"))

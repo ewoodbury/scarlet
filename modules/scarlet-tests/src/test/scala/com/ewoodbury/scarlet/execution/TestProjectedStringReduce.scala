@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,8 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * A string-pair `Project` reduced without publishing the pair batch when one slot sits above it.
@@ -46,7 +47,8 @@ class TestProjectedStringReduce extends AnyFlatSpec with Matchers with BeforeAnd
   it should "reduce one key slot above a string pair map without publishing" in {
     val source = sample()
     val mapped = source.map((pair: (String, Int)) => (pair._1 + "!", pair._2))
-    val reduced = mapped.filterKeys((key: String) => key != "!").reduceByKey[String, Int](_ + _)
+    val reduced =
+      mapped.filterKeys((key: String) => !Check.same(key, "!")).reduceByKey[String, Int](_ + _)
     ColumnarPlanner.lower(reduced.plan).map(_.shape) shouldBe Some(
       "StringHashAggregate(Exchange(FilterKey(Project(Scan))))",
     )
@@ -58,7 +60,7 @@ class TestProjectedStringReduce extends AnyFlatSpec with Matchers with BeforeAnd
 
     StringPairProject.resetPublishedForTest()
     StringHashReduce.resetByKeyForTest()
-    val projected = mapped.filterKeys((key: String) => key != "!").collect()
+    val projected = mapped.filterKeys((key: String) => !Check.same(key, "!")).collect()
     StringPairProject.publishedForTest should be > 0
     StringHashReduce.byKeyCallsForTest shouldBe 0
     shown(projected) shouldBe Seq("a!:1", "a!:2", "b!:3")
@@ -77,7 +79,7 @@ class TestProjectedStringReduce extends AnyFlatSpec with Matchers with BeforeAnd
     val calls = new AtomicInteger
     val reduced = presentNullKeys()
       .map(shiftNullKey(calls))
-      .filterKeys((key: String) => key != "!")
+      .filterKeys((key: String) => !Check.same(key, "!"))
       .reduceByKey[String, Int](_ + _)
     ColumnarPlanner.lower(reduced.plan).map(_.shape) shouldBe Some(
       "StringHashAggregate(Exchange(FilterKey(Project(Scan))))",
@@ -103,7 +105,7 @@ class TestProjectedStringReduce extends AnyFlatSpec with Matchers with BeforeAnd
 
     val keptEmpty = DistCollection(Seq("" -> 1, "a" -> 2), 1)
       .map((pair: (String, Int)) => (pair._1, pair._2))
-      .filterKeys((key: String) => key != "a")
+      .filterKeys((key: String) => !Check.same(key, "a"))
       .reduceByKey[String, Int](_ + _)
     val emptySums = atBatch(keptEmpty, 8192)
     emptySums shouldBe Map("" -> 1)
@@ -114,7 +116,7 @@ class TestProjectedStringReduce extends AnyFlatSpec with Matchers with BeforeAnd
     val decomposed = "e\u0301"
     val accents = DistCollection(Seq(composed -> 3, decomposed -> 4, composed -> 5), 1)
       .map((pair: (String, Int)) => (pair._1 + "!", pair._2))
-      .filterKeys((key: String) => key != "!")
+      .filterKeys((key: String) => !Check.same(key, "!"))
       .reduceByKey[String, Int](_ + _)
     val accentSums = Map(composed + "!" -> 8, decomposed + "!" -> 4)
     atBatch(accents, 8192) shouldBe accentSums
@@ -130,7 +132,7 @@ class TestProjectedStringReduce extends AnyFlatSpec with Matchers with BeforeAnd
       .map(projectNull(calls))
       .filterKeys { (key: String) =>
         val _ = preds.incrementAndGet()
-        key != "!"
+        !Check.same(key, "!")
       }
       .reduceByKey[String, Int](_ + _)
     val at = (size: Int) => {
@@ -159,7 +161,7 @@ class TestProjectedStringReduce extends AnyFlatSpec with Matchers with BeforeAnd
     val calls = new AtomicInteger
     val kept = DistCollection(Seq(stringPair("a", absentInt)), 1)
       .map(keepNull(calls))
-      .filterKeys((key: String) => key != "!")
+      .filterKeys((key: String) => !Check.same(key, "!"))
       .reduceByKey[String, Int](_ + _)
     ColumnarPlanner.lower(kept.plan).map(_.shape) shouldBe Some(
       "StringHashAggregate(Exchange(FilterKey(Project(Scan))))",
@@ -167,7 +169,7 @@ class TestProjectedStringReduce extends AnyFlatSpec with Matchers with BeforeAnd
     calls.set(0)
     StringPairProject.resetPublishedForTest()
     StringHashReduce.resetByKeyForTest()
-    ColumnarPlanner.tryRun(kept.plan) shouldBe None
+    ColumnarPlanner.tryRun(kept.plan).shouldBeEmpty
     StringPairProject.publishedForTest shouldBe 0
     StringHashReduce.byKeyCallsForTest shouldBe 0
     calls.set(0)
@@ -181,7 +183,7 @@ class TestProjectedStringReduce extends AnyFlatSpec with Matchers with BeforeAnd
       Seq(stringPair("keep", Integer.valueOf(1)), stringPair("drop", absentInt)),
       1,
     ).map(keepNull(calls))
-      .filterKeys((key: String) => key != "drop!")
+      .filterKeys((key: String) => !Check.same(key, "drop!"))
       .reduceByKey[String, Int](_ + _)
     val droppedSums = atBatch(dropped, 8192)
     droppedSums shouldBe Map("keep!" -> 1)
@@ -203,7 +205,7 @@ class TestProjectedStringReduce extends AnyFlatSpec with Matchers with BeforeAnd
     preds.set(0)
     StringPairProject.resetPublishedForTest()
     StringHashReduce.resetByKeyForTest()
-    ColumnarPlanner.tryRun(byValue.plan) shouldBe None
+    ColumnarPlanner.tryRun(byValue.plan).shouldBeEmpty
     // The value slot declines before the predicate. The row path then sees the unboxed 0.
     preds.get shouldBe 0
     StringPairProject.publishedForTest shouldBe 0
@@ -218,7 +220,7 @@ class TestProjectedStringReduce extends AnyFlatSpec with Matchers with BeforeAnd
       .reduceByKey[String, Int](_ + _)
     StringPairProject.resetPublishedForTest()
     StringHashReduce.resetByKeyForTest()
-    ColumnarPlanner.tryRun(keptByValue.plan) shouldBe None
+    ColumnarPlanner.tryRun(keptByValue.plan).shouldBeEmpty
     val keptCells = cells(keptByValue.collect())
     keptCells shouldBe Seq(("a!", "null"))
     keptCells shouldBe cells(row(keptByValue.collect()))
@@ -243,25 +245,42 @@ class TestProjectedStringReduce extends AnyFlatSpec with Matchers with BeforeAnd
   it should "leave a second slot, a whole-row filter, and a second map empty" in {
     val source = sample()
     val mapped = source.map((pair: (String, Int)) => (pair._1 + "!", pair._2))
-    val once = mapped.filterKeys((key: String) => key != "!")
-    ColumnarPlanner.lower(once.filterValues((value: Int) => value > 0).plan) shouldBe None
-    ColumnarPlanner.lower(mapped.filter((pair: (String, Int)) => pair._2 > 0).plan) shouldBe None
+    val once = mapped.filterKeys((key: String) => !Check.same(key, "!"))
+    ColumnarPlanner.lower(once.filterValues((value: Int) => value > 0).plan).shouldBeEmpty
+    ColumnarPlanner
+      .lower(
+        mapped.filter((pair: (String, Int)) => pair._2 > 0).plan,
+      )
+      .shouldBeEmpty
     val nested = mapped.map((pair: (String, Int)) => (pair._1 + "?", pair._2))
-    ColumnarPlanner.lower(nested.filterKeys((key: String) => key != "!").plan) shouldBe None
-    ColumnarPlanner.lower(
-      once.filterValues((value: Int) => value > 0).reduceByKey[String, Int](_ + _).plan,
-    ) shouldBe None
-    ColumnarPlanner.lower(
-      mapped.filter((pair: (String, Int)) => pair._2 > 0).reduceByKey[String, Int](_ + _).plan,
-    ) shouldBe None
-    ColumnarPlanner.lower(
-      nested.filterKeys((key: String) => key != "!").reduceByKey[String, Int](_ + _).plan,
-    ) shouldBe None
+    ColumnarPlanner
+      .lower(
+        nested.filterKeys((key: String) => !Check.same(key, "!")).plan,
+      )
+      .shouldBeEmpty
+    ColumnarPlanner
+      .lower(
+        once.filterValues((value: Int) => value > 0).reduceByKey[String, Int](_ + _).plan,
+      )
+      .shouldBeEmpty
+    ColumnarPlanner
+      .lower(
+        mapped.filter((pair: (String, Int)) => pair._2 > 0).reduceByKey[String, Int](_ + _).plan,
+      )
+      .shouldBeEmpty
+    ColumnarPlanner
+      .lower(
+        nested
+          .filterKeys((key: String) => !Check.same(key, "!"))
+          .reduceByKey[String, Int](_ + _)
+          .plan,
+      )
+      .shouldBeEmpty
   }
 
   it should "reduce one slot above a filtered string pair map without publishing" in {
     val reduced = DistCollection(Seq("a" -> 1, "b" -> 2, "" -> 3, "a" -> 4), 1)
-      .filterKeys((key: String) => key != "b")
+      .filterKeys((key: String) => !Check.same(key, "b"))
       .map((pair: (String, Int)) => (pair._1 + "!", pair._2))
       .filterValues((value: Int) => value > 1)
       .reduceByKey[String, Int](_ + _)
@@ -277,7 +296,7 @@ class TestProjectedStringReduce extends AnyFlatSpec with Matchers with BeforeAnd
   it should "combine a shared projection and a code whose projection changes" in {
     val shared = DistCollection(Seq("a" -> 1, "b" -> 2, "a" -> 3), 1)
       .map((pair: (String, Int)) => ("k", pair._2))
-      .filterKeys((key: String) => key != "!")
+      .filterKeys((key: String) => !Check.same(key, "!"))
       .reduceByKey[String, Int](_ + _)
     atBatch(shared, 8192) shouldBe Map("k" -> 6)
     atBatch(shared, 1) shouldBe Map("k" -> 6)
@@ -287,7 +306,7 @@ class TestProjectedStringReduce extends AnyFlatSpec with Matchers with BeforeAnd
         val key = if (pair._2 == 1) "p" else "q"
         (key, pair._2)
       }
-      .filterKeys((key: String) => key != "!")
+      .filterKeys((key: String) => !Check.same(key, "!"))
       .reduceByKey[String, Int](_ + _)
     val sums = atBatch(changed, 8192)
     sums shouldBe Map("p" -> 1, "q" -> 5)

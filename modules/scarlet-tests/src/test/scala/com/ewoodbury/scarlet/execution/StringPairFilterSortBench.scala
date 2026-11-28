@@ -1,11 +1,10 @@
 package com.ewoodbury.scarlet.execution
-
-
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink}
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Same-session row and columnar times for a remapped filtered string key under `sortByStringKey`.
@@ -88,7 +87,7 @@ object StringPairFilterSortBench:
     queryFiltered(rows).sortByStringKey
 
   private def queryFiltered(rows: Int): DistCollection[(String, Int)] =
-    queryProject(rows).filterKeys((key: String) => key != "!")
+    queryProject(rows).filterKeys((key: String) => !Check.same(key, "!"))
 
   private def queryProject(rows: Int): DistCollection[(String, Int)] =
     val pool = Array.tabulate(groups)(_.toString)
@@ -148,7 +147,7 @@ object StringPairFilterSortBench:
     val pool = Array.tabulate(groups)(group => group.toString + "!")
     val keys = Array.tabulate(rows)(row => pool(row % groups))
     val values = lcgValues(rows)
-    val order = Array.tabulate(rows)(identity).filter(index => keys(index) != "!")
+    val order = Array.tabulate(rows)(identity).filter(index => !Check.same(keys(index), "!"))
     scala.util.Sorting.stableSort(
       order,
       (left: Int, right: Int) => {

@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -9,6 +8,7 @@ import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.execution.schema.{Describe, KernelChoice, Layout}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * The execution route is the binder tag for a hash aggregate and the child layout for a pair.
@@ -108,7 +108,7 @@ class TestExecutionRoute extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     val reduced = Plan.ReduceByKeyOp(source, longest)
     ExecutionRoute.decodesAsIntLongSum(Some(reduced), aggregate) shouldBe false
     ExecutionRoute.reduceArm(source, project, add) shouldBe ExecutionRoute.Arm.IntLongReduce
-    ColumnarPlanner.lower(reduced) shouldBe None
+    ColumnarPlanner.lower(reduced).shouldBeEmpty
     // This node lowers to nothing, so collect never reaches it. interpret still must not use the
     // schema test: that test is true here, and it would enter IntLongReduce before declining.
     IntLongReduce.resetColumnsForTest()
@@ -134,8 +134,8 @@ class TestExecutionRoute extends AnyFlatSpec with Matchers with BeforeAndAfterEa
     ExecutionRoute.pairArm(pairs) shouldBe Some(ExecutionRoute.PairArm.IntPairs)
     ExecutionRoute.pairArm(longs) shouldBe Some(ExecutionRoute.PairArm.LongPairs)
     ExecutionRoute.pairArm(text) shouldBe Some(ExecutionRoute.PairArm.StringPairs)
-    ExecutionRoute.pairArm(grouped) shouldBe None
-    ExecutionRoute.pairArm(triples) shouldBe None
+    ExecutionRoute.pairArm(grouped).shouldBeEmpty
+    ExecutionRoute.pairArm(triples).shouldBeEmpty
     Layout.known(grouped) shouldBe Layout.Grouped
     ExecutionRoute.distinctArm(ints) shouldBe ExecutionRoute.DistinctArm.Ints
     ExecutionRoute.distinctArm(longColumn) shouldBe ExecutionRoute.DistinctArm.Longs

@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -8,6 +7,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.LogicalType
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Type-by-operation coverage. Every cell runs the same gate checks. The expected record is a
@@ -136,7 +136,7 @@ class TestTypeCoverage extends AnyFlatSpec with Matchers with BeforeAndAfterEach
 
   "coverage enums" should "name every logical type, source descriptor, and physical kind" in {
     CoverageType.values.map(logicalType).toSet shouldBe singletonLogicalTypes
-    wideOnly(LogicalType.Decimal(18, 0)) shouldBe None
+    wideOnly(LogicalType.Decimal(18, 0)).shouldBeEmpty
     Plan.SourceDescriptor.values.toSet shouldBe Set(
       Plan.SourceDescriptor.Unknown,
       Plan.SourceDescriptor.Ints,

@@ -1,11 +1,11 @@
 package com.ewoodbury.scarlet.execution
-
 import java.lang.management.ManagementFactory
 import java.util.{Arrays, Locale}
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{IntArrays, IntPairArrays, Plan, ScarletConf}
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Phase split for the two actions A1 names. Not a test, and not part of `make test`. No kernel
@@ -15,19 +15,18 @@ import com.ewoodbury.scarlet.core.{IntArrays, IntPairArrays, Plan, ScarletConf}
  * LCG ints, `filter(_ > 0).map(_ * 2)`. `filter-countbykey` is keys `row % 1024` and the same LCG
  * values, then `key % 3 != 0` and `value >= 0`. Spill stays off.
  *
- * Each line is one phase. The arrays already exist and the timer wraps that phase only. Phases
- * are not subtracted from each other or from an action total. p50 is nearest-rank
- * `ceil(p / 100 * n)` over 40 rounds after 5 warmups. A [[CountingSink]] is installed around the
- * timed call the way [[QueryBench.sample]] installs it, so a scheduled phase pays the same
- * per-morsel visit.
+ * Each line is one phase. The arrays already exist and the timer wraps that phase only. Phases are
+ * not subtracted from each other or from an action total. p50 is nearest-rank `ceil(p / 100 * n)`
+ * over 40 rounds after 5 warmups. A [[CountingSink]] is installed around the timed call the way
+ * [[QueryBench.sample]] installs it, so a scheduled phase pays the same per-morsel visit.
  *
  *   - `lower` is [[ColumnarPlanner.lower]] on that action's logical plan.
- *   - `encode` is the owned copy the action pays on the caller, before any worker.
- *     `int-narrow` is [[BatchCodec.copiedInts]] per partition. `filter-countbykey` is
+ *   - `encode` is the owned copy the action pays on the caller, before any worker. `int-narrow` is
+ *     [[BatchCodec.copiedInts]] per partition. `filter-countbykey` is
  *     [[BatchCodec.copiedIntPairs]] per partition.
  *   - `selection` is [[MorselScheduler.map]] of [[Selection.applySelected]] over morsels of the
- *     filtered pair batches. That is the parallel half of `FilterChain.selectBatches`. It does
- *     not encode and it does not assemble.
+ *     filtered pair batches. That is the parallel half of `FilterChain.selectBatches`. It does not
+ *     encode and it does not assemble.
  *   - `assemble` is the caller-side id copy in `FilterChain.assemble`: one `Array[Int]` of the
  *     batch length and `System.arraycopy` of each morsel's ids.
  *   - `dispatch` is one [[MorselScheduler.map]] at 4 threads whose body reads the morsel length.
@@ -272,10 +271,9 @@ object PhaseBench:
     reading
 
   /**
-   * The check runs after the timer stops and before the sample is stored. Warm rounds are
-   * checked and discarded. The sink stays installed through the check, then the previous sink
-   * is restored. [[QueryBench.sample]] installs [[CountingSink]] the same way, outside the
-   * timer.
+   * The check runs after the timer stops and before the sample is stored. Warm rounds are checked
+   * and discarded. The sink stays installed through the check, then the previous sink is restored.
+   * [[QueryBench.sample]] installs [[CountingSink]] the same way, outside the timer.
    */
   private def sample[A](action: => A)(check: A => Unit): Double =
     var round = 0
@@ -315,7 +313,7 @@ object PhaseBench:
       case None => refuse(s"lower refused, expected $shape")
 
   private def acceptLower(shape: String)(got: String): Unit =
-    if (got != shape) then refuse(s"lower shape $got != $shape")
+    if (!Check.same(got, shape)) then refuse(s"lower shape $got != $shape")
 
   private def selectMorsels(
       morsels: Vector[Morsel],
@@ -357,14 +355,15 @@ object PhaseBench:
 
   private def filterSteps(plan: Plan[_]): List[Selection.Step] =
     val op = ColumnarPlanner.lower(plan) match
-      case Some(lowered) if lowered.shape == filterShape => lowered
+      case Some(lowered) if Check.same(lowered.shape, filterShape) => lowered
       case Some(lowered) => refuse(s"filter shape ${lowered.shape} != $filterShape")
       case None => refuse("filter plan did not lower")
     val compiled = PredicatePlan.compile(plan, op).getOrElse {
       refuse("filter stack did not compile")
     }
     val ordinals = ColumnUse.ordinals(plan, op)
-    if (ordinals != Set(0, 1)) then refuse(s"filter ordinals $ordinals, expected both columns")
+    if (!Check.same(ordinals, Set(0, 1))) then
+      refuse(s"filter ordinals $ordinals, expected both columns")
     val steps = PredicatePlan
       .selectionSteps(PredicatePlan.encoded(compiled, ordinals))
       .getOrElse(refuse("filter stack has no selection steps"))
@@ -431,7 +430,8 @@ object PhaseBench:
 
   private def acceptVisits(phase: String, expected: Int): Unit =
     val visits = ColumnMetrics.visitCount
-    if (visits != expected.toLong) then refuse(s"$phase visited $visits morsels, expected $expected")
+    if (visits != expected.toLong) then
+      refuse(s"$phase visited $visits morsels, expected $expected")
 
   private def sumCounts(batches: Vector[ColumnBatch]): Long =
     batches.foldLeft(0L)((total, batch) => total + countSum(batch))
@@ -482,12 +482,14 @@ object PhaseBench:
     var kept = 0
     while (index < keys.length) do
       val key = keys(index)
-      if (key % groups != index % groups) then refuse(s"key at $index is $key, expected row % $groups")
+      if (key % groups != index % groups) then
+        refuse(s"key at $index is $key, expected row % $groups")
       if (key % 3 != 0) then
         keptKeys += 1
         if (values(index) >= 0) then kept += 1
       index += 1
-    if (keptKeys.toLong != keyKept) then refuse(s"key filter kept $keptKeys rows, formula $keyKept")
+    if (keptKeys.toLong != keyKept) then
+      refuse(s"key filter kept $keptKeys rows, formula $keyKept")
     if (kept <= 0 || kept.toLong >= keyKept) then
       refuse(s"survivors $kept are not a non-empty subset of key rows $keyKept")
     kept.toLong

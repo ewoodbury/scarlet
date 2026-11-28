@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -8,15 +7,16 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{BatchCodec, ColumnBatch}
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
- * Prefix decode for the plans `tryTake` accepts. One batch per column kind on that path, at
- * n = 1 and n = 3, compared with `decodePrefixFor`, `tryTake`, and the row-path `take`.
+ * Prefix decode for the plans `tryTake` accepts. One batch per column kind on that path, at n = 1
+ * and n = 3, compared with `decodePrefixFor`, `tryTake`, and the row-path `take`.
  *
  * A clear key bit on an int-pair sort is the split the old strict prefix rejected.
- * `decodeIntPairs` still throws. `decodePrefixFor` keeps the null and matches the row path.
- * A clear bit on a long pair and on a string pair stays null on both the product prefix and
- * the row path, because those decoders are shared. An outer join is not in `tryTake`.
+ * `decodeIntPairs` still throws. `decodePrefixFor` keeps the null and matches the row path. A
+ * clear bit on a long pair and on a string pair stays null on both the product prefix and the row
+ * path, because those decoders are shared. An outer join is not in `tryTake`.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Any"))
 class TestDecodePrefix extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
@@ -110,8 +110,8 @@ class TestDecodePrefix extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     )
     ColumnarPlanner.lower(joined.plan).map(_.shape) shouldBe Some("BroadcastLeftOuter(Scan, Scan)")
     // The join is not partition-preserving. Prefix decode of an outer batch is separate.
-    ColumnarPlanner.tryTake(joined.plan, 1) shouldBe None
-    ColumnarPlanner.tryTake(joined.plan, 3) shouldBe None
+    ColumnarPlanner.tryTake(joined.plan, 1).shouldBeEmpty
+    ColumnarPlanner.tryTake(joined.plan, 3).shouldBeEmpty
     rowTake(joined, 1).length shouldBe 1
     rowTake(joined, 3).length shouldBe 3
   }

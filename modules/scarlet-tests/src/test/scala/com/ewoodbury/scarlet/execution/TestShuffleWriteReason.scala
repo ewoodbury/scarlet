@@ -36,7 +36,7 @@ class TestShuffleWriteReason extends AnyFlatSpec with Matchers {
     StageBuilder.StageInfo(
       id = StageId(id),
       stage = Stage.identity,
-      inputSources = Seq.empty,
+      inputSources = Seq.empty[StageBuilder.InputSource],
       isShuffleStage = true,
       wideOp = Some(wideOp),
       outputPartitioning = None,
@@ -162,7 +162,7 @@ class TestShuffleWriteReason extends AnyFlatSpec with Matchers {
       StageBuilder.StageInfo(
         id = StageId(1),
         stage = Stage.identity,
-        inputSources = Seq.empty,
+        inputSources = Seq.empty[StageBuilder.InputSource],
         isShuffleStage = true,
         wideOp = None,
         outputPartitioning = None,

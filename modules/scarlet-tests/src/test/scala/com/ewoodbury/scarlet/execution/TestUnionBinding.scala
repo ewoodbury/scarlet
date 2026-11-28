@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -9,6 +8,7 @@ import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.execution.schema.*
 import com.ewoodbury.scarlet.execution.schema.ColumnBinding.Operator
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * `union` asks [[ColumnBinding]] before it builds.
@@ -72,7 +72,13 @@ class TestUnionBinding extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     Layout.known(projected) shouldBe Layout.AssumedIntLong
     Layout.known(scan) should not be Layout.known(projected)
     ColumnBinding.resetChooseCallsForTest()
-    UnionLowering.lower(leftPlan, rightPlan, childFor(leftPlan, projected, scan)) shouldBe None
+    UnionLowering
+      .lower(
+        leftPlan,
+        rightPlan,
+        childFor(leftPlan, projected, scan),
+      )
+      .shouldBeEmpty
     ColumnBinding.chooseCallsForTest should be > 0
     ColumnBinding.asked(projected, Operator.Union) shouldBe Some(KernelChoice.Union)
     ColumnBinding.asked(scan, Operator.Union) shouldBe Some(KernelChoice.Union)

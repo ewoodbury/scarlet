@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -11,6 +10,7 @@ import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.execution.schema.ColumnBinding.ReducerWitness
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Known answers for the added cross-engine shapes, on one small int table.
@@ -286,7 +286,7 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
       .reduceByKey((left: (Int, Int), right: (Int, Int)) =>
         (left._1 + right._1, left._2 + right._2),
       )
-    ColumnarPlanner.lower(nested.plan) shouldBe None
+    ColumnarPlanner.lower(nested.plan).shouldBeEmpty
     ColumnarPlanner.tryRun(nested.plan).isEmpty shouldBe true
     val nestedCount = joined.map { case (key, pair) => (key, pair) }.countByKey
     ColumnarPlanner.lower(nestedCount.plan).isDefined shouldBe true
@@ -431,7 +431,7 @@ class TestCrossEngineShapes extends AnyFlatSpec with Matchers with BeforeAndAfte
       .reduceByKey((left: (Int, Int), right: (Int, Int)) =>
         (left._1 + right._1, left._2 + right._2),
       )
-    ColumnarPlanner.lower(nested.plan) shouldBe None
+    ColumnarPlanner.lower(nested.plan).shouldBeEmpty
     ColumnarPlanner.tryRun(nested.plan).isEmpty shouldBe true
     val savedNested = ScarletConf.get
     ScarletConf.set(savedNested.copy(columnarExecution = false))

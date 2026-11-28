@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.lang.management.ManagementFactory
 
 import com.sun.management.ThreadMXBean
@@ -9,6 +8,7 @@ import com.ewoodbury.scarlet.columnar.{BatchCodec, ColumnBatch, ColumnMetrics, C
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * One-off cross-engine comparison harness. Not a test, and not part of `make test`.
@@ -553,8 +553,9 @@ object CrossEngineBench:
       round += 1
     val steady = steadyOf(samples)
     if (
-        name == "filter-join" || name == "filter-joinsum" || name == "filter-count" ||
-        name == "filter-joinagg"
+        Check.same(name, "filter-join") || Check
+          .same(name, "filter-joinsum") || Check.same(name, "filter-count") ||
+        Check.same(name, "filter-joinagg")
       )
     then
       val shown = samples.mkString(",")

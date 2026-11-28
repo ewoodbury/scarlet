@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -8,6 +7,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{WideBatch, WideExpr}
 import com.ewoodbury.scarlet.core.*
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Decimal columns are scaled longs. Add, multiply, a literal compare, and an ungrouped sum match a
@@ -45,8 +45,8 @@ class TestDecimal extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       ),
     )
     val summed = agree(table, ColumnExpr.Add(0, 1), "sum")
-    summed.head.fields.last.kind shouldBe ColumnKind.Decimal(6, 3)
-    summed.map(_.cells.last) shouldBe Vector(Cell.Decimal(6, 3, 1625L), Cell.Null)
+    Check.last(Check.first(summed).fields).kind shouldBe ColumnKind.Decimal(6, 3)
+    summed.map(row => Check.last(row.cells)) shouldBe Vector(Cell.Decimal(6, 3, 1625L), Cell.Null)
   }
 
   it should "subtract after aligning scales" in {
@@ -57,8 +57,8 @@ class TestDecimal extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       ),
     )
     val difference = agree(table, ColumnExpr.Sub(0, 1), "diff")
-    difference.head.fields.last.kind shouldBe ColumnKind.Decimal(6, 3)
-    difference.map(_.cells.last) shouldBe Vector(Cell.Decimal(6, 3, 3750L))
+    Check.last(Check.first(difference).fields).kind shouldBe ColumnKind.Decimal(6, 3)
+    difference.map(row => Check.last(row.cells)) shouldBe Vector(Cell.Decimal(6, 3, 3750L))
   }
 
   it should "multiply and widen precision and scale" in {
@@ -69,8 +69,8 @@ class TestDecimal extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       ),
     )
     val product = agree(table, ColumnExpr.Mul(0, 1), "product")
-    product.head.fields.last.kind shouldBe ColumnKind.Decimal(4, 2)
-    product.map(_.cells.last) shouldBe Vector(Cell.Decimal(4, 2, 375L))
+    Check.last(Check.first(product).fields).kind shouldBe ColumnKind.Decimal(4, 2)
+    product.map(row => Check.last(row.cells)) shouldBe Vector(Cell.Decimal(4, 2, 375L))
   }
 
   it should "compare a column with a literal after aligning scales" in {
@@ -78,19 +78,24 @@ class TestDecimal extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       Vector(WideInput.decimals("a", 3, 2, Array(150L, 160L))),
     ).compute(ColumnExpr.Lit(ColumnLiteral.Decimal(2, 1, 15L)), "mark")
     val compared = agree(table, ColumnExpr.Compare(CompareOp.Eq, 0, 1), "eq")
-    compared.map(_.cells.last) shouldBe Vector(Cell.Bool(true), Cell.Bool(false))
+    compared.map(row => Check.last(row.cells)) shouldBe Vector(Cell.Bool(true), Cell.Bool(false))
   }
 
   it should "cast between a long and a decimal toward zero" in {
     val ints = WideColumns(Vector(WideInput.ints("n", Array(5, -1))))
     val widened = agree(ints, ColumnExpr.Cast(0, ColumnKind.Decimal(4, 2)), "money")
-    widened.map(_.cells.last) shouldBe Vector(
+    widened.map(row => Check.last(row.cells)) shouldBe Vector(
       Cell.Decimal(4, 2, 500L),
       Cell.Decimal(4, 2, -100L),
     )
     val money = WideColumns(Vector(WideInput.decimals("m", 4, 2, Array(150L, -150L, -99L))))
     val narrowed = agree(money, ColumnExpr.Cast(0, ColumnKind.Int64), "whole")
-    narrowed.map(_.cells.last) shouldBe Vector(Cell.Int64(1L), Cell.Int64(-1L), Cell.Int64(0L))
+    narrowed
+      .map(row => Check.last(row.cells)) shouldBe Vector(
+      Cell.Int64(1L),
+      Cell.Int64(-1L),
+      Cell.Int64(0L),
+    )
   }
 
   it should "match a row fold on a few thousand rows" in {
@@ -104,14 +109,14 @@ class TestDecimal extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       ),
     )
     val summed = agree(table, ColumnExpr.Add(0, 1), "sum")
-    summed.head.fields.last.kind shouldBe ColumnKind.Decimal(5, 0)
+    Check.last(Check.first(summed).fields).kind shouldBe ColumnKind.Decimal(5, 0)
     val expected = Vector.tabulate(rows) { row =>
       if (present(row)) then Cell.Decimal(5, 0, left(row) + right(row)) else Cell.Null
     }
-    summed.map(_.cells.last) shouldBe expected
+    summed.map(row => Check.last(row.cells)) shouldBe expected
     val product = agree(table, ColumnExpr.Mul(0, 1), "product")
-    product.head.fields.last.kind shouldBe ColumnKind.Decimal(6, 0)
-    product.map(_.cells.last) shouldBe Vector.tabulate(rows) { row =>
+    Check.last(Check.first(product).fields).kind shouldBe ColumnKind.Decimal(6, 0)
+    product.map(row => Check.last(row.cells)) shouldBe Vector.tabulate(rows) { row =>
       if (present(row)) then Cell.Decimal(6, 0, left(row) * right(row)) else Cell.Null
     }
   }
@@ -153,7 +158,7 @@ class TestDecimal extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       .ofColumns(Vector(input), 1)
       .filterColumn(0, ColumnCompare(CompareOp.Gt, ColumnLiteral.Decimal(4, 2, 200L)))
     val kept = collect(planned)
-    kept.map(_.cells.head) shouldBe List(Cell.Decimal(4, 2, 250L))
+    kept.map(row => Check.first(row.cells)) shouldBe List(Cell.Decimal(4, 2, 250L))
   }
 
   "an ungrouped decimal sum" should "match a row fold and skip nulls" in {

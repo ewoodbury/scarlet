@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.nio.file.{Files, Path}
 import java.util.Locale
 
@@ -10,6 +9,7 @@ import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
 import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * End-to-end spill at the cross-engine row count. Not a test, and not part of `make test`.
@@ -94,7 +94,8 @@ object SpillScaleBench:
       names.foreach { name =>
         val reading = runQuery(name, settings)
         println(render(settings, reading))
-        if (reading.status != "ok" && reading.status != "throw") then status = 1
+        if (!Check.same(reading.status, "ok") && !Check.same(reading.status, "throw")) then
+          status = 1
         else if (!checksumOk(name, settings.rows, reading)) then status = 1
       }
     catch
@@ -114,13 +115,13 @@ object SpillScaleBench:
     val built = build(name, settings.rows)
     val shape = ColumnarPlanner.lower(built.plan).map(_.shape).getOrElse("refused")
     System.err.println(s"ARM $name $shape")
-    if (shape == "refused") then
+    if (Check.same(shape, "refused")) then
       Reading(name, "refused", Double.NaN, 0L, readCounts(), "planner refused the plan")
     else if (throwsByDesign(name)) then runOnce(name, built.action)
     else timeMany(name, built.action, settings.warmup, settings.rounds)
 
   private def throwsByDesign(name: String): Boolean =
-    name == "long-sort-merge" || name == "string-sort-merge"
+    Check.same(name, "long-sort-merge") || Check.same(name, "string-sort-merge")
 
   private final case class Built(action: () => Long, plan: Plan[_])
 
@@ -213,7 +214,7 @@ object SpillScaleBench:
         Reading(name, "throw", elapsed, 0L, readCounts(), s"${thrown.getClass.getName}: $text")
 
   private def checksumOk(name: String, rows: Int, reading: Reading): Boolean =
-    if (reading.status != "ok" || rows != 10000000) then true
+    if (!Check.same(reading.status, "ok") || rows != 10000000) then true
     else
       knownAt10m.get(name) match
         case Some(expected) if reading.checksum != expected =>
@@ -330,7 +331,7 @@ object SpillScaleBench:
     Settings(
       query = sys.env.getOrElse("SPILL_SCALE_QUERY", "suite"),
       rows = readInt("SPILL_SCALE_ROWS", 10000000),
-      spill = sys.env.get("SPILL_SCALE_SPILL").forall(_ == "true"),
+      spill = sys.env.get("SPILL_SCALE_SPILL").forall(Check.same(_, "true")),
       budget = readLong("SPILL_SCALE_BUDGET", defaultBudget),
       threads = readInt("SPILL_SCALE_THREADS", 4),
       warmup = readInt("SPILL_SCALE_WARMUP", 1),

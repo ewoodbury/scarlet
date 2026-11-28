@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.columnar
-
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 
@@ -8,6 +7,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.core.ScarletConf
+import com.ewoodbury.scarlet.support.Check
 
 class TestStringHashReduceSpill extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -47,11 +47,13 @@ class TestStringHashReduceSpill extends AnyFlatSpec with Matchers with BeforeAnd
     val memory = reduce(batches)
     // Two partials of 32 groups, one partition, so the exchanged bucket is 64 rows. Both passes
     // intern the same strings in the same order, and the exchange keeps that dictionary.
-    utf8(batches(0)).dictionary.toSeq shouldBe utf8(batches(1)).dictionary.toSeq
+    utf8(Check.at(batches, 0)).dictionary.toSeq shouldBe utf8(
+      Check.at(batches, 1),
+    ).dictionary.toSeq
     val budget = StringHashReduceSpill.retainedBytes(
       twoPassRows,
-      utf8(batches.head).dictionary.length,
-      dictionaryBytes(batches.head),
+      utf8(Check.first(batches)).dictionary.length,
+      dictionaryBytes(Check.first(batches)),
     )
 
     withConf(budget) { dir =>
@@ -245,7 +247,9 @@ class TestStringHashReduceSpill extends AnyFlatSpec with Matchers with BeforeAnd
   private val twoPassRows = 64
 
   private def pairRows: Seq[(String, Int)] =
-    (0 until 32).map(key => key.toString -> (key + 1)) ++ (0 until 32).map(key => key.toString -> 1)
+    (0 until 32).map(key => key.toString -> (key + 1)) ++ (0 until 32).map(key =>
+      key.toString -> 1,
+    )
 
   private def twoPasses: Vector[ColumnBatch] =
     val (left, right) = pairRows.splitAt(32)

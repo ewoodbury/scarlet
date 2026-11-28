@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,8 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.execution.schema.Layout
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Non-adding `reduceByKey` and `countSumByIntLongKey` after `mapValues` to long.
@@ -75,8 +76,8 @@ class TestIntLongReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     val ints = Plan.ReduceByKeyOp(widened.plan, intFn)
     val kept = filtered.reduceByKey[Int, Long]((left: Long, _: Long) => left)
 
-    ColumnarPlanner.lower(ints) shouldBe None
-    ColumnarPlanner.lower(kept.plan) shouldBe None
+    ColumnarPlanner.lower(ints).shouldBeEmpty
+    ColumnarPlanner.lower(kept.plan).shouldBeEmpty
   }
 
   "null components" should "drop a null key and unbox a null value" in {
@@ -173,7 +174,7 @@ class TestIntLongReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       PhysicalOp.Project(PhysicalOp.Scan(PhysicalOp.Kind.Triples, Seq.empty)),
     )
     Layout.known(projected) shouldBe Layout.AssumedIntLong
-    CountSumLowering(projected) shouldBe None
+    CountSumLowering(projected).shouldBeEmpty
   }
 
   /**
@@ -243,7 +244,7 @@ class TestIntLongReduce extends AnyFlatSpec with Matchers with BeforeAndAfterEac
 
   @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf", "org.wartremover.warts.Null"))
   private def absent(value: Any): Boolean =
-    value.asInstanceOf[AnyRef] eq null
+    Check.isNull(value.asInstanceOf[AnyRef])
 
   private def intComponent(values: Seq[(Int, Long)], index: Int): Int =
     pairComponent(values, index, 0) match

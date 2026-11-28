@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{ColumnBatches, ColumnMetrics, CountingSink, NoOpSink}
 import com.ewoodbury.scarlet.core.ScarletConf
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 import MaterialisationStudySupport.{batchSize, elementRows, sourcePartitions}
 
@@ -101,7 +101,7 @@ class TestLongColumnar extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     ColumnarPlanner.lower(empty.plan).map(_.kind) shouldBe Some(PhysicalOp.Kind.Longs)
     agree(empty.sum) shouldBe 0L
     agree(empty.count()) shouldBe 0L
-    agree(empty.take(4)) shouldBe Nil
+    agree(empty.take(4)) shouldBe List.empty[Long]
     agree(empty.collect().toVector) shouldBe Vector.empty[Long]
   }
 
@@ -144,11 +144,11 @@ class TestLongColumnar extends AnyFlatSpec with Matchers with BeforeAndAfterEach
       value.toInt
     }
 
-    ColumnarPlanner.partitioning(mapped.plan) shouldBe None
-    ColumnarPlanner.tryRun(mapped.plan) shouldBe None
-    ColumnarPlanner.tryCount(mapped.plan) shouldBe None
-    ColumnarPlanner.trySumLong(mapped.plan) shouldBe None
-    ColumnarPlanner.tryTake(mapped.plan, 1) shouldBe None
+    ColumnarPlanner.partitioning(mapped.plan).shouldBeEmpty
+    ColumnarPlanner.tryRun(mapped.plan).shouldBeEmpty
+    ColumnarPlanner.tryCount(mapped.plan).shouldBeEmpty
+    ColumnarPlanner.trySumLong(mapped.plan).shouldBeEmpty
+    ColumnarPlanner.tryTake(mapped.plan, 1).shouldBeEmpty
     hits.get() shouldBe 0
 
     mapped.collect() shouldBe Seq(1, 2, 4)
@@ -230,10 +230,12 @@ class TestLongColumnar extends AnyFlatSpec with Matchers with BeforeAndAfterEach
   private def morselCount(rows: Int, parts: Int, size: Int): Long =
     val base = rows / parts
     val remainder = rows % parts
-    Vector.tabulate(parts) { index =>
-      val length = if (index < remainder) base + 1 else base
-      ColumnBatches.cuts(length, size).length.toLong
-    }.sum
+    Vector
+      .tabulate(parts) { index =>
+        val length = if (index < remainder) base + 1 else base
+        ColumnBatches.cuts(length, size).length.toLong
+      }
+      .sum
 
   private def armStudy(): Unit =
     ScarletRuntime.get.shuffle.clear()

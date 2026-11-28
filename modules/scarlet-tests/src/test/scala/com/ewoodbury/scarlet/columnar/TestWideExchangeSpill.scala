@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.columnar
-
 import java.nio.file.{Files, Path}
 
 import org.scalatest.BeforeAndAfterEach
@@ -7,6 +6,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.core.*
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * A wide scan exchanged through the existing spill store.
@@ -306,7 +306,7 @@ class TestWideExchangeSpill extends AnyFlatSpec with Matchers with BeforeAndAfte
   ): Vector[Vector[Cell]] =
     batches.flatMap(batch => WideBatch.decode(batch, fields)).map(_.cells).sortBy(order)
 
-  private def order(cells: Vector[Cell]): Long = cells.head match
+  private def order(cells: Vector[Cell]): Long = Check.first(cells) match
     case Cell.Int32(value) => value.toLong
     case Cell.Int64(value) => value
     case other => throw new IllegalArgumentException(s"key cell $other")
@@ -315,9 +315,9 @@ class TestWideExchangeSpill extends AnyFlatSpec with Matchers with BeforeAndAfte
   private def bits(batches: Vector[ColumnBatch]): Seq[Seq[Seq[Boolean]]] =
     batches.map { batch =>
       batch.columns.map { column =>
-        (0 until batch.length).map(column.isValid).toSeq
-      }.toSeq
-    }.toSeq
+        (0 until batch.length).map(column.isValid)
+      }
+    }
 
   private def withConf[A](budget: Long, enabled: Boolean)(body: Path => A): A =
     val dir = Files.createTempDirectory("scarlet-wide-spill")

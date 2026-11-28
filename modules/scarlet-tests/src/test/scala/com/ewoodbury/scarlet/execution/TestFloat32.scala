@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -9,6 +8,7 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Float32 scan, one filter, one `Float => Float` map, sum, and distinct.
@@ -61,7 +61,7 @@ class TestFloat32 extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       Seq[java.lang.Float](absent, java.lang.Float.valueOf(1.0f)),
       1,
     )
-    ColumnarPlanner.lower(leading.plan) shouldBe None
+    ColumnarPlanner.lower(leading.plan).shouldBeEmpty
   }
 
   "one float32 filter" should "keep the same values as the row path" in {

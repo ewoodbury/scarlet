@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -8,6 +7,8 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * String outer joins. A null value stays on the row path. A missing partner is an absence bit. A
@@ -49,9 +50,9 @@ class TestStringOuterJoin extends AnyFlatSpec with Matchers with BeforeAndAfterE
         val op = ColumnarPlanner.lower(plan).getOrElse(fail(s"$side $strategy did not lower"))
         op.shape shouldBe expectedShape(side, strategy)
         op.kind shouldBe PhysicalOp.Kind.StringOuter
-        (op.kind == PhysicalOp.Kind.StringTriples) shouldBe false
-        (op.kind == PhysicalOp.Kind.Triples) shouldBe false
-        ColumnarPlanner.tryTake(plan, 1) shouldBe None
+        (Check.same(op.kind, PhysicalOp.Kind.StringTriples)) shouldBe false
+        (Check.same(op.kind, PhysicalOp.Kind.Triples)) shouldBe false
+        ColumnarPlanner.tryTake(plan, 1).shouldBeEmpty
       }
     }
   }
@@ -134,7 +135,7 @@ class TestStringOuterJoin extends AnyFlatSpec with Matchers with BeforeAndAfterE
         val _ = ColumnarInterpreter.interpret(plan, op)
       }
       thrown.getMessage shouldBe s"a null value on a $side outer join stays on the row path"
-      ColumnarPlanner.tryRun(plan) shouldBe None
+      ColumnarPlanner.tryRun(plan).shouldBeEmpty
       same(DistCollection(plan))
     }
   }
@@ -313,8 +314,8 @@ class TestStringOuterJoin extends AnyFlatSpec with Matchers with BeforeAndAfterE
   private def assertDecoded(side: String, batch: ColumnBatch, absent: AbsentSide): Unit =
     StringOuterDecode.decode(batch, absent).foreach { row =>
       row match
-        case (null, (_, None)) if side == "left" || side == "full" => ()
-        case (null, (None, _)) if side == "right" || side == "full" => ()
+        case (null, (_, None)) if Check.same(side, "left") || Check.same(side, "full") => ()
+        case (null, (None, _)) if Check.same(side, "right") || Check.same(side, "full") => ()
         case (null, _) => fail(s"$side matched a null key: $row")
         case _ => ()
     }

@@ -1,7 +1,8 @@
 package com.ewoodbury.scarlet.columnar
-
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+
+import com.ewoodbury.scarlet.support.Check
 
 /** Round trip of a UTF-8 dictionary key and an int value. */
 class TestStringPairCodec extends AnyFlatSpec with Matchers:
@@ -56,9 +57,9 @@ class TestStringPairCodec extends AnyFlatSpec with Matchers:
     val decoded = BatchCodec.decodeStringPairs(batch)
 
     decoded.length shouldBe 2
-    decoded.head shouldBe ("red" -> 4)
-    absentValue(decoded(1)) shouldBe true
-    keyOf(decoded(1)) shouldBe "red"
+    Check.first(decoded) shouldBe ("red" -> 4)
+    absentValue(Check.at(decoded, 1)) shouldBe true
+    keyOf(Check.at(decoded, 1)) shouldBe "red"
     BatchCodec.decodeStringPairs(batch, 1) shouldBe Seq("red" -> 4)
   }
 
@@ -71,9 +72,9 @@ class TestStringPairCodec extends AnyFlatSpec with Matchers:
     values.isValid(0) shouldBe false
     values.isValid(1) shouldBe true
     values.values(1) shouldBe 0
-    absentValue(decoded.head) shouldBe true
-    keyOf(decoded.head) shouldBe "a"
-    decoded(1) shouldBe ("" -> 0)
+    absentValue(Check.first(decoded)) shouldBe true
+    keyOf(Check.first(decoded)) shouldBe "a"
+    Check.at(decoded, 1) shouldBe ("" -> 0)
   }
 
   it should "decode a selected clear value bit and ignore one the index does not name" in {
@@ -91,9 +92,9 @@ class TestStringPairCodec extends AnyFlatSpec with Matchers:
     val absent = BatchCodec.decodeStringPairs(batch, Array(0, 2), 2)
 
     kept shouldBe Seq("red" -> 4, nullKey(5))
-    absent.head shouldBe ("red" -> 4)
-    keyOf(absent(1)) shouldBe ""
-    absentValue(absent(1)) shouldBe true
+    Check.first(absent) shouldBe ("red" -> 4)
+    keyOf(Check.at(absent, 1)) shouldBe ""
+    absentValue(Check.at(absent, 1)) shouldBe true
   }
 
   it should "reject a batch that is not a string key and an int value" in {
@@ -130,7 +131,7 @@ class TestStringPairCodec extends AnyFlatSpec with Matchers:
     ),
   )
   private def absentValue(row: (String, Int)): Boolean =
-    row.productElement(1).asInstanceOf[AnyRef] eq null
+    Check.isNull(row.productElement(1).asInstanceOf[AnyRef])
 
   @SuppressWarnings(Array("org.wartremover.warts.Any", "org.wartremover.warts.Null"))
   private def keyOf(row: (String, Int)): String = row.productElement(0) match

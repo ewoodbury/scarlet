@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.columnar
-
 import java.nio.file.{Files, Path}
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.execution.{ColumnarPlanner, ExecutionModuleSupport}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * String `groupByKey` spill. The estimate charges dictionary bytes, including an entry no row
@@ -187,14 +187,14 @@ class TestStringGroupByKeySpill extends AnyFlatSpec with Matchers with BeforeAnd
       (text, index)
     }
     val kept = BatchCodec.stringIntPairs(rows.filter { case (key, value) =>
-      key != "00" && value != 11
+      !Check.same(key, "00") && value != 11
     })
     val budget = morselBudget(kept)
     StringGroupByKeySpill.inputRowBytes(kept) should be > budget
     withConf(enabled = true, budget = budget, partitions = 1) { dir =>
       val source = DistCollection(rows, 1)
       val filtered = source
-        .filterKeys((key: String) => key != "00")
+        .filterKeys((key: String) => !Check.same(key, "00"))
         .filterValues((value: Int) => value != 11)
         .groupByKey
       val (found, batches) = ColumnMetrics.withSink(new CountingSink) {
@@ -222,10 +222,13 @@ class TestStringGroupByKeySpill extends AnyFlatSpec with Matchers with BeforeAnd
    * Largest compacted morsel of `batch`. A spill of this batch fits one morsel and not the bucket.
    */
   private def morselBudget(batch: ColumnBatch): Long =
-    ColumnBatches
-      .slice(batch, morselRows)
-      .map(piece => StringGroupByKeySpill.inputRowBytes(ColumnBatches.compactDictionaries(piece)))
-      .max
+    Check.maximum(
+      ColumnBatches
+        .slice(batch, morselRows)
+        .map(piece =>
+          StringGroupByKeySpill.inputRowBytes(ColumnBatches.compactDictionaries(piece)),
+        ),
+    )
 
   private def repeated(text: String, rows: Int): ColumnBatch =
     BatchCodec.stringIntPairs((0 until rows).map(index => text -> index))
@@ -236,7 +239,7 @@ class TestStringGroupByKeySpill extends AnyFlatSpec with Matchers with BeforeAnd
     new ColumnBatch(Vector(LogicalType.Utf8Dict, LogicalType.Int32), Vector(keys, values), 1)
 
   private def unusedEntry(batch: ColumnBatch): ColumnBatch =
-    val keys = batch.columns.head match
+    val keys = Check.first(batch.columns) match
       case utf8: DictUtf8Column =>
         DictUtf8Column.of(
           utf8.dictionary :+ "unused-dictionary-entry",
@@ -245,7 +248,7 @@ class TestStringGroupByKeySpill extends AnyFlatSpec with Matchers with BeforeAnd
           utf8.length,
         )
       case other => fail(s"expected a dictionary, found $other")
-    new ColumnBatch(batch.schema, Vector(keys, batch.columns(1)), batch.length)
+    new ColumnBatch(batch.schema, Vector(keys, Check.at(batch.columns, 1)), batch.length)
 
   private def inMemory(batches: Vector[ColumnBatch]): Vector[GroupedStringBatch] =
     val budget = batches.map(StringGroupByKeySpill.inputRowBytes).maxOption.getOrElse(0L)

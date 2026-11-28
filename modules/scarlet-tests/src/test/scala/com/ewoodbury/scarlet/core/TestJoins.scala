@@ -1,11 +1,11 @@
 package com.ewoodbury.scarlet.core
-
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.execution.*
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 class TestJoins extends AnyFlatSpec with Matchers {
 
@@ -19,13 +19,12 @@ class TestJoins extends AnyFlatSpec with Matchers {
     // Arrange
     ScarletRuntime.get.shuffle.clear()
 
-    val left  = toDistCollection(Seq("a" -> 1))
+    val left = toDistCollection(Seq("a" -> 1))
     val right = toDistCollection(Seq("a" -> 2))
 
     // Create an unrelated branch that performs a shuffle before the join executes
     val unrelatedShuffled: DistCollection[(String, (Int, Int))] =
-      toDistCollection(Seq("u" -> 999))
-        .groupByKey
+      toDistCollection(Seq("u" -> 999)).groupByKey
         .map { case (k, vs) => (k, (vs.headOption.getOrElse(0), -1)) }
 
     // Build a plan where the unrelated branch is on the left of a union, so its shuffle stages
@@ -47,7 +46,7 @@ class TestJoins extends AnyFlatSpec with Matchers {
     // Arrange
     ScarletRuntime.get.shuffle.clear()
 
-    val left  = toDistCollection(Seq("a" -> 1, "a" -> 3, "b" -> 7))
+    val left = toDistCollection(Seq("a" -> 1, "a" -> 3, "b" -> 7))
     val right = toDistCollection(Seq("a" -> 2, "a" -> 4, "c" -> 9))
 
     // Act
@@ -72,7 +71,7 @@ class TestJoins extends AnyFlatSpec with Matchers {
     // Arrange
     ScarletRuntime.get.shuffle.clear()
 
-    val left  = toDistCollection(Seq("a" -> 1, "a" -> 3, "b" -> 5))
+    val left = toDistCollection(Seq("a" -> 1, "a" -> 3, "b" -> 5))
     val right = toDistCollection(Seq("a" -> 2, "a" -> 4, "b" -> 6, "b" -> 7))
 
     // Act
@@ -105,7 +104,7 @@ class TestJoins extends AnyFlatSpec with Matchers {
     ScarletRuntime.get.shuffle.clear()
 
     val nonEmpty = toDistCollection(Seq("x" -> 1, "y" -> 2))
-    val emptyDC  = toDistCollection(Seq.empty[(String, Int)])
+    val emptyDC = toDistCollection(Seq.empty[(String, Int)])
 
     // Act + Assert
     nonEmpty.join(emptyDC).collect().toSeq shouldBe empty
@@ -153,7 +152,8 @@ class TestJoins extends AnyFlatSpec with Matchers {
 
     cases.foreach { case (name, leftRows, rightRows) =>
       ScarletRuntime.get.shuffle.clear()
-      val actual = toDistCollection(leftRows).leftOuterJoin(toDistCollection(rightRows)).collect().toSeq
+      val actual =
+        toDistCollection(leftRows).leftOuterJoin(toDistCollection(rightRows)).collect().toSeq
       withClue(name) {
         actual should contain theSameElementsAs referenceLeftOuter(leftRows, rightRows)
       }
@@ -168,7 +168,7 @@ class TestJoins extends AnyFlatSpec with Matchers {
 
     plan shouldBe a[Plan.LeftOuterJoinOp[_, _, _]]
     plan match {
-      case Plan.LeftOuterJoinOp(_, _, strategy) => strategy shouldBe None
+      case Plan.LeftOuterJoinOp(_, _, strategy) => strategy.shouldBeEmpty
       case _ => fail("Expected LeftOuterJoinOp")
     }
     PlanWide.isWide(plan) shouldBe true
@@ -355,7 +355,7 @@ class TestJoins extends AnyFlatSpec with Matchers {
 
     plan shouldBe a[Plan.RightOuterJoinOp[_, _, _]]
     plan match {
-      case Plan.RightOuterJoinOp(_, _, strategy) => strategy shouldBe None
+      case Plan.RightOuterJoinOp(_, _, strategy) => strategy.shouldBeEmpty
       case _ => fail("Expected RightOuterJoinOp")
     }
     PlanWide.isWide(plan) shouldBe true
@@ -458,7 +458,7 @@ class TestJoins extends AnyFlatSpec with Matchers {
 
     plan shouldBe a[Plan.FullOuterJoinOp[_, _, _]]
     plan match {
-      case Plan.FullOuterJoinOp(_, _, strategy) => strategy shouldBe None
+      case Plan.FullOuterJoinOp(_, _, strategy) => strategy.shouldBeEmpty
       case _ => fail("Expected FullOuterJoinOp")
     }
     PlanWide.isWide(plan) shouldBe true
@@ -551,7 +551,9 @@ class TestJoins extends AnyFlatSpec with Matchers {
   private def fullNullRight(value: Int): (String, (Option[Int], Option[Int])) =
     ((null: String), (None, Some(value)))
 
-  /** Scalar left outer join. A null key does not match, and each unmatched left row is kept once. */
+  /**
+   * Scalar left outer join. A null key does not match, and each unmatched left row is kept once.
+   */
   @SuppressWarnings(Array("org.wartremover.warts.Null", "org.wartremover.warts.Equals"))
   private def referenceLeftOuter(
       left: Seq[(String, Int)],
@@ -566,8 +568,7 @@ class TestJoins extends AnyFlatSpec with Matchers {
     }
 
   /**
-   * Scalar right outer join. A null key does not match, and each unmatched right row is kept
-   * once.
+   * Scalar right outer join. A null key does not match, and each unmatched right row is kept once.
    */
   @SuppressWarnings(Array("org.wartremover.warts.Null", "org.wartremover.warts.Equals"))
   private def referenceRightOuter(
@@ -609,5 +610,3 @@ class TestJoins extends AnyFlatSpec with Matchers {
     matched ++ leftUnmatched ++ rightUnmatched
   }
 }
-
-

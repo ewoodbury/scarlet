@@ -1,10 +1,10 @@
 package com.ewoodbury.scarlet.execution
-
 import scala.util.Random
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{IntPairArrays, Plan, ScarletConf}
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Catalogue of [[QueryBench]] cases. Checksums live in the `Filter*Checksum` objects and the
@@ -38,7 +38,7 @@ private[execution] object QueryBenchCases:
           ),
         )
       case other =>
-        val picked = build().filter(_.name == other)
+        val picked = build().filter(query => Check.same(query.name, other))
         if (picked.isEmpty) then
           System.err.println(s"unknown query $other")
           sys.exit(1)

@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -7,6 +6,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.{Partition, Plan}
 import com.ewoodbury.scarlet.execution.schema.ColumnBinding.{Operator, ReducerWitness}
 import com.ewoodbury.scarlet.execution.schema.{Describe, KernelChoice}
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * The three aggregate parents consult [[AggregateBinding]] and still build today's root.
@@ -15,9 +15,9 @@ import com.ewoodbury.scarlet.execution.schema.{Describe, KernelChoice}
  * does not compile to steps, so the binder is not asked for the project underneath. `countByKey`
  * keeps today's root, which still holds the filter. Two slots above that project do not lower.
  * `reduceByKey` has no arm there and stays empty. A join count is
- * [[KernelChoice.CountThroughProbe]] from the join's three columns. A probe
- * sum stays [[KernelChoice.JoinProbeSum]]. A projected `(Int32, Int64)` whose reducer does not add
- * longs does not lower.
+ * [[KernelChoice.CountThroughProbe]] from the join's three columns. A probe sum stays
+ * [[KernelChoice.JoinProbeSum]]. A projected `(Int32, Int64)` whose reducer does not add longs
+ * does not lower.
  */
 class TestAggregateBinding extends AnyFlatSpec with Matchers:
 
@@ -72,12 +72,14 @@ class TestAggregateBinding extends AnyFlatSpec with Matchers:
 
   it should "keep a key filter over an int-long project on today's count" in {
     val plan = Plan.CountByKeyOp(keyAboveProject)
-    AggregateBinding.choiceFor(
-      keyAboveProject,
-      lowered(keyAboveProject),
-      Operator.CountByKey,
-      ReducerWitness.NotApplicable,
-    ) shouldBe None
+    AggregateBinding
+      .choiceFor(
+        keyAboveProject,
+        lowered(keyAboveProject),
+        Operator.CountByKey,
+        ReducerWitness.NotApplicable,
+      )
+      .shouldBeEmpty
     lowered(plan).shape shouldBe
       "CountByKey(Exchange(FilterKey(Project(HashJoin(Exchange(Scan), Exchange(Scan))))))"
   }
@@ -85,7 +87,7 @@ class TestAggregateBinding extends AnyFlatSpec with Matchers:
   it should "refuse a slot stack above an int-long project" in {
     val values = Plan.FilterValuesOp(projected, (value: Long) => value >= 0L)
     val stacked = Plan.FilterKeysOp(values, (key: Int) => key > 0)
-    ColumnarPlanner.lower(Plan.CountByKeyOp(stacked)) shouldBe None
+    ColumnarPlanner.lower(Plan.CountByKeyOp(stacked)).shouldBeEmpty
   }
 
   it should "tag count-through-probe from the join binder" in {
@@ -97,12 +99,14 @@ class TestAggregateBinding extends AnyFlatSpec with Matchers:
       Operator.CountByKey,
       ReducerWitness.NotApplicable,
     ) shouldBe Some(KernelChoice.CountThroughProbe)
-    AggregateBinding.choiceFor(
-      joined,
-      child,
-      Operator.ReduceByKey,
-      ReducerWitness.AddsLongs,
-    ) shouldBe None
+    AggregateBinding
+      .choiceFor(
+        joined,
+        child,
+        Operator.ReduceByKey,
+        ReducerWitness.AddsLongs,
+      )
+      .shouldBeEmpty
     val root = lowered(plan)
     root.shape shouldBe "CountByKey(HashJoin(Exchange(Scan), Exchange(Scan)))"
     Describe.tag(root) shouldBe KernelChoice.CountThroughProbe
@@ -116,28 +120,32 @@ class TestAggregateBinding extends AnyFlatSpec with Matchers:
       Operator.ReduceByKey,
       ReducerWitness.AddsLongs,
     ) shouldBe Some(KernelChoice.IntLongProjectSum)
-    AggregateBinding.choiceFor(
-      projected,
-      child,
-      Operator.ReduceByKey,
-      ReducerWitness.Other,
-    ) shouldBe None
+    AggregateBinding
+      .choiceFor(
+        projected,
+        child,
+        Operator.ReduceByKey,
+        ReducerWitness.Other,
+      )
+      .shouldBeEmpty
     val summed = lowered(Plan.ReduceByKeyOp(projected, addLongs))
     summed.shape shouldBe
       "HashAggregate(Exchange(Project(HashJoin(Exchange(Scan), Exchange(Scan)))))"
     Describe.tag(summed) shouldBe KernelChoice.IntLongProjectSum
     val longest = (left: Long, right: Long) => math.max(left, right)
-    ColumnarPlanner.lower(Plan.ReduceByKeyOp(projected, longest)) shouldBe None
+    ColumnarPlanner.lower(Plan.ReduceByKeyOp(projected, longest)).shouldBeEmpty
   }
 
   it should "refuse a key filter over an int-long project" in {
-    AggregateBinding.choiceFor(
-      keyAboveProject,
-      lowered(keyAboveProject),
-      Operator.ReduceByKey,
-      ReducerWitness.AddsLongs,
-    ) shouldBe None
-    ColumnarPlanner.lower(Plan.ReduceByKeyOp(keyAboveProject, addLongs)) shouldBe None
+    AggregateBinding
+      .choiceFor(
+        keyAboveProject,
+        lowered(keyAboveProject),
+        Operator.ReduceByKey,
+        ReducerWitness.AddsLongs,
+      )
+      .shouldBeEmpty
+    ColumnarPlanner.lower(Plan.ReduceByKeyOp(keyAboveProject, addLongs)).shouldBeEmpty
   }
 
   it should "keep a filtered int reduce and a probe sum" in {
@@ -156,7 +164,7 @@ class TestAggregateBinding extends AnyFlatSpec with Matchers:
     val mapped = Plan.MapIntKeyOp(pairs, (key: Int) => key + 1)
     val once = Plan.FilterKeysOp(mapped, (key: Int) => key > 0)
     val twice = Plan.FilterKeysOp(once, (key: Int) => key < 10)
-    ColumnarPlanner.lower(twice) shouldBe None
+    ColumnarPlanner.lower(twice).shouldBeEmpty
     val counted = lowered(Plan.CountByKeyOp(twice))
     counted.shape shouldBe "CountByKey(Exchange(FilterKey(FilterKey(MapKey(Scan)))))"
     Describe.tag(counted) shouldBe KernelChoice.CountByKey

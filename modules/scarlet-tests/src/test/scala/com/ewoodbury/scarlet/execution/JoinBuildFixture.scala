@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.lang.management.ManagementFactory
 
 import com.sun.management.ThreadMXBean
@@ -7,6 +6,7 @@ import com.sun.management.ThreadMXBean
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.ScarletConf
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Types, open-addressed table, allocation probe, and data helpers for [[JoinBuildBench]].
@@ -430,7 +430,7 @@ private[execution] object JoinBuildFixture:
       case other => refuse(s"unknown policy $other")
 
   private[execution] def pow2(policy: String): Boolean =
-    policy != "exact64"
+    !Check.same(policy, "exact64")
 
   private[execution] def nextPow2(need: Long): Int =
     if (need <= 1L) then 1
@@ -538,10 +538,20 @@ private[execution] object JoinBuildFixture:
     val builds = hashSplit(build)
     val probes = hashSplit(probe)
     Vector.tabulate(shuffleWidth) { part =>
-      val matched = matchCount(builds(part), probes(part))
-      if (builds(part).keys.length <= 0 || probes(part).keys.length <= 0 || matched <= 0) then
-        refuse(s"partition $part is empty")
-      Part(builds(part), probes(part), matched, probes(part).keys.length)
+      val matched = matchCount(Check.at(builds, part), Check.at(probes, part))
+      if (
+          Check.at(builds, part).keys.length <= 0 || Check
+            .at(probes, part)
+            .keys
+            .length <= 0 || matched <= 0
+        )
+      then refuse(s"partition $part is empty")
+      Part(
+        Check.at(builds, part),
+        Check.at(probes, part),
+        matched,
+        Check.at(probes, part).keys.length,
+      )
     }
 
   private[execution] def hashSplit(side: Side): Vector[Side] =
@@ -586,7 +596,7 @@ private[execution] object JoinBuildFixture:
     Replay(keys, left, right)
 
   private[execution] def copyColumn(batch: ColumnBatch, ordinal: Int, into: Array[Int]): Unit =
-    batch.columns(ordinal) match
+    Check.at(batch.columns, ordinal) match
       case column: Int32Column =>
         if (column.length != into.length) then
           refuse(s"column $ordinal length ${column.length} != ${into.length}")

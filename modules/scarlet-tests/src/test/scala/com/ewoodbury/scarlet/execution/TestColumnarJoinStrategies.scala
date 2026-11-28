@@ -1,9 +1,9 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 
 import com.ewoodbury.scarlet.api.DistCollection
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /** Sort-merge, broadcast, and hash inner joins on the same pairs. */
 class TestColumnarJoinStrategies
@@ -38,7 +38,7 @@ class TestColumnarJoinStrategies
       "SortMergeJoin(Exchange(Scan), Exchange(Scan))",
     )
     ColumnarPlanner.tryRun(sortMerge) shouldBe defined
-    ColumnarPlanner.tryTake(sortMerge, 1) shouldBe None
+    ColumnarPlanner.tryTake(sortMerge, 1).shouldBeEmpty
     collected(sortMerge) should contain theSameElementsAs rowResult(sortMerge)
     rowResult(sortMerge) should contain theSameElementsAs expected
 

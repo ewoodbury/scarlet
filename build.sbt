@@ -5,6 +5,38 @@ ThisBuild / version := "0.1.0-SNAPSHOT"
 // AGENTS.md asks for about 1000 lines. This is the hard cap, with room for a focused file to grow.
 val maxScalaFileLines = 1200
 
+// Warnings in library projects. scarlet-tests promotes this same set to errors.
+val warnedWarts = Warts.allBut(
+  Wart.Any,
+  Wart.AsInstanceOf,
+  Wart.ImplicitParameter,
+  Wart.Overloading,
+  Wart.NonUnitStatements,
+  Wart.Throw,
+  Wart.While,
+  Wart.Return,
+  Wart.AsInstanceOf,
+  Wart.IsInstanceOf,
+  Wart.OptionPartial,
+  Wart.TryPartial,
+  Wart.EitherProjectionPartial,
+  Wart.ArrayEquals,
+  Wart.ImplicitConversion,
+  Wart.Serializable,
+  Wart.JavaSerializable,
+  Wart.Product,
+  Wart.LeakingSealed,
+  Wart.PublicInference,
+  Wart.Option2Iterable,
+  Wart.StringPlusAny,
+  Wart.JavaConversions,
+  Wart.Recursion,
+  Wart.Enumeration,
+  Wart.ExplicitImplicitTypes,
+  Wart.SizeIs,
+  Wart.DefaultArguments,
+)
+
 lazy val checkFileLength = taskKey[Unit](
   "Fail if a hand-written Scala source exceeds maxScalaFileLines"
 )
@@ -25,36 +57,7 @@ lazy val commonSettings = Seq(
   // Type erasure policy: asInstanceOf and Any-inference are compile errors. The named
   // boundaries, and the rule for a new site, are in docs/ARCHITECTURE.md ("Type erasure policy").
   wartremoverErrors ++= Seq(Wart.AsInstanceOf, Wart.Any),
-  wartremoverWarnings ++= Warts.allBut(
-    Wart.Any,
-    Wart.AsInstanceOf,
-    Wart.ImplicitParameter,
-    Wart.Overloading,
-    Wart.NonUnitStatements,
-    Wart.Throw,
-    Wart.While,
-    Wart.Return,
-    Wart.AsInstanceOf,
-    Wart.IsInstanceOf,
-    Wart.OptionPartial,
-    Wart.TryPartial,
-    Wart.EitherProjectionPartial,
-    Wart.ArrayEquals,
-    Wart.ImplicitConversion,
-    Wart.Serializable,
-    Wart.JavaSerializable,
-    Wart.Product,
-    Wart.LeakingSealed,
-    Wart.PublicInference,
-    Wart.Option2Iterable,
-    Wart.StringPlusAny,
-    Wart.JavaConversions,
-    Wart.Recursion,
-    Wart.Enumeration,
-    Wart.ExplicitImplicitTypes,
-    Wart.SizeIs,
-    Wart.DefaultArguments,
-  ),
+  wartremoverWarnings ++= warnedWarts,
   checkFileLength := {
     val maxLines = maxScalaFileLines
     val sources =
@@ -140,6 +143,8 @@ lazy val `scarlet-tests` = (project in file("modules/scarlet-tests"))
   .settings(
     name := "scarlet-tests",
     commonSettings,
+    wartremoverErrors ++= warnedWarts,
+    wartremoverWarnings --= warnedWarts,
     libraryDependencies ++= Seq(scalatest % Test)
   )
   .dependsOn(`scarlet-api`, `scarlet-execution`, `scarlet-runtime`, `scarlet-columnar`, `scarlet-sql`)

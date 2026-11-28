@@ -1,11 +1,12 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
+import com.ewoodbury.scarlet.support.Check
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Equality and inequality of a string column against a literal.
@@ -61,6 +62,7 @@ class TestStringFilter extends AnyFlatSpec with Matchers with BeforeAndAfterEach
   }
 
   "a null literal" should "be refused" in {
+    @SuppressWarnings(Array("org.wartremover.warts.Null"))
     val missing: String = null
     val thrown = the[IllegalArgumentException] thrownBy {
       val _ = ColumnCompare(CompareOp.Eq, ColumnLiteral.Utf8(missing))
@@ -71,7 +73,7 @@ class TestStringFilter extends AnyFlatSpec with Matchers with BeforeAndAfterEach
   "ordering" should "stay off the columnar plan" in {
     val compare = ColumnCompare(CompareOp.Gt, ColumnLiteral.Utf8("a"))
     val planned = table.filterColumn(1, compare)
-    ColumnarPlanner.lower(planned.plan) shouldBe None
+    ColumnarPlanner.lower(planned.plan).shouldBeEmpty
   }
 
   private def idsOf(planned: DistCollection[WideRow]): Vector[Int] =
@@ -83,4 +85,8 @@ class TestStringFilter extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     columnar
 
   private def ids(planned: DistCollection[WideRow]): Vector[Int] =
-    planned.collect().map(_.cells.head).collect { case Cell.Int32(value) => value }.toVector
+    planned
+      .collect()
+      .map(row => Check.first(row.cells))
+      .collect { case Cell.Int32(value) => value }
+      .toVector

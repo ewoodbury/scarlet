@@ -1,8 +1,8 @@
 package com.ewoodbury.scarlet.execution
-
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{ColumnBatch, Int32Column}
 import com.ewoodbury.scarlet.core.ScarletConf
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Sort-action checksum: the sum of `key * 31 + value` over the sorted pairs.
@@ -40,7 +40,7 @@ private[execution] object SortChecksum:
     var sum = 0L
     var dense = true
     while (index < parts.length && dense) {
-      add(parts(index)) match
+      add(Check.at(parts, index)) match
         case Some(part) => sum += part
         case None => dense = false
       index += 1

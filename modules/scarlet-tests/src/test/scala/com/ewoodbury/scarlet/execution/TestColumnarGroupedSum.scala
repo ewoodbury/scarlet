@@ -1,10 +1,10 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.Plan
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /** Grouped-sum fusion and bounded take, outside the fixture lists. */
 class TestColumnarGroupedSum
@@ -37,21 +37,21 @@ class TestColumnarGroupedSum
     // fuse it. The peel label is the walked MapPair step, not an action shape.
     val widenedPairs = Plan.MapOp(pairSource, (pair: (Int, Int)) => (pair._1.toLong, pair._2))
     ColumnarPlanner.lower(widenedPairs).map(_.shape) shouldBe Some("Project(Scan)")
-    ColumnarPlanner.tryRun(widenedPairs) shouldBe None
-    ColumnarPlanner.tryGroupedSum(widenedPairs) shouldBe None
+    ColumnarPlanner.tryRun(widenedPairs).shouldBeEmpty
+    ColumnarPlanner.tryGroupedSum(widenedPairs).shouldBeEmpty
     ColumnarPlanner.groupedSumPeel(widenedPairs) shouldBe Some("GroupedSum(MapPair(Scan))")
     DistCollection(widenedPairs).collect().toList shouldBe rowResult(widenedPairs).toList
 
     val longMapped = Plan.MapOp(longPairSource, (pair: (Long, Long)) => (pair._1, pair._2))
     ColumnarPlanner.lower(longMapped).map(_.shape) shouldBe Some("Project(Scan)")
-    ColumnarPlanner.tryGroupedSum(longMapped) shouldBe None
+    ColumnarPlanner.tryGroupedSum(longMapped).shouldBeEmpty
     ColumnarPlanner.tryRun(longMapped).map(_.flatMap(_.data).toList) shouldBe Some(
       rowResult(longMapped).toList,
     )
     val stringMapped =
       Plan.MapOp(stringKeySource, (pair: (String, Int)) => (pair._1, pair._2))
     ColumnarPlanner.lower(stringMapped).map(_.shape) shouldBe Some("Project(Scan)")
-    ColumnarPlanner.tryGroupedSum(stringMapped) shouldBe None
+    ColumnarPlanner.tryGroupedSum(stringMapped).shouldBeEmpty
     ColumnarPlanner.tryRun(stringMapped).map(_.flatMap(_.data).toList) shouldBe Some(
       rowResult(stringMapped).toList,
     )

@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 
@@ -11,6 +10,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.*
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * Spilled rank split of a string-pair sort. The in-memory path is [[StringRankSplit]]. Partition
@@ -65,7 +65,10 @@ class TestStringSortSpill extends AnyFlatSpec with Matchers with BeforeAndAfterE
     StringRankSplitRuns.exceeds(batches, confAt(estimate, enabled = false)) shouldBe false
     StringRankSplitRuns.exceeds(batches, confAt(estimate, enabled = true)) shouldBe false
     StringRankSplitRuns.exceeds(batches, confAt(estimate - 1L, enabled = true)) shouldBe true
-    StringRankSplitRuns.exceeds(Vector(empty, emptyDictionary), confAt(0L, enabled = true)) shouldBe
+    StringRankSplitRuns.exceeds(
+      Vector(empty, emptyDictionary),
+      confAt(0L, enabled = true),
+    ) shouldBe
       false
   }
 
@@ -236,7 +239,8 @@ class TestStringSortSpill extends AnyFlatSpec with Matchers with BeforeAndAfterE
       ),
       2,
     )
-    val memory = StringRankSplit.sortAndSplit(Vector(nullable, dirty), partitions = 2, parallelism = 1)
+    val memory =
+      StringRankSplit.sortAndSplit(Vector(nullable, dirty), partitions = 2, parallelism = 1)
 
     withConf(0L, batchSize = 1, fanIn = 2) { dir =>
       val spilled = StringRankSplitRuns.sortAndSplit(
@@ -268,7 +272,12 @@ class TestStringSortSpill extends AnyFlatSpec with Matchers with BeforeAndAfterE
       val spilled =
         StringRankSplitRuns.sortAndSplit(batches, partitions = 3, parallelism = 1, ScarletConf.get)
       val absent =
-        StringRankSplitRuns.sortAndSplit(Vector.empty, partitions = 3, parallelism = 1, ScarletConf.get)
+        StringRankSplitRuns.sortAndSplit(
+          Vector.empty,
+          partitions = 3,
+          parallelism = 1,
+          ScarletConf.get,
+        )
 
       identical(spilled, memory)
       spilled.map(_.length) shouldBe Vector(0, 0, 0)
@@ -313,7 +322,12 @@ class TestStringSortSpill extends AnyFlatSpec with Matchers with BeforeAndAfterE
       StringRankSplitRuns.armWriteFailure()
       val caught = intercept[IllegalStateException] {
         val _ =
-          StringRankSplitRuns.sortAndSplit(batches, partitions = 2, parallelism = 1, ScarletConf.get)
+          StringRankSplitRuns.sortAndSplit(
+            batches,
+            partitions = 2,
+            parallelism = 1,
+            ScarletConf.get,
+          )
       }
 
       caught.getMessage shouldBe StringRankSplitRuns.WriteFailed
@@ -330,7 +344,12 @@ class TestStringSortSpill extends AnyFlatSpec with Matchers with BeforeAndAfterE
       StringRankSplitRuns.armWriteFailureAfter(5)
       val caught = intercept[IllegalStateException] {
         val _ =
-          StringRankSplitRuns.sortAndSplit(batches, partitions = 2, parallelism = 1, ScarletConf.get)
+          StringRankSplitRuns.sortAndSplit(
+            batches,
+            partitions = 2,
+            parallelism = 1,
+            ScarletConf.get,
+          )
       }
 
       caught.getMessage shouldBe StringRankSplitRuns.WriteFailed
@@ -348,7 +367,12 @@ class TestStringSortSpill extends AnyFlatSpec with Matchers with BeforeAndAfterE
       StringRankSplitRuns.armPassFailure(2)
       val caught = intercept[IllegalStateException] {
         val _ =
-          StringRankSplitRuns.sortAndSplit(batches, partitions = 2, parallelism = 1, ScarletConf.get)
+          StringRankSplitRuns.sortAndSplit(
+            batches,
+            partitions = 2,
+            parallelism = 1,
+            ScarletConf.get,
+          )
       }
 
       caught.getMessage shouldBe StringRankSplitRuns.MergeFailed
@@ -450,7 +474,7 @@ class TestStringSortSpill extends AnyFlatSpec with Matchers with BeforeAndAfterE
     val selected = Vector(Selected(batch, Array(1), 1))
     val dictionary = utf8(batch).dictionary
     val full = dictionary.iterator.map(utf8Bytes).sum
-    val live = dictionary.iterator.filter(_ != "aaaa").map(utf8Bytes).sum
+    val live = dictionary.iterator.filter(!Check.same(_, "aaaa")).map(utf8Bytes).sum
     val perRow = 8L + 4L + 4L + 1L
     val kept = perRow + full + StringRankSplitRuns.HeaderAllowance
     val survivorDict = perRow + live + StringRankSplitRuns.HeaderAllowance
@@ -509,7 +533,9 @@ class TestStringSortSpill extends AnyFlatSpec with Matchers with BeforeAndAfterE
       presences(leftKeys, left.length) shouldBe presences(rightKeys, right.length)
       val leftValues = int32(left)
       val rightValues = int32(right)
-      leftValues.values.take(left.length).toSeq shouldBe rightValues.values.take(right.length).toSeq
+      leftValues.values
+        .take(left.length)
+        .toSeq shouldBe rightValues.values.take(right.length).toSeq
       presences(leftValues, left.length) shouldBe presences(rightValues, right.length)
     }
 

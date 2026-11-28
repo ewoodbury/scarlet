@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -11,6 +10,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{BatchCodec, HashJoin, HashReduce, IntPairProject}
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /** The columnar path lowers physical trees and fuses short element filter/project runs. */
 class TestPhysicalPlan extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
@@ -245,7 +245,7 @@ class TestPhysicalPlan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     shape(broadcast) shouldBe "BroadcastJoin(Scan, Scan)"
     val sortMerge = probe.sortMergeJoin(build)
     shape(sortMerge) shouldBe "SortMergeJoin(Exchange(Scan), Exchange(Scan))"
-    ColumnarPlanner.tryTake(sortMerge.plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(sortMerge.plan, 1).shouldBeEmpty
     val lowered = ColumnarPlanner.lower(sortMerge.plan).getOrElse(fail("sort-merge was refused"))
     intercept[IllegalArgumentException] {
       ColumnarInterpreter.interpret(sortMerge.plan, lowered, Some(0))

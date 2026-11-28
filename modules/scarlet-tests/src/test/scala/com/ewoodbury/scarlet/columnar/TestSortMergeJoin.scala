@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.columnar
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -8,6 +7,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.{Partition, Plan, ScarletConf}
 import com.ewoodbury.scarlet.execution.ColumnarPlanner
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /** Inner sort-merge of int pairs against the row path, including the merge order. */
 class TestSortMergeJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
@@ -234,7 +234,7 @@ class TestSortMergeJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     ColumnarPlanner.lower(strings.plan).map(_.shape) shouldBe Some(
       "StringSortMergeJoin(Exchange(Scan), Exchange(Scan))",
     )
-    ColumnarPlanner.lower(doubles.plan) shouldBe None
+    ColumnarPlanner.lower(doubles.plan).shouldBeEmpty
     stringOuters.zip(stringShapes).foreach { (plan, shape) =>
       ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(shape)
     }
@@ -245,11 +245,11 @@ class TestSortMergeJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     outers.zip(shapes).foreach { (plan, shape) =>
       ColumnarPlanner.lower(plan).map(_.shape) shouldBe Some(shape)
     }
-    ColumnarPlanner.tryTake(strings.plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(strings.plan, 1).shouldBeEmpty
     val hinted = DistCollection
       .ofIntPairs(Array(1), Array(2), 1)
       .sortMergeJoin(DistCollection.ofIntPairs(Array(1), Array(3), 1))
-    ColumnarPlanner.tryTake(hinted.plan, 1) shouldBe None
+    ColumnarPlanner.tryTake(hinted.plan, 1).shouldBeEmpty
     ColumnarPlanner.lower(hinted.plan).map(_.shape) shouldBe Some(
       "SortMergeJoin(Exchange(Scan), Exchange(Scan))",
     )
@@ -268,7 +268,7 @@ class TestSortMergeJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEac
       Plan.RightOuterJoinOp(left, right, hinted),
       Plan.FullOuterJoinOp(left, right, hinted),
     ).foreach { outer =>
-      ColumnarPlanner.lower(outer) shouldBe None
+      ColumnarPlanner.lower(outer).shouldBeEmpty
     }
 
   private def agree(left: Seq[(Int, Int)], right: Seq[(Int, Int)], parts: Int): Unit =

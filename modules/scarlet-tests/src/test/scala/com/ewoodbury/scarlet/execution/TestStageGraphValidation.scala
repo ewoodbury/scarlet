@@ -145,7 +145,7 @@ class TestStageGraphValidation extends AnyFlatSpec with Matchers {
   it should "reject an orphaned stage unreachable from the final stage" in {
     val g = graph(
       stages = Seq(stageInfo(0), stageInfo(1)),
-      dependencies = Map.empty,
+      dependencies = Map.empty[StageId, Set[StageId]],
       finalStageId = StageId(0),
     )
 
@@ -224,7 +224,10 @@ class TestStageGraphValidation extends AnyFlatSpec with Matchers {
         stageInfo(1),
         stageInfo(
           2,
-          inputSources = Seq(shuffleInput(0, Some(StageBuilder.Side.Left)), StageBuilder.StageOutput(StageId(1))),
+          inputSources = Seq(
+            shuffleInput(0, Some(StageBuilder.Side.Left)),
+            StageBuilder.StageOutput(StageId(1)),
+          ),
           isShuffleStage = true,
           wideOp = Some(JoinWideOp(SimpleWideOpMeta(kind = WideOpKind.Join, numPartitions = 4))),
         ),

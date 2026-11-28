@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -7,6 +6,7 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Ungrouped min and max. A null is skipped. Empty and all-null columns are zero. The batch path
@@ -121,7 +121,7 @@ class TestUngroupedExtremum extends AnyFlatSpec with Matchers with BeforeAndAfte
 
   "the wrong kind" should "stay off the int kernel" in {
     val table = DistCollection.ofColumns(Vector(WideInput.longs("n", Array(1L, -2L))), 1)
-    WideExtremum.minInt(table.plan, 0) shouldBe None
+    WideExtremum.minInt(table.plan, 0).shouldBeEmpty
     ScarletConf.set(ScarletConf.get.copy(columnarExecution = true))
     an[IllegalArgumentException] should be thrownBy table.minIntColumn(0)
     ScarletConf.set(ScarletConf.get.copy(columnarExecution = false))

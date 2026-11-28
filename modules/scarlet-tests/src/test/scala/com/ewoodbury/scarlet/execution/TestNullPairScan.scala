@@ -1,5 +1,4 @@
 package com.ewoodbury.scarlet.execution
-
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.BeforeAndAfterEach
@@ -10,6 +9,7 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.columnar.{ColumnMetrics, CountingSink, Int32Column}
 import com.ewoodbury.scarlet.core.{Plan, ScarletConf}
 import com.ewoodbury.scarlet.runtime.ScarletRuntime
+import com.ewoodbury.scarlet.support.Check
 
 /**
  * A boxed int-pair scan keeps a later null absent.
@@ -121,7 +121,7 @@ class TestNullPairScan extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     batches should be > 0L
     rows shouldBe shownGroups(row(grouped.collect()))
     rows.map(_._1) should contain("2")
-    rows.find(_._1 == "2").map(_._2) shouldBe Some("null,7")
+    rows.find(pair => Check.same(pair._1, "2")).map(_._2) shouldBe Some("null,7")
   }
 
   "an owned array" should "fold a filtered count without a primitive encode" in {
