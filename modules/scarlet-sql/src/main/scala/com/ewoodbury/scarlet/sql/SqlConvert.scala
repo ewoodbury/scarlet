@@ -21,9 +21,10 @@ import com.ewoodbury.scarlet.core.*
 /**
  * One SELECT: registered tables, one int or long equi-join, comparisons combined with AND, OR, and
  * NOT, arithmetic, count, sum, min, max, and an exact count of distinct values. A string compares
- * with JVM order, and `LIKE` uses `%` and `_`. `length` is the UTF-16 length. A group is one or
- * two keys, each an int, a long, or a string. A string measure emits count, min, and max. Order is
- * one int, long, or string column, then a limit. Anything else names its node.
+ * with JVM order. `LIKE` uses `%` and `_`, and it combines with AND and NOT. OR of `LIKE` names
+ * the node. `length` is the UTF-16 length. A group is one or two keys, each an int, a long, or a
+ * string. A string measure emits count, min, and max. Order is one int, long, or string column,
+ * then a limit. Anything else names its node.
  */
 private object SqlConvert:
 

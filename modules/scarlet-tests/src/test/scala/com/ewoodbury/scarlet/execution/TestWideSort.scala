@@ -105,6 +105,22 @@ class TestWideSort extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     )
   }
 
+  "a null string beside an empty string" should "tie on empty and keep the cell" in {
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.nullableStrings("s", Array("", "a", "b"), Array(true, false, true)),
+        ),
+        1,
+      )
+      .sortColumn(0, descending = false)
+    both(planned) shouldBe List(
+      Vector(Cell.Utf8("")),
+      Vector(Cell.Null),
+      Vector(Cell.Utf8("b")),
+    )
+  }
+
   "a null string" should "order as empty and stay null" in {
     val planned = DistCollection
       .ofColumns(

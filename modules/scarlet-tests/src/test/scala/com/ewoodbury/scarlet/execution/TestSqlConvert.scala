@@ -281,6 +281,39 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     kept shouldBe 2457L
   }
 
+  "not like" should "drop a null and a match" in {
+    val table = DistCollection.ofColumns(
+      Vector(
+        WideInput.nullableStrings(
+          "URL",
+          Array("agoogle", "Google", "", "%xa", "x"),
+          Array(true, true, true, true, false),
+        ),
+      ),
+      2,
+    )
+    val tables = Map("hits" -> table)
+    val (kept, shape) = value("select count(*) from hits where URL not like '%google%'", tables)
+    kept shouldBe 3L
+    shape shouldBe "WideFilter0(Scan)"
+    val (matched, _) = value("select count(*) from hits where URL like '%a'", tables)
+    matched shouldBe 1L
+  }
+
+  "or of like" should "name the node" in {
+    val table = DistCollection.ofColumns(
+      Vector(WideInput.strings("URL", Array("agoogle", "bing"))),
+      2,
+    )
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(
+        "select count(*) from hits where URL like '%google%' or URL like '%bing%'",
+        Map("hits" -> table),
+      )
+    }
+    thrown.getMessage should include("LikeExpression")
+  }
+
   "like" should "match query 20" in {
     val (result, shape) = value(
       "select count(*) from hits where URL like '%google%'",

@@ -96,6 +96,21 @@ class TestStringText extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     )
   }
 
+  it should "drop a null string key" in {
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.nullableStrings("k", Array("k", "z", "k"), Array(true, false, true)),
+          WideInput.strings("u", Array("b", "z", "a")),
+        ),
+        2,
+      )
+      .groupColumns(0, 1)
+    cells(both(planned)) shouldBe cellsOf(
+      List(Vector(Cell.Utf8("k"), Cell.Int64(2L), Cell.Utf8("a"), Cell.Utf8("b"))),
+    )
+  }
+
   it should "emit null min and max when every measure is null" in {
     val planned = DistCollection
       .ofColumns(
@@ -165,6 +180,24 @@ class TestStringText extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       Vector(6)
   }
 
+  it should "treat a percent sign in the text as data" in {
+    idsOf(
+      percents.filterColumn(1, ColumnCompare(CompareOp.Like, ColumnLiteral.Utf8("%a"))),
+    ) shouldBe
+      Vector(1)
+    idsOf(
+      percents.filterColumn(1, ColumnCompare(CompareOp.Like, ColumnLiteral.Utf8("%bc"))),
+    ) shouldBe Vector(2)
+    idsOf(
+      percents.filterColumn(1, ColumnCompare(CompareOp.Like, ColumnLiteral.Utf8("%"))),
+    ) shouldBe
+      Vector(1, 2, 3, 4)
+    idsOf(
+      percents.filterColumn(1, ColumnCompare(CompareOp.Like, ColumnLiteral.Utf8("a%"))),
+    ) shouldBe
+      Vector(4)
+  }
+
   "not like" should "drop a null and a match" in {
     idsOf(
       texts.filterColumn(1, ColumnCompare(CompareOp.Unlike, ColumnLiteral.Utf8("%google%"))),
@@ -172,6 +205,19 @@ class TestStringText extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     idsOf(texts.filterColumn(1, ColumnCompare(CompareOp.Unlike, ColumnLiteral.Utf8("%")))) shouldBe
       Vector.empty[Int]
   }
+
+  private val percents: DistCollection[WideRow] =
+    DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("id", Array(1, 2, 3, 4, 5)),
+        WideInput.nullableStrings(
+          "s",
+          Array("%xa", "%abc", "%x", "a%", "x"),
+          Array(true, true, true, true, false),
+        ),
+      ),
+      2,
+    )
 
   private val texts: DistCollection[WideRow] =
     DistCollection.ofColumns(
