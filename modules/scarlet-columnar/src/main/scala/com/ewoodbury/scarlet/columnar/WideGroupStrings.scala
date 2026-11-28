@@ -7,10 +7,11 @@ import com.ewoodbury.scarlet.core.{ColumnField, ColumnKind, WideAggregate}
 /**
  * Groups when the measure is a string.
  *
- * Output is the key or keys, then count, min, and max. There is no sum. Min and max use JVM
- * `compareTo`, so dictionary code order is not string order. A null key is dropped. An empty
- * string is a value. A null measure increments count and does not change min or max. A key whose
- * measures are all null still emits a row, with min and max null. Output order is not a contract.
+ * Output is the key or keys, then count, min, and max. There is no sum. `textMin` appends the min
+ * of one other string column. Min and max use JVM `compareTo`, so dictionary code order is not
+ * string order. A null key is dropped. An empty string is a value. A null measure increments count
+ * and does not change min or max. A key whose measures are all null still emits a row, with min
+ * and max null. Output order is not a contract.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object WideGroupStrings:
@@ -21,18 +22,23 @@ object WideGroupStrings:
       key: Int,
       measure: Int,
       key2: Option[Int],
+      textMin: Option[Int],
   ): (Vector[ColumnField], ColumnBatch) =
-    val out = WideAggregate.output(fields, key, measure, key2).getOrElse {
+    val out = WideAggregate.output(fields, key, measure, key2, None, textMin).getOrElse {
       throw new IllegalArgumentException(
         s"columns $key, $key2, and $measure of ${fields.map(_.kind)} do not group",
       )
     }
     val right = key2.map(second => fields(second).kind)
-    val table = new Table(fields(key).kind, right)
+    val table = new Table(fields(key).kind, right, textMin)
     table.absorb(batches, key, measure, key2)
     (out, table.emit())
 
-  private final class Table(leftKind: ColumnKind, rightKind: Option[ColumnKind]):
+  private final class Table(
+      leftKind: ColumnKind,
+      rightKind: Option[ColumnKind],
+      textMin: Option[Int],
+  ):
     private var cap = 16
     private var used = new Array[Boolean](cap)
     private var size = 0
@@ -44,6 +50,8 @@ object WideGroupStrings:
     private var seen = new Array[Boolean](cap)
     private var mins = new Array[String](cap)
     private var maxs = new Array[String](cap)
+    private var secondSeen = new Array[Boolean](cap)
+    private var secondText = new Array[String](cap)
 
     def absorb(batches: Seq[ColumnBatch], key: Int, measure: Int, key2: Option[Int]): Unit =
       batches.foreach { batch =>
@@ -53,6 +61,9 @@ object WideGroupStrings:
             val slot = slotOf(batch, key, key2, row)
             counts(slot) += 1L
             if present(batch, measure, row) then note(slot, textAt(batch, measure, row))
+            textMin.foreach { ordinal =>
+              if present(batch, ordinal, row) then noteSecond(slot, textAt(batch, ordinal, row))
+            }
           row += 1
       }
 
@@ -70,7 +81,7 @@ object WideGroupStrings:
         countColumn(slots),
         textColumn(slots, minimum = true),
         textColumn(slots, minimum = false),
-      )
+      ) ++ secondColumns(slots)
       new ColumnBatch(columns.map(_.logicalType), columns, rows)
 
     private def keys(slots: Array[Int]): Vector[Column] =
@@ -119,6 +130,8 @@ object WideGroupStrings:
       val oldSeen = seen
       val oldMins = mins
       val oldMaxs = maxs
+      val oldSecondSeen = secondSeen
+      val oldSecondText = secondText
       val mapping = new Array[Int](oldCap)
       Arrays.fill(mapping, -1)
       cap *= 2
@@ -131,6 +144,8 @@ object WideGroupStrings:
       seen = new Array[Boolean](cap)
       mins = new Array[String](cap)
       maxs = new Array[String](cap)
+      secondSeen = new Array[Boolean](cap)
+      secondText = new Array[String](cap)
       size = 0
       var row = 0
       while row < oldCap do
@@ -146,6 +161,8 @@ object WideGroupStrings:
           seen(dest) = oldSeen(row)
           mins(dest) = oldMins(row)
           maxs(dest) = oldMaxs(row)
+          secondSeen(dest) = oldSecondSeen(row)
+          secondText(dest) = oldSecondText(row)
         row += 1
 
     private def note(slot: Int, value: String): Unit =
@@ -156,6 +173,12 @@ object WideGroupStrings:
       else
         if value.compareTo(mins(slot)) < 0 then mins(slot) = value
         if value.compareTo(maxs(slot)) > 0 then maxs(slot) = value
+
+    private def noteSecond(slot: Int, value: String): Unit =
+      if !secondSeen(slot) then
+        secondSeen(slot) = true
+        secondText(slot) = value
+      else if value.compareTo(secondText(slot)) < 0 then secondText(slot) = value
 
     private def same(
         index: Int,
@@ -204,6 +227,15 @@ object WideGroupStrings:
         values(row) = counts(slots(row))
         row += 1
       Int64Column.of(values, Validity.allValid(slots.length), slots.length)
+
+    private def secondColumns(slots: Array[Int]): Vector[Column] =
+      if textMin.isEmpty then Vector.empty
+      else
+        val values = Vector.tabulate(slots.length) { row =>
+          val slot = slots(row)
+          if secondSeen(slot) then Some(secondText(slot)) else None
+        }
+        Vector(DictUtf8Column.fromNullable(values))
 
     private def textColumn(slots: Array[Int], minimum: Boolean): Column =
       val values = Vector.tabulate(slots.length) { row =>

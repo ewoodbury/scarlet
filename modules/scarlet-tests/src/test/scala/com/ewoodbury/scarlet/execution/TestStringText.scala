@@ -126,6 +126,90 @@ class TestStringText extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     )
   }
 
+  it should "append the min of a second string" in {
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.strings("k", Array("a", "a", "a", "b")),
+          WideInput
+            .nullableStrings("u", Array("z", "a", "m", "q"), Array(true, true, false, true)),
+          WideInput.nullableStrings(
+            "t",
+            Array("é", "e\u0301", "m", "z"),
+            Array(true, true, false, false),
+          ),
+          WideInput.longs("id", Array(1L, 2L, 1L, 9L)),
+        ),
+        2,
+      )
+      .groupStringMin(0, 1, 2, 3)
+    ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some("WideGroup(Scan)")
+    cells(both(planned)) shouldBe cellsOf(
+      List(
+        Vector(
+          Cell.Utf8("a"),
+          Cell.Int64(3L),
+          Cell.Utf8("a"),
+          Cell.Utf8("z"),
+          Cell.Utf8("e\u0301"),
+          Cell.Int64(2L),
+        ),
+        Vector(
+          Cell.Utf8("b"),
+          Cell.Int64(1L),
+          Cell.Utf8("q"),
+          Cell.Utf8("q"),
+          Cell.Null,
+          Cell.Int64(1L),
+        ),
+      ),
+    )
+  }
+
+  it should "keep the second min when the table grows" in {
+    val count = 12
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.strings("k", Array.tabulate(count)(i => "k" + i.toString)),
+          WideInput.strings("u", Array.tabulate(count)(i => "u" + i.toString)),
+          WideInput.strings("t", Array.tabulate(count)(i => "t" + i.toString)),
+        ),
+        2,
+      )
+      .groupStringMin(0, 1, 2)
+    cells(both(planned)) shouldBe cellsOf(
+      List.tabulate(count) { i =>
+        Vector(
+          Cell.Utf8("k" + i.toString),
+          Cell.Int64(1L),
+          Cell.Utf8("u" + i.toString),
+          Cell.Utf8("u" + i.toString),
+          Cell.Utf8("t" + i.toString),
+        )
+      },
+    )
+  }
+
+  it should "refuse a second string min of a number" in {
+    val planned = DistCollection.ofColumns(
+      Vector(
+        WideInput.strings("k", Array("a")),
+        WideInput.ints("q", Array(1)),
+        WideInput.strings("t", Array("b")),
+      ),
+      2,
+    )
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = planned.groupStringMin(0, 1, 2)
+    }
+    thrown.getMessage should include("string measure")
+    val same = the[IllegalArgumentException] thrownBy {
+      val _ = planned.groupStringMin(0, 2, 2)
+    }
+    same.getMessage should include("another column")
+  }
+
   it should "keep one present string beside a null measure" in {
     val planned = DistCollection
       .ofColumns(

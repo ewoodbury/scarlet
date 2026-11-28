@@ -6,7 +6,7 @@ import com.ewoodbury.scarlet.core.{ColumnField, ColumnKind, WideAggregate}
 
 /**
  * Groups one int, long, or string column. A numeric measure emits count, sum, min, and max. A
- * string measure emits count, min, and max, and has no sum.
+ * string measure emits count, min, and max, and has no sum. `textMin` appends one more string min.
  *
  * One pass over each batch. A null key is dropped. A null measure increments count and does not
  * change sum, min, or max. A key whose measures are all null still emits a row, with those
@@ -24,11 +24,14 @@ object WideGroup:
       measure: Int,
       key2: Option[Int] = None,
       distinct: Option[Int] = None,
+      textMin: Option[Int] = None,
   ): (Vector[ColumnField], ColumnBatch) =
     val text = textKey(fields, key) || key2.exists(second => textKey(fields, second))
     val stringMeasure = textKey(fields, measure)
+    refuseSecond(fields, measure, stringMeasure, textMin)
     val built =
-      if stringMeasure then WideGroupStrings.aggregate(batches, fields, key, measure, key2)
+      if stringMeasure then
+        WideGroupStrings.aggregate(batches, fields, key, measure, key2, textMin)
       else if text then WideGroupText.aggregate(batches, fields, key, measure, key2)
       else
         key2 match
@@ -37,16 +40,32 @@ object WideGroup:
     distinct match
       case None => built
       case Some(ordinal) =>
-        val full = WideAggregate.output(fields, key, measure, key2, Some(ordinal)).getOrElse {
-          throw new IllegalArgumentException(
-            s"column $ordinal of ${fields.map(_.kind)} is not a distinct count",
-          )
-        }
+        val full =
+          WideAggregate.output(fields, key, measure, key2, Some(ordinal), textMin).getOrElse {
+            throw new IllegalArgumentException(
+              s"column $ordinal of ${fields.map(_.kind)} is not a distinct count",
+            )
+          }
         val batch = WideDistinct.attach(built._2, batches, fields, key, key2, ordinal)
         (full, batch)
 
   private def textKey(fields: Vector[ColumnField], ordinal: Int): Boolean =
     ordinal >= 0 && ordinal < fields.size && fields(ordinal).kind == ColumnKind.Utf8
+
+  private def refuseSecond(
+      fields: Vector[ColumnField],
+      measure: Int,
+      stringMeasure: Boolean,
+      textMin: Option[Int],
+  ): Unit =
+    textMin.foreach { ordinal =>
+      if (!stringMeasure) then
+        throw new IllegalArgumentException("a second string min needs a string measure")
+      if (ordinal == measure) then
+        throw new IllegalArgumentException("a second string min needs another column")
+      if (!textKey(fields, ordinal)) then
+        throw new IllegalArgumentException("a second string min needs a string column")
+    }
 
   private def aggregateOne(
       batches: Seq[ColumnBatch],

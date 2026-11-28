@@ -691,7 +691,8 @@ object Plan {
    * min, and max. A null in either key is dropped. A null measure is counted and skipped by sum,
    * min, and max. A key whose measures are all null still emits a row. `key2` empty is the one-key
    * group. `distinct` appends an exact distinct count and leaves the four aggregates in place.
-   * This does not build value lists and it does not call `groupByKey`.
+   * `textMin` appends the min of one other string column when the measure is a string. This does
+   * not build value lists and it does not call `groupByKey`.
    *
    * @param source
    *   The preceding wide-row plan.
@@ -703,6 +704,8 @@ object Plan {
    *   Second group column, when the group has two keys.
    * @param distinct
    *   Column whose exact distinct count is appended, when the group asks for one.
+   * @param textMin
+   *   Other string column whose min is appended after max, when the group asks for one.
    */
   case class WideGroupOp(
       source: Plan[WideRow],
@@ -710,6 +713,7 @@ object Plan {
       measure: Int,
       key2: Option[Int] = None,
       distinct: Option[Int] = None,
+      textMin: Option[Int] = None,
   ) extends Plan[WideRow]
 
   /**

@@ -6,7 +6,7 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 import com.ewoodbury.scarlet.support.Check
 
 /**
- * Twenty-eight ClickBench queries on 4096 generated rows. This is not the hits table.
+ * Twenty-nine ClickBench queries on 4096 generated rows. This is not the hits table.
  *
  * Numbers follow the 0-based order of `clickhouse/queries.sql`. An average is the long sum and the
  * count. Query 2's width average is 3679360 / 4096. Query 3's user average is 8386588672 / 4096.
@@ -73,6 +73,13 @@ object ClickBenchSlice:
   val urlMix: Long = -1500008808850017596L
   val urlGroups: Long = 6L
 
+  /**
+   * Query 22. Four phrases. The checker sorts by the count. Min of the URL is not `.google.`, and
+   * min of the title is not `AAA`.
+   */
+  val twoMinMix: Long = 8815493031513626747L
+  val twoMinGroups: Long = 4L
+
   /** Present URLs matching `%google%`. Null URLs are dropped. */
   val likeUrlsCount: Long = 2315L
 
@@ -129,7 +136,7 @@ object ClickBenchSlice:
     "19 This file. One long equality. The published query names a literal this file does not hold.",
     "20 string pattern match. This file.",
     "21 pattern match and the min of a string. This file. The checker applies the order.",
-    "22 pattern match, two string mins, and a distinct count. Missing: a second string min.",
+    "22 This file. Two string mins. The checker sorts. The published query also limits.",
     "23 pattern match, then sort. This file.",
     "24 string filter, then sort and limit. This file.",
     "25 sort by a string. This file.",
@@ -230,6 +237,18 @@ object ClickBenchSlice:
       .filterColumn(3, ColumnCompare(CompareOp.Ne, ColumnLiteral.Utf8("")))
       .groupColumns(3, 4)
 
+  /**
+   * Query 22: a title match, a URL that is not a google host, and a non-empty phrase. The measure
+   * is the URL, so the row also keeps that URL's max. The second min is the title. Distinct users
+   * repeat inside a phrase. The published statement also limits.
+   */
+  def searchGroups(): DistCollection[WideRow] =
+    searchHits()
+      .filterColumn(5, ColumnCompare(CompareOp.Like, ColumnLiteral.Utf8("%Google%")))
+      .filterColumn(4, ColumnCompare(CompareOp.Unlike, ColumnLiteral.Utf8("%.google.%")))
+      .filterColumn(3, ColumnCompare(CompareOp.Ne, ColumnLiteral.Utf8("")))
+      .groupStringMin(3, 4, 5, 2)
+
   /** Query 23: LIKE, then the long UserID standing in for EventTime, then ten rows. */
   def likeSorted(): DistCollection[WideRow] =
     likeUrls().sortColumn(2, descending = true).limitColumns(10)
@@ -257,8 +276,25 @@ object ClickBenchSlice:
   def phrasesAndUrls(): DistCollection[WideRow] =
     DistCollection.ofColumns(scanInputs() :+ phraseColumn("p", 4) :+ urlColumn(), partitions)
 
+  /** Query 22 columns. UserID repeats. Phrase, URL, and title each carry their own nulls. */
+  def searchHits(): DistCollection[WideRow] =
+    DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("AdvEngineID", Array.tabulate(rowCount)(index => index % 8)),
+        WideInput.ints("ResolutionWidth", Array.tabulate(rowCount)(index => 800 + (index % 200))),
+        WideInput.longs("UserID", Array.tabulate(rowCount)(index => (index % 32).toLong)),
+        searchPhrase(),
+        searchUrl(),
+        searchTitle(),
+      ),
+      partitions,
+    )
+
   def stringGroupChecksum(rows: Iterable[WideRow]): Long =
     rows.toVector.sortWith(stringGroupBefore).foldLeft(0L)(mixStringGroup)
+
+  def twoMinChecksum(rows: Iterable[WideRow]): Long =
+    rows.toVector.sortWith(stringGroupBefore).foldLeft(0L)(mixTwoMin)
 
   def userPhraseChecksum(rows: Iterable[WideRow]): Long =
     rows.foldLeft(0L)(mixUserPhrase)
@@ -389,6 +425,49 @@ object ClickBenchSlice:
       Array.tabulate(rowCount)(index => index % 17 != 0),
     )
 
+  private def searchPhrase(): WideInput =
+    WideInput.nullableStrings(
+      "SearchPhrase",
+      Array.tabulate(rowCount)(searchPhraseText),
+      Array.tabulate(rowCount)(index => index % 13 != 0),
+    )
+
+  private def searchPhraseText(index: Int): String =
+    if (index % 5 == 0) then "" else "p" + (index % 4).toString
+
+  private def searchUrl(): WideInput =
+    WideInput.nullableStrings(
+      "URL",
+      Array.tabulate(rowCount)(searchUrlText),
+      Array.tabulate(rowCount)(index => index % 17 != 0),
+    )
+
+  private def searchUrlText(index: Int): String =
+    val kind = index % 6
+    if kind == 0 then ".google."
+    else if kind == 1 then "https://www.google.com/search"
+    else if kind == 2 then "agoogle"
+    else if kind == 3 then "https://example.com/"
+    else if kind == 4 then "é"
+    else "e\u0301"
+
+  private def searchTitle(): WideInput =
+    WideInput.nullableStrings(
+      "Title",
+      Array.tabulate(rowCount)(searchTitleText),
+      Array.tabulate(rowCount)(index => index % 19 != 0),
+    )
+
+  private def searchTitleText(index: Int): String =
+    val kind = index % 7
+    if kind == 0 then "AAA"
+    else if kind == 1 then "AGoogle"
+    else if kind == 2 then "Google"
+    else if kind == 3 then "zGoogle"
+    else if kind == 4 then "agoogle"
+    else if kind == 5 then "éGoogle"
+    else "e\u0301Google"
+
   private def urlText(index: Int): String =
     val kind = (index / 4) % 5
     if kind == 0 then "https://www.google.com/search"
@@ -464,6 +543,12 @@ object ClickBenchSlice:
       counted("query 20", likeUrls().plan, likeUrlsCount),
       shaped("query 21", likeGroups().plan, "WideGroup(WideFilter3(WideFilter4(Scan)))"),
       counted("query 21", likeGroups().plan, 4L),
+      shaped(
+        "query 22",
+        searchGroups().plan,
+        "WideGroup(WideFilter3(WideFilter4(WideFilter5(Scan))))",
+      ),
+      counted("query 22", searchGroups().plan, twoMinGroups),
       shaped("query 23", likeSorted().plan, "WideLimit(WideSort(WideFilter3(Scan)))"),
       counted("query 23", likeSorted().plan, 10L),
       shaped(
@@ -507,6 +592,7 @@ object ClickBenchSlice:
       both("query 29", sumWidthPlus)(widthPlus().sumLongColumn(5)),
       both("query 20", likeUrlsCount)(likeUrls().count()),
       both("query 21", stringMinMix)(stringGroupChecksum(likeGroups().collect())),
+      both("query 22", twoMinMix)(twoMinChecksum(searchGroups().collect())),
       both("query 23", likeSortMix)(userChecksum(likeSorted().collect())),
       both("query 24", phraseFilterSortMix)(userPhraseChecksum(filteredPhrases().collect())),
       both("query 25", phraseSortMix)(userPhraseChecksum(sortedPhrases().collect())),
@@ -720,6 +806,20 @@ object ClickBenchSlice:
   private def mixStringGroup(acc: Long, row: WideRow): Long = cells(row) match
     case Vector(Cell.Utf8(key), Cell.Int64(count), Cell.Utf8(min), Cell.Utf8(max)) =>
       foldText(foldText(foldText(acc, key) * 31L + count, min), max)
+    case other => refuse(other.size)
+
+  private def mixTwoMin(acc: Long, row: WideRow): Long = cells(row) match
+    case Vector(
+          Cell.Utf8(key),
+          Cell.Int64(count),
+          Cell.Utf8(minUrl),
+          Cell.Utf8(maxUrl),
+          Cell.Utf8(minTitle),
+          Cell.Int64(distinct),
+        ) =>
+      val folded =
+        foldText(foldText(foldText(foldText(acc, key) * 31L + count, minUrl), maxUrl), minTitle)
+      folded * 31L + distinct
     case other => refuse(other.size)
 
   private def mixUserPhrase(acc: Long, row: WideRow): Long =

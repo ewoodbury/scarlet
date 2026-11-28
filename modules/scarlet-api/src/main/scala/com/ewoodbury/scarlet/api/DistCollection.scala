@@ -198,6 +198,53 @@ final case class DistCollection[A](plan: Plan[A]):
     acceptDistinct(key, measure, Some(key2), distinct)
     DistCollection(Plan.WideGroupOp(widePlan, key, measure, Some(key2), Some(distinct)))
 
+  /**
+   * Groups one string measure and appends the min of one other string column. Count, min, and max
+   * stay. There is no sum. A null key is dropped. A null string is skipped by both mins.
+   */
+  def groupStringMin(key: Int, measure: Int, textMin: Int)(using
+      ev: A =:= WideRow,
+  ): DistCollection[WideRow] =
+    acceptStringMin(key, measure, textMin, None)
+    DistCollection(Plan.WideGroupOp(widePlan, key, measure, None, None, Some(textMin)))
+
+  /** [[groupStringMin]] with an exact distinct count appended after the second min. */
+  def groupStringMin(key: Int, measure: Int, textMin: Int, distinct: Int)(using
+      ev: A =:= WideRow,
+  ): DistCollection[WideRow] =
+    acceptDistinct(key, measure, None, distinct)
+    acceptStringMin(key, measure, textMin, Some(distinct))
+    DistCollection(
+      Plan.WideGroupOp(widePlan, key, measure, None, Some(distinct), Some(textMin)),
+    )
+
+  private def acceptStringMin(key: Int, measure: Int, textMin: Int, distinct: Option[Int])(using
+      ev: A =:= WideRow,
+  ): Unit =
+    require(textMin != measure, "a second string min needs another column")
+    WideFields.known(widePlan).foreach { fields =>
+      if (WideAggregate.output(fields, key, measure, None, distinct, Some(textMin)).isEmpty) then
+        refuseStringMin(fields, key, measure, textMin)
+    }
+
+  private def refuseStringMin(
+      fields: Vector[ColumnField],
+      key: Int,
+      measure: Int,
+      textMin: Int,
+  ): Unit =
+    if (!stringColumn(fields, measure)) then
+      throw new IllegalArgumentException("a second string min needs a string measure")
+    else if (!stringColumn(fields, textMin)) then
+      throw new IllegalArgumentException("a second string min needs a string column")
+    else
+      throw new IllegalArgumentException(
+        s"columns $key and $textMin of ${fields.map(_.kind)} do not group",
+      )
+
+  private def stringColumn(fields: Vector[ColumnField], ordinal: Int): Boolean =
+    fields.lift(ordinal).exists(field => field.kind == ColumnKind.Utf8)
+
   private def acceptDistinct(key: Int, measure: Int, key2: Option[Int], distinct: Int)(using
       ev: A =:= WideRow,
   ): Unit =
