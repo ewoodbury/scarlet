@@ -2,16 +2,16 @@ package com.ewoodbury.scarlet.columnar
 
 import java.util.Arrays
 
-import com.ewoodbury.scarlet.core.{ColumnField, ColumnKind, WideAggregate}
+import com.ewoodbury.scarlet.core.{ColumnField, ColumnKind, TextRule, WideAggregate}
 
 /**
  * Groups when the measure is a string.
  *
  * Output is the key or keys, then count, min, and max. There is no sum. `textMin` appends the min
- * of one other string column. Min and max use JVM `compareTo`, so dictionary code order is not
- * string order. A null key is dropped. An empty string is a value. A null measure increments count
- * and does not change min or max. A key whose measures are all null still emits a row, with min
- * and max null. Output order is not a contract.
+ * of one other string column. Min and max use [[TextRule.compare]], so dictionary code order is
+ * not string order. A null key is dropped. An empty string is a value. A null measure increments
+ * count and does not change min or max. A key whose measures are all null still emits a row, with
+ * min and max null. Output order is not a contract.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object WideGroupStrings:
@@ -171,14 +171,14 @@ object WideGroupStrings:
         mins(slot) = value
         maxs(slot) = value
       else
-        if value.compareTo(mins(slot)) < 0 then mins(slot) = value
-        if value.compareTo(maxs(slot)) > 0 then maxs(slot) = value
+        if TextRule.compare(value, mins(slot)) < 0 then mins(slot) = value
+        if TextRule.compare(value, maxs(slot)) > 0 then maxs(slot) = value
 
     private def noteSecond(slot: Int, value: String): Unit =
       if !secondSeen(slot) then
         secondSeen(slot) = true
         secondText(slot) = value
-      else if value.compareTo(secondText(slot)) < 0 then secondText(slot) = value
+      else if TextRule.compare(value, secondText(slot)) < 0 then secondText(slot) = value
 
     private def same(
         index: Int,

@@ -228,7 +228,7 @@ private[scarlet] object WideCompute:
           cast(columns(input).cell(row), to)
         case ColumnExpr.Len(input) =>
           columns(input).cell(row) match
-            case Cell.Utf8(value) => Cell.Int32(value.length)
+            case Cell.Utf8(value) => Cell.Int32(TextRule.length(value))
             case other =>
               throw new IllegalArgumentException(s"length of $other is not supported")
         case ColumnExpr.Host(input) =>

@@ -1,6 +1,6 @@
 package com.ewoodbury.scarlet.columnar
 
-import com.ewoodbury.scarlet.core.HostText
+import com.ewoodbury.scarlet.core.{HostText, TextRule}
 
 /**
  * UTF-16 length of a string column.
@@ -19,7 +19,7 @@ object WideText:
       while row < count do
         if texts.isValid(row) then
           present(row) = true
-          values(row) = texts.dictionary(texts.codes(row)).length
+          values(row) = TextRule.length(texts.dictionary(texts.codes(row)))
         row += 1
       Int32Column.of(values, Validity.pack(count, at => present(at)), count)
     case other =>

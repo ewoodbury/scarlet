@@ -10,10 +10,10 @@ import com.ewoodbury.scarlet.core.*
  *
  * A null key is dropped. A null measure increments count and is skipped by sum, min, and max. A
  * key whose measures are all null still emits a row. A string measure emits count, min, and max,
- * and has no sum. `textMin` appends the min of one other string. String order is JVM `compareTo`.
- * `sum2` appends the sum of one other int or long. `distinct` appends the size of that key's set
- * after those values. Int sums widen to long. Long sums wrap. The plan is not `GroupByKey`, and
- * this fold does not build a list of values.
+ * and has no sum. `textMin` appends the min of one other string. String order is
+ * [[TextRule.compare]]. `sum2` appends the sum of one other int or long. `distinct` appends the
+ * size of that key's set after those values. Int sums widen to long. Long sums wrap. The plan is
+ * not `GroupByKey`, and this fold does not build a list of values.
  */
 private[execution] object WideGroupRows:
 
@@ -169,14 +169,14 @@ private[execution] object WideGroupRows:
         textMin = value
         textMax = value
       else
-        if (value.compareTo(textMin) < 0) then textMin = value
-        if (value.compareTo(textMax) > 0) then textMax = value
+        if (TextRule.compare(value, textMin) < 0) then textMin = value
+        if (TextRule.compare(value, textMax) > 0) then textMax = value
 
     def addSecond(value: String): Unit =
       if (!secondSeen) then
         secondSeen = true
         secondText = value
-      else if (value.compareTo(secondText) < 0) then secondText = value
+      else if (TextRule.compare(value, secondText) < 0) then secondText = value
 
     def addExtra(value: Long): Unit = extraSum += value
 

@@ -332,6 +332,38 @@ class TestStringText extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       Vector(4)
   }
 
+  "string order" should "agree with compareTo" in {
+    val samples = Vector("", "a", "b", "B", "é", "e\u0301")
+    samples.foreach { left =>
+      samples.foreach { right =>
+        TextRule.compare(left, right) shouldBe left.compareTo(right)
+      }
+    }
+    val planned = DistCollection
+      .ofColumns(Vector(WideInput.strings("s", samples.toArray)), 2)
+      .sortColumn(0, descending = false)
+    textsOf(planned) shouldBe samples.sortWith((left, right) => left.compareTo(right) < 0)
+    val reversed = planned.sortColumn(0, descending = true)
+    textsOf(reversed) shouldBe samples.sortWith((left, right) => left.compareTo(right) > 0)
+  }
+
+  "like" should "agree with LikeMatch" in {
+    val pattern = "a_c%"
+    val rows = Vector("ac", "axc", "abc", "a", "abbc", "é", "")
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.ints("id", rows.indices.map(_ + 1).toArray),
+          WideInput.strings("s", rows.toArray),
+        ),
+        2,
+      )
+      .filterColumn(1, ColumnCompare(CompareOp.Like, ColumnLiteral.Utf8(pattern)))
+    idsOf(planned) shouldBe rows.zipWithIndex.collect {
+      case (text, index) if LikeMatch.matches(text, pattern) => index + 1
+    }
+  }
+
   "not like" should "drop a null and a match" in {
     idsOf(
       texts.filterColumn(1, ColumnCompare(CompareOp.Unlike, ColumnLiteral.Utf8("%google%"))),
@@ -373,6 +405,23 @@ class TestStringText extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val rows = ids(planned)
     columnar shouldBe rows
     columnar
+
+  private def textsOf(planned: DistCollection[WideRow]): Vector[String] =
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = true))
+    val columnar = textsIn(planned)
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = false))
+    val rows = textsIn(planned)
+    columnar shouldBe rows
+    columnar
+
+  private def textsIn(planned: DistCollection[WideRow]): Vector[String] =
+    planned
+      .collect()
+      .map(row => Check.first(row.cells))
+      .collect { case Cell.Utf8(value) =>
+        value
+      }
+      .toVector
 
   private def ids(planned: DistCollection[WideRow]): Vector[Int] =
     planned

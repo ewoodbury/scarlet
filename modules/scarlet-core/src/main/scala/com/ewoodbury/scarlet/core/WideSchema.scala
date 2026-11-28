@@ -39,12 +39,12 @@ object CompareOp:
     case Like | Unlike =>
       throw new IllegalArgumentException("a pattern is not ordered")
 
-  /** JVM string order, or a `LIKE` match. `"é"` and `"e\u0301"` stay different. */
+  /** [[TextRule]] order, or a [[LikeMatch]]. `"é"` and `"e\u0301"` stay different. */
   def text(op: CompareOp, value: String, constant: String): Boolean = op match
-    case Gt => value.compareTo(constant) > 0
-    case Ge => value.compareTo(constant) >= 0
-    case Lt => value.compareTo(constant) < 0
-    case Le => value.compareTo(constant) <= 0
+    case Gt => TextRule.compare(value, constant) > 0
+    case Ge => TextRule.compare(value, constant) >= 0
+    case Lt => TextRule.compare(value, constant) < 0
+    case Le => TextRule.compare(value, constant) <= 0
     case Eq => value == constant
     case Ne => value != constant
     case Like => LikeMatch.matches(value, constant)
