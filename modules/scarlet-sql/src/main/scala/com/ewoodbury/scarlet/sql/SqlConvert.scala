@@ -23,8 +23,9 @@ import com.ewoodbury.scarlet.core.*
  * NOT, arithmetic, count, sum, min, max, and an exact count of distinct values. A string compares
  * with JVM order. `LIKE` uses `%` and `_`, and it combines with AND and NOT. OR of `LIKE` names
  * the node. `length` is the UTF-16 length. A group is one or two keys. A key is an int, a long, a
- * string, or arithmetic on an int or a long. A string measure emits count, min, and max. Order is
- * one int, long, or string column, then a limit. Anything else names its node.
+ * string, or arithmetic on an int or a long. `extract(minute from` an int64 epoch`)` and
+ * `date_trunc('minute',` that epoch`)` are computes. A string measure emits count, min, and max.
+ * Order is one int, long, or string column, then a limit. Anything else names its node.
  */
 private object SqlConvert:
 
@@ -540,8 +541,38 @@ private object SqlConvert:
     case sub: Subtraction => binary(sub, frame, ColumnExpr.Sub.apply)
     case mul: Multiplication => binary(mul, frame, ColumnExpr.Mul.apply)
     case div: Division => binary(div, frame, ColumnExpr.Div.apply)
-    case function: Function => lengthOf(function, frame)
+    case extract: ExtractExpression => minuteOf(extract, frame)
+    case function: Function =>
+      if dateTrunc(function) then truncMinute(function, frame) else lengthOf(function, frame)
     case other => unsupported(other)
+
+  private def minuteOf(extract: ExtractExpression, frame: Frame): (Frame, Int) =
+    val name = extract.getName
+    if name == null || !name.equalsIgnoreCase("minute") then unsupported(extract)
+    val inner = extract.getExpression
+    if inner == null then unsupported(extract)
+    val (placed, ordinal) = side(inner, frame)
+    kindAt(placed, ordinal) match
+      case ColumnKind.Int64 => placed.bind(ColumnExpr.Minute(ordinal))
+      case other => throw new IllegalArgumentException(s"minute of $other is not supported")
+
+  private def dateTrunc(function: Function): Boolean =
+    val name = function.getName
+    name != null && name.equalsIgnoreCase("date_trunc")
+
+  private def truncMinute(function: Function, frame: Frame): (Frame, Int) =
+    if function.isDistinct || function.isUnique then unsupported(function)
+    val args = arguments(function)
+    if args.size != 2 then unsupported(function)
+    args.headOption match
+      case Some(text: StringValue) if text.getValue.equalsIgnoreCase("minute") => ()
+      case Some(other) => unsupported(other)
+      case None => unsupported(function)
+    val column = args.drop(1).headOption.getOrElse(unsupported(function))
+    val (placed, ordinal) = side(column, frame)
+    kindAt(placed, ordinal) match
+      case ColumnKind.Int64 => placed.bind(ColumnExpr.TruncMinute(ordinal))
+      case other => throw new IllegalArgumentException(s"minute of $other is not supported")
 
   private def lengthOf(function: Function, frame: Frame): (Frame, Int) =
     val name = function.getName
@@ -563,6 +594,7 @@ private object SqlConvert:
 
   private def aggregate(item: SelectItem[?]): Option[Aggregate] =
     unwrap(expressionOf(item)) match
+      case function: Function if dateTrunc(function) => None
       case function: Function =>
         if function.isDistinct then Some(distinctAggregate(function))
         else if function.isUnique then unsupported(function)
@@ -633,8 +665,12 @@ private object SqlConvert:
           case other => throw new IllegalArgumentException(s"group key $other is not supported")
       case None =>
         val bare = unwrap(expression)
-        if !referencesColumn(bare) then unsupported(bare)
-        val (bound, ordinal) = arithmeticKey(bare, frame)
+        val (bound, ordinal) = bare match
+          case extract: ExtractExpression => minuteOf(extract, frame)
+          case function: Function if dateTrunc(function) => truncMinute(function, frame)
+          case _ =>
+            if !referencesColumn(bare) then unsupported(bare)
+            arithmeticKey(bare, frame)
         kindAt(bound, ordinal) match
           case ColumnKind.Int32 | ColumnKind.Int64 => (bound, ordinal)
           case other => throw new IllegalArgumentException(s"group key $other is not supported")
@@ -701,7 +737,33 @@ private object SqlConvert:
       case (leftSub: Subtraction, rightSub: Subtraction) => sameBinary(leftSub, rightSub)
       case (leftMul: Multiplication, rightMul: Multiplication) => sameBinary(leftMul, rightMul)
       case (leftDiv: Division, rightDiv: Division) => sameBinary(leftDiv, rightDiv)
+      case (leftExtract: ExtractExpression, rightExtract: ExtractExpression) =>
+        val leftName = leftExtract.getName
+        val rightName = rightExtract.getName
+        val leftInner = leftExtract.getExpression
+        val rightInner = rightExtract.getExpression
+        leftName != null && rightName != null && leftName.equalsIgnoreCase(rightName) &&
+        leftInner != null && rightInner != null && sameExpression(leftInner, rightInner)
+      case (leftFunction: Function, rightFunction: Function)
+          if dateTrunc(leftFunction) && dateTrunc(rightFunction) =>
+        sameTrunc(leftFunction, rightFunction)
       case _ => false
+
+  private def sameTrunc(left: Function, right: Function): Boolean =
+    val leftArgs = arguments(left)
+    val rightArgs = arguments(right)
+    if leftArgs.length != 2 || rightArgs.length != 2 then false
+    else
+      val units = (leftArgs.headOption, rightArgs.headOption) match
+        case (Some(leftText: StringValue), Some(rightText: StringValue)) =>
+          val leftUnit = leftText.getValue
+          val rightUnit = rightText.getValue
+          leftUnit != null && rightUnit != null && leftUnit.equalsIgnoreCase(rightUnit)
+        case _ => false
+      val columns = (leftArgs.lift(1), rightArgs.lift(1)) match
+        case (Some(leftColumn), Some(rightColumn)) => sameExpression(leftColumn, rightColumn)
+        case _ => false
+      units && columns
 
   private def sameBinary(left: BinaryExpression, right: BinaryExpression): Boolean =
     sameExpression(left.getLeftExpression, right.getLeftExpression) &&

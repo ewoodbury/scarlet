@@ -51,6 +51,10 @@ object WideExpr:
         cast(at(batch, input), to, length)
       case ColumnExpr.Len(input) =>
         WideText.length(at(batch, input), length)
+      case ColumnExpr.Minute(input) =>
+        WideEpoch.minute(at(batch, input), length)
+      case ColumnExpr.TruncMinute(input) =>
+        WideEpoch.truncate(at(batch, input), length)
 
   private def arithmetic(
       batch: ColumnBatch,

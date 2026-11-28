@@ -158,6 +158,106 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     shape shouldBe "WideGroup(Scan)"
   }
 
+  "a minute" should "match query 18" in {
+    val sql =
+      """select extract(minute from EventTime), count(*)
+        |from hits group by extract(minute from EventTime)""".stripMargin
+    val tables = Map("hits" -> ClickBenchSlice.events())
+    val (columnar, shape) = listed(sql, columnar = true, tables)
+    val (rows, _) = listed(sql, columnar = false, tables)
+    shape shouldBe "WideProject(WideGroup(WideCompute(Scan)))"
+    columnar.length shouldBe 60
+    rows.length shouldBe 60
+    countFor(columnar, 0) shouldBe 120L
+    countFor(rows, 0) shouldBe 120L
+    countFor(columnar, 8) shouldBe 76L
+    countFor(rows, 8) shouldBe 76L
+    countOnly(columnar) shouldBe ClickBenchSlice.countAll
+    countOnly(rows) shouldBe ClickBenchSlice.countAll
+  }
+
+  "a truncated minute" should "match query 42" in {
+    val sql =
+      """select date_trunc('minute', EventTime), count(*)
+        |from hits group by date_trunc('minute', EventTime)""".stripMargin
+    val tables = Map("hits" -> ClickBenchSlice.events())
+    val (columnar, shape) = listed(sql, columnar = true, tables)
+    val (rows, _) = listed(sql, columnar = false, tables)
+    shape shouldBe "WideProject(WideGroup(WideCompute(Scan)))"
+    columnar.length shouldBe 69
+    rows.length shouldBe 69
+    countForLong(columnar, 0L) shouldBe 60L
+    countForLong(rows, 0L) shouldBe 60L
+    countForLong(columnar, 4080L) shouldBe 16L
+    countForLong(rows, 4080L) shouldBe 16L
+    countOnly(columnar) shouldBe ClickBenchSlice.countAll
+    countOnly(rows) shouldBe ClickBenchSlice.countAll
+  }
+
+  "a negative epoch" should "floor to the previous minute" in {
+    val table = DistCollection.ofColumns(
+      Vector(WideInput.longs("EventTime", Array(-1L, 0L, 61L))),
+      1,
+    )
+    val tables = Map("hits" -> table)
+    val (minutes, minuteShape) = listed(
+      "select extract(minute from EventTime) from hits",
+      columnar = true,
+      tables,
+    )
+    val (minuteRows, _) = listed(
+      "select extract(minute from EventTime) from hits",
+      columnar = false,
+      tables,
+    )
+    minuteShape shouldBe "WideProject(WideCompute(Scan))"
+    minutes.map(_.cells) shouldBe minuteRows.map(_.cells)
+    minutes.map(_.cells) shouldBe List(
+      Vector(Cell.Int32(59)),
+      Vector(Cell.Int32(0)),
+      Vector(Cell.Int32(1)),
+    )
+    val (truncated, truncShape) = listed(
+      "select date_trunc('minute', EventTime) from hits",
+      columnar = true,
+      tables,
+    )
+    val (truncRows, _) = listed(
+      "select date_trunc('minute', EventTime) from hits",
+      columnar = false,
+      tables,
+    )
+    truncShape shouldBe "WideProject(WideCompute(Scan))"
+    truncated.map(_.cells) shouldBe truncRows.map(_.cells)
+    truncated.map(_.cells) shouldBe List(
+      Vector(Cell.Int64(-60L)),
+      Vector(Cell.Int64(0L)),
+      Vector(Cell.Int64(60L)),
+    )
+  }
+
+  "an hour extract" should "name the node" in {
+    named("select extract(hour from id) from tiny", "ExtractExpression")
+  }
+
+  "a day truncation" should "name the node" in {
+    named("select date_trunc('day', id) from tiny", "StringValue")
+  }
+
+  "a minute of an int" should "stay out" in {
+    named("select extract(minute from id) from tiny", "minute of Int32 is not supported")
+  }
+
+  "a date literal" should "name the node" in {
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(
+        "select count(*) from hits where EventTime >= '2013-07-01'",
+        Map("hits" -> ClickBenchSlice.events()),
+      )
+    }
+    thrown.getMessage should include("StringValue")
+  }
+
   "an expression group" should "match query 35" in {
     val sql =
       """select ResolutionWidth - 1, count(*)
@@ -622,6 +722,16 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
       val _ = Sql.run(sql, Map("tiny" -> tiny()))
     }
     thrown.getMessage should include(node)
+
+  private def countForLong(rows: List[WideRow], key: Long): Long =
+    rows
+      .collectFirst {
+        case row if row.cells.headOption.contains(Cell.Int64(key)) =>
+          row.cells.lift(1) match
+            case Some(Cell.Int64(count)) => count
+            case _ => fail(s"missing count for $key")
+      }
+      .getOrElse(fail(s"missing group $key"))
 
   private def countFor(rows: List[WideRow], key: Int): Long =
     rows
