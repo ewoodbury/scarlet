@@ -34,9 +34,9 @@ private[scarlet] object WideFields:
       joined(left, right, rightKey)
     case Plan.WideLeftJoinOp(left, right, _, rightKey, _) =>
       joined(left, right, rightKey)
-    case Plan.WideGroupOp(source, key, measure, key2, distinct, textMin) =>
+    case Plan.WideGroupOp(source, key, measure, key2, distinct, textMin, sum2) =>
       known(source).flatMap { fields =>
-        WideAggregate.output(fields, key, measure, key2, distinct, textMin)
+        WideAggregate.output(fields, key, measure, key2, distinct, textMin, sum2)
       }
     case Plan.WideSortOp(source, _, _) => known(source)
     case Plan.WideLimitOp(source, _) => known(source)

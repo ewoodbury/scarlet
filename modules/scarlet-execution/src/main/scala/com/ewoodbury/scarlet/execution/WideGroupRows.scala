@@ -11,13 +11,15 @@ import com.ewoodbury.scarlet.core.*
  * A null key is dropped. A null measure increments count and is skipped by sum, min, and max. A
  * key whose measures are all null still emits a row. A string measure emits count, min, and max,
  * and has no sum. `textMin` appends the min of one other string. String order is JVM `compareTo`.
- * `distinct` appends the size of that key's set after those strings. Int sums widen to long. Long
- * sums wrap. The plan is not `GroupByKey`, and this fold does not build a list of values.
+ * `sum2` appends the sum of one other int or long. `distinct` appends the size of that key's set
+ * after those values. Int sums widen to long. Long sums wrap. The plan is not `GroupByKey`, and
+ * this fold does not build a list of values.
  */
 private[execution] object WideGroupRows:
 
   def partitions(group: Plan.WideGroupOp): Seq[Partition[WideRow]] =
     val (fields, rows) = materialize(group.source)
+    WideAggregate.checkSum(fields, group.key, group.measure, group.key2, group.sum2)
     val out =
       WideAggregate
         .output(
@@ -27,6 +29,7 @@ private[execution] object WideGroupRows:
           group.key2,
           group.distinct,
           group.textMin,
+          group.sum2,
         )
         .getOrElse {
           throw new IllegalArgumentException(
@@ -43,6 +46,7 @@ private[execution] object WideGroupRows:
           out,
           group.distinct,
           group.textMin,
+          group.sum2,
         )
       case Some(second) =>
         foldTwo(
@@ -54,6 +58,7 @@ private[execution] object WideGroupRows:
           out,
           group.distinct,
           group.textMin,
+          group.sum2,
         )
     Seq(Partition(folded))
 
@@ -92,6 +97,7 @@ private[execution] object WideGroupRows:
     var textMax: String = ""
     var secondSeen: Boolean = false
     var secondText: String = ""
+    var extraSum: Long = 0L
     private val distinctValues: Option[mutable.HashSet[Cell]] =
       if trackDistinct then Some(mutable.HashSet.empty[Cell]) else None
 
@@ -172,6 +178,8 @@ private[execution] object WideGroupRows:
         secondText = value
       else if (value.compareTo(secondText) < 0) then secondText = value
 
+    def addExtra(value: Long): Unit = extraSum += value
+
   private def fold(
       rows: Vector[WideRow],
       key: Int,
@@ -180,6 +188,7 @@ private[execution] object WideGroupRows:
       fields: Vector[ColumnField],
       distinct: Option[Int],
       second: Option[Int],
+      sum2: Option[Int],
   ): Vector[WideRow] =
     val groups = mutable.LinkedHashMap.empty[Cell, Acc]
     rows.foreach { row =>
@@ -190,12 +199,13 @@ private[execution] object WideGroupRows:
           acc.count += 1L
           addMeasure(acc, cellAt(row, measure))
           noteSecond(acc, row, second)
+          noteSum(acc, row, sum2)
           distinct.foreach(ordinal => acc.noteDistinct(cellAt(row, ordinal)))
     }
     groups.iterator.map { (keyCell, acc) =>
       finished(
         fields,
-        Vector(keyCell, Cell.Int64(acc.count)) ++ aggregateCells(acc, measureKind, second),
+        Vector(keyCell, Cell.Int64(acc.count)) ++ aggregateCells(acc, measureKind, second, sum2),
         acc,
       )
     }.toVector
@@ -209,6 +219,7 @@ private[execution] object WideGroupRows:
       fields: Vector[ColumnField],
       distinct: Option[Int],
       second: Option[Int],
+      sum2: Option[Int],
   ): Vector[WideRow] =
     val groups = mutable.LinkedHashMap.empty[(Cell, Cell), Acc]
     rows.foreach { row =>
@@ -218,13 +229,19 @@ private[execution] object WideGroupRows:
           acc.count += 1L
           addMeasure(acc, cellAt(row, measure))
           noteSecond(acc, row, second)
+          noteSum(acc, row, sum2)
           distinct.foreach(ordinal => acc.noteDistinct(cellAt(row, ordinal)))
         case _ => ()
     }
     groups.iterator.map { case ((left, right), acc) =>
       finished(
         fields,
-        Vector(left, right, Cell.Int64(acc.count)) ++ aggregateCells(acc, measureKind, second),
+        Vector(left, right, Cell.Int64(acc.count)) ++ aggregateCells(
+          acc,
+          measureKind,
+          second,
+          sum2,
+        ),
         acc,
       )
     }.toVector
@@ -260,10 +277,21 @@ private[execution] object WideGroupRows:
           throw new IllegalArgumentException(s"measure $other does not aggregate")
     }
 
+  private def noteSum(acc: Acc, row: WideRow, sum2: Option[Int]): Unit =
+    sum2.foreach { ordinal =>
+      cellAt(row, ordinal) match
+        case Cell.Null => ()
+        case Cell.Int32(value) => acc.addExtra(value.toLong)
+        case Cell.Int64(value) => acc.addExtra(value)
+        case other =>
+          throw new IllegalArgumentException(s"measure $other does not aggregate")
+    }
+
   private def aggregateCells(
       acc: Acc,
       measureKind: ColumnKind,
       second: Option[Int],
+      sum2: Option[Int],
   ): Vector[Cell] =
     val primary = measureKind match
       case ColumnKind.Utf8 =>
@@ -292,7 +320,10 @@ private[execution] object WideGroupRows:
       case None => Vector.empty
       case Some(_) if !acc.secondSeen => Vector(Cell.Null)
       case Some(_) => Vector(Cell.Utf8(acc.secondText))
-    primary ++ extra
+    val added = sum2 match
+      case None => Vector.empty
+      case Some(_) => Vector(Cell.Int64(acc.extraSum))
+    primary ++ extra ++ added
 
   private def cellAt(row: WideRow, ordinal: Int): Cell =
     if (ordinal >= 0 && ordinal < row.cells.size) then row.cells(ordinal)

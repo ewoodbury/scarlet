@@ -340,6 +340,96 @@ class TestWideGroup extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     )
   }
 
+  "a wide int group" should "append the sum of a second column" in {
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.nullableInts(
+            "k",
+            Array(1, 1, 1, 2, 9),
+            Array(true, true, true, true, false),
+          ),
+          WideInput.ints("q", Array(10, 1, 4, 5, 100)),
+          WideInput
+            .nullableInts("w", Array(3, 0, 8, 9, 1000), Array(true, false, true, true, true)),
+          WideInput.longs("u", Array(1L, 1L, 2L, 4L, 9L)),
+        ),
+        2,
+      )
+      .groupSum(0, 1, 2, 3)
+    ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some("WideGroup(Scan)")
+    cells(both(planned)) shouldBe cellsOf(
+      List(
+        Vector(
+          Cell.Int32(1),
+          Cell.Int64(3L),
+          Cell.Int64(15L),
+          Cell.Int32(1),
+          Cell.Int32(10),
+          Cell.Int64(11L),
+          Cell.Int64(2L),
+        ),
+        Vector(
+          Cell.Int32(2),
+          Cell.Int64(1L),
+          Cell.Int64(5L),
+          Cell.Int32(5),
+          Cell.Int32(5),
+          Cell.Int64(9L),
+          Cell.Int64(1L),
+        ),
+      ),
+    )
+  }
+
+  it should "keep the second sum when the table grows" in {
+    val keys = Array.tabulate(12)(identity)
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.ints("k", keys),
+          WideInput.ints("q", keys),
+          WideInput.ints("w", keys.map(_ * 10)),
+          WideInput.longs("u", keys.map(_.toLong)),
+        ),
+        2,
+      )
+      .groupSum(0, 1, 2, 3)
+    cells(both(planned)) shouldBe cellsOf(
+      keys.toList.map { key =>
+        Vector(
+          Cell.Int32(key),
+          Cell.Int64(1L),
+          Cell.Int64(key.toLong),
+          Cell.Int32(key),
+          Cell.Int32(key),
+          Cell.Int64(key.toLong * 10L),
+          Cell.Int64(1L),
+        )
+      },
+    )
+  }
+
+  it should "refuse a second sum of a string" in {
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.ints("k", Array(1)),
+          WideInput.ints("q", Array(1)),
+          WideInput.strings("w", Array("a")),
+          WideInput.longs("u", Array(1L)),
+        ),
+        1,
+      )
+      .groupSum(0, 1, 2, 3)
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = true))
+    val columnar = the[IllegalArgumentException] thrownBy planned.count()
+    columnar.getMessage should include("int or long")
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = false))
+    val rows = the[IllegalArgumentException] thrownBy planned.count()
+    rows.getMessage shouldBe columnar.getMessage
+  }
+
   private def table(key: WideInput, measure: WideInput): DistCollection[WideRow] =
     DistCollection.ofColumns(Vector(key, measure), 2)
 
