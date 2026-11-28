@@ -1,0 +1,43 @@
+# BenchSlice medians in milliseconds.
+# Recorded from the bench workflow on e58bc34984f84fea0028f496e742a68de9333a35.
+# A later run fails when a median is above twice its budget.
+clickbench-0 2.123
+clickbench-1 1.752
+clickbench-19 1.168
+clickbench-33 4.319
+clickbench-2 2.703
+clickbench-3 0.478
+clickbench-4 1.291
+clickbench-5 1.680
+clickbench-6 0.710
+clickbench-10 1.670
+clickbench-7 1.331
+clickbench-8 2.088
+clickbench-32 1.873
+clickbench-12 2.118
+clickbench-11 2.534
+clickbench-14 1.940
+clickbench-16 8.664
+clickbench-15 9.089
+clickbench-29 1.179
+clickbench-20 1.505
+clickbench-21 3.969
+clickbench-22 3.652
+clickbench-9 2.365
+clickbench-23 3.315
+clickbench-24 2.477
+clickbench-25 3.199
+clickbench-26 4.430
+clickbench-28 2.746
+clickbench-27 1.204
+clickbench-35 2.022
+clickbench-18 1.222
+clickbench-42 1.389
+tpch-6 1.169
+tpch-1 0.845
+tpch-3 1.571
+tpch-5 1.997
+tpch-13 0.428
+tpch-4 0.763
+tpch-15 0.053
+tpch-2 0.588

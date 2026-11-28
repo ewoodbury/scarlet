@@ -1,0 +1,60 @@
+name: Bench slice
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+# A newer push to the same branch makes the older run pointless; stop paying for it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Times the plans in ClickBenchSlice and TpchSlice.
+# perf.yml stays the five-minute checksum smoke and does not run this main.
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
+
+      - name: Cache coursier and sbt
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.sbt
+            ~/.ivy2/cache
+          key: sbt-deps-${{ runner.os }}-${{ hashFiles('**/*.sbt', 'project/build.properties') }}
+          restore-keys: sbt-deps-${{ runner.os }}-
+
+      - name: Cache compiled classes
+        uses: actions/cache@v4
+        with:
+          path: |
+            **/target
+            project/target
+            project/project/target
+          key: sbt-classes-${{ runner.os }}-${{ hashFiles('**/*.sbt', 'project/build.properties') }}
+          restore-keys: sbt-classes-${{ runner.os }}-
+
+      # The filter is on unmanagedSources so log4j2-test.xml still lands on the classpath.
+      # A hyphenated project id is not valid in set. A missing budget file prints the table
+      # and does not fail on time. A present file fails when a median is above twice its budget.
+      - name: Bench slice
+        run: |
+          sbt -J-Xmx3g -batch \
+            "project scarlet-tests" \
+            "set Test / unmanagedSources / includeFilter := new SimpleFileFilter(f => { val n = f.getName; n == \"BenchSlice.scala\" || n == \"ClickBenchSlice.scala\" || n == \"TpchSlice.scala\" || n == \"Check.scala\" })" \
+            "Test/runMain com.ewoodbury.scarlet.execution.BenchSlice"
