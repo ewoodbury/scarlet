@@ -13,7 +13,7 @@ import net.sf.jsqlparser.expression.operators.conditional.{AndExpression, OrExpr
 import net.sf.jsqlparser.expression.operators.relational.*
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
 import net.sf.jsqlparser.schema.{Column, Table}
-import net.sf.jsqlparser.statement.select.{AllColumns, FromItem, Join, PlainSelect, SelectItem}
+import net.sf.jsqlparser.statement.select.*
 
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
@@ -21,7 +21,8 @@ import com.ewoodbury.scarlet.core.*
 /**
  * One SELECT: registered tables, one int or long equi-join, comparisons combined with AND, OR, and
  * NOT, arithmetic, and count, sum, min, and max. A string compares equal or not equal. A group is
- * one or two numeric keys. Anything else names its node.
+ * one or two numeric keys. Order is one int or long column, then a limit. Anything else names its
+ * node.
  */
 private object SqlConvert:
 
@@ -42,12 +43,9 @@ private object SqlConvert:
     if plain.getDistinct != null then unsupported(plain.getDistinct)
     val joins = plain.getJoins
     if joins != null && joins.size > 1 then unsupported(joins.get(1))
-    if plain.getLimit != null then unsupported(plain.getLimit)
     if plain.getOffset != null then unsupported(plain.getOffset)
     if plain.getFetch != null then unsupported(plain.getFetch)
     if plain.getTop != null then unsupported(plain.getTop)
-    if plain.getOrderByElements != null && !plain.getOrderByElements.isEmpty then
-      unsupported(plain.getOrderByElements.get(0))
     if plain.getHaving != null then unsupported(plain.getHaving)
     val from = plain.getFromItem
     if from == null then unsupported(plain)
@@ -57,8 +55,80 @@ private object SqlConvert:
       else joined(leftName, resolve(tables, leftName), joins.get(0), tables)
     val filtered = if plain.getWhere == null then opened else predicate(plain.getWhere, opened)
     val grouped = plain.getGroupBy
-    if grouped == null then select(plain, filtered)
-    else group(plain, keys(grouped.getGroupByExpressionList, filtered), filtered)
+    val selected =
+      if grouped == null then select(plain, filtered)
+      else group(plain, keys(grouped.getGroupByExpressionList, filtered), filtered)
+    finish(plain, selected)
+
+  /** One int or long order, then a row count. A scalar names the node that asked. */
+  private def finish(plain: PlainSelect, result: SqlResult): SqlResult =
+    limit(plain, orderBy(plain, result))
+
+  private def orderBy(plain: PlainSelect, result: SqlResult): SqlResult =
+    val elements = plain.getOrderByElements
+    if elements == null || elements.isEmpty then result
+    else if elements.size > 1 then unsupported(elements.get(1))
+    else
+      val element = elements.get(0)
+      if element.getNullOrdering != null || element.isMysqlWithRollup then unsupported(element)
+      result match
+        case SqlResult.Value(_, _) => unsupported(element)
+        case SqlResult.Rows(rows) =>
+          val ordinal = sortOrdinal(element, rows)
+          SqlResult.Rows(rows.sortColumn(ordinal, descending = !element.isAsc))
+
+  private def limit(plain: PlainSelect, result: SqlResult): SqlResult =
+    val node = plain.getLimit
+    if node == null then result
+    else
+      result match
+        case SqlResult.Value(_, _) => unsupported(node)
+        case SqlResult.Rows(rows) =>
+          SqlResult.Rows(rows.limitColumns(limitCount(node)))
+
+  private def sortOrdinal(element: OrderByElement, rows: DistCollection[WideRow]): Int =
+    val expr = element.getExpression
+    if expr == null then unsupported(element)
+    val fields = WideFields.known(rows.plan).getOrElse(unsupported(element))
+    val ordinal = unwrap(expr) match
+      case column: Column =>
+        val name = column.getColumnName
+        if name == null then unsupported(element)
+        else fields.indexWhere(field => field.name.equalsIgnoreCase(name))
+      case function: Function =>
+        aggregateColumn(function) match
+          case Some(name) => fields.indexWhere(field => field.name.equalsIgnoreCase(name))
+          case None => unsupported(element)
+      case _ => unsupported(element)
+    if ordinal < 0 then unsupported(element)
+    val field = fields.lift(ordinal).getOrElse(unsupported(element))
+    field.kind match
+      case ColumnKind.Int32 | ColumnKind.Int64 => ordinal
+      case _ => unsupported(element)
+
+  /** `count`, `sum`, `min`, or `max` when that name is an output column. */
+  private def aggregateColumn(function: Function): Option[String] =
+    if function.isDistinct || function.isUnique then None
+    else
+      val name = function.getName
+      if name == null then None
+      else if name.equalsIgnoreCase("count") && countStar(function) then Some("count")
+      else if name.equalsIgnoreCase("count") then None
+      else if Set("sum", "min", "max").contains(name.toLowerCase) then
+        val args = arguments(function)
+        if args.size == 1 then Some(name.toLowerCase) else None
+      else None
+
+  private def limitCount(node: Limit): Int =
+    if node.getOffset != null || node.isLimitAll || node.isLimitNull then unsupported(node)
+    val by = node.getByExpressions
+    if by != null && by.size > 0 then unsupported(node)
+    node.getRowCount match
+      case value: LongValue =>
+        val count = value.getValue
+        if count < 0L || count > Int.MaxValue.toLong then unsupported(node)
+        else count.toInt
+      case _ => unsupported(node)
 
   private def select(plain: PlainSelect, frame: Frame): SqlResult =
     val items = itemsOf(plain)

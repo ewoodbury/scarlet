@@ -91,6 +91,31 @@ private[execution] object WideLowering:
           None
     }
 
+  def sort(
+      source: com.ewoodbury.scarlet.core.Plan[WideRow],
+      ordinal: Int,
+      descending: Boolean,
+      lowerChild: com.ewoodbury.scarlet.core.Plan[_] => Option[PhysicalOp],
+  ): Option[PhysicalOp] =
+    lowerChild(source).flatMap { child =>
+      fieldsOf(child) match
+        case Some(fields) if sortable(fields, ordinal) =>
+          Some(PhysicalOp.WideSort(child, ordinal, descending))
+        case Some(_) =>
+          LoweringTrace.note("WideSortOp", child.kind, "WideLowering")
+          None
+        case None =>
+          None
+    }
+
+  def limit(
+      source: com.ewoodbury.scarlet.core.Plan[WideRow],
+      count: Int,
+      lowerChild: com.ewoodbury.scarlet.core.Plan[_] => Option[PhysicalOp],
+  ): Option[PhysicalOp] =
+    if count < 0 then None
+    else lowerChild(source).map(child => PhysicalOp.WideLimit(child, count))
+
   def project(
       source: com.ewoodbury.scarlet.core.Plan[WideRow],
       spec: Vector[(Int, String)],
@@ -103,6 +128,15 @@ private[execution] object WideLowering:
         case _ =>
           LoweringTrace.note("WideProjectOp", child.kind, "WideLowering")
           None
+    }
+
+  private def sortable(fields: Vector[ColumnField], ordinal: Int): Boolean =
+    fields.lift(ordinal).exists { field =>
+      field.kind match
+        case com.ewoodbury.scarlet.core.ColumnKind.Int32 |
+            com.ewoodbury.scarlet.core.ColumnKind.Int64 =>
+          true
+        case _ => false
     }
 
   private def column(op: PhysicalOp, ordinal: Int): Option[ColumnField] =
@@ -137,6 +171,8 @@ private[execution] object WideLowering:
       fieldsOf(child).flatMap { fields =>
         com.ewoodbury.scarlet.core.WideAggregate.output(fields, key, measure, key2)
       }
+    case PhysicalOp.WideSort(child, _, _) => fieldsOf(child)
+    case PhysicalOp.WideLimit(child, _) => fieldsOf(child)
     case _ =>
       None
 

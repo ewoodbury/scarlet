@@ -6,7 +6,7 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 import com.ewoodbury.scarlet.support.Check
 
 /**
- * Nine ClickBench queries on 4096 generated rows. This is not the hits table.
+ * Ten ClickBench queries on 4096 generated rows. This is not the hits table.
  *
  * Numbers follow the 0-based order of `clickhouse/queries.sql`. An average is the long sum and the
  * count. Query 2's width average is 3679360 / 4096. Query 3's user average is 8386588672 / 4096.
@@ -32,6 +32,9 @@ object ClickBenchSlice:
 
   /** Keys 1 to 7, count 512, sum 512 * key, min and max the key. Count descending, then key. */
   val groupedMix: Long = -2156419963914273660L
+
+  /** Ten largest UserIDs, each a group of one. Folded in engine order. */
+  val topUserMix: Long = -7996923543694224240L
   val groups: Long = 7L
   val twoKeyGroups: Long = 200L
   val twoKeyMix: Long = -5517106496331210496L
@@ -52,7 +55,7 @@ object ClickBenchSlice:
     "12 group by a string. Missing: string group key.",
     "13 distinct count by a string. Missing: string group key.",
     "14 int and string group key. Missing: multi-column group.",
-    "15 group by a long, then sort and limit. Missing: sort.",
+    "15 group by a long, then sort and limit. This file.",
     "16 long and string group key. Missing: multi-column group.",
     "17 long and string group key. Missing: multi-column group.",
     "18 minute extracted from a timestamp. Missing: calendar arithmetic.",
@@ -162,6 +165,16 @@ object ClickBenchSlice:
   def groupedTwo(): DistCollection[WideRow] =
     scan().groupColumns(0, 1, 0)
 
+  /**
+   * Query 15 shape: group UserID, sort that key descending, then ten rows. The published statement
+   * sorts by count. Every count is 1, so this slice sorts the key.
+   */
+  def topUsers(): DistCollection[WideRow] =
+    scan().groupColumns(2, 2).sortColumn(0, descending = true).limitColumns(10)
+
+  def topUserChecksum(rows: Iterable[WideRow]): Long =
+    rows.foldLeft(0L)(mixLong)
+
   def groupedChecksum(rows: Iterable[WideRow]): Long =
     rows.toVector.sortWith(groupBefore).foldLeft(0L)(mixGroup)
 
@@ -185,6 +198,7 @@ object ClickBenchSlice:
       counted("query 7", grouped().plan, groups),
       shaped("query 32", groupedTwo().plan, "WideGroup(Scan)"),
       counted("query 32", groupedTwo().plan, twoKeyGroups),
+      shaped("query 15", topUsers().plan, "WideLimit(WideSort(WideGroup(Scan)))"),
       shaped(
         "query 29",
         widthPlus().plan,
@@ -203,6 +217,7 @@ object ClickBenchSlice:
       both("query 10", notEmpty)(notEmptyPhrase().count()),
       both("query 7", groupedMix)(groupedChecksum(grouped().collect())),
       both("query 32", twoKeyMix)(twoKeyChecksum(groupedTwo().collect())),
+      both("query 15", topUserMix)(topUserChecksum(topUsers().collect())),
       both("query 29", sumWidthPlus)(widthPlus().sumLongColumn(5)),
     ).flatten
 
@@ -268,6 +283,18 @@ object ClickBenchSlice:
     val leftCount = countOf(left)
     val rightCount = countOf(right)
     leftCount > rightCount || (leftCount == rightCount && keyOf(left) < keyOf(right))
+
+  private def mixLong(acc: Long, row: WideRow): Long = cells(row) match
+    case Vector(
+          Cell.Int64(key),
+          Cell.Int64(count),
+          Cell.Int64(sum),
+          Cell.Int64(min),
+          Cell.Int64(max),
+        ) =>
+      (((((acc * 31L + key) * 31L + count) * 31L + sum) * 31L + min) * 31L + max)
+    case other =>
+      refuse(other.size)
 
   private def mixGroup(acc: Long, row: WideRow): Long = cells(row) match
     case Vector(

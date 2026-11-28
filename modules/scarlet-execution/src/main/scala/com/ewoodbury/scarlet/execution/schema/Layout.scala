@@ -184,7 +184,8 @@ private[execution] object Layout:
     case node: PhysicalOp.IntExtremum =>
       columns(node.kind)
     case _: PhysicalOp.WideFilter | _: PhysicalOp.WideProject | _: PhysicalOp.WideCompute |
-        _: PhysicalOp.WideHashJoin | _: PhysicalOp.WideBroadcastJoin | _: PhysicalOp.WideGroup =>
+        _: PhysicalOp.WideHashJoin | _: PhysicalOp.WideBroadcastJoin | _: PhysicalOp.WideGroup |
+        _: PhysicalOp.WideSort | _: PhysicalOp.WideLimit =>
       Output.Opaque("wide row")
 
   private def columns(kind: PhysicalOp.Kind): Output =

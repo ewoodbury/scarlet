@@ -41,6 +41,8 @@ private[scarlet] object WideFields:
           None
     case Plan.WideGroupOp(source, key, measure, key2) =>
       known(source).flatMap(fields => WideAggregate.output(fields, key, measure, key2))
+    case Plan.WideSortOp(source, _, _) => known(source)
+    case Plan.WideLimitOp(source, _) => known(source)
     case _ =>
       None
 

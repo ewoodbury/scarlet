@@ -132,6 +132,33 @@ final case class DistCollection[A](plan: Plan[A]):
     DistCollection(Plan.WideGroupOp(widePlan, key, measure, Some(key2)))
 
   /**
+   * Sorts by one int or long column. A null orders as zero and the row stays. Ties keep input
+   * order. The result is one partition.
+   */
+  def sortColumn(ordinal: Int, descending: Boolean)(using
+      ev: A =:= WideRow,
+  ): DistCollection[WideRow] =
+    val fields = WideFields.known(widePlan).getOrElse {
+      throw new IllegalArgumentException("sort needs a wide schema")
+    }
+    val field = fields.lift(ordinal).getOrElse {
+      throw new IllegalArgumentException(s"column $ordinal outside width ${fields.size}")
+    }
+    field.kind match
+      case ColumnKind.Int32 | ColumnKind.Int64 => ()
+      case other =>
+        throw new IllegalArgumentException(s"sort column ${field.name} is $other")
+    DistCollection(Plan.WideSortOp(widePlan, ordinal, descending))
+
+  /**
+   * Keeps the first `count` rows in the child order. A negative count is refused. This is not
+   * [[take]].
+   */
+  def limitColumns(count: Int)(using ev: A =:= WideRow): DistCollection[WideRow] =
+    require(count >= 0, "limit must not be negative")
+    DistCollection(Plan.WideLimitOp(widePlan, count))
+
+  /**
    * Sums one long column. A null slot contributes nothing. The total wraps. A columnar plan adds
    * that column with the existing long sum and does not decode the row.
    */

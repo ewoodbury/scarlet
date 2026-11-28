@@ -687,6 +687,8 @@ enum PhysicalOp:
     case WideFilter(child, _, _) => child.kind
     case WideProject(child, _) => child.kind
     case WideCompute(child, _, _) => child.kind
+    case WideSort(child, _, _) => child.kind
+    case WideLimit(child, _) => child.kind
     case WideHashJoin(_, _, _, _) | WideBroadcastJoin(_, _, _, _) | WideGroup(_, _, _, _) =>
       PhysicalOp.Kind.Columns
 
@@ -853,6 +855,8 @@ enum PhysicalOp:
     case WideBroadcastJoin(left, right, _, _) =>
       s"WideBroadcastJoin(${left.shape},${right.shape})"
     case WideGroup(child, _, _, _) => s"WideGroup(${child.shape})"
+    case WideSort(child, _, _) => s"WideSort(${child.shape})"
+    case WideLimit(child, _) => s"WideLimit(${child.shape})"
 
   /**
    * Non-adding `reduceByKey` of an int key and a long value. The child is an [[Exchange]]. The
@@ -1034,6 +1038,18 @@ enum PhysicalOp:
    * `groupByKey`.
    */
   case WideGroup(child: PhysicalOp, key: Int, measure: Int, key2: Option[Int])
+
+  /**
+   * Global sort of one int or long column. A null orders as zero and the row stays. Ties keep
+   * input order. Output kind is the child's kind. The result is one partition. There is no spill.
+   */
+  case WideSort(child: PhysicalOp, columnOrdinal: Int, descending: Boolean)
+
+  /**
+   * First `count` rows of the child, in the child's order. Output kind is the child's kind. The
+   * result is one partition. There is no spill.
+   */
+  case WideLimit(child: PhysicalOp, count: Int)
 
 object PhysicalOp:
 
