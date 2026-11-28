@@ -8,7 +8,7 @@ import com.ewoodbury.scarlet.core.*
  *
  * A null number orders as zero and the row stays. A null string orders as empty and the row stays.
  * The last key keeps input order, and a descending first key does not reverse that order. String
- * order is JVM `compareTo`. Each result is one partition.
+ * order is [[TextRule.compare]]. Each result is one partition.
  */
 private[execution] object WideOrderRows:
 
@@ -48,14 +48,20 @@ private[execution] object WideOrderRows:
       .sortBy((row, index) => (keyOf(row, ordinal), index))(ordering)
       .map((row, _) => row)
 
+  private val textAscending: Ordering[String] =
+    Ordering.fromLessThan((left, right) => TextRule.compare(left, right) < 0)
+
+  private val textDescending: Ordering[String] =
+    Ordering.fromLessThan((left, right) => TextRule.compare(right, left) < 0)
+
   private def orderedText(
       rows: Vector[WideRow],
       ordinal: Int,
       descending: Boolean,
   ): Vector[WideRow] =
     val ordering =
-      if descending then Ordering.Tuple2(Ordering.String.reverse, Ordering.Int)
-      else Ordering.Tuple2(Ordering.String, Ordering.Int)
+      if descending then Ordering.Tuple2(textDescending, Ordering.Int)
+      else Ordering.Tuple2(textAscending, Ordering.Int)
     rows.zipWithIndex
       .sortBy((row, index) => (textKey(row, ordinal), index))(ordering)
       .map((row, _) => row)
@@ -89,7 +95,7 @@ private[execution] object WideOrderRows:
       case ColumnKind.Int32 | ColumnKind.Int64 =>
         java.lang.Long.compare(keyOf(left, ordinal), keyOf(right, ordinal))
       case ColumnKind.Utf8 =>
-        textKey(left, ordinal).compareTo(textKey(right, ordinal))
+        TextRule.compare(textKey(left, ordinal), textKey(right, ordinal))
       case other =>
         throw new IllegalArgumentException(s"sort column $ordinal is $other")
     if descending then -compared else compared

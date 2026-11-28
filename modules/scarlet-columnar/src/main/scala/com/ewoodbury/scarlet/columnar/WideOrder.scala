@@ -1,5 +1,7 @@
 package com.ewoodbury.scarlet.columnar
 
+import com.ewoodbury.scarlet.core.TextRule
+
 /**
  * Global sort and limit of wide batches.
  *
@@ -7,7 +9,7 @@ package com.ewoodbury.scarlet.columnar
  * second of those kinds. A null number compares as zero and stays null. A null string compares as
  * empty and stays null. The last key keeps the input index, and a descending first key does not
  * reverse that index. The result is one batch. String dictionaries are rebuilt, because codes
- * belong to one batch. String order is JVM `compareTo`, not dictionary code order.
+ * belong to one batch. String order is [[TextRule.compare]], not dictionary code order.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object WideOrder:
@@ -167,8 +169,8 @@ object WideOrder:
       if descending then java.lang.Long.compare(values(right), values(left))
       else java.lang.Long.compare(values(left), values(right))
     case SortKey.Text(values, descending) =>
-      if descending then values(right).compareTo(values(left))
-      else values(left).compareTo(values(right))
+      if descending then TextRule.compare(values(right), values(left))
+      else TextRule.compare(values(left), values(right))
 
   private def keyLength(key: SortKey): Int = key match
     case SortKey.Number(values, _) => values.length
@@ -207,8 +209,8 @@ object WideOrder:
         val first = left.intValue
         val second = right.intValue
         val cmp =
-          if descending then keys(second).compareTo(keys(first))
-          else keys(first).compareTo(keys(second))
+          if descending then TextRule.compare(keys(second), keys(first))
+          else TextRule.compare(keys(first), keys(second))
         if cmp != 0 then cmp else java.lang.Integer.compare(first, second)
 
   private def comparator(keys: Array[Long], descending: Boolean): java.util.Comparator[Integer] =
