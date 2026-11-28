@@ -19,14 +19,15 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
 
 /**
- * One SELECT: registered tables, a left-deep chain of int or long equi-joins in the written order,
- * comparisons combined with AND, OR, and NOT, arithmetic, count, sum, min, max, and an exact count
- * of distinct values. A string compares with JVM order. `LIKE` uses `%` and `_`, and it combines
- * with AND and NOT. OR of `LIKE` names the node. `length` is the UTF-16 length. A group is one or
- * two keys. A key is an int, a long, a string, or arithmetic on an int or a long. `extract(minute
- * from` an int64 epoch`)` and `date_trunc('minute',` that epoch`)` are computes. A string measure
- * emits count, min, and max. Order is one int, long, or string column, then a limit. Anything else
- * names its node.
+ * One SELECT: registered tables, a left-deep chain of int or long equi-joins in the written order.
+ * A left outer join keeps an unmatched left row. A right or full join names the node. Comparisons
+ * combine with AND, OR, and NOT. Arithmetic, count, sum, min, max, and an exact count of distinct
+ * values. A string compares with JVM order. `LIKE` uses `%` and `_`, and it combines with AND and
+ * NOT. OR of `LIKE` names the node. `length` is the UTF-16 length. A group is one or two keys. A
+ * key is an int, a long, a string, or arithmetic on an int or a long. `extract(minute from` an
+ * int64 epoch`)` and `date_trunc('minute',` that epoch`)` are computes. A string measure emits
+ * count, min, and max. Order is one int, long, or string column, then a limit. Anything else names
+ * its node.
  */
 private object SqlConvert:
 
@@ -362,8 +363,8 @@ private object SqlConvert:
       join: Join,
       tables: Map[String, DistCollection[WideRow]],
   ): Chain =
-    if join.isLeft || join.isRight || join.isFull || join.isOuter || join.isCross ||
-      join.isSemi || join.isNatural || join.isApply
+    if join.isRight || join.isFull || join.isCross || join.isSemi || join.isNatural ||
+      join.isApply
     then unsupported(join)
     val rightItem = join.getRightItem
     if rightItem == null || join.getOnExpression == null then unsupported(join)
@@ -380,7 +381,10 @@ private object SqlConvert:
     val rightKind = rightFields(rightKey).kind
     if !joinKey(leftKind) || !joinKey(rightKind) then
       throw new IllegalArgumentException("a join key must be an int or a long")
-    val joined = chain.frame.rows.joinColumns(right, leftKey, rightKey)
+    val outer = join.isLeft || join.isOuter
+    val joined =
+      if (outer) then chain.frame.rows.leftJoinColumns(right, leftKey, rightKey)
+      else chain.frame.rows.joinColumns(right, leftKey, rightKey)
     val width = leftFields.size
     val rightOrdinals = rightFields.indices
       .foldLeft((width, Vector.empty[Int])) { (state, index) =>

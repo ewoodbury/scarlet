@@ -383,6 +383,9 @@ object StageBuilder:
       case _: Plan.WideJoinOp =>
         throw new UnsupportedOperationException("wide join is executed by WideJoinRows")
 
+      case _: Plan.WideLeftJoinOp =>
+        throw new UnsupportedOperationException("wide left join is executed by WideJoinRows")
+
       case _: Plan.WideGroupOp =>
         throw new UnsupportedOperationException("wide group is executed by WideGroupRows")
 

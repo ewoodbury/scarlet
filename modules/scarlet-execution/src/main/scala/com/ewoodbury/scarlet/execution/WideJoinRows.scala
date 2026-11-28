@@ -10,7 +10,8 @@ import com.ewoodbury.scarlet.core.*
  * A null key is dropped. A null payload stays. Output is every left column, then every right
  * column except the key. Hash and broadcast name the same multiset: the build is grouped by key,
  * not by shuffle bucket. The caller names the strategy on the plan. A key that is not int or long
- * throws, so a refused columnar plan does not invent a result.
+ * throws, so a refused columnar plan does not invent a result. A left outer join keeps each
+ * unmatched left row once. A missing partner is null. A stored zero stays present.
  */
 private[execution] object WideJoinRows:
 
@@ -25,6 +26,18 @@ private[execution] object WideJoinRows:
       case (field, ordinal) if ordinal != join.rightKey => field
     }
     Seq(Partition(matchRows(leftRows, rightRows, join.leftKey, join.rightKey, fields)))
+
+  def leftPartitions(join: Plan.WideLeftJoinOp): Seq[Partition[WideRow]] =
+    val (leftFields, leftRows) = materialize(join.left)
+    val (rightFields, rightRows) = materialize(join.right)
+    val leftKind = keyKind(leftFields, join.leftKey, "left")
+    val rightKind = keyKind(rightFields, join.rightKey, "right")
+    if (!joinable(leftKind, rightKind)) then
+      throw new IllegalArgumentException(s"join keys are $leftKind and $rightKind")
+    val fields = leftFields ++ rightFields.zipWithIndex.collect {
+      case (field, ordinal) if ordinal != join.rightKey => field
+    }
+    Seq(Partition(keepLeft(leftRows, rightRows, join.leftKey, join.rightKey, fields)))
 
   private def materialize(plan: Plan[WideRow]): (Vector[ColumnField], Vector[WideRow]) =
     val parts = ExecutionService.get.executePartitions(plan)
@@ -68,6 +81,42 @@ private[execution] object WideJoinRows:
               matched += WideRow(fields, row.cells ++ payload)
             }
           }
+    }
+    matched.result()
+
+  private def keepLeft(
+      leftRows: Vector[WideRow],
+      rightRows: Vector[WideRow],
+      leftKey: Int,
+      rightKey: Int,
+      fields: Vector[ColumnField],
+  ): Vector[WideRow] =
+    val build = mutable.HashMap.empty[Cell, List[Vector[Cell]]]
+    rightRows.foreach { row =>
+      cellAt(row, rightKey) match
+        case Cell.Null => ()
+        case key =>
+          val payload = row.cells.zipWithIndex.collect {
+            case (cell, ordinal) if ordinal != rightKey => cell
+          }
+          build.updateWith(key) {
+            case Some(hits) => Some(payload :: hits)
+            case None => Some(payload :: Nil)
+          }
+    }
+    val matched = Vector.newBuilder[WideRow]
+    leftRows.foreach { row =>
+      cellAt(row, leftKey) match
+        case Cell.Null => ()
+        case key =>
+          build.get(key) match
+            case Some(hits) =>
+              hits.foreach { payload =>
+                matched += WideRow(fields, row.cells ++ payload)
+              }
+            case None =>
+              val missing = Vector.fill(fields.size - row.cells.size)(Cell.Null)
+              matched += WideRow(fields, row.cells ++ missing)
     }
     matched.result()
 

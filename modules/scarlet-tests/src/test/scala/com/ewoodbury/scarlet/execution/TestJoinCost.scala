@@ -72,11 +72,17 @@ class TestJoinCost extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     shape(left.joinColumns(right, 0, 0).plan) shouldBe "WideBroadcastJoin(Scan,Scan)"
     shape(left.hashJoinColumns(right, 0, 0).plan) shouldBe "WideHashJoin(Scan,Scan)"
     shape(left.broadcastJoinColumns(right, 0, 0).plan) shouldBe "WideBroadcastJoin(Scan,Scan)"
+    shape(left.leftJoinColumns(right, 0, 0).plan) shouldBe "WideBroadcastLeftJoin(Scan,Scan)"
+    shape(left.hashLeftJoinColumns(right, 0, 0).plan) shouldBe "WideHashLeftJoin(Scan,Scan)"
+    shape(left.broadcastLeftJoinColumns(right, 0, 0).plan) shouldBe
+      "WideBroadcastLeftJoin(Scan,Scan)"
     rows(left.joinColumns(right, 0, 0)) shouldBe rows(left.hashJoinColumns(right, 0, 0))
+    rows(left.leftJoinColumns(right, 0, 0)) shouldBe rows(left.hashLeftJoinColumns(right, 0, 0))
 
     withThreshold(2L) {
       shape(left.joinColumns(right, 0, 0).plan) shouldBe "WideHashJoin(Scan,Scan)"
       shape(left.broadcastJoinColumns(right, 0, 0).plan) shouldBe "WideBroadcastJoin(Scan,Scan)"
+      shape(left.leftJoinColumns(right, 0, 0).plan) shouldBe "WideHashLeftJoin(Scan,Scan)"
     }
   }
 

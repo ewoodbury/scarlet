@@ -689,7 +689,8 @@ enum PhysicalOp:
     case WideCompute(child, _, _) => child.kind
     case WideSort(child, _, _) => child.kind
     case WideLimit(child, _) => child.kind
-    case WideHashJoin(_, _, _, _) | WideBroadcastJoin(_, _, _, _) | WideGroup(_, _, _, _, _) =>
+    case WideHashJoin(_, _, _, _) | WideBroadcastJoin(_, _, _, _) | WideHashLeftJoin(_, _, _, _) |
+        WideBroadcastLeftJoin(_, _, _, _) | WideGroup(_, _, _, _, _) =>
       PhysicalOp.Kind.Columns
 
   /**
@@ -854,6 +855,10 @@ enum PhysicalOp:
     case WideHashJoin(left, right, _, _) => s"WideHashJoin(${left.shape},${right.shape})"
     case WideBroadcastJoin(left, right, _, _) =>
       s"WideBroadcastJoin(${left.shape},${right.shape})"
+    case WideHashLeftJoin(left, right, _, _) =>
+      s"WideHashLeftJoin(${left.shape},${right.shape})"
+    case WideBroadcastLeftJoin(left, right, _, _) =>
+      s"WideBroadcastLeftJoin(${left.shape},${right.shape})"
     case WideGroup(child, _, _, _, _) => s"WideGroup(${child.shape})"
     case WideSort(child, _, _) => s"WideSort(${child.shape})"
     case WideLimit(child, _) => s"WideLimit(${child.shape})"
@@ -1056,6 +1061,21 @@ enum PhysicalOp:
    * result is one partition. There is no spill.
    */
   case WideLimit(child: PhysicalOp, count: Int)
+
+  /**
+   * Left outer hash join of two wide rows on one int or long key. The right side is the build.
+   * Each unmatched left row is kept once. A missing partner is invalid. A stored zero stays
+   * present. A null key is dropped. Output kind is [[PhysicalOp.Kind.Columns]]. There is no spill.
+   * Hash and broadcast are the same multiset.
+   */
+  case WideHashLeftJoin(left: PhysicalOp, right: PhysicalOp, leftKey: Int, rightKey: Int)
+
+  /**
+   * Left outer broadcast join of two wide rows. The right side is the build and is joined with
+   * every left batch. Nulls follow [[WideHashLeftJoin]]. Output kind is
+   * [[PhysicalOp.Kind.Columns]]. There is no spill.
+   */
+  case WideBroadcastLeftJoin(left: PhysicalOp, right: PhysicalOp, leftKey: Int, rightKey: Int)
 
 object PhysicalOp:
 

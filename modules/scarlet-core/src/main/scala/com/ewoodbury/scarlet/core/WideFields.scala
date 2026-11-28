@@ -31,14 +31,9 @@ private[scarlet] object WideFields:
         ColumnExpr.resultKind(expr, fields).map(kind => fields :+ ColumnField(name, kind))
       }
     case Plan.WideJoinOp(left, right, _, rightKey, _) =>
-      (known(left), known(right)) match
-        case (Some(leftFields), Some(rightFields))
-            if rightKey >= 0 && rightKey < rightFields.size =>
-          Some(leftFields ++ rightFields.zipWithIndex.collect {
-            case (field, ordinal) if ordinal != rightKey => field
-          })
-        case _ =>
-          None
+      joined(left, right, rightKey)
+    case Plan.WideLeftJoinOp(left, right, _, rightKey, _) =>
+      joined(left, right, rightKey)
     case Plan.WideGroupOp(source, key, measure, key2, distinct) =>
       known(source).flatMap { fields =>
         WideAggregate.output(fields, key, measure, key2, distinct)
@@ -47,6 +42,19 @@ private[scarlet] object WideFields:
     case Plan.WideLimitOp(source, _) => known(source)
     case _ =>
       None
+
+  private def joined(
+      left: Plan[WideRow],
+      right: Plan[WideRow],
+      rightKey: Int,
+  ): Option[Vector[ColumnField]] =
+    (known(left), known(right)) match
+      case (Some(leftFields), Some(rightFields)) if rightKey >= 0 && rightKey < rightFields.size =>
+        Some(leftFields ++ rightFields.zipWithIndex.collect {
+          case (field, ordinal) if ordinal != rightKey => field
+        })
+      case _ =>
+        None
 
   private def same(left: Vector[ColumnField], right: Vector[ColumnField]): Boolean =
     left.size == right.size && left.zip(right).forall { (leftField, rightField) =>

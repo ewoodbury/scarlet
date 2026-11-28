@@ -106,6 +106,58 @@ class TestWideJoin extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     cells(both(left.broadcastJoinColumns(right, 0, 0))) shouldBe cellsOf(expected)
   }
 
+  "a wide left join" should "keep an unmatched row and a stored zero" in {
+    val left = side(
+      WideInput.nullableInts("k", Array(1, 0, 2, 3), Array(true, false, true, true)),
+      WideInput.nullableLongs("q", Array(0L, 9L, 4L, 8L), Array(true, true, true, true)),
+    )
+    val right = DistCollection.ofColumns(
+      Vector(
+        WideInput.nullableInts("k", Array(1, 1, 0), Array(true, true, false)),
+        WideInput.nullableLongs("p", Array(5L, 0L, 7L), Array(true, false, true)),
+      ),
+      2,
+    )
+    val expected = List(
+      Vector(Cell.Int32(1), Cell.Int64(0L), Cell.Int64(5L)),
+      Vector(Cell.Int32(1), Cell.Int64(0L), Cell.Null),
+      Vector(Cell.Int32(2), Cell.Int64(4L), Cell.Null),
+      Vector(Cell.Int32(3), Cell.Int64(8L), Cell.Null),
+    )
+    val hashed = left.hashLeftJoinColumns(right, 0, 0)
+    val broadcast = left.broadcastLeftJoinColumns(right, 0, 0)
+    ColumnarPlanner.lower(hashed.plan).map(_.shape) shouldBe Some("WideHashLeftJoin(Scan,Scan)")
+    ColumnarPlanner.lower(broadcast.plan).map(_.shape) shouldBe Some(
+      "WideBroadcastLeftJoin(Scan,Scan)",
+    )
+    cells(both(hashed)) shouldBe cellsOf(expected)
+    cells(both(broadcast)) shouldBe cellsOf(expected)
+  }
+
+  it should "keep a string partner invalid when the key misses" in {
+    val left = DistCollection.ofColumns(
+      Vector(
+        WideInput.nullableInts("k", Array(1, 3), Array(true, true)),
+        WideInput.strings("name", Array("ann", "bob")),
+      ),
+      1,
+    )
+    val right = DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("k", Array(1, 1)),
+        WideInput.strings("note", Array("aa", "bb")),
+      ),
+      1,
+    )
+    val expected = List(
+      Vector(Cell.Int32(1), Cell.Utf8("ann"), Cell.Utf8("aa")),
+      Vector(Cell.Int32(1), Cell.Utf8("ann"), Cell.Utf8("bb")),
+      Vector(Cell.Int32(3), Cell.Utf8("bob"), Cell.Null),
+    )
+    cells(both(left.hashLeftJoinColumns(right, 0, 0))) shouldBe cellsOf(expected)
+    cells(both(left.broadcastLeftJoinColumns(right, 0, 0))) shouldBe cellsOf(expected)
+  }
+
   it should "refuse a string key" in {
     val left = side(WideInput.strings("k", Array("a")), WideInput.ints("q", Array(1)))
     val right = side(WideInput.strings("k", Array("a")), WideInput.ints("q", Array(2)))

@@ -53,17 +53,41 @@ private[execution] object WideLowering:
       broadcast: Option[Boolean],
       lowerChild: com.ewoodbury.scarlet.core.Plan[_] => Option[PhysicalOp],
   ): Option[PhysicalOp] =
+    joined(left, right, leftKey, rightKey, broadcast, lowerChild, outer = false)
+
+  def leftJoin(
+      left: PlanNode,
+      right: PlanNode,
+      leftKey: Int,
+      rightKey: Int,
+      broadcast: Option[Boolean],
+      lowerChild: com.ewoodbury.scarlet.core.Plan[_] => Option[PhysicalOp],
+  ): Option[PhysicalOp] =
+    joined(left, right, leftKey, rightKey, broadcast, lowerChild, outer = true)
+
+  private def joined(
+      left: PlanNode,
+      right: PlanNode,
+      leftKey: Int,
+      rightKey: Int,
+      broadcast: Option[Boolean],
+      lowerChild: com.ewoodbury.scarlet.core.Plan[_] => Option[PhysicalOp],
+      outer: Boolean,
+  ): Option[PhysicalOp] =
     (lowerChild(left), lowerChild(right)) match
       case (Some(leftOp), Some(rightOp)) =>
         (fieldsOf(leftOp), fieldsOf(rightOp)) match
           case (Some(leftFields), Some(rightFields))
               if keysMatch(leftFields, rightFields, leftKey, rightKey) =>
             val useBroadcast = broadcast.getOrElse(JoinCost.preferBroadcast(rightOp))
-            val joined =
-              if (useBroadcast) then
+            val chosen =
+              if (outer && useBroadcast) then
+                PhysicalOp.WideBroadcastLeftJoin(leftOp, rightOp, leftKey, rightKey)
+              else if (outer) then PhysicalOp.WideHashLeftJoin(leftOp, rightOp, leftKey, rightKey)
+              else if (useBroadcast) then
                 PhysicalOp.WideBroadcastJoin(leftOp, rightOp, leftKey, rightKey)
               else PhysicalOp.WideHashJoin(leftOp, rightOp, leftKey, rightKey)
-            Some(joined)
+            Some(chosen)
           case _ =>
             LoweringTrace.note("WideJoinOp", PhysicalOp.Kind.Columns, "WideLowering")
             None
@@ -168,6 +192,10 @@ private[execution] object WideLowering:
     case PhysicalOp.WideHashJoin(left, right, _, rightKey) =>
       joinedFields(left, right, rightKey)
     case PhysicalOp.WideBroadcastJoin(left, right, _, rightKey) =>
+      joinedFields(left, right, rightKey)
+    case PhysicalOp.WideHashLeftJoin(left, right, _, rightKey) =>
+      joinedFields(left, right, rightKey)
+    case PhysicalOp.WideBroadcastLeftJoin(left, right, _, rightKey) =>
       joinedFields(left, right, rightKey)
     case PhysicalOp.WideGroup(child, key, measure, key2, distinct) =>
       fieldsOf(child).flatMap { fields =>

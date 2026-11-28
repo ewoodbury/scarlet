@@ -197,7 +197,8 @@ private[execution] object ColumnUse:
     case Plan.SortByIntLongValueDescOp(source) => Some(source)
     case Plan.Source(_, _) | Plan.UnionOp(_, _) | Plan.JoinOp(_, _, _) |
         Plan.LeftOuterJoinOp(_, _, _) | Plan.RightOuterJoinOp(_, _, _) |
-        Plan.FullOuterJoinOp(_, _, _) | Plan.CoGroupOp(_, _) | Plan.WideJoinOp(_, _, _, _, _) =>
+        Plan.FullOuterJoinOp(_, _, _) | Plan.CoGroupOp(_, _) | Plan.WideJoinOp(_, _, _, _, _) |
+        Plan.WideLeftJoinOp(_, _, _, _, _) =>
       None
 
   private def joinSides(
