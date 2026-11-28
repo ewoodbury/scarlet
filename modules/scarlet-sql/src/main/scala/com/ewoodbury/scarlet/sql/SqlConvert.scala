@@ -22,9 +22,9 @@ import com.ewoodbury.scarlet.core.*
  * One SELECT: registered tables, one int or long equi-join, comparisons combined with AND, OR, and
  * NOT, arithmetic, count, sum, min, max, and an exact count of distinct values. A string compares
  * with JVM order. `LIKE` uses `%` and `_`, and it combines with AND and NOT. OR of `LIKE` names
- * the node. `length` is the UTF-16 length. A group is one or two keys, each an int, a long, or a
- * string. A string measure emits count, min, and max. Order is one int, long, or string column,
- * then a limit. Anything else names its node.
+ * the node. `length` is the UTF-16 length. A group is one or two keys. A key is an int, a long, a
+ * string, or arithmetic on an int or a long. A string measure emits count, min, and max. Order is
+ * one int, long, or string column, then a limit. Anything else names its node.
  */
 private object SqlConvert:
 
@@ -59,7 +59,9 @@ private object SqlConvert:
     val grouped = plain.getGroupBy
     val selected =
       if grouped == null then select(plain, filtered)
-      else group(plain, keys(grouped.getGroupByExpressionList, filtered), filtered)
+      else
+        val (keyed, ordinals, exprs) = keys(grouped.getGroupByExpressionList, filtered)
+        group(plain, ordinals, exprs, keyed)
     finish(plain, selected)
 
   /** One int, long, or string order, then a row count. A scalar names the node that asked. */
@@ -147,11 +149,16 @@ private object SqlConvert:
       throw new IllegalArgumentException("several aggregates need a group")
     else SqlResult.Rows(project(items, frame).rows)
 
-  private def group(plain: PlainSelect, keyOrdinals: List[Int], frame: Frame): SqlResult =
+  private def group(
+      plain: PlainSelect,
+      keyOrdinals: List[Int],
+      keyExprs: List[Expression],
+      frame: Frame,
+  ): SqlResult =
     if keyOrdinals.isEmpty || keyOrdinals.size > 2 then
       throw new IllegalArgumentException("a group needs one or two columns")
     val items = itemsOf(plain)
-    val (measure, names, distinctOrdinal) = groupedSelect(items, keyOrdinals, frame)
+    val (measure, names, distinctOrdinal) = groupedSelect(items, keyOrdinals, keyExprs, frame)
     val grouped = (keyOrdinals.size, distinctOrdinal) match
       case (1, None) => frame.rows.groupColumns(keyOrdinals.head, measure)
       case (1, Some(column)) => frame.rows.groupDistinct(keyOrdinals.head, measure, column)
@@ -166,13 +173,13 @@ private object SqlConvert:
   private def groupedSelect(
       items: List[SelectItem[?]],
       keys: List[Int],
+      keyExprs: List[Expression],
       frame: Frame,
   ): (Int, Vector[String], Option[Int]) =
     if items.size <= keys.size then groupList()
-    keys.zipWithIndex.foreach { (ordinal, index) =>
-      plainColumn(expressionOf(items(index)), frame) match
-        case Some(found) if found == ordinal => ()
-        case _ => groupList()
+    keys.zip(keyExprs).zipWithIndex.foreach { (pair, index) =>
+      val (ordinal, keyExpr) = pair
+      if !selectsKey(expressionOf(items(index)), ordinal, keyExpr, frame) then groupList()
     }
     var cursor = 0
     val chosen = items.drop(keys.size).map { item =>
@@ -603,20 +610,102 @@ private object SqlConvert:
   private def keys(
       list: net.sf.jsqlparser.expression.operators.relational.ExpressionList[?],
       frame: Frame,
-  ): List[Int] =
-    if list == null then Nil
+  ): (Frame, List[Int], List[Expression]) =
+    if list == null then (frame, Nil, Nil)
     else
-      list.asScala.toList.map {
-        case expression: Expression =>
-          plainColumn(expression, frame) match
-            case Some(ordinal) =>
-              kindAt(frame, ordinal) match
-                case ColumnKind.Int32 | ColumnKind.Int64 | ColumnKind.Utf8 => ordinal
-                case other =>
-                  throw new IllegalArgumentException(s"group key $other is not supported")
-            case None => unsupported(expression)
+      val (bound, reversedOrdinals, reversedExprs) =
+        list.asScala.toList.foldLeft((frame, List.empty[Int], List.empty[Expression])) {
+          case ((current, ordinals, exprs), item) =>
+            item match
+              case expression: Expression =>
+                val (next, ordinal) = keyOrdinal(expression, current)
+                (next, ordinal :: ordinals, expression :: exprs)
+              case other => unsupported(other)
+        }
+      (bound, reversedOrdinals.reverse, reversedExprs.reverse)
+
+  /** A column key stays put. Arithmetic on an int or a long appends the compute, then groups. */
+  private def keyOrdinal(expression: Expression, frame: Frame): (Frame, Int) =
+    plainColumn(expression, frame) match
+      case Some(ordinal) =>
+        kindAt(frame, ordinal) match
+          case ColumnKind.Int32 | ColumnKind.Int64 | ColumnKind.Utf8 => (frame, ordinal)
+          case other => throw new IllegalArgumentException(s"group key $other is not supported")
+      case None =>
+        val bare = unwrap(expression)
+        if !referencesColumn(bare) then unsupported(bare)
+        val (bound, ordinal) = arithmeticKey(bare, frame)
+        kindAt(bound, ordinal) match
+          case ColumnKind.Int32 | ColumnKind.Int64 => (bound, ordinal)
+          case other => throw new IllegalArgumentException(s"group key $other is not supported")
+
+  private def arithmeticKey(expr: Expression, frame: Frame): (Frame, Int) = expr match
+    case add: Addition => binaryKey(add, frame, ColumnExpr.Add.apply)
+    case sub: Subtraction => binaryKey(sub, frame, ColumnExpr.Sub.apply)
+    case mul: Multiplication => binaryKey(mul, frame, ColumnExpr.Mul.apply)
+    case div: Division => binaryKey(div, frame, ColumnExpr.Div.apply)
+    case other => unsupported(other)
+
+  private def binaryKey(
+      expr: BinaryExpression,
+      frame: Frame,
+      op: (Int, Int) => ColumnExpr,
+  ): (Frame, Int) =
+    val (leftFrame, left) = keyLeaf(expr.getLeftExpression, frame)
+    val (rightFrame, right) = keyLeaf(expr.getRightExpression, leftFrame)
+    rightFrame.bind(op(left, right))
+
+  private def keyLeaf(expr: Expression, frame: Frame): (Frame, Int) = unwrap(expr) match
+    case column: Column =>
+      val ordinal = columnOrdinal(frame, column)
+      kindAt(frame, ordinal) match
+        case ColumnKind.Int32 | ColumnKind.Int64 => (frame, ordinal)
+        case other => throw new IllegalArgumentException(s"group key $other is not supported")
+    case value: LongValue => frame.bind(ColumnExpr.Lit(intLiteral(value.getValue)))
+    case value: SignedExpression if value.getSign == '-' =>
+      value.getExpression match
+        case inner: LongValue => frame.bind(ColumnExpr.Lit(intLiteral(-inner.getValue)))
         case other => unsupported(other)
-      }
+    case other => arithmeticKey(other, frame)
+
+  private def referencesColumn(expr: Expression): Boolean = unwrap(expr) match
+    case _: Column => true
+    case binary: BinaryExpression =>
+      referencesColumn(binary.getLeftExpression) || referencesColumn(binary.getRightExpression)
+    case _ => false
+
+  private def selectsKey(
+      expr: Expression,
+      ordinal: Int,
+      keyExpr: Expression,
+      frame: Frame,
+  ): Boolean =
+    plainColumn(expr, frame) match
+      case Some(found) => found == ordinal
+      case None => sameExpression(expr, keyExpr)
+
+  private def sameExpression(left: Expression, right: Expression): Boolean =
+    (unwrap(left), unwrap(right)) match
+      case (leftColumn: Column, rightColumn: Column) =>
+        val leftName = leftColumn.getColumnName
+        val rightName = rightColumn.getColumnName
+        leftName != null && rightName != null && leftName.equalsIgnoreCase(rightName)
+      case (leftValue: LongValue, rightValue: LongValue) =>
+        leftValue.getValue == rightValue.getValue
+      case (leftSigned: SignedExpression, rightSigned: SignedExpression) =>
+        leftSigned.getSign == rightSigned.getSign && sameExpression(
+          leftSigned.getExpression,
+          rightSigned.getExpression,
+        )
+      case (leftAdd: Addition, rightAdd: Addition) => sameBinary(leftAdd, rightAdd)
+      case (leftSub: Subtraction, rightSub: Subtraction) => sameBinary(leftSub, rightSub)
+      case (leftMul: Multiplication, rightMul: Multiplication) => sameBinary(leftMul, rightMul)
+      case (leftDiv: Division, rightDiv: Division) => sameBinary(leftDiv, rightDiv)
+      case _ => false
+
+  private def sameBinary(left: BinaryExpression, right: BinaryExpression): Boolean =
+    sameExpression(left.getLeftExpression, right.getLeftExpression) &&
+      sameExpression(left.getRightExpression, right.getRightExpression)
 
   private def plainColumn(expr: Expression, frame: Frame): Option[Int] = unwrap(expr) match
     case column: Column => Some(columnOrdinal(frame, column))
