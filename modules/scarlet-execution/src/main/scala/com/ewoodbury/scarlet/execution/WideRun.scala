@@ -63,6 +63,10 @@ private[execution] object WideRun:
       Seq(join(left, right, leftKey, rightKey, broadcast = true))
     case PhysicalOp.WideGroup(child, key, measure, key2) =>
       Seq(group(child, key, measure, key2))
+    case PhysicalOp.WideSort(child, ordinal, descending) =>
+      Seq(sorted(child, ordinal, descending))
+    case PhysicalOp.WideLimit(child, count) =>
+      Seq(limited(child, count))
     case other =>
       throw new IllegalStateException(s"wide run does not accept ${other.shape}")
 
@@ -92,6 +96,24 @@ private[execution] object WideRun:
     val (outFields, batch) =
       WideGroup.aggregate(tables.map(_.batch), fields, key, measure, key2)
     Table(outFields, batch)
+
+  private def sorted(child: PhysicalOp, ordinal: Int, descending: Boolean): Table =
+    val tables = run(child)
+    val fields = schema(tables, child, "wide sort")
+    Table(fields, WideOrder.sort(tables.map(_.batch), ordinal, descending))
+
+  private def limited(child: PhysicalOp, count: Int): Table =
+    val tables = run(child)
+    val fields = schema(tables, child, "wide limit")
+    Table(fields, WideOrder.limit(tables.map(_.batch), count))
+
+  private def schema(tables: Seq[Table], child: PhysicalOp, what: String): Vector[ColumnField] =
+    tables.headOption
+      .map(_.fields)
+      .orElse(WideLowering.fieldsOf(child))
+      .getOrElse(
+        throw new IllegalStateException(s"$what child ${child.shape} has no schema"),
+      )
 
   private def side(op: PhysicalOp): (Vector[ColumnField], Seq[ColumnBatch]) =
     val tables = run(op)

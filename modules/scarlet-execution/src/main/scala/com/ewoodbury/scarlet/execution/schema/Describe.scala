@@ -126,3 +126,5 @@ private[execution] object Describe:
     case _: PhysicalOp.WideHashJoin => KernelChoice.HashJoin
     case _: PhysicalOp.WideBroadcastJoin => KernelChoice.BroadcastJoin
     case _: PhysicalOp.WideGroup => KernelChoice.IntHashAggregate
+    case _: PhysicalOp.WideSort => KernelChoice.SortByLongKey
+    case _: PhysicalOp.WideLimit => KernelChoice.Project

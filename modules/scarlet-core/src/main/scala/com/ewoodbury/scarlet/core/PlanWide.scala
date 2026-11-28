@@ -33,7 +33,7 @@ object PlanWide {
         _: Plan.LeftOuterJoinOp[_, _, _] | _: Plan.RightOuterJoinOp[_, _, _] |
         _: Plan.FullOuterJoinOp[_, _, _] | _: Plan.CoGroupOp[_, _, _] | _: Plan.RepartitionOp[_] |
         _: Plan.CoalesceOp[_] | _: Plan.PartitionByOp[_, _] | _: Plan.DistinctOp[_] |
-        _: Plan.WideJoinOp | _: Plan.WideGroupOp =>
+        _: Plan.WideJoinOp | _: Plan.WideGroupOp | _: Plan.WideSortOp | _: Plan.WideLimitOp =>
       true
 
     // Narrow operations - recurse on source(s) to check for downstream wide operations
@@ -80,7 +80,7 @@ object PlanWide {
         _: Plan.LeftOuterJoinOp[_, _, _] | _: Plan.RightOuterJoinOp[_, _, _] |
         _: Plan.FullOuterJoinOp[_, _, _] | _: Plan.CoGroupOp[_, _, _] | _: Plan.RepartitionOp[_] |
         _: Plan.CoalesceOp[_] | _: Plan.PartitionByOp[_, _] | _: Plan.DistinctOp[_] |
-        _: Plan.WideJoinOp | _: Plan.WideGroupOp =>
+        _: Plan.WideJoinOp | _: Plan.WideGroupOp | _: Plan.WideSortOp | _: Plan.WideLimitOp =>
       true
     case _ => false
   }

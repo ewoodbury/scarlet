@@ -105,6 +105,48 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     shape shouldBe handShape
   }
 
+  "a sorted group" should "match query 15" in {
+    val (result, shape) = grouped(
+      """select UserID, count(*), sum(UserID), min(UserID), max(UserID)
+        |from hits group by UserID
+        |order by UserID desc
+        |limit 10""".stripMargin,
+      Map("hits" -> ClickBenchSlice.scan()),
+      ClickBenchSlice.topUserChecksum,
+    )
+    result shouldBe ClickBenchSlice.topUserMix
+    shape shouldBe "WideLimit(WideSort(WideGroup(Scan)))"
+  }
+
+  "count order" should "resolve count star" in {
+    val sql =
+      """select UserID, count(*) from hits group by UserID
+        |order by count(*) desc limit 10""".stripMargin
+    val (columnar, columnarShape) = listed(sql, columnar = true)
+    val (rows, _) = listed(sql, columnar = false)
+    columnar.length shouldBe 10
+    rows.length shouldBe 10
+    columnarShape shouldBe "WideLimit(WideSort(WideProject(WideGroup(Scan))))"
+    countsOf(columnar) shouldBe List.fill(10)(1L)
+    countsOf(rows) shouldBe List.fill(10)(1L)
+  }
+
+  "a descending limit" should "keep the largest ids" in {
+    val (cells, shape) = listed(
+      "select id from tiny order by id desc limit 2",
+      columnar = true,
+      Map("tiny" -> tiny()),
+    )
+    val (rows, _) = listed(
+      "select id from tiny order by id desc limit 2",
+      columnar = false,
+      Map("tiny" -> tiny()),
+    )
+    cells shouldBe rows
+    cells.map(_.cells) shouldBe List(Vector(Cell.Int32(4)), Vector(Cell.Int32(3)))
+    shape shouldBe "WideLimit(WideSort(WideProject(Scan)))"
+  }
+
   "a group" should "match query 7" in {
     val (result, shape) = grouped(
       """select AdvEngineID, count(*), sum(AdvEngineID), min(AdvEngineID), max(AdvEngineID)
@@ -184,6 +226,40 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     thrown.getMessage should include("Join")
   }
 
+  "an ordered string" should "name the node" in {
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(
+        "select SearchPhrase from hits order by SearchPhrase",
+        Map("hits" -> phraseHits()),
+      )
+    }
+    thrown.getMessage should include("OrderByElement")
+  }
+
+  "an ordered expression" should "name the node" in {
+    named("select id from tiny order by id + 1", "OrderByElement")
+  }
+
+  "two sort keys" should "name the second" in {
+    named("select id from tiny order by id, id", "OrderByElement")
+  }
+
+  "a limit all" should "name the node" in {
+    named("select id from tiny limit all", "Limit")
+  }
+
+  "a limit offset" should "name the node" in {
+    named("select id from tiny limit 1, 2", "Limit")
+  }
+
+  "an ordered value" should "name the node" in {
+    named("select count(*) from tiny order by id", "OrderByElement")
+  }
+
+  "a limited value" should "name the node" in {
+    named("select count(*) from tiny limit 1", "Limit")
+  }
+
   "a string order" should "name the node" in {
     val thrown = the[IllegalArgumentException] thrownBy {
       val _ = Sql.run(
@@ -247,6 +323,26 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val rows = read(false)
     columnar._1 shouldBe rows._1
     columnar
+
+  private def listed(
+      sql: String,
+      columnar: Boolean,
+      tables: Map[String, DistCollection[WideRow]] = Map("hits" -> ClickBenchSlice.scan()),
+  ): (List[WideRow], String) =
+    ScarletConf.set(base.copy(columnarExecution = columnar))
+    Sql.run(sql, tables) match
+      case SqlResult.Rows(rows) =>
+        val shape = ColumnarPlanner.lower(rows.plan).map(_.shape).getOrElse("none")
+        if columnar then shape should not be "none"
+        (rows.collect().toList, shape)
+      case SqlResult.Value(_, _) => fail(s"expected rows: $sql")
+
+  private def countsOf(rows: List[WideRow]): List[Long] =
+    rows.map { row =>
+      row.cells.lift(1) match
+        case Some(Cell.Int64(count)) => count
+        case _ => fail("a grouped count is the second cell")
+    }
 
   private def named(sql: String, node: String): Unit =
     val thrown = the[IllegalArgumentException] thrownBy {

@@ -68,6 +68,12 @@ class DefaultExecutionService extends ExecutionService {
     case project: Plan.WideProjectOp =>
       wideProjectPartitions(plan, project)
 
+    case sort: Plan.WideSortOp =>
+      wideSortPartitions(plan, sort)
+
+    case limit: Plan.WideLimitOp =>
+      wideLimitPartitions(plan, limit)
+
     case _ =>
       ColumnarPlanner.tryRun(plan).orElse(MixedJoin.partitions(plan)).getOrElse(runRow(plan))
   }
@@ -92,6 +98,20 @@ class DefaultExecutionService extends ExecutionService {
   private def wideGroupPartitions[A](plan: Plan[A], group: Plan.WideGroupOp): Seq[Partition[A]] =
     ColumnarPlanner.tryRun(plan).getOrElse {
       WideGroupRows.partitions(group).asInstanceOf[Seq[Partition[A]]]
+    }
+
+  /** Columnar wide sort when it lowers. Otherwise [[WideOrderRows]]. */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+  private def wideSortPartitions[A](plan: Plan[A], sort: Plan.WideSortOp): Seq[Partition[A]] =
+    ColumnarPlanner.tryRun(plan).getOrElse {
+      WideOrderRows.sort(sort).asInstanceOf[Seq[Partition[A]]]
+    }
+
+  /** Columnar wide limit when it lowers. Otherwise [[WideOrderRows]]. */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+  private def wideLimitPartitions[A](plan: Plan[A], limit: Plan.WideLimitOp): Seq[Partition[A]] =
+    ColumnarPlanner.tryRun(plan).getOrElse {
+      WideOrderRows.limit(limit).asInstanceOf[Seq[Partition[A]]]
     }
 
   /**

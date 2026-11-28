@@ -252,6 +252,8 @@ private[execution] object RowBoundary:
       case _: Plan.JoinOp[?, ?, ?] => false
       case _: Plan.WideJoinOp => false
       case _: Plan.WideGroupOp => false
+      case _: Plan.WideSortOp => false
+      case _: Plan.WideLimitOp => false
       case _: Plan.LeftOuterJoinOp[?, ?, ?] => false
       case _: Plan.RightOuterJoinOp[?, ?, ?] => false
       case _: Plan.FullOuterJoinOp[?, ?, ?] => false

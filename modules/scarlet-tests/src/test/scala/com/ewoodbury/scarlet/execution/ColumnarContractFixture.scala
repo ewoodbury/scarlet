@@ -390,7 +390,8 @@ trait ColumnarContractFixture extends Matchers:
         PhysicalOp.StringBroadcastRightOuter(_, _) | PhysicalOp.StringBroadcastFullOuter(_, _) |
         PhysicalOp.StringSortMergeLeftOuter(_, _) | PhysicalOp.StringSortMergeRightOuter(_, _) |
         PhysicalOp.StringSortMergeFullOuter(_, _) | PhysicalOp.WideHashJoin(_, _, _, _) |
-        PhysicalOp.WideBroadcastJoin(_, _, _, _) | PhysicalOp.WideGroup(_, _, _, _) =>
+        PhysicalOp.WideBroadcastJoin(_, _, _, _) | PhysicalOp.WideGroup(_, _, _, _) |
+        PhysicalOp.WideSort(_, _, _) | PhysicalOp.WideLimit(_, _) =>
       false
 
   /** A key sort is not partition-preserving, and `tryTake` still runs it. */
@@ -552,6 +553,7 @@ trait ColumnarContractFixture extends Matchers:
     case Plan.FullOuterJoinOp(_, _, _) => PlanNode.Join
     case Plan.WideJoinOp(_, _, _, _, _) => PlanNode.Join
     case Plan.WideGroupOp(_, _, _, _) => PlanNode.ReduceByKey
+    case Plan.WideSortOp(_, _, _) | Plan.WideLimitOp(_, _) => PlanNode.SortBy
     case Plan.CoGroupOp(_, _) => PlanNode.CoGroup
 
   /**

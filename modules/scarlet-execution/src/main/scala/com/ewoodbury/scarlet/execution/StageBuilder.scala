@@ -386,6 +386,12 @@ object StageBuilder:
       case _: Plan.WideGroupOp =>
         throw new UnsupportedOperationException("wide group is executed by WideGroupRows")
 
+      case _: Plan.WideSortOp =>
+        throw new UnsupportedOperationException("wide sort is executed by WideOrderRows")
+
+      case _: Plan.WideLimitOp =>
+        throw new UnsupportedOperationException("wide limit is executed by WideOrderRows")
+
       case Plan.FlatMapOp(sourcePlan, f) =>
         val (sourceStageId, _) = buildStagesFromPlan(ctx, sourcePlan, builderMap, dependencies)
         val resultId = appendOperation(
