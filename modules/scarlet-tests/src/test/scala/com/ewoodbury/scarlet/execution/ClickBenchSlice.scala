@@ -6,7 +6,7 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 import com.ewoodbury.scarlet.support.Check
 
 /**
- * Thirty ClickBench queries on 4096 generated rows. This is not the hits table.
+ * Thirty-one ClickBench queries on 4096 generated rows. This is not the hits table.
  *
  * Numbers follow the 0-based order of `clickhouse/queries.sql`. An average is the long sum and the
  * count. Query 2's width average is 3679360 / 4096. Query 3's user average is 8386588672 / 4096.
@@ -84,6 +84,10 @@ object ClickBenchSlice:
   val regionMix: Long = 876263744663466213L
   val regionGroups: Long = 5L
 
+  /** Non-empty phrases. The engine orders a repeated time, then the phrase. */
+  val timedPhraseMix: Long = 2159987004469666056L
+  val timedPhraseRows: Long = 3024L
+
   /** Present URLs matching `%google%`. Null URLs are dropped. */
   val likeUrlsCount: Long = 2315L
 
@@ -144,7 +148,7 @@ object ClickBenchSlice:
     "23 pattern match, then sort. This file.",
     "24 string filter, then sort and limit. This file.",
     "25 sort by a string. This file.",
-    "26 sort by a time and a string. Missing: a second sort key.",
+    "26 This file. The engine applies the order. The published query also limits.",
     "27 length of a string. This file.",
     "28 regular expression replace. Missing: regex.",
     "29 add a literal to a column. This file.",
@@ -276,6 +280,25 @@ object ClickBenchSlice:
   def sortedPhrases(): DistCollection[WideRow] =
     notEmptyPhrase().sortColumn(3, descending = false).limitColumns(10)
 
+  /**
+   * Query 26: a non-empty phrase, ordered by a repeated time, then the phrase. The published
+   * statement also limits.
+   */
+  def timedPhrases(): DistCollection[WideRow] =
+    DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.longs(
+            "EventTime",
+            Array.tabulate(rowCount)(index => (index % 7).toLong),
+          ),
+          searchPhrase(),
+        ),
+        partitions,
+      )
+      .filterColumn(1, ColumnCompare(CompareOp.Ne, ColumnLiteral.Utf8("")))
+      .sortColumn(0, descending = false, Some(1))
+
   /** Query 27: sum of the UTF-16 length. Average and HAVING stay out. */
   def urlLengths(): DistCollection[WideRow] =
     urls()
@@ -325,6 +348,9 @@ object ClickBenchSlice:
 
   def userPhraseChecksum(rows: Iterable[WideRow]): Long =
     rows.foldLeft(0L)(mixUserPhrase)
+
+  def timedPhraseChecksum(rows: Iterable[WideRow]): Long =
+    rows.foldLeft(0L)((acc, row) => foldText(acc * 31L + longAt(row, 0), textAt(row, 1)))
 
   def userChecksum(rows: Iterable[WideRow]): Long =
     rows.foldLeft(0L)((acc, row) => acc * 31L + longAt(row, 2))
@@ -588,6 +614,8 @@ object ClickBenchSlice:
       counted("query 24", filteredPhrases().plan, 10L),
       shaped("query 25", sortedPhrases().plan, "WideLimit(WideSort(WideFilter3(Scan)))"),
       counted("query 25", sortedPhrases().plan, 10L),
+      shaped("query 26", timedPhrases().plan, "WideSort(WideFilter1(Scan))"),
+      counted("query 26", timedPhrases().plan, timedPhraseRows),
       shaped("query 27", urlLengths().plan, "WideCompute(WideCompute(Scan))"),
       summed("query 27", urlLengths().plan, 5, urlLengthSum),
       shaped("query 35", widthMinus().plan, "WideGroup(WideCompute(WideCompute(Scan)))"),
@@ -626,6 +654,7 @@ object ClickBenchSlice:
       both("query 23", likeSortMix)(userChecksum(likeSorted().collect())),
       both("query 24", phraseFilterSortMix)(userPhraseChecksum(filteredPhrases().collect())),
       both("query 25", phraseSortMix)(userPhraseChecksum(sortedPhrases().collect())),
+      both("query 26", timedPhraseMix)(timedPhraseChecksum(timedPhrases().collect())),
       both("query 27", urlLengthSum)(urlLengths().sumLongColumn(5)),
       both("query 35", exprGroupMix)(groupedChecksum(widthMinus().collect())),
       both("query 18", minuteMix)(groupedChecksum(byMinute().collect())),

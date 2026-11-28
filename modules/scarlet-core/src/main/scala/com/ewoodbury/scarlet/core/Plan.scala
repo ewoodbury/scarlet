@@ -721,18 +721,17 @@ object Plan {
   ) extends Plan[WideRow]
 
   /**
-   * Global sort of one int or long column. A null orders as zero and the row stays. Ties keep
-   * input order, including when the sort is descending. The result is one partition.
-   *
-   * @param source
-   *   The preceding wide-row plan.
-   * @param ordinal
-   *   Sort column.
-   * @param descending
-   *   True when larger keys come first.
+   * Global sort of one int, long, or string, then an optional second of those kinds. A null number
+   * orders as zero and the row stays. A null string orders as empty and the row stays. The last
+   * key keeps input order, including when the first key is descending. The result is one
+   * partition.
    */
-  case class WideSortOp(source: Plan[WideRow], ordinal: Int, descending: Boolean)
-      extends Plan[WideRow]
+  case class WideSortOp(
+      source: Plan[WideRow],
+      ordinal: Int,
+      descending: Boolean,
+      second: Option[Int] = None,
+  ) extends Plan[WideRow]
 
   /**
    * First `count` rows of the child, in the child's order. A negative count is refused. This is

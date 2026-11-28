@@ -270,17 +270,18 @@ final case class DistCollection[A](plan: Plan[A]):
     case ColumnKind.Int32 | ColumnKind.Int64 | ColumnKind.Utf8 => true
     case _ => false
 
-  /**
-   * Sorts by one int, long, or string column. A null number orders as zero. A null string orders
-   * as empty. The row stays. Ties keep input order. String order is the JVM string, not a
-   * dictionary code. The result is one partition.
-   */
-  def sortColumn(ordinal: Int, descending: Boolean)(using
+  /** Sorts by one int, long, or string, then an optional second of those kinds. */
+  def sortColumn(ordinal: Int, descending: Boolean, second: Option[Int] = None)(using
       ev: A =:= WideRow,
   ): DistCollection[WideRow] =
     val fields = WideFields.known(widePlan).getOrElse {
       throw new IllegalArgumentException("sort needs a wide schema")
     }
+    acceptSort(fields, ordinal)
+    second.foreach(next => acceptSort(fields, next))
+    DistCollection(Plan.WideSortOp(widePlan, ordinal, descending, second))
+
+  private def acceptSort(fields: Vector[ColumnField], ordinal: Int): Unit =
     val field = fields.lift(ordinal).getOrElse {
       throw new IllegalArgumentException(s"column $ordinal outside width ${fields.size}")
     }
@@ -288,7 +289,6 @@ final case class DistCollection[A](plan: Plan[A]):
       case ColumnKind.Int32 | ColumnKind.Int64 | ColumnKind.Utf8 => ()
       case other =>
         throw new IllegalArgumentException(s"sort column ${field.name} is $other")
-    DistCollection(Plan.WideSortOp(widePlan, ordinal, descending))
 
   /**
    * Keeps the first `count` rows in the child order. A negative count is refused. This is not
