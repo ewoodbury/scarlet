@@ -19,13 +19,14 @@ import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
 
 /**
- * One SELECT: registered tables, one int or long equi-join, comparisons combined with AND, OR, and
- * NOT, arithmetic, count, sum, min, max, and an exact count of distinct values. A string compares
- * with JVM order. `LIKE` uses `%` and `_`, and it combines with AND and NOT. OR of `LIKE` names
- * the node. `length` is the UTF-16 length. A group is one or two keys. A key is an int, a long, a
- * string, or arithmetic on an int or a long. `extract(minute from` an int64 epoch`)` and
- * `date_trunc('minute',` that epoch`)` are computes. A string measure emits count, min, and max.
- * Order is one int, long, or string column, then a limit. Anything else names its node.
+ * One SELECT: registered tables, a left-deep chain of int or long equi-joins in the written order,
+ * comparisons combined with AND, OR, and NOT, arithmetic, count, sum, min, max, and an exact count
+ * of distinct values. A string compares with JVM order. `LIKE` uses `%` and `_`, and it combines
+ * with AND and NOT. OR of `LIKE` names the node. `length` is the UTF-16 length. A group is one or
+ * two keys. A key is an int, a long, a string, or arithmetic on an int or a long. `extract(minute
+ * from` an int64 epoch`)` and `date_trunc('minute',` that epoch`)` are computes. A string measure
+ * emits count, min, and max. Order is one int, long, or string column, then a limit. Anything else
+ * names its node.
  */
 private object SqlConvert:
 
@@ -45,17 +46,13 @@ private object SqlConvert:
   ): SqlResult =
     if plain.getDistinct != null then unsupported(plain.getDistinct)
     val joins = plain.getJoins
-    if joins != null && joins.size > 1 then unsupported(joins.get(1))
     if plain.getOffset != null then unsupported(plain.getOffset)
     if plain.getFetch != null then unsupported(plain.getFetch)
     if plain.getTop != null then unsupported(plain.getTop)
     if plain.getHaving != null then unsupported(plain.getHaving)
     val from = plain.getFromItem
     if from == null then unsupported(plain)
-    val leftName = tableName(from)
-    val opened =
-      if joins == null || joins.isEmpty then Frame(resolve(tables, leftName), 0)
-      else joined(leftName, resolve(tables, leftName), joins.get(0), tables)
+    val opened = openFrom(from, joins, tables)
     val filtered = if plain.getWhere == null then opened else predicate(plain.getWhere, opened)
     val grouped = plain.getGroupBy
     val selected =
@@ -344,33 +341,58 @@ private object SqlConvert:
       val (negated, column) = built.bind(ColumnExpr.Not(ordinal))
       negated.filter(column, ColumnCompare(CompareOp.Eq, ColumnLiteral.Bool(true)))
 
-  private def joined(
-      leftName: String,
-      left: DistCollection[WideRow],
-      join: Join,
+  private final case class Side(name: String, ordinals: Vector[Int])
+
+  private final case class Chain(frame: Frame, sides: Vector[Side])
+
+  /** Left-deep equi-joins. Each right key is dropped. Earlier columns keep their ordinals. */
+  private def openFrom(
+      from: FromItem,
+      joins: java.util.List[Join],
       tables: Map[String, DistCollection[WideRow]],
   ): Frame =
+    val leftName = tableName(from)
+    val left = resolve(tables, leftName)
+    val start = Chain(Frame(left, 0), Vector(Side(leftName, fieldsOf(left).indices.toVector)))
+    val list = if joins == null then Nil else joins.asScala.toList
+    list.foldLeft(start)((chain, join) => link(chain, join, tables)).frame
+
+  private def link(
+      chain: Chain,
+      join: Join,
+      tables: Map[String, DistCollection[WideRow]],
+  ): Chain =
     if join.isLeft || join.isRight || join.isFull || join.isOuter || join.isCross ||
       join.isSemi || join.isNatural || join.isApply
     then unsupported(join)
     val rightItem = join.getRightItem
     if rightItem == null || join.getOnExpression == null then unsupported(join)
     val rightName = tableName(rightItem)
+    if chain.sides.exists(side => side.name.equalsIgnoreCase(rightName)) then
+      throw new IllegalArgumentException(s"table $rightName is already joined")
     val right = resolve(tables, rightName)
+    val rightFields = fieldsOf(right)
     val (leftKey, rightKey) = unwrap(join.getOnExpression) match
-      case eq: EqualsTo =>
-        equiKeys(eq, leftName, fieldsOf(left), rightName, fieldsOf(right))
+      case eq: EqualsTo => equiKeys(eq, chain, rightName, rightFields)
       case other => unsupported(other)
-    val leftKind = fieldsOf(left)(leftKey).kind
-    val rightKind = fieldsOf(right)(rightKey).kind
+    val leftFields = fieldsOf(chain.frame.rows)
+    val leftKind = leftFields(leftKey).kind
+    val rightKind = rightFields(rightKey).kind
     if !joinKey(leftKind) || !joinKey(rightKind) then
       throw new IllegalArgumentException("a join key must be an int or a long")
-    Frame(left.joinColumns(right, leftKey, rightKey), 0)
+    val joined = chain.frame.rows.joinColumns(right, leftKey, rightKey)
+    val width = leftFields.size
+    val rightOrdinals = rightFields.indices
+      .foldLeft((width, Vector.empty[Int])) { (state, index) =>
+        val (cursor, found) = state
+        if index == rightKey then state else (cursor + 1, found :+ cursor)
+      }
+      ._2
+    Chain(Frame(joined, chain.frame.next), chain.sides :+ Side(rightName, rightOrdinals))
 
   private def equiKeys(
       eq: EqualsTo,
-      leftName: String,
-      leftFields: Vector[ColumnField],
+      chain: Chain,
       rightName: String,
       rightFields: Vector[ColumnField],
   ): (Int, Int) =
@@ -378,38 +400,59 @@ private object SqlConvert:
     val rightExpr = unwrap(eq.getRightExpression)
     (leftExpr, rightExpr) match
       case (leftColumn: Column, rightColumn: Column) =>
-        val leftSide = place(leftColumn, leftName, leftFields, rightName, rightFields)
-        val rightSide = place(rightColumn, leftName, leftFields, rightName, rightFields)
-        (leftSide, rightSide) match
-          case ((true, leftKey), (false, rightKey)) => (leftKey, rightKey)
-          case ((false, rightKey), (true, leftKey)) => (leftKey, rightKey)
+        val leftPlace = locate(leftColumn, chain, rightName, rightFields)
+        val rightPlace = locate(rightColumn, chain, rightName, rightFields)
+        (leftPlace, rightPlace) match
+          case (Some((true, leftKey)), Some((false, rightKey))) => (leftKey, rightKey)
+          case (Some((false, rightKey)), Some((true, leftKey))) => (leftKey, rightKey)
           case _ => unsupported(eq)
       case _ => unsupported(eq)
 
-  /** True when the column is on the left input. */
-  private def place(
+  /** True means the column is on the accumulated left input. */
+  private def locate(
       column: Column,
-      leftName: String,
-      leftFields: Vector[ColumnField],
+      chain: Chain,
       rightName: String,
       rightFields: Vector[ColumnField],
-  ): (Boolean, Int) =
+  ): Option[(Boolean, Int)] =
     val table = column.getTable
     val qualified = table != null && table.getName != null && table.getName.nonEmpty
-    if qualified && table.getName.equalsIgnoreCase(leftName) then
-      (true, ordinalIn(leftFields, column))
-    else if qualified && table.getName.equalsIgnoreCase(rightName) then
-      (false, ordinalIn(rightFields, column))
-    else if qualified then unsupported(column)
+    if qualified && table.getName.equalsIgnoreCase(rightName) then
+      Some((false, ordinalIn(rightFields, column)))
+    else if qualified then
+      chain.sides.find(side => side.name.equalsIgnoreCase(table.getName)) match
+        case Some(side) => Some((true, ordinalOn(chain, side, column)))
+        case None => unsupported(column)
     else
       val name = column.getColumnName
-      val onLeft = leftFields.indexWhere(field => field.name.equalsIgnoreCase(name))
-      val onRight = rightFields.indexWhere(field => field.name.equalsIgnoreCase(name))
-      if onLeft >= 0 && onRight >= 0 then
-        throw new IllegalArgumentException(s"column $name is on both sides of the join")
-      else if onLeft >= 0 then (true, onLeft)
-      else if onRight >= 0 then (false, onRight)
-      else throw new IllegalArgumentException(s"column $name is not in the table")
+      if name == null then unsupported(column)
+      else
+        val leftHits = chain.sides.flatMap { side =>
+          ordinalNamed(chain, side, name).map(ordinal => (true, ordinal))
+        }
+        val rightHit = rightFields.zipWithIndex.collectFirst {
+          case (field, ordinal) if field.name.equalsIgnoreCase(name) => (false, ordinal)
+        }
+        val hits = leftHits ++ rightHit.toList
+        hits match
+          case Vector((onLeft, ordinal)) => Some((onLeft, ordinal))
+          case more if more.size > 1 =>
+            throw new IllegalArgumentException(s"column $name is on both sides of the join")
+          case _ => throw new IllegalArgumentException(s"column $name is not in the table")
+
+  private def ordinalOn(chain: Chain, side: Side, column: Column): Int =
+    val name = column.getColumnName
+    if name == null then unsupported(column)
+    else
+      ordinalNamed(chain, side, name).getOrElse(
+        throw new IllegalArgumentException(s"column $name is not in the table"),
+      )
+
+  private def ordinalNamed(chain: Chain, side: Side, name: String): Option[Int] =
+    val fields = fieldsOf(chain.frame.rows)
+    side.ordinals.find { ordinal =>
+      fields.lift(ordinal).exists(field => field.name.equalsIgnoreCase(name))
+    }
 
   private def ordinalIn(fields: Vector[ColumnField], column: Column): Int =
     val name = column.getColumnName

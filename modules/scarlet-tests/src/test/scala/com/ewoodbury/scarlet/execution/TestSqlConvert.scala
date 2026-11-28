@@ -105,6 +105,53 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     shape shouldBe handShape
   }
 
+  "a join chain" should "keep the written order" in {
+    val customer = DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("custkey", Array(1, 2)),
+        WideInput.strings("segment", Array("BUILDING", "AUTO")),
+      ),
+      1,
+    )
+    val orders = DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("orderkey", Array(10, 11, 12)),
+        WideInput.ints("custkey", Array(1, 1, 2)),
+      ),
+      1,
+    )
+    val lines = DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("orderkey", Array(10, 11, 11, 12)),
+        WideInput.ints("qty", Array(1, 2, 3, 4)),
+      ),
+      1,
+    )
+    val hand = customer.joinColumns(orders, 0, 1).joinColumns(lines, 2, 0)
+    val handCount = hand.count()
+    val handShape = ColumnarPlanner.lower(hand.plan).map(_.shape).getOrElse("none")
+    val tables = Map("customer" -> customer, "orders" -> orders, "lines" -> lines)
+    val (result, shape) = value(
+      """select count(*) from customer
+        |join orders on customer.custkey = orders.custkey
+        |join lines on orders.orderkey = lines.orderkey""".stripMargin,
+      tables,
+    )
+    result shouldBe handCount
+    result shouldBe 4L
+    shape shouldBe handShape
+  }
+
+  "a repeated join" should "name the table" in {
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(
+        "select count(*) from tiny join tiny on id = id",
+        Map("tiny" -> tiny()),
+      )
+    }
+    thrown.getMessage should include("already joined")
+  }
+
   "a sorted group" should "match query 15" in {
     val (result, shape) = grouped(
       """select UserID, count(*), sum(UserID), min(UserID), max(UserID)

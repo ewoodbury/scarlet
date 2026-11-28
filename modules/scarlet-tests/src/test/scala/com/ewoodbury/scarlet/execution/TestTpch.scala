@@ -79,11 +79,11 @@ class TestTpch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
   "query 3" should "join and then group on the columnar path" in {
     val planned = TpchSlice.shippingPlan()
     ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some(
-      "WideGroup(WideHashJoin(WideFilter1(Scan),WideCompute(WideFilter1(Scan))))",
+      "WideGroup(WideHashJoin(WideHashJoin(WideFilter1(Scan),WideFilter2(Scan)),WideCompute(WideFilter1(Scan))))",
     )
     ColumnarPlanner.tryCount(planned.plan) shouldBe Some(TpchSlice.shippingGroups)
     val columnar = planned.collect().toSeq
-    columnar.length shouldBe 128
+    columnar.length shouldBe 64
     cellsOf(columnar, 0) shouldBe Vector(
       Cell.Int32(0),
       Cell.Int64(1L),

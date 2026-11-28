@@ -76,9 +76,30 @@ class DefaultExecutionService extends ExecutionService {
     case limit: Plan.WideLimitOp =>
       wideLimitPartitions(plan, limit)
 
+    case filter: Plan.WideFilterOp =>
+      aboveJoin(plan, filter.source, WideStepRows.filter(filter))
+
+    case compute: Plan.WideComputeOp =>
+      aboveJoin(plan, compute.source, WideStepRows.compute(compute))
+
     case _ =>
       ColumnarPlanner.tryRun(plan).orElse(MixedJoin.partitions(plan)).getOrElse(runRow(plan))
   }
+
+  /**
+   * Columnar filter or compute when it lowers. Above a join, the row oracle packs the joined rows
+   * and runs the same column kernel. A filter or compute of a scan stays a stage.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.AsInstanceOf"))
+  private def aboveJoin[A](
+      plan: Plan[A],
+      source: Plan[WideRow],
+      rows: => Seq[Partition[WideRow]],
+  ): Seq[Partition[A]] =
+    ColumnarPlanner.tryRun(plan).getOrElse {
+      if (PlanWide.isWide(source)) then rows.asInstanceOf[Seq[Partition[A]]]
+      else MixedJoin.partitions(plan).getOrElse(runRow(plan))
+    }
 
   /**
    * Columnar wide join when it lowers. Otherwise the in-memory wide join. `Plan` is invariant, so
