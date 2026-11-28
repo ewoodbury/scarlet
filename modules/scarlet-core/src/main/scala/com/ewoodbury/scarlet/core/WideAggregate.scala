@@ -6,7 +6,8 @@ package com.ewoodbury.scarlet.core
  * A key is an int, a long, or a string. The measure is an int, a long, a double, or a float. Count
  * is a long. Sum is a long for an int or long measure, and a double for a float or double measure.
  * Min and max keep the measure's kind. A bool or string measure is not in this set. A null key is
- * dropped. A null measure is counted and is not a sum, min, or max.
+ * dropped. A null measure is counted and is not a sum, min, or max. `distinct` appends one long
+ * column when that source column is an int, a long, or a string.
  */
 private[scarlet] object WideAggregate:
 
@@ -15,25 +16,43 @@ private[scarlet] object WideAggregate:
       key: Int,
       measure: Int,
       key2: Option[Int] = None,
+      distinct: Option[Int] = None,
   ): Option[Vector[ColumnField]] =
     fieldAt(fields, key).flatMap { keyField =>
       secondField(fields, key, key2).flatMap { extra =>
         fieldAt(fields, measure).flatMap { measureField =>
           summed(measureField.kind).flatMap { sumKind =>
             if (groupKey(keyField.kind) && extra.forall(field => groupKey(field.kind))) then
-              Some(
+              counted(fields, distinct).map { extraCount =>
                 Vector(keyField) ++ extra.toVector ++ Vector(
                   ColumnField("count", ColumnKind.Int64),
                   ColumnField("sum", sumKind),
                   ColumnField("min", measureField.kind),
                   ColumnField("max", measureField.kind),
-                ),
-              )
+                ) ++ extraCount
+              }
             else None
           }
         }
       }
     }
+
+  /** The appended distinct column, or an empty vector when the group does not ask for one. */
+  private def counted(
+      fields: Vector[ColumnField],
+      distinct: Option[Int],
+  ): Option[Vector[ColumnField]] = distinct match
+    case None => Some(Vector.empty)
+    case Some(ordinal) =>
+      fieldAt(fields, ordinal).flatMap { field =>
+        if (distinctKind(field.kind)) then Some(Vector(ColumnField("distinct", ColumnKind.Int64)))
+        else None
+      }
+
+  private def distinctKind(kind: ColumnKind): Boolean = kind match
+    case ColumnKind.Int32 | ColumnKind.Int64 | ColumnKind.Utf8 => true
+    case ColumnKind.Float64 | ColumnKind.Bool | ColumnKind.Float32 => false
+    case ColumnKind.Decimal(_, _) => false
 
   private def secondField(
       fields: Vector[ColumnField],

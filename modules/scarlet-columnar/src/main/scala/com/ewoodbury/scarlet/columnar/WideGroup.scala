@@ -11,7 +11,8 @@ import com.ewoodbury.scarlet.core.{ColumnField, ColumnKind, WideAggregate}
  * change sum, min, or max. A key whose measures are all null still emits a row, with those three
  * columns null. Int sums widen to long. Long sums wrap. Float and double sums are doubles. This
  * does not build a list of values and it does not call `groupByKey`. Output order is not a
- * contract. Empty input emits no rows.
+ * contract. Empty input emits no rows. `distinct` appends an exact distinct count and does not
+ * change the four aggregate columns.
  */
 object WideGroup:
 
@@ -21,13 +22,25 @@ object WideGroup:
       key: Int,
       measure: Int,
       key2: Option[Int] = None,
+      distinct: Option[Int] = None,
   ): (Vector[ColumnField], ColumnBatch) =
     val text = textKey(fields, key) || key2.exists(second => textKey(fields, second))
-    if text then WideGroupText.aggregate(batches, fields, key, measure, key2)
-    else
-      key2 match
-        case Some(second) => WideGroupPair.aggregate(batches, fields, key, second, measure)
-        case None => aggregateOne(batches, fields, key, measure)
+    val built =
+      if text then WideGroupText.aggregate(batches, fields, key, measure, key2)
+      else
+        key2 match
+          case Some(second) => WideGroupPair.aggregate(batches, fields, key, second, measure)
+          case None => aggregateOne(batches, fields, key, measure)
+    distinct match
+      case None => built
+      case Some(ordinal) =>
+        val full = WideAggregate.output(fields, key, measure, key2, Some(ordinal)).getOrElse {
+          throw new IllegalArgumentException(
+            s"column $ordinal of ${fields.map(_.kind)} is not a distinct count",
+          )
+        }
+        val batch = WideDistinct.attach(built._2, batches, fields, key, key2, ordinal)
+        (full, batch)
 
   private def textKey(fields: Vector[ColumnField], ordinal: Int): Boolean =
     ordinal >= 0 && ordinal < fields.size && fields(ordinal).kind == ColumnKind.Utf8

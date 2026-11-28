@@ -288,6 +288,107 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     negated.getMessage should include("MinorThan")
   }
 
+  "count distinct" should "match query 4" in {
+    val (result, shape) = value(
+      "select count(distinct UserID) from hits",
+      Map("hits" -> ClickBenchSlice.scan()),
+    )
+    result shouldBe ClickBenchSlice.distinctUsers
+    shape shouldBe "Scan"
+  }
+
+  "a distinct phrase" should "match query 5" in {
+    val (result, shape) = value(
+      "select count(distinct SearchPhrase) from hits",
+      Map("hits" -> ClickBenchSlice.phrases()),
+    )
+    result shouldBe ClickBenchSlice.distinctPhrases
+    shape shouldBe "Scan"
+  }
+
+  "a distinct group" should "match query 8" in {
+    val sql = "select AdvEngineID, count(distinct ResolutionWidth) from hits group by AdvEngineID"
+    val (columnar, shape) = listed(sql, columnar = true)
+    val (rows, _) = listed(sql, columnar = false)
+    shape shouldBe "WideProject(WideGroup(Scan))"
+    columnar.length shouldBe 8
+    rows.length shouldBe 8
+    distinctOf(columnar, 0) shouldBe ClickBenchSlice.distinctWidths
+    distinctOf(rows, 0) shouldBe ClickBenchSlice.distinctWidths
+  }
+
+  "count and distinct" should "keep both columns" in {
+    val sql =
+      """select AdvEngineID, count(*), count(distinct ResolutionWidth)
+        |from hits group by AdvEngineID""".stripMargin
+    val (columnar, shape) = listed(sql, columnar = true)
+    val (rows, _) = listed(sql, columnar = false)
+    shape shouldBe "WideProject(WideGroup(Scan))"
+    countAndDistinct(columnar, 0) shouldBe ((512L, ClickBenchSlice.distinctWidths))
+    countAndDistinct(rows, 0) shouldBe ((512L, ClickBenchSlice.distinctWidths))
+  }
+
+  "a string key" should "count distinct values of its measure" in {
+    val sql =
+      """select SearchPhrase, sum(AdvEngineID), count(distinct AdvEngineID)
+        |from hits group by SearchPhrase""".stripMargin
+    val (columnar, shape) = listed(sql, columnar = true, Map("hits" -> ClickBenchSlice.phrases()))
+    val (rows, _) = listed(sql, columnar = false, Map("hits" -> ClickBenchSlice.phrases()))
+    shape shouldBe "WideProject(WideGroup(Scan))"
+    phraseDistinct(columnar, "p0") shouldBe ((2048L, 2L))
+    phraseDistinct(rows, "p0") shouldBe ((2048L, 2L))
+  }
+
+  "distinct of an expression" should "name the node" in {
+    named("select count(distinct id + 1) from tiny", "Addition")
+  }
+
+  "sum distinct" should "name the node" in {
+    named("select sum(distinct id) from tiny", "Function")
+  }
+
+  "count distinct star" should "name the node" in {
+    named("select count(distinct *) from tiny", "Function")
+  }
+
+  "two distinct counts" should "be refused" in {
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(
+        """select AdvEngineID, count(distinct ResolutionWidth), count(distinct UserID)
+          |from hits group by AdvEngineID""".stripMargin,
+        Map("hits" -> ClickBenchSlice.scan()),
+      )
+    }
+    thrown.getMessage should include("a group has one distinct count")
+  }
+
+  "a float distinct" should "name the kind" in {
+    val table = DistCollection.ofColumns(Vector(WideInput.doubles("w", Array(1.0, 2.0))), 2)
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run("select count(distinct w) from t", Map("t" -> table))
+    }
+    thrown.getMessage should include("distinct of Float64 is not supported")
+  }
+
+  "a bool distinct" should "name the kind" in {
+    val table = DistCollection.ofColumns(Vector(WideInput.bools("b", Array(true, false))), 2)
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run("select count(distinct b) from t", Map("t" -> table))
+    }
+    thrown.getMessage should include("distinct of Bool is not supported")
+  }
+
+  "a decimal distinct" should "name the kind" in {
+    val table = DistCollection.ofColumns(
+      Vector(WideInput.decimals("d", 4, 0, Array(1L, 2L))),
+      2,
+    )
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run("select count(distinct d) from t", Map("t" -> table))
+    }
+    thrown.getMessage should include("distinct of Decimal")
+  }
+
   "between" should "name the node" in {
     val thrown = the[IllegalArgumentException] thrownBy {
       val _ = Sql.run(
@@ -347,6 +448,36 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
         if columnar then shape should not be "none"
         (rows.collect().toList, shape)
       case SqlResult.Value(_, _) => fail(s"expected rows: $sql")
+
+  private def distinctOf(rows: List[WideRow], key: Int): Long =
+    rows
+      .collectFirst {
+        case row if row.cells.headOption.contains(Cell.Int32(key)) =>
+          row.cells.lift(1) match
+            case Some(Cell.Int64(distinct)) => distinct
+            case _ => fail(s"missing distinct for $key")
+      }
+      .getOrElse(fail(s"missing group $key"))
+
+  private def countAndDistinct(rows: List[WideRow], key: Int): (Long, Long) =
+    rows
+      .collectFirst {
+        case row if row.cells.headOption.contains(Cell.Int32(key)) =>
+          (row.cells.lift(1), row.cells.lift(2)) match
+            case (Some(Cell.Int64(count)), Some(Cell.Int64(distinct))) => (count, distinct)
+            case _ => fail(s"missing count and distinct for $key")
+      }
+      .getOrElse(fail(s"missing group $key"))
+
+  private def phraseDistinct(rows: List[WideRow], key: String): (Long, Long) =
+    rows
+      .collectFirst {
+        case row if row.cells.headOption.contains(Cell.Utf8(key)) =>
+          (row.cells.lift(1), row.cells.lift(2)) match
+            case (Some(Cell.Int64(sum)), Some(Cell.Int64(distinct))) => (sum, distinct)
+            case _ => fail(s"missing sum and distinct for $key")
+      }
+      .getOrElse(fail(s"missing group $key"))
 
   private def countsOf(rows: List[WideRow]): List[Long] =
     rows.map { row =>

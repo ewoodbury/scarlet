@@ -689,7 +689,7 @@ enum PhysicalOp:
     case WideCompute(child, _, _) => child.kind
     case WideSort(child, _, _) => child.kind
     case WideLimit(child, _) => child.kind
-    case WideHashJoin(_, _, _, _) | WideBroadcastJoin(_, _, _, _) | WideGroup(_, _, _, _) =>
+    case WideHashJoin(_, _, _, _) | WideBroadcastJoin(_, _, _, _) | WideGroup(_, _, _, _, _) =>
       PhysicalOp.Kind.Columns
 
   /**
@@ -854,7 +854,7 @@ enum PhysicalOp:
     case WideHashJoin(left, right, _, _) => s"WideHashJoin(${left.shape},${right.shape})"
     case WideBroadcastJoin(left, right, _, _) =>
       s"WideBroadcastJoin(${left.shape},${right.shape})"
-    case WideGroup(child, _, _, _) => s"WideGroup(${child.shape})"
+    case WideGroup(child, _, _, _, _) => s"WideGroup(${child.shape})"
     case WideSort(child, _, _) => s"WideSort(${child.shape})"
     case WideLimit(child, _) => s"WideLimit(${child.shape})"
 
@@ -1034,10 +1034,16 @@ enum PhysicalOp:
    * Group one int or long column, or two, and aggregate one numeric column: count, sum, min, and
    * max. A null in either key is dropped. A null measure is counted and skipped by sum, min, and
    * max. A key whose measures are all null still emits a row. `key2` empty is the one-key group.
-   * Output kind is [[PhysicalOp.Kind.Columns]]. There is no spill. This does not call
-   * `groupByKey`.
+   * `distinct` appends one long column. Output kind is [[PhysicalOp.Kind.Columns]]. There is no
+   * spill. This does not call `groupByKey`.
    */
-  case WideGroup(child: PhysicalOp, key: Int, measure: Int, key2: Option[Int])
+  case WideGroup(
+      child: PhysicalOp,
+      key: Int,
+      measure: Int,
+      key2: Option[Int],
+      distinct: Option[Int] = None,
+  )
 
   /**
    * Global sort of one int or long column. A null orders as zero and the row stays. Ties keep

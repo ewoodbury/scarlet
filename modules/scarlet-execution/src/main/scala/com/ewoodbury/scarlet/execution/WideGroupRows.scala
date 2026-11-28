@@ -9,22 +9,35 @@ import com.ewoodbury.scarlet.core.*
  * [[com.ewoodbury.scarlet.columnar.WideGroup]].
  *
  * A null key is dropped. A null measure increments count and is skipped by sum, min, and max. A
- * key whose measures are all null still emits a row. Int sums widen to long. Long sums wrap. The
- * plan is not `GroupByKey`, and this fold does not build a list of values.
+ * key whose measures are all null still emits a row. `distinct` appends the size of that key's set
+ * after max. Int sums widen to long. Long sums wrap. The plan is not `GroupByKey`, and this fold
+ * does not build a list of values.
  */
 private[execution] object WideGroupRows:
 
   def partitions(group: Plan.WideGroupOp): Seq[Partition[WideRow]] =
     val (fields, rows) = materialize(group.source)
-    val out = WideAggregate.output(fields, group.key, group.measure, group.key2).getOrElse {
-      throw new IllegalArgumentException(
-        s"columns ${group.key}, ${group.key2}, and ${group.measure} of ${fields.map(_.kind)} do not group",
-      )
-    }
+    val out =
+      WideAggregate
+        .output(fields, group.key, group.measure, group.key2, group.distinct)
+        .getOrElse {
+          throw new IllegalArgumentException(
+            s"columns ${group.key}, ${group.key2}, and ${group.measure} of ${fields.map(_.kind)} do not group",
+          )
+        }
     val folded = group.key2 match
-      case None => fold(rows, group.key, group.measure, fields(group.measure).kind, out)
+      case None =>
+        fold(rows, group.key, group.measure, fields(group.measure).kind, out, group.distinct)
       case Some(second) =>
-        foldTwo(rows, group.key, second, group.measure, fields(group.measure).kind, out)
+        foldTwo(
+          rows,
+          group.key,
+          second,
+          group.measure,
+          fields(group.measure).kind,
+          out,
+          group.distinct,
+        )
     Seq(Partition(folded))
 
   private def materialize(plan: Plan[WideRow]): (Vector[ColumnField], Vector[WideRow]) =
@@ -39,8 +52,13 @@ private[execution] object WideGroupRows:
       .getOrElse(throw new IllegalArgumentException("wide group has no schema"))
     (fields, rows)
 
-  @SuppressWarnings(Array("org.wartremover.warts.Var"))
-  private final class Acc:
+  @SuppressWarnings(
+    Array(
+      "org.wartremover.warts.Var",
+      "org.wartremover.warts.MutableDataStructures",
+    ),
+  )
+  private final class Acc(trackDistinct: Boolean):
     var count: Long = 0L
     var seen: Boolean = false
     var longSum: Long = 0L
@@ -53,6 +71,26 @@ private[execution] object WideGroupRows:
     var doubleMax: Double = 0.0
     var floatMin: Float = 0.0f
     var floatMax: Float = 0.0f
+    private val distinctValues: Option[mutable.HashSet[Cell]] =
+      if trackDistinct then Some(mutable.HashSet.empty[Cell]) else None
+
+    def noteDistinct(cell: Cell): Unit =
+      distinctValues.foreach { values =>
+        cell match
+          case Cell.Null => ()
+          case Cell.Int32(_) | Cell.Int64(_) | Cell.Utf8(_) =>
+            val _ = values.add(cell)
+          case Cell.Float64(_) =>
+            throw new IllegalArgumentException("distinct of Float64 is not supported")
+          case Cell.Float32(_) =>
+            throw new IllegalArgumentException("distinct of Float32 is not supported")
+          case Cell.Bool(_) =>
+            throw new IllegalArgumentException("distinct of Bool is not supported")
+          case Cell.Decimal(_, _, _) =>
+            throw new IllegalArgumentException("distinct of Decimal is not supported")
+      }
+
+    def distinctCount: Option[Long] = distinctValues.map(seen => seen.size.toLong)
 
     def addInt(value: Int): Unit =
       if (!seen) then
@@ -104,25 +142,24 @@ private[execution] object WideGroupRows:
       measure: Int,
       measureKind: ColumnKind,
       fields: Vector[ColumnField],
+      distinct: Option[Int],
   ): Vector[WideRow] =
     val groups = mutable.LinkedHashMap.empty[Cell, Acc]
     rows.foreach { row =>
       cellAt(row, key) match
         case Cell.Null => ()
         case keyCell =>
-          val acc = groups.getOrElseUpdate(keyCell, new Acc)
+          val acc = groups.getOrElseUpdate(keyCell, new Acc(distinct.isDefined))
           acc.count += 1L
-          cellAt(row, measure) match
-            case Cell.Null => ()
-            case Cell.Int32(value) => acc.addInt(value)
-            case Cell.Int64(value) => acc.addLong(value)
-            case Cell.Float64(value) => acc.addDouble(value)
-            case Cell.Float32(value) => acc.addFloat(value)
-            case other =>
-              throw new IllegalArgumentException(s"measure $other does not aggregate")
+          addMeasure(acc, cellAt(row, measure))
+          distinct.foreach(ordinal => acc.noteDistinct(cellAt(row, ordinal)))
     }
     groups.iterator.map { (keyCell, acc) =>
-      WideRow(fields, Vector(keyCell, Cell.Int64(acc.count)) ++ aggregateCells(acc, measureKind))
+      finished(
+        fields,
+        Vector(keyCell, Cell.Int64(acc.count)) ++ aggregateCells(acc, measureKind),
+        acc,
+      )
     }.toVector
 
   private def foldTwo(
@@ -132,22 +169,30 @@ private[execution] object WideGroupRows:
       measure: Int,
       measureKind: ColumnKind,
       fields: Vector[ColumnField],
+      distinct: Option[Int],
   ): Vector[WideRow] =
     val groups = mutable.LinkedHashMap.empty[(Cell, Cell), Acc]
     rows.foreach { row =>
       (keptKey(row, key), keptKey(row, key2)) match
         case (Some(left), Some(right)) =>
-          val acc = groups.getOrElseUpdate((left, right), new Acc)
+          val acc = groups.getOrElseUpdate((left, right), new Acc(distinct.isDefined))
           acc.count += 1L
           addMeasure(acc, cellAt(row, measure))
+          distinct.foreach(ordinal => acc.noteDistinct(cellAt(row, ordinal)))
         case _ => ()
     }
     groups.iterator.map { case ((left, right), acc) =>
-      WideRow(
+      finished(
         fields,
         Vector(left, right, Cell.Int64(acc.count)) ++ aggregateCells(acc, measureKind),
+        acc,
       )
     }.toVector
+
+  private def finished(fields: Vector[ColumnField], cells: Vector[Cell], acc: Acc): WideRow =
+    acc.distinctCount match
+      case Some(count) => WideRow(fields, cells :+ Cell.Int64(count))
+      case None => WideRow(fields, cells)
 
   private def keptKey(row: WideRow, ordinal: Int): Option[Cell] =
     cellAt(row, ordinal) match

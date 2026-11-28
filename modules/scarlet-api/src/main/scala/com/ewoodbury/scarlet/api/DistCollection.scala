@@ -132,6 +132,61 @@ final case class DistCollection[A](plan: Plan[A]):
     DistCollection(Plan.WideGroupOp(widePlan, key, measure, Some(key2)))
 
   /**
+   * Exact distinct count of one int, long, or string column. Nulls are skipped. An empty string
+   * counts. Empty input, and a column of only nulls, return zero. This does not spill.
+   */
+  def countDistinctColumn(ordinal: Int)(using ev: A =:= WideRow): Long =
+    WideFields.known(widePlan).foreach { fields =>
+      val field = fields.lift(ordinal).getOrElse {
+        throw new IllegalArgumentException(s"column $ordinal outside width ${fields.size}")
+      }
+      field.kind match
+        case ColumnKind.Int32 | ColumnKind.Int64 | ColumnKind.Utf8 => ()
+        case other => throw new IllegalArgumentException(s"distinct of $other is not supported")
+    }
+    DistCollection.service.countWideDistinct(widePlan, ordinal)
+
+  /**
+   * Groups by one int, long, or string column and appends an exact distinct count of one int,
+   * long, or string column. The four aggregates stay. The distinct column may differ from the
+   * measure. A null key is dropped. A null distinct value is skipped. An empty string counts.
+   */
+  def groupDistinct(key: Int, measure: Int, distinct: Int)(using
+      ev: A =:= WideRow,
+  ): DistCollection[WideRow] =
+    acceptDistinct(key, measure, None, distinct)
+    DistCollection(Plan.WideGroupOp(widePlan, key, measure, None, Some(distinct)))
+
+  /**
+   * Groups by two columns and appends one exact distinct count. The measure and the null rules
+   * match [[groupDistinct]].
+   */
+  def groupDistinct(key: Int, key2: Int, measure: Int, distinct: Int)(using
+      ev: A =:= WideRow,
+  ): DistCollection[WideRow] =
+    require(key != key2, "group keys must be different columns")
+    acceptDistinct(key, measure, Some(key2), distinct)
+    DistCollection(Plan.WideGroupOp(widePlan, key, measure, Some(key2), Some(distinct)))
+
+  private def acceptDistinct(key: Int, measure: Int, key2: Option[Int], distinct: Int)(using
+      ev: A =:= WideRow,
+  ): Unit =
+    WideFields.known(widePlan).foreach { fields =>
+      if (WideAggregate.output(fields, key, measure, key2, Some(distinct)).isEmpty) then
+        fields.lift(distinct).map(_.kind) match
+          case Some(other) if !distinctKind(other) =>
+            throw new IllegalArgumentException(s"distinct of $other is not supported")
+          case _ =>
+            throw new IllegalArgumentException(
+              s"column $distinct of ${fields.map(_.kind)} is not a distinct count",
+            )
+    }
+
+  private def distinctKind(kind: ColumnKind): Boolean = kind match
+    case ColumnKind.Int32 | ColumnKind.Int64 | ColumnKind.Utf8 => true
+    case _ => false
+
+  /**
    * Sorts by one int or long column. A null orders as zero and the row stays. Ties keep input
    * order. The result is one partition.
    */

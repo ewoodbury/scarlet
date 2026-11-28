@@ -72,6 +72,12 @@ trait ExecutionService {
   def maxWideDouble(plan: Plan[WideRow], ordinal: Int): Double
 
   /**
+   * Exact distinct count of one int, long, or string column. A null slot contributes nothing. An
+   * empty string counts. Empty input, and a column of only nulls, return zero.
+   */
+  def countWideDistinct(plan: Plan[WideRow], ordinal: Int): Long
+
+  /**
    * Sums a `Double` plan. Empty input returns zero.
    */
   def sumDouble(plan: Plan[Double]): Double
@@ -186,6 +192,12 @@ object ExecutionService {
     }
 
     def maxWideDouble(plan: Plan[WideRow], ordinal: Int): Double = {
+      throw new UnsupportedOperationException(
+        "No execution service registered. Please ensure the execution module is properly initialized.",
+      )
+    }
+
+    def countWideDistinct(plan: Plan[WideRow], ordinal: Int): Long = {
       throw new UnsupportedOperationException(
         "No execution service registered. Please ensure the execution module is properly initialized.",
       )

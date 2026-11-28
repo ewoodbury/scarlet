@@ -87,6 +87,8 @@ class TestExecutionServiceRegistration extends AnyFlatSpec with Matchers with Be
 
     def maxWideDouble(plan: Plan[WideRow], ordinal: Int): Double = 0.0
 
+    def countWideDistinct(plan: Plan[WideRow], ordinal: Int): Long = 0L
+
     def sumDouble(plan: Plan[Double]): Double = 0.0
 
     def sumFloat(plan: Plan[Float]): Float = 0.0f

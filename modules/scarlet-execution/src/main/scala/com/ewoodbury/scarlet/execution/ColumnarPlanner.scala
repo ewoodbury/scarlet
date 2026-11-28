@@ -858,8 +858,8 @@ object ColumnarPlanner:
       WideLowering.compute(source, expr, name, lowerChild)
     case Plan.WideJoinOp(left, right, leftKey, rightKey, broadcast) =>
       WideLowering.join(left, right, leftKey, rightKey, broadcast, lowerChild)
-    case Plan.WideGroupOp(source, key, measure, key2) =>
-      WideLowering.group(source, key, measure, key2, lowerChild)
+    case Plan.WideGroupOp(source, key, measure, key2, distinct) =>
+      WideLowering.group(source, key, measure, key2, distinct, lowerChild)
     case Plan.WideSortOp(source, ordinal, descending) =>
       WideLowering.sort(source, ordinal, descending, lowerChild)
     case Plan.WideLimitOp(source, count) =>
