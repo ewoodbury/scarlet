@@ -23,7 +23,7 @@ Fast loop
 - CI runs `make test-lint`, `sbt test`, PerfCheck, then `make test-spill`. Run PerfCheck when a change can send a query back to the row path. Run `make test-spill` when a change touches spill. Raise `SPILL_SUITE_FLOOR` when a spill suite is added.
 
 One heavy build at a time
-- Plan for a 16 GB machine. The default sbt process may take a 3 GB heap and 1 GB of metaspace, and the tests run inside that process (`fork := false`). One full `make test` is enough to fill the machine. A second full suite swaps or gets killed, and a killed JVM looks like a flaky test.
+- Plan for a 16 GB machine. The default sbt process may take a 3 GB heap and 1 GB of metaspace. `scarlet-tests` forks two JVMs, each capped at 3 GB, so a full suite is that process plus about 6 GB of test heaps. One full `make test` is enough to fill the machine. A second full suite swaps or gets killed, and a killed JVM looks like a flaky test.
 - `ScarletConf` and `ScarletRuntime` are global inside one JVM. A second sbt process has its own. Worktrees have separate `target/` directories and separate sbt servers, so two processes do not corrupt each other.
 - Run one full suite, one PerfCheck, or one multi-gigabyte bench at a time.
 - A second sbt may compile or run `make test-one`, with one explicit heap around 1.5 GB. `sbt --mem` does nothing when `-Xmx` is already set, so the small run needs a single heap flag and no second `-Xmx`.
@@ -38,7 +38,7 @@ Branches
 - One imperative sentence per commit. Do not amend a commit that has been pushed.
 
 Testing
-- Tests run sequentially (`Test / parallelExecution := false`). Do not enable parallelism inside one JVM.
+- `scarlet-tests` runs in two forked JVMs. Suites inside one JVM stay sequential (`Test / testForkedParallel := false`). `Test / parallelExecution` on that project only schedules the two JVMs. `Test / fork` stays false, so `runMain` stays in the sbt JVM. The two JVMs come from `testGrouping`. Do not enable parallelism inside one JVM. Other projects keep `Test / parallelExecution := false`.
 - `ScarletConf` is global mutable state. Restore it in `afterEach` or `finally`. `ScarletRuntime` uses the same set/restore pattern.
 - Retry-related tests must set `baseRetryDelayMs = 1L`, or they take seconds.
 - Cover behavior through `DistCollection` when possible. Unit-test internals only for invariants such as graph structure, partitioning, and sorting.

@@ -5,6 +5,9 @@ ThisBuild / version := "0.1.0-SNAPSHOT"
 // AGENTS.md asks for about 1000 lines. This is the hard cap, with room for a focused file to grow.
 val maxScalaFileLines = 1200
 
+// scarlet-tests splits into this many JVMs. The ForkedTestGroup cap below matches it.
+val testShardCount = 2
+
 // Warnings in library projects. scarlet-tests promotes this same set to errors.
 val warnedWarts = Warts.allBut(
   Wart.Any,
@@ -38,7 +41,7 @@ val warnedWarts = Warts.allBut(
 )
 
 lazy val checkFileLength = taskKey[Unit](
-  "Fail if a hand-written Scala source exceeds maxScalaFileLines"
+  "Fail if a hand-written Scala source exceeds maxScalaFileLines",
 )
 
 lazy val commonSettings = Seq(
@@ -50,7 +53,7 @@ lazy val commonSettings = Seq(
   ),
   // Prefer async loggers
   ThisBuild / javaOptions ++= Seq(
-    "-DLog4jContextSelector=org.apache.logging.log4j.core.async.AsyncLoggerContextSelector"
+    "-DLog4jContextSelector=org.apache.logging.log4j.core.async.AsyncLoggerContextSelector",
   ),
   // Run tests sequentially to avoid cross-suite state interference
   Test / parallelExecution := false,
@@ -90,7 +93,7 @@ lazy val `scarlet-api` = (project in file("modules/scarlet-api"))
   .settings(
     name := "scarlet-api",
     commonSettings,
-    libraryDependencies ++= Seq(scalaLogging)
+    libraryDependencies ++= Seq(scalaLogging),
   )
   .dependsOn(`scarlet-core`)
 
@@ -99,7 +102,7 @@ lazy val `scarlet-core` = (project in file("modules/scarlet-core"))
   .settings(
     name := "scarlet-core",
     commonSettings,
-    libraryDependencies ++= Seq(scalaLogging, log4jApi, log4jCore, log4jSlf4j, disruptor)
+    libraryDependencies ++= Seq(scalaLogging, log4jApi, log4jCore, log4jSlf4j, disruptor),
   )
 
 // Runtime SPI (RunnableTask, TaskScheduler, ExecutorBackend, Partitioner, ShuffleService)
@@ -107,7 +110,7 @@ lazy val `scarlet-runtime` = (project in file("modules/scarlet-runtime"))
   .settings(
     name := "scarlet-runtime",
     commonSettings,
-    libraryDependencies ++= Seq(scalaLogging)
+    libraryDependencies ++= Seq(scalaLogging),
   )
   .dependsOn(`scarlet-core`)
 
@@ -116,7 +119,7 @@ lazy val `scarlet-execution` = (project in file("modules/scarlet-execution"))
   .settings(
     name := "scarlet-execution",
     commonSettings,
-    libraryDependencies ++= Seq(scalaLogging, log4jApi, log4jCore, log4jSlf4j, disruptor)
+    libraryDependencies ++= Seq(scalaLogging, log4jApi, log4jCore, log4jSlf4j, disruptor),
   )
   .dependsOn(`scarlet-api`, `scarlet-core`, `scarlet-runtime`, `scarlet-columnar`)
 
@@ -125,7 +128,7 @@ lazy val `scarlet-execution` = (project in file("modules/scarlet-execution"))
 lazy val `scarlet-columnar` = (project in file("modules/scarlet-columnar"))
   .settings(
     name := "scarlet-columnar",
-    commonSettings
+    commonSettings,
   )
   .dependsOn(`scarlet-core`)
 
@@ -145,9 +148,46 @@ lazy val `scarlet-tests` = (project in file("modules/scarlet-tests"))
     commonSettings,
     wartremoverErrors ++= warnedWarts,
     wartremoverWarnings --= warnedWarts,
-    libraryDependencies ++= Seq(scalatest % Test)
+    libraryDependencies ++= Seq(scalatest % Test),
+    // Two forked JVMs. Suites inside a JVM stay sequential: ScarletConf is process-global,
+    // and testForkedParallel stays false. parallelExecution only schedules those JVMs.
+    // Each JVM gets its own temp directory so the default spill directory does not collide.
+    // Each fork is 3 GB. A 2 GB fork ran out of heap on the large suites.
+    // Test / fork stays false. The groups below are the subprocesses. runMain stays in the
+    // sbt JVM, which is what the bench measures.
+    Test / testForkedParallel := false,
+    Test / parallelExecution := true,
+    Test / javaOptions ++= Seq("-Xmx3g", "-XX:+ExitOnOutOfMemoryError"),
+    Test / testGrouping := {
+      val suites = (Test / definedTests).value
+      val base = (Test / forkOptions).value
+      val shardRoot = (Test / target).value / "shards"
+      val width = math.max(1, (suites.size + testShardCount - 1) / testShardCount)
+      suites
+        .grouped(width)
+        .zipWithIndex
+        .map { case (group, index) =>
+          val directory = shardRoot / s"shard-$index"
+          IO.createDirectory(directory)
+          val options = base.withRunJVMOptions(
+            base.runJVMOptions ++ Vector(s"-Djava.io.tmpdir=${directory.getAbsolutePath}"),
+          )
+          Tests.Group(
+            name = s"shard-$index",
+            tests = group,
+            runPolicy = Tests.SubProcess(options),
+          )
+        }
+        .toSeq
+    },
   )
-  .dependsOn(`scarlet-api`, `scarlet-execution`, `scarlet-runtime`, `scarlet-columnar`, `scarlet-sql`)
+  .dependsOn(
+    `scarlet-api`,
+    `scarlet-execution`,
+    `scarlet-runtime`,
+    `scarlet-columnar`,
+    `scarlet-sql`,
+  )
 
 // Root aggregator
 lazy val root = (project in file("."))
@@ -158,7 +198,7 @@ lazy val root = (project in file("."))
     `scarlet-execution`,
     `scarlet-columnar`,
     `scarlet-sql`,
-    `scarlet-tests`
+    `scarlet-tests`,
   )
   .settings(
     name := "scarlet",
@@ -170,4 +210,10 @@ lazy val root = (project in file("."))
     // Subprojects do the real check. This definition lets `sbt checkFileLength` run here and
     // aggregate.
     checkFileLength := {},
+    // The default cap is one forked test group, which would run the shards one after another.
+    Global / concurrentRestrictions := Seq(
+      Tags.limitAll(java.lang.Runtime.getRuntime.availableProcessors()),
+      Tags.limit(Tags.ForkedTestGroup, testShardCount),
+      Tags.exclusiveGroup(Tags.Clean),
+    ),
   )

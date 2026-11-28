@@ -150,7 +150,7 @@ Do not merge these. The bodies differ by primitive type, and each type has its o
 ## House rules that still match
 
 - `checkFileLength` fails above 1200. 1200 is allowed (`build.sbt:6`, `AGENTS.md:21`).
-- `Test / parallelExecution := false` (`build.sbt:24`).
+- `commonSettings` keeps `Test / parallelExecution := false`. `scarlet-tests` forks two JVMs and sets `Test / parallelExecution := true` only to schedule those JVMs. `Test / testForkedParallel` stays false, so suites inside one JVM stay sequential. `Test / fork` stays false, so `runMain` stays in the sbt JVM.
 - `spillEnabled` defaults to false (`ScarletConf.scala:67`).
 - `Wart.AsInstanceOf` and `Wart.Any` are errors (`build.sbt:27`). `wartremoverWarnings` is
   `Warts.allBut` of the list at `build.sbt:28`, so those names are neither errors nor warnings.
