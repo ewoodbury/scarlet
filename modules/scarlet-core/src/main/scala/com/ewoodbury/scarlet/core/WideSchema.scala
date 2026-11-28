@@ -8,9 +8,10 @@ package com.ewoodbury.scarlet.core
  * no nested row and no array column.
  *
  * A compare is a closed set: a numeric column against a constant of the same kind, equality on a
- * bool, a decimal against a decimal constant, or equality and inequality of a string column
- * against a string literal. Scales align by an exact power of ten. A null does not pass. String
- * ordering and float32 compares are not in this set. A null string literal is refused.
+ * bool, a decimal against a decimal constant, or a string column against a string literal. String
+ * order is JVM `compareTo`. `LIKE` uses `%` and `_` and is case sensitive. Scales align by an
+ * exact power of ten. A null does not pass. Float32 compares are not in this set. A null string
+ * literal is refused.
  */
 enum ColumnKind:
   case Int32, Int64, Float64, Bool, Utf8, Float32
@@ -23,7 +24,31 @@ final case class ColumnField(name: String, kind: ColumnKind):
     case _ => ()
 
 enum CompareOp:
-  case Gt, Ge, Lt, Le, Eq, Ne
+  case Gt, Ge, Lt, Le, Eq, Ne, Like, Unlike
+
+object CompareOp:
+
+  /** True when `order` is a numeric comparison. A pattern has no order. */
+  def signed(op: CompareOp, order: Int): Boolean = op match
+    case Gt => order > 0
+    case Ge => order >= 0
+    case Lt => order < 0
+    case Le => order <= 0
+    case Eq => order == 0
+    case Ne => order != 0
+    case Like | Unlike =>
+      throw new IllegalArgumentException("a pattern is not ordered")
+
+  /** JVM string order, or a `LIKE` match. `"é"` and `"e\u0301"` stay different. */
+  def text(op: CompareOp, value: String, constant: String): Boolean = op match
+    case Gt => value.compareTo(constant) > 0
+    case Ge => value.compareTo(constant) >= 0
+    case Lt => value.compareTo(constant) < 0
+    case Le => value.compareTo(constant) <= 0
+    case Eq => value == constant
+    case Ne => value != constant
+    case Like => LikeMatch.matches(value, constant)
+    case Unlike => !LikeMatch.matches(value, constant)
 
 enum ColumnLiteral:
   case Int32(value: Int)
@@ -55,12 +80,13 @@ final case class ColumnCompare(op: CompareOp, literal: ColumnLiteral):
 
   /** True when this compare is legal for a column of `kind`. */
   def allows(kind: ColumnKind): Boolean = (kind, literal, op) match
-    case (ColumnKind.Int32, _: ColumnLiteral.Int32, _) => true
-    case (ColumnKind.Int64, _: ColumnLiteral.Int64, _) => true
-    case (ColumnKind.Float64, _: ColumnLiteral.Float64, _) => true
+    case (ColumnKind.Int32, _: ColumnLiteral.Int32, operator) if numeric(operator) => true
+    case (ColumnKind.Int64, _: ColumnLiteral.Int64, operator) if numeric(operator) => true
+    case (ColumnKind.Float64, _: ColumnLiteral.Float64, operator) if numeric(operator) => true
     case (ColumnKind.Bool, _: ColumnLiteral.Bool, CompareOp.Eq | CompareOp.Ne) => true
-    case (ColumnKind.Decimal(_, _), _: ColumnLiteral.Decimal, _) => true
-    case (ColumnKind.Utf8, _: ColumnLiteral.Utf8, CompareOp.Eq | CompareOp.Ne) => true
+    case (ColumnKind.Decimal(_, _), _: ColumnLiteral.Decimal, operator) if numeric(operator) =>
+      true
+    case (ColumnKind.Utf8, _: ColumnLiteral.Utf8, _) => true
     case _ => false
 
   /**
@@ -108,19 +134,18 @@ final case class ColumnCompare(op: CompareOp, literal: ColumnLiteral):
       sameBool(constant, value)
     case (CompareOp.Ne, ColumnLiteral.Bool(constant), Cell.Bool(value)) =>
       !sameBool(constant, value)
-    case (CompareOp.Eq, ColumnLiteral.Utf8(constant), Cell.Utf8(value)) => value == constant
-    case (CompareOp.Ne, ColumnLiteral.Utf8(constant), Cell.Utf8(value)) => value != constant
+    case (_, ColumnLiteral.Utf8(constant), Cell.Utf8(value)) =>
+      CompareOp.text(op, value, constant)
     case (_, ColumnLiteral.Decimal(_, scale, constant), Cell.Decimal(_, valueScale, value)) =>
       val order = DecimalRules.compare(value, valueScale, constant, scale)
-      op match
-        case CompareOp.Gt => order > 0
-        case CompareOp.Ge => order >= 0
-        case CompareOp.Lt => order < 0
-        case CompareOp.Le => order <= 0
-        case CompareOp.Eq => order == 0
-        case CompareOp.Ne => order != 0
+      CompareOp.signed(op, order)
     case _ =>
       throw new IllegalArgumentException(s"$this does not apply to $cell")
+
+  private def numeric(operator: CompareOp): Boolean = operator match
+    case CompareOp.Like | CompareOp.Unlike => false
+    case CompareOp.Gt | CompareOp.Ge | CompareOp.Lt | CompareOp.Le | CompareOp.Eq | CompareOp.Ne =>
+      true
 
   private def sameBool(left: Boolean, right: Boolean): Boolean = (left, right) match
     case (true, true) | (false, false) => true

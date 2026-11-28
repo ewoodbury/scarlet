@@ -7,9 +7,9 @@ import com.ewoodbury.scarlet.core.*
  *
  * Filter uses the existing per-column kernels. A null in the predicate column is dropped and the
  * predicate is not called. A null in another column stays null. Project drops or reorders columns
- * and does not compute. Float32 compares and string ordering are not in the closed set:
- * [[ColumnCompare.allows]] is false for them, and this object refuses the call. String equality
- * compares dictionary codes.
+ * and does not compute. Float32 compares are not in the closed set: [[ColumnCompare.allows]] is
+ * false for them, and this object refuses the call. String equality compares dictionary codes.
+ * String order and `LIKE` read the dictionary string.
  */
 object WideBatch:
 
@@ -35,8 +35,11 @@ object WideBatch:
       case (ColumnKind.Decimal(_, _), ColumnLiteral.Decimal(precision, scale, constant)) =>
         WideDecimal.filter(batch, ordinal, compare.op, precision, scale, constant)
       case (ColumnKind.Utf8, ColumnLiteral.Utf8(constant)) =>
-        val equal = compare.op == CompareOp.Eq
-        ColumnKernel.filterUtf8Compare(batch, ordinal, constant, equal)
+        compare.op match
+          case CompareOp.Eq | CompareOp.Ne =>
+            ColumnKernel.filterUtf8Compare(batch, ordinal, constant, compare.op == CompareOp.Eq)
+          case _ =>
+            ColumnKernel.filterUtf8(batch, ordinal, textPredicate(compare.op, constant))
       case _ =>
         throw new IllegalArgumentException(s"no columnar compare for $kind column $ordinal")
 
@@ -169,6 +172,8 @@ object WideBatch:
     case CompareOp.Le => value => value <= constant
     case CompareOp.Eq => value => value == constant
     case CompareOp.Ne => value => value != constant
+    case CompareOp.Like | CompareOp.Unlike =>
+      throw new IllegalArgumentException("a pattern is not ordered")
 
   private def longPredicate(op: CompareOp, constant: Long): ColumnKernel.Int64Predicate = op match
     case CompareOp.Gt => value => value > constant
@@ -177,6 +182,8 @@ object WideBatch:
     case CompareOp.Le => value => value <= constant
     case CompareOp.Eq => value => value == constant
     case CompareOp.Ne => value => value != constant
+    case CompareOp.Like | CompareOp.Unlike =>
+      throw new IllegalArgumentException("a pattern is not ordered")
 
   private def doublePredicate(op: CompareOp, constant: Double): ColumnKernel.Float64Predicate =
     op match
@@ -186,6 +193,8 @@ object WideBatch:
       case CompareOp.Le => value => value <= constant
       case CompareOp.Eq => value => value == constant
       case CompareOp.Ne => value => value != constant
+      case CompareOp.Like | CompareOp.Unlike =>
+        throw new IllegalArgumentException("a pattern is not ordered")
 
   private def boolPredicate(op: CompareOp, constant: Boolean): ColumnKernel.BoolPredicate =
     op match
@@ -193,6 +202,14 @@ object WideBatch:
       case CompareOp.Ne => value => !sameBool(value, constant)
       case _ =>
         throw new IllegalArgumentException(s"bool compare does not support $op")
+
+  /**
+   * A null string from an empty cell does not pass. The predicate is how [[filterUtf8]] reports
+   * it.
+   */
+  @SuppressWarnings(Array("org.wartremover.warts.Null", "org.wartremover.warts.Equals"))
+  private def textPredicate(op: CompareOp, constant: String): ColumnKernel.Utf8Predicate =
+    (value: String) => if value eq null then false else CompareOp.text(op, value, constant)
 
   private def sameBool(left: Boolean, right: Boolean): Boolean = (left, right) match
     case (true, true) | (false, false) => true

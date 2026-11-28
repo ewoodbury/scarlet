@@ -5,14 +5,15 @@ import java.util.Arrays
 import com.ewoodbury.scarlet.core.{ColumnField, ColumnKind, WideAggregate}
 
 /**
- * Groups one int, long, or string column and aggregates one numeric column.
+ * Groups one int, long, or string column. A numeric measure emits count, sum, min, and max. A
+ * string measure emits count, min, and max, and has no sum.
  *
  * One pass over each batch. A null key is dropped. A null measure increments count and does not
- * change sum, min, or max. A key whose measures are all null still emits a row, with those three
- * columns null. Int sums widen to long. Long sums wrap. Float and double sums are doubles. This
- * does not build a list of values and it does not call `groupByKey`. Output order is not a
- * contract. Empty input emits no rows. `distinct` appends an exact distinct count and does not
- * change the four aggregate columns.
+ * change sum, min, or max. A key whose measures are all null still emits a row, with those
+ * aggregate columns null. Int sums widen to long. Long sums wrap. Float and double sums are
+ * doubles. This does not build a list of values and it does not call `groupByKey`. Output order is
+ * not a contract. Empty input emits no rows. `distinct` appends an exact distinct count and does
+ * not change the aggregates already emitted.
  */
 object WideGroup:
 
@@ -25,8 +26,10 @@ object WideGroup:
       distinct: Option[Int] = None,
   ): (Vector[ColumnField], ColumnBatch) =
     val text = textKey(fields, key) || key2.exists(second => textKey(fields, second))
+    val stringMeasure = textKey(fields, measure)
     val built =
-      if text then WideGroupText.aggregate(batches, fields, key, measure, key2)
+      if stringMeasure then WideGroupStrings.aggregate(batches, fields, key, measure, key2)
+      else if text then WideGroupText.aggregate(batches, fields, key, measure, key2)
       else
         key2 match
           case Some(second) => WideGroupPair.aggregate(batches, fields, key, second, measure)

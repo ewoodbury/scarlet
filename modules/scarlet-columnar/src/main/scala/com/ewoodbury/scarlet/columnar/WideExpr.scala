@@ -8,8 +8,9 @@ import com.ewoodbury.scarlet.core.*
  * Arithmetic uses the wider input: double, then float, then long, then int. A compare yields bool.
  * A null input leaves the result null and the value slot unread. Divide uses that same widening
  * and refuses a present zero divisor. A decimal add, subtract, or multiply stays exact, and
- * decimal divide is not in this set. Strings are not in this set. Casts are the same Java
- * conversions the row path uses. A literal fills every row and is never null.
+ * decimal divide is not in this set. `length` of a string is that string's UTF-16 length. Other
+ * string expressions are not in this set. Casts are the same Java conversions the row path uses. A
+ * literal fills every row and is never null.
  */
 object WideExpr:
 
@@ -48,6 +49,8 @@ object WideExpr:
         negate(batch, input, length)
       case ColumnExpr.Cast(input, to) =>
         cast(at(batch, input), to, length)
+      case ColumnExpr.Len(input) =>
+        WideText.length(at(batch, input), length)
 
   private def arithmetic(
       batch: ColumnBatch,
@@ -290,6 +293,8 @@ object WideExpr:
     case CompareOp.Le => left <= right
     case CompareOp.Eq => left == right
     case CompareOp.Ne => left != right
+    case CompareOp.Like | CompareOp.Unlike =>
+      throw new IllegalArgumentException("a pattern is not ordered")
 
   private def relate(op: CompareOp, left: Long, right: Long): Boolean = op match
     case CompareOp.Gt => left > right
@@ -298,6 +303,8 @@ object WideExpr:
     case CompareOp.Le => left <= right
     case CompareOp.Eq => left == right
     case CompareOp.Ne => left != right
+    case CompareOp.Like | CompareOp.Unlike =>
+      throw new IllegalArgumentException("a pattern is not ordered")
 
   private def relate(op: CompareOp, left: Float, right: Float): Boolean = op match
     case CompareOp.Gt => left > right
@@ -306,6 +313,8 @@ object WideExpr:
     case CompareOp.Le => left <= right
     case CompareOp.Eq => left == right
     case CompareOp.Ne => left != right
+    case CompareOp.Like | CompareOp.Unlike =>
+      throw new IllegalArgumentException("a pattern is not ordered")
 
   private def relate(op: CompareOp, left: Double, right: Double): Boolean = op match
     case CompareOp.Gt => left > right
@@ -314,6 +323,8 @@ object WideExpr:
     case CompareOp.Le => left <= right
     case CompareOp.Eq => left == right
     case CompareOp.Ne => left != right
+    case CompareOp.Like | CompareOp.Unlike =>
+      throw new IllegalArgumentException("a pattern is not ordered")
 
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private def bools(

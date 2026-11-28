@@ -6,7 +6,8 @@ package com.ewoodbury.scarlet.core
  * Arithmetic uses the wider input: double, then float, then long, then int. A compare yields bool.
  * Null in an input yields null, including `true OR null`. Divide uses that same widening and
  * refuses a present zero divisor. A decimal add, subtract, or multiply stays exact. Decimal divide
- * is not in this set. Strings are not in this set. A date compare is a long compare.
+ * is not in this set. `length` of a string is that string's UTF-16 length. Other string
+ * expressions are not in this set. A date compare is a long compare.
  */
 enum ColumnExpr:
   case Add(left: Int, right: Int)
@@ -19,6 +20,7 @@ enum ColumnExpr:
   case Or(left: Int, right: Int)
   case Not(input: Int)
   case Cast(input: Int, to: ColumnKind)
+  case Len(input: Int)
 
 object ColumnExpr:
 
@@ -38,6 +40,10 @@ object ColumnExpr:
       field(fields, input).filter(column => boolKind(column.kind)).map(_ => ColumnKind.Bool)
     case ColumnExpr.Cast(input, to) =>
       field(fields, input).flatMap(column => castKind(column.kind, to))
+    case ColumnExpr.Len(input) =>
+      field(fields, input)
+        .filter(column => column.kind == ColumnKind.Utf8)
+        .map(_ => ColumnKind.Int32)
 
   /**
    * Kind `expr` appends. Throws when the name is empty, already used, or `expr` does not apply.

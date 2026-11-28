@@ -237,14 +237,15 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     thrown.getMessage should include("Join")
   }
 
-  "an ordered string" should "name the node" in {
-    val thrown = the[IllegalArgumentException] thrownBy {
-      val _ = Sql.run(
-        "select SearchPhrase from hits order by SearchPhrase",
-        Map("hits" -> phraseHits()),
-      )
-    }
-    thrown.getMessage should include("OrderByElement")
+  "an ordered string" should "sort one string column" in {
+    val sql =
+      "select SearchPhrase from hits where SearchPhrase <> '' order by SearchPhrase limit 1"
+    val tables = Map("hits" -> phraseHits())
+    val (columnar, columnarShape) = listed(sql, columnar = true, tables)
+    val (rows, _) = listed(sql, columnar = false, tables)
+    columnarShape shouldBe "WideLimit(WideSort(WideProject(WideFilter3(Scan))))"
+    columnar.map(_.cells) shouldBe rows.map(_.cells)
+    columnar.headOption.map(_.cells) shouldBe Some(Vector(Cell.Utf8("p0")))
   }
 
   "an ordered expression" should "name the node" in {
@@ -271,21 +272,64 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     named("select count(*) from tiny limit 1", "Limit")
   }
 
-  "a string order" should "name the node" in {
+  "a string order" should "count the rows below the literal" in {
+    val tables = Map("hits" -> phraseHits())
+    val (below, shape) = value("select count(*) from hits where SearchPhrase < 'a'", tables)
+    below shouldBe 820L
+    shape shouldBe "WideFilter3(Scan)"
+    val (kept, _) = value("select count(*) from hits where not SearchPhrase < 'a'", tables)
+    kept shouldBe 2457L
+  }
+
+  "like" should "match query 20" in {
+    val (result, shape) = value(
+      "select count(*) from hits where URL like '%google%'",
+      Map("hits" -> ClickBenchSlice.urls()),
+    )
+    result shouldBe ClickBenchSlice.likeUrlsCount
+    shape shouldBe "WideFilter3(Scan)"
+  }
+
+  "length" should "match query 27" in {
+    val (result, shape) = value(
+      "select sum(length(URL)) from hits",
+      Map("hits" -> ClickBenchSlice.urls()),
+    )
+    result shouldBe ClickBenchSlice.urlLengthSum
+    shape shouldBe "WideCompute(WideCompute(Scan))"
+  }
+
+  "a string min" should "match query 21" in {
+    val (rows, shape) = listed(
+      """select SearchPhrase, count(*), min(URL)
+        |from hits where URL like '%google%' and SearchPhrase <> ''
+        |group by SearchPhrase""".stripMargin,
+      columnar = true,
+      Map("hits" -> ClickBenchSlice.phrasesAndUrls()),
+    )
+    shape shouldBe "WideProject(WideGroup(WideFilter3(WideFilter4(Scan))))"
+    val (_, rowShape) = listed(
+      """select SearchPhrase, count(*), min(URL)
+        |from hits where URL like '%google%' and SearchPhrase <> ''
+        |group by SearchPhrase""".stripMargin,
+      columnar = false,
+      Map("hits" -> ClickBenchSlice.phrasesAndUrls()),
+    )
+    rowShape shouldBe "none"
+    val found = rows.collectFirst {
+      case row if row.cells.headOption.contains(Cell.Utf8("p0")) => row.cells
+    }
+    found shouldBe Some(Vector(Cell.Utf8("p0"), Cell.Int64(578L), Cell.Utf8("agoogle")))
+  }
+
+  "a regex replace" should "name the node" in {
     val thrown = the[IllegalArgumentException] thrownBy {
       val _ = Sql.run(
-        "select count(*) from hits where SearchPhrase < 'a'",
+        "select regexp_replace(SearchPhrase, 'a', 'b') from hits",
         Map("hits" -> phraseHits()),
       )
     }
-    thrown.getMessage should include("MinorThan")
-    val negated = the[IllegalArgumentException] thrownBy {
-      val _ = Sql.run(
-        "select count(*) from hits where not SearchPhrase < 'a'",
-        Map("hits" -> phraseHits()),
-      )
-    }
-    negated.getMessage should include("MinorThan")
+    thrown.getMessage should include("Function")
   }
 
   "count distinct" should "match query 4" in {

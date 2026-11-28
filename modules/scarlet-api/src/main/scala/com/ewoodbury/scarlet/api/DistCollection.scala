@@ -75,8 +75,8 @@ final case class DistCollection[A](plan: Plan[A]):
   /**
    * Appends one computed column. Arithmetic uses the wider input: double, then float, then long,
    * then int. A decimal add, subtract, or multiply stays exact. A compare yields bool. Null in an
-   * input yields null. Divide refuses a present zero. Decimal divide and strings are not in this
-   * set.
+   * input yields null. Divide refuses a present zero. Decimal divide is not in this set. `length`
+   * of a string is an int. Other string expressions are not in this set.
    */
   def compute(expr: ColumnExpr, name: String)(using ev: A =:= WideRow): DistCollection[WideRow] =
     WideFields.known(widePlan).foreach(fields => ColumnExpr.checked(expr, fields, name))
@@ -112,18 +112,19 @@ final case class DistCollection[A](plan: Plan[A]):
     )
 
   /**
-   * Groups by one int, long, or string column and computes count, sum, min, and max of one numeric
-   * column. A null key is dropped. A null measure is counted and skipped by sum, min, and max. One
-   * pass. This does not build value lists.
+   * Groups by one int, long, or string column. A numeric measure emits count, sum, min, and max. A
+   * string measure emits count, min, and max, and has no sum. A null key is dropped. A null
+   * measure is counted and skipped by the other aggregates. One pass. This does not build value
+   * lists.
    */
   def groupColumns(key: Int, measure: Int)(using ev: A =:= WideRow): DistCollection[WideRow] =
     DistCollection(Plan.WideGroupOp(widePlan, key, measure, None))
 
   /**
-   * Groups by two columns, each an int, a long, or a string, and aggregates one numeric column. A
-   * null in either key is dropped. The measure follows [[groupColumns]]: count includes nulls, and
-   * sum, min, and max skip them. Output is the two keys, then count, sum, min, and max. This does
-   * not call `groupByKey`.
+   * Groups by two columns, each an int, a long, or a string. A numeric measure emits count, sum,
+   * min, and max. A string measure emits count, min, and max, and has no sum. A null in either key
+   * is dropped. A null measure is counted and skipped by the other aggregates. This does not call
+   * `groupByKey`.
    */
   def groupColumns(key: Int, key2: Int, measure: Int)(using
       ev: A =:= WideRow,
@@ -187,8 +188,9 @@ final case class DistCollection[A](plan: Plan[A]):
     case _ => false
 
   /**
-   * Sorts by one int or long column. A null orders as zero and the row stays. Ties keep input
-   * order. The result is one partition.
+   * Sorts by one int, long, or string column. A null number orders as zero. A null string orders
+   * as empty. The row stays. Ties keep input order. String order is the JVM string, not a
+   * dictionary code. The result is one partition.
    */
   def sortColumn(ordinal: Int, descending: Boolean)(using
       ev: A =:= WideRow,
@@ -200,7 +202,7 @@ final case class DistCollection[A](plan: Plan[A]):
       throw new IllegalArgumentException(s"column $ordinal outside width ${fields.size}")
     }
     field.kind match
-      case ColumnKind.Int32 | ColumnKind.Int64 => ()
+      case ColumnKind.Int32 | ColumnKind.Int64 | ColumnKind.Utf8 => ()
       case other =>
         throw new IllegalArgumentException(s"sort column ${field.name} is $other")
     DistCollection(Plan.WideSortOp(widePlan, ordinal, descending))

@@ -9,7 +9,8 @@ import com.ewoodbury.scarlet.core.*
  * [[com.ewoodbury.scarlet.columnar.WideGroup]].
  *
  * A null key is dropped. A null measure increments count and is skipped by sum, min, and max. A
- * key whose measures are all null still emits a row. `distinct` appends the size of that key's set
+ * key whose measures are all null still emits a row. A string measure emits count, min, and max,
+ * and has no sum. String order is JVM `compareTo`. `distinct` appends the size of that key's set
  * after max. Int sums widen to long. Long sums wrap. The plan is not `GroupByKey`, and this fold
  * does not build a list of values.
  */
@@ -71,6 +72,8 @@ private[execution] object WideGroupRows:
     var doubleMax: Double = 0.0
     var floatMin: Float = 0.0f
     var floatMax: Float = 0.0f
+    var textMin: String = ""
+    var textMax: String = ""
     private val distinctValues: Option[mutable.HashSet[Cell]] =
       if trackDistinct then Some(mutable.HashSet.empty[Cell]) else None
 
@@ -135,6 +138,15 @@ private[execution] object WideGroupRows:
         if (value < floatMin) then floatMin = value
         if (value > floatMax) then floatMax = value
         doubleSum += value.toDouble
+
+    def addText(value: String): Unit =
+      if (!seen) then
+        seen = true
+        textMin = value
+        textMax = value
+      else
+        if (value.compareTo(textMin) < 0) then textMin = value
+        if (value.compareTo(textMax) > 0) then textMax = value
 
   private def fold(
       rows: Vector[WideRow],
@@ -207,31 +219,34 @@ private[execution] object WideGroupRows:
     case Cell.Int64(value) => acc.addLong(value)
     case Cell.Float64(value) => acc.addDouble(value)
     case Cell.Float32(value) => acc.addFloat(value)
+    case Cell.Utf8(value) => acc.addText(value)
     case other =>
       throw new IllegalArgumentException(s"measure $other does not aggregate")
 
   private def aggregateCells(acc: Acc, measureKind: ColumnKind): Vector[Cell] =
-    if (!acc.seen) then Vector(Cell.Null, Cell.Null, Cell.Null)
-    else
-      measureKind match
-        case ColumnKind.Int32 =>
-          Vector(Cell.Int64(acc.longSum), Cell.Int32(acc.intMin), Cell.Int32(acc.intMax))
-        case ColumnKind.Int64 =>
-          Vector(Cell.Int64(acc.longSum), Cell.Int64(acc.longMin), Cell.Int64(acc.longMax))
-        case ColumnKind.Float64 =>
-          Vector(
-            Cell.Float64(acc.doubleSum),
-            Cell.Float64(acc.doubleMin),
-            Cell.Float64(acc.doubleMax),
-          )
-        case ColumnKind.Float32 =>
-          Vector(
-            Cell.Float64(acc.doubleSum),
-            Cell.Float32(acc.floatMin),
-            Cell.Float32(acc.floatMax),
-          )
-        case other =>
-          throw new IllegalArgumentException(s"measure $other does not aggregate")
+    measureKind match
+      case ColumnKind.Utf8 =>
+        if (!acc.seen) then Vector(Cell.Null, Cell.Null)
+        else Vector(Cell.Utf8(acc.textMin), Cell.Utf8(acc.textMax))
+      case _ if !acc.seen => Vector(Cell.Null, Cell.Null, Cell.Null)
+      case ColumnKind.Int32 =>
+        Vector(Cell.Int64(acc.longSum), Cell.Int32(acc.intMin), Cell.Int32(acc.intMax))
+      case ColumnKind.Int64 =>
+        Vector(Cell.Int64(acc.longSum), Cell.Int64(acc.longMin), Cell.Int64(acc.longMax))
+      case ColumnKind.Float64 =>
+        Vector(
+          Cell.Float64(acc.doubleSum),
+          Cell.Float64(acc.doubleMin),
+          Cell.Float64(acc.doubleMax),
+        )
+      case ColumnKind.Float32 =>
+        Vector(
+          Cell.Float64(acc.doubleSum),
+          Cell.Float32(acc.floatMin),
+          Cell.Float32(acc.floatMax),
+        )
+      case other =>
+        throw new IllegalArgumentException(s"measure $other does not aggregate")
 
   private def cellAt(row: WideRow, ordinal: Int): Cell =
     if (ordinal >= 0 && ordinal < row.cells.size) then row.cells(ordinal)
