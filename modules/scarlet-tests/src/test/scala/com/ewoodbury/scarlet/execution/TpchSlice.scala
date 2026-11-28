@@ -9,8 +9,9 @@ import com.ewoodbury.scarlet.support.Check
  * TPC-H queries 6, 1, and 3 on generated rows. This is not a downloaded scale factor.
  *
  * Money is a long. A date is a long. An average is a sum divided by a count. Query 1 groups by the
- * return flag only. Query 3 multiplies the lineitem price by the discount, joins orders, and
- * groups by the order key. [[note]] names every TPC-H query.
+ * return flag only. Query 3 multiplies the lineitem price by the discount, joins customer and
+ * orders, and groups by the order key. Query 5 joins the local supplier and groups by the nation
+ * name. [[note]] names every TPC-H query.
  */
 object TpchSlice:
 
@@ -28,30 +29,39 @@ object TpchSlice:
   val pricingMix: Long = -2219730004622530266L
   val pricingGroups: Long = 3L
 
-  /** Order keys 0 to 127. Each count is 1 and each revenue is 30. Revenue descending, then key. */
-  val shippingMix: Long = 414472905078466624L
-  val shippingGroups: Long = 128L
+  /**
+   * Even order keys from 0 to 126. Each count is 1 and each revenue is 30. The customer segment is
+   * BUILDING. Revenue descending, then key.
+   */
+  val shippingMix: Long = -3443305142726056896L
+  val shippingGroups: Long = 64L
+
+  /**
+   * Nations china and india. Each count is 1 and each revenue is 30. Count descending, then name.
+   */
+  val localMix: Long = 516785584372771424L
+  val localGroups: Long = 2L
 
   val note: Vector[String] = Vector(
     "1 This file. One group column. The published query also groups by line status.",
     "2 Missing: subquery.",
-    "3 This file. One join and one group column. The published query also joins customer.",
+    "3 This file. Joins customer and orders. One group column. The published query groups three columns.",
     "4 Missing: exists.",
-    "5 Missing: several joins.",
+    "5 This file. Joins supplier and nation. The published query also filters a date literal.",
     "6 This file.",
-    "7 Missing: several joins.",
-    "8 Missing: several joins.",
-    "9 Missing: several joins.",
-    "10 Missing: several joins.",
+    "7 Missing: extract year.",
+    "8 Missing: case.",
+    "9 Missing: extract year.",
+    "10 Missing: more than two group columns.",
     "11 Missing: subquery.",
-    "12 Missing: several joins.",
+    "12 Missing: a conditional count.",
     "13 Missing: outer join.",
     "14 Missing: string LIKE.",
     "15 Missing: subquery.",
     "16 Missing: subquery.",
     "17 Missing: subquery.",
-    "18 Missing: several joins.",
-    "19 Missing: several joins.",
+    "18 Missing: subquery.",
+    "19 Missing: an in-list.",
     "20 Missing: subquery.",
     "21 Missing: exists.",
     "22 Missing: subquery.",
@@ -105,18 +115,35 @@ object TpchSlice:
       .groupColumns(1, 2)
 
   def shippingPlan(): DistCollection[WideRow] =
-    orders()
-      .hashJoinColumns(lines().compute(ColumnExpr.Mul(2, 3), "revenue"), 0, 0)
-      .groupColumns(
-        0,
-        5,
-      )
+    customers()
+      .hashJoinColumns(datedOrders(), 0, 1)
+      .hashJoinColumns(pricedLines(), 2, 0)
+      .groupColumns(2, 7)
+
+  /**
+   * Query 5 reduced to Asia. The supplier's nation must match the customer's nation. Revenue is
+   * price times discount. The checker sorts by count, then by the nation name.
+   */
+  def localPlan(): DistCollection[WideRow] =
+    val joined = regions()
+      .hashJoinColumns(nations(), 0, 1)
+      .hashJoinColumns(localCustomers(), 2, 1)
+      .hashJoinColumns(localOrders(), 4, 1)
+      .hashJoinColumns(localLines(), 5, 0)
+      .hashJoinColumns(suppliers(), 7, 0)
+    joined
+      .compute(ColumnExpr.Compare(CompareOp.Eq, 2, 11), "sameNation")
+      .filterColumn(12, ColumnCompare(CompareOp.Eq, ColumnLiteral.Bool(true)))
+      .groupColumns(3, 10)
 
   def pricingChecksum(rows: Iterable[WideRow]): Long =
     rows.toVector.sortWith(byKey).foldLeft(0L)(mixIntMeasure)
 
   def shippingChecksum(rows: Iterable[WideRow]): Long =
     rows.toVector.sortWith(byRevenue).foldLeft(0L)(mixLongMeasure)
+
+  def localChecksum(rows: Iterable[WideRow]): Long =
+    rows.toVector.sortWith(byNation).foldLeft(0L)(mixNation)
 
   private def prove(): List[String] =
     val revenueShape =
@@ -130,9 +157,15 @@ object TpchSlice:
       shaped(
         "query 3",
         shippingPlan().plan,
-        "WideGroup(WideHashJoin(WideFilter1(Scan),WideCompute(WideFilter1(Scan))))",
+        "WideGroup(WideHashJoin(WideHashJoin(WideFilter1(Scan),WideFilter2(Scan)),WideCompute(WideFilter1(Scan))))",
       ),
       counted("query 3", shippingPlan().plan, shippingGroups),
+      shaped(
+        "query 5",
+        localPlan().plan,
+        "WideGroup(WideFilter12(WideCompute(WideHashJoin(WideHashJoin(WideHashJoin(WideHashJoin(WideHashJoin(WideFilter1(Scan),Scan),Scan),WideFilter2(Scan)),WideCompute(Scan)),Scan))))",
+      ),
+      counted("query 5", localPlan().plan, localGroups),
     ).flatten
 
   private def bothPaths(): List[String] =
@@ -140,6 +173,7 @@ object TpchSlice:
       both("query 6", revenue)(revenuePlan().sumLongColumn(4)),
       both("query 1", pricingMix)(pricingChecksum(pricingPlan().collect())),
       both("query 3", shippingMix)(shippingChecksum(shippingPlan().collect())),
+      both("query 5", localMix)(localChecksum(localPlan().collect())),
     ).flatten
 
   private def lineitem(): DistCollection[WideRow] =
@@ -166,18 +200,33 @@ object TpchSlice:
       partitions,
     )
 
-  private def orders(): DistCollection[WideRow] =
+  private def customers(): DistCollection[WideRow] =
+    DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.ints("custkey", Array.tabulate(32)(index => index)),
+          WideInput.strings(
+            "segment",
+            Array.tabulate(32)(index => if Check.same(index % 2, 0) then "BUILDING" else "AUTO"),
+          ),
+        ),
+        partitions,
+      )
+      .filterColumn(1, ColumnCompare(CompareOp.Eq, ColumnLiteral.Utf8("BUILDING")))
+
+  private def datedOrders(): DistCollection[WideRow] =
     DistCollection
       .ofColumns(
         Vector(
           WideInput.ints("orderkey", Array.tabulate(orderRows)(index => index)),
+          WideInput.ints("custkey", Array.tabulate(orderRows)(index => index % 32)),
           WideInput.longs("orderdate", Array.tabulate(orderRows)(index => index.toLong)),
         ),
         partitions,
       )
-      .filterColumn(1, ColumnCompare(CompareOp.Lt, ColumnLiteral.Int64(128L)))
+      .filterColumn(2, ColumnCompare(CompareOp.Lt, ColumnLiteral.Int64(128L)))
 
-  private def lines(): DistCollection[WideRow] =
+  private def pricedLines(): DistCollection[WideRow] =
     DistCollection
       .ofColumns(
         Vector(
@@ -192,6 +241,71 @@ object TpchSlice:
         partitions,
       )
       .filterColumn(1, ColumnCompare(CompareOp.Gt, ColumnLiteral.Int64(32L)))
+      .compute(ColumnExpr.Mul(2, 3), "revenue")
+
+  private def regions(): DistCollection[WideRow] =
+    DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.ints("regionkey", Array(0, 1)),
+          WideInput.strings("name", Array("ASIA", "EUROPE")),
+        ),
+        partitions,
+      )
+      .filterColumn(1, ColumnCompare(CompareOp.Eq, ColumnLiteral.Utf8("ASIA")))
+
+  private def nations(): DistCollection[WideRow] =
+    DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("nationkey", Array(0, 1, 2)),
+        WideInput.ints("regionkey", Array(0, 0, 1)),
+        WideInput.strings("name", Array("china", "india", "france")),
+      ),
+      partitions,
+    )
+
+  private def localCustomers(): DistCollection[WideRow] =
+    DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("custkey", Array(0, 1, 2)),
+        WideInput.ints("nationkey", Array(0, 1, 2)),
+      ),
+      partitions,
+    )
+
+  private def localOrders(): DistCollection[WideRow] =
+    DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.ints("orderkey", Array(0, 1, 2, 3)),
+          WideInput.ints("custkey", Array(0, 1, 2, 0)),
+          WideInput.ints("orderdate", Array(10, 10, 10, 50)),
+        ),
+        partitions,
+      )
+      .filterColumn(2, ColumnCompare(CompareOp.Lt, ColumnLiteral.Int32(20)))
+
+  private def localLines(): DistCollection[WideRow] =
+    DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.ints("orderkey", Array(0, 0, 1, 1)),
+          WideInput.ints("suppkey", Array(0, 1, 1, 0)),
+          WideInput.ints("price", Array(10, 10, 10, 10)),
+          WideInput.ints("discount", Array(3, 3, 3, 3)),
+        ),
+        partitions,
+      )
+      .compute(ColumnExpr.Mul(2, 3), "revenue")
+
+  private def suppliers(): DistCollection[WideRow] =
+    DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("suppkey", Array(0, 1, 2)),
+        WideInput.ints("nationkey", Array(0, 1, 2)),
+      ),
+      partitions,
+    )
 
   private def both(name: String, expected: Long)(query: => Long): Option[String] =
     ScarletConf.set(ScarletConf.get.copy(columnarExecution = true))
@@ -228,6 +342,24 @@ object TpchSlice:
 
   private def byKey(left: WideRow, right: WideRow): Boolean = keyOf(left) < keyOf(right)
 
+  private def byNation(left: WideRow, right: WideRow): Boolean =
+    val leftCount = countOf(left)
+    val rightCount = countOf(right)
+    leftCount > rightCount || (leftCount == rightCount && textAt(left, 0).compareTo(
+      textAt(right, 0),
+    ) < 0)
+
+  private def mixNation(acc: Long, row: WideRow): Long = cells(row) match
+    case Vector(
+          Cell.Utf8(key),
+          Cell.Int64(count),
+          Cell.Int64(sum),
+          Cell.Int32(min),
+          Cell.Int32(max),
+        ) =>
+      finish(foldText(acc, key), count, sum, min.toLong, max.toLong)
+    case other => refuse(other.size)
+
   private def byRevenue(left: WideRow, right: WideRow): Boolean =
     val leftSum = sumOf(left)
     val rightSum = sumOf(right)
@@ -257,6 +389,20 @@ object TpchSlice:
       ((((acc * 31L + key.toLong) * 31L + count) * 31L + sum) * 31L + min) * 31L + max
     case other =>
       refuse(other.size)
+
+  private def countOf(row: WideRow): Long = cells(row) match
+    case Vector(_, Cell.Int64(count), _, _, _) => count
+    case other => refuse(other.size)
+
+  private def textAt(row: WideRow, ordinal: Int): String = Check.at(cells(row), ordinal) match
+    case Cell.Utf8(value) => value
+    case _ => refuse(cells(row).size)
+
+  private def foldText(acc: Long, text: String): Long =
+    text.foldLeft(acc)((hash, ch) => hash * 31L + ch.toLong)
+
+  private def finish(acc: Long, count: Long, sum: Long, min: Long, max: Long): Long =
+    (((acc * 31L + count) * 31L + sum) * 31L + min) * 31L + max
 
   private def keyOf(row: WideRow): Long = cells(row) match
     case Vector(Cell.Int32(key), _, _, _, _) => key.toLong
