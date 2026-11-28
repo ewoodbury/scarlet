@@ -6,7 +6,7 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 import com.ewoodbury.scarlet.support.Check
 
 /**
- * Twenty-nine ClickBench queries on 4096 generated rows. This is not the hits table.
+ * Thirty ClickBench queries on 4096 generated rows. This is not the hits table.
  *
  * Numbers follow the 0-based order of `clickhouse/queries.sql`. An average is the long sum and the
  * count. Query 2's width average is 3679360 / 4096. Query 3's user average is 8386588672 / 4096.
@@ -80,6 +80,10 @@ object ClickBenchSlice:
   val twoMinMix: Long = 8815493031513626747L
   val twoMinGroups: Long = 4L
 
+  /** Five regions. The checker sorts by the count. The width sum is the average numerator. */
+  val regionMix: Long = 876263744663466213L
+  val regionGroups: Long = 5L
+
   /** Present URLs matching `%google%`. Null URLs are dropped. */
   val likeUrlsCount: Long = 2315L
 
@@ -123,7 +127,7 @@ object ClickBenchSlice:
     "6 min and max of ResolutionWidth. This file.",
     "7 group by AdvEngineID. This file. The checker applies the order.",
     "8 distinct count by one int. This file. The checker applies the order.",
-    "9 sums AdvEngineID and averages ResolutionWidth, then a distinct count. Missing: a second measure.",
+    "9 This file. The width sum is the average. The checker sorts. The published query also limits.",
     "10 string not equal to empty. This file.",
     "11 two strings in the group key. This file. The checker applies the order.",
     "12 group by a string. This file. The checker applies the order.",
@@ -249,6 +253,14 @@ object ClickBenchSlice:
       .filterColumn(3, ColumnCompare(CompareOp.Ne, ColumnLiteral.Utf8("")))
       .groupStringMin(3, 4, 5, 2)
 
+  /**
+   * Query 9: group by region, sum AdvEngineID, and sum ResolutionWidth. An average is that width
+   * sum divided by the count. UserID repeats, so the distinct count is not the row count. The
+   * published statement also limits.
+   */
+  def groupedRegion(): DistCollection[WideRow] =
+    regionHits().groupSum(3, 0, 1, 2)
+
   /** Query 23: LIKE, then the long UserID standing in for EventTime, then ten rows. */
   def likeSorted(): DistCollection[WideRow] =
     likeUrls().sortColumn(2, descending = true).limitColumns(10)
@@ -290,11 +302,26 @@ object ClickBenchSlice:
       partitions,
     )
 
+  /** Query 9 columns. RegionID is `index % 5`. UserID repeats inside a region. */
+  def regionHits(): DistCollection[WideRow] =
+    DistCollection.ofColumns(
+      Vector(
+        WideInput.ints("AdvEngineID", Array.tabulate(rowCount)(index => index % 8)),
+        WideInput.ints("ResolutionWidth", Array.tabulate(rowCount)(index => 800 + (index % 200))),
+        WideInput.longs("UserID", Array.tabulate(rowCount)(index => (index % 32).toLong)),
+        WideInput.ints("RegionID", Array.tabulate(rowCount)(index => index % 5)),
+      ),
+      partitions,
+    )
+
   def stringGroupChecksum(rows: Iterable[WideRow]): Long =
     rows.toVector.sortWith(stringGroupBefore).foldLeft(0L)(mixStringGroup)
 
   def twoMinChecksum(rows: Iterable[WideRow]): Long =
     rows.toVector.sortWith(stringGroupBefore).foldLeft(0L)(mixTwoMin)
+
+  def regionChecksum(rows: Iterable[WideRow]): Long =
+    rows.toVector.sortWith(regionBefore).foldLeft(0L)(mixRegion)
 
   def userPhraseChecksum(rows: Iterable[WideRow]): Long =
     rows.foldLeft(0L)(mixUserPhrase)
@@ -549,6 +576,8 @@ object ClickBenchSlice:
         "WideGroup(WideFilter3(WideFilter4(WideFilter5(Scan))))",
       ),
       counted("query 22", searchGroups().plan, twoMinGroups),
+      shaped("query 9", groupedRegion().plan, "WideGroup(Scan)"),
+      counted("query 9", groupedRegion().plan, regionGroups),
       shaped("query 23", likeSorted().plan, "WideLimit(WideSort(WideFilter3(Scan)))"),
       counted("query 23", likeSorted().plan, 10L),
       shaped(
@@ -593,6 +622,7 @@ object ClickBenchSlice:
       both("query 20", likeUrlsCount)(likeUrls().count()),
       both("query 21", stringMinMix)(stringGroupChecksum(likeGroups().collect())),
       both("query 22", twoMinMix)(twoMinChecksum(searchGroups().collect())),
+      both("query 9", regionMix)(regionChecksum(groupedRegion().collect())),
       both("query 23", likeSortMix)(userChecksum(likeSorted().collect())),
       both("query 24", phraseFilterSortMix)(userPhraseChecksum(filteredPhrases().collect())),
       both("query 25", phraseSortMix)(userPhraseChecksum(sortedPhrases().collect())),
@@ -806,6 +836,25 @@ object ClickBenchSlice:
   private def mixStringGroup(acc: Long, row: WideRow): Long = cells(row) match
     case Vector(Cell.Utf8(key), Cell.Int64(count), Cell.Utf8(min), Cell.Utf8(max)) =>
       foldText(foldText(foldText(acc, key) * 31L + count, min), max)
+    case other => refuse(other.size)
+
+  private def regionBefore(left: WideRow, right: WideRow): Boolean =
+    val leftCount = longAt(left, 1)
+    val rightCount = longAt(right, 1)
+    leftCount > rightCount || (leftCount == rightCount && intAt(left, 0) < intAt(right, 0))
+
+  private def mixRegion(acc: Long, row: WideRow): Long = cells(row) match
+    case Vector(
+          Cell.Int32(key),
+          Cell.Int64(count),
+          Cell.Int64(sum),
+          Cell.Int32(min),
+          Cell.Int32(max),
+          Cell.Int64(width),
+          Cell.Int64(distinct),
+        ) =>
+      ((((((acc * 31L + key.toLong) * 31L + count) * 31L + sum) * 31L + min.toLong) * 31L +
+        max.toLong) * 31L + width) * 31L + distinct
     case other => refuse(other.size)
 
   private def mixTwoMin(acc: Long, row: WideRow): Long = cells(row) match

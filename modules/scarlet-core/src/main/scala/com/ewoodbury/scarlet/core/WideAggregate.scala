@@ -20,22 +20,48 @@ private[scarlet] object WideAggregate:
       key2: Option[Int] = None,
       distinct: Option[Int] = None,
       textMin: Option[Int] = None,
+      sum2: Option[Int] = None,
   ): Option[Vector[ColumnField]] =
     fieldAt(fields, key).flatMap { keyField =>
       secondField(fields, key, key2).flatMap { extra =>
         fieldAt(fields, measure).flatMap { measureField =>
           addedMin(fields, measure, measureField.kind, textMin).flatMap { second =>
-            if (groupKey(keyField.kind) && extra.forall(field => groupKey(field.kind))) then
-              counted(fields, distinct).flatMap { extraCount =>
-                body(measureField, second).map { middle =>
-                  Vector(keyField) ++ extra.toVector ++ middle ++ extraCount
+            addedSum(fields, measure, measureField.kind, sum2).flatMap { extraSum =>
+              if (second && extraSum) then None
+              else if (groupKey(keyField.kind) && extra.forall(field => groupKey(field.kind))) then
+                counted(fields, distinct).flatMap { extraCount =>
+                  body(measureField, second, extraSum).map { middle =>
+                    Vector(keyField) ++ extra.toVector ++ middle ++ extraCount
+                  }
                 }
-              }
-            else None
+              else None
+            }
           }
         }
       }
     }
+
+  /**
+   * Refuses a second sum that is not one int or long column beside an int or long measure. A
+   * missing sum is allowed. An average is that sum divided by the count.
+   */
+  def checkSum(
+      fields: Vector[ColumnField],
+      key: Int,
+      measure: Int,
+      key2: Option[Int],
+      sum2: Option[Int],
+  ): Unit = sum2.foreach { ordinal =>
+    if (key2.isDefined) then throw new IllegalArgumentException("a second sum is one key")
+    if (ordinal == measure) then
+      throw new IllegalArgumentException("a second sum needs another column")
+    if (!whole(fields, key)) then
+      throw new IllegalArgumentException("a second sum needs an int or long key")
+    if (!whole(fields, measure)) then
+      throw new IllegalArgumentException("a second sum needs an int or long measure")
+    if (!whole(fields, ordinal)) then
+      throw new IllegalArgumentException("a second sum needs an int or long column")
+  }
 
   /** True when the extra string min is emitted. None refuses the group. */
   private def addedMin(
@@ -49,6 +75,20 @@ private[scarlet] object WideAggregate:
       fieldAt(fields, ordinal).flatMap { field =>
         if (measureKind == ColumnKind.Utf8 && field.kind == ColumnKind.Utf8) then Some(true)
         else None
+      }
+    case Some(_) => None
+
+  /** True when the extra numeric sum is emitted. None refuses the group. */
+  private def addedSum(
+      fields: Vector[ColumnField],
+      measure: Int,
+      measureKind: ColumnKind,
+      sum2: Option[Int],
+  ): Option[Boolean] = sum2 match
+    case None => Some(false)
+    case Some(ordinal) if ordinal != measure && wholeKind(measureKind) =>
+      fieldAt(fields, ordinal).flatMap { field =>
+        if (wholeKind(field.kind)) then Some(true) else None
       }
     case Some(_) => None
 
@@ -86,9 +126,13 @@ private[scarlet] object WideAggregate:
     case ColumnKind.Float64 | ColumnKind.Bool | ColumnKind.Float32 => false
     case ColumnKind.Decimal(_, _) => false
 
-  private def body(measure: ColumnField, second: Boolean): Option[Vector[ColumnField]] =
+  private def body(
+      measure: ColumnField,
+      second: Boolean,
+      extraSum: Boolean,
+  ): Option[Vector[ColumnField]] =
     summed(measure.kind) match
-      case Some(sumKind) if !second =>
+      case Some(sumKind) if !second && !extraSum =>
         Some(
           Vector(
             ColumnField("count", ColumnKind.Int64),
@@ -97,10 +141,20 @@ private[scarlet] object WideAggregate:
             ColumnField("max", measure.kind),
           ),
         )
+      case Some(sumKind) if !second && extraSum =>
+        Some(
+          Vector(
+            ColumnField("count", ColumnKind.Int64),
+            ColumnField("sum", sumKind),
+            ColumnField("min", measure.kind),
+            ColumnField("max", measure.kind),
+            ColumnField("sum2", ColumnKind.Int64),
+          ),
+        )
       case Some(_) => None
       case None =>
         measure.kind match
-          case ColumnKind.Utf8 =>
+          case ColumnKind.Utf8 if !extraSum =>
             val columns = Vector(
               ColumnField("count", ColumnKind.Int64),
               ColumnField("min", ColumnKind.Utf8),
@@ -108,6 +162,13 @@ private[scarlet] object WideAggregate:
             )
             Some(if (second) then columns :+ ColumnField("min2", ColumnKind.Utf8) else columns)
           case _ => None
+
+  private def whole(fields: Vector[ColumnField], ordinal: Int): Boolean =
+    fieldAt(fields, ordinal).exists(field => wholeKind(field.kind))
+
+  private def wholeKind(kind: ColumnKind): Boolean = kind match
+    case ColumnKind.Int32 | ColumnKind.Int64 => true
+    case _ => false
 
   private def summed(kind: ColumnKind): Option[ColumnKind] = kind match
     case ColumnKind.Int32 | ColumnKind.Int64 => Some(ColumnKind.Int64)

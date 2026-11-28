@@ -198,10 +198,7 @@ final case class DistCollection[A](plan: Plan[A]):
     acceptDistinct(key, measure, Some(key2), distinct)
     DistCollection(Plan.WideGroupOp(widePlan, key, measure, Some(key2), Some(distinct)))
 
-  /**
-   * Groups one string measure and appends the min of one other string column. Count, min, and max
-   * stay. There is no sum. A null key is dropped. A null string is skipped by both mins.
-   */
+  /** Appends the min of one other string. Count, min, and max stay. A null string is skipped. */
   def groupStringMin(key: Int, measure: Int, textMin: Int)(using
       ev: A =:= WideRow,
   ): DistCollection[WideRow] =
@@ -216,6 +213,16 @@ final case class DistCollection[A](plan: Plan[A]):
     acceptStringMin(key, measure, textMin, Some(distinct))
     DistCollection(
       Plan.WideGroupOp(widePlan, key, measure, None, Some(distinct), Some(textMin)),
+    )
+
+  /** Appends the sum of one other int or long. An average is that sum divided by the count. */
+  def groupSum(key: Int, measure: Int, sum2: Int, distinct: Int)(using
+      ev: A =:= WideRow,
+  ): DistCollection[WideRow] =
+    require(sum2 != measure, "a second sum needs another column")
+    acceptDistinct(key, measure, None, distinct)
+    DistCollection(
+      Plan.WideGroupOp(widePlan, key, measure, None, Some(distinct), None, Some(sum2)),
     )
 
   private def acceptStringMin(key: Int, measure: Int, textMin: Int, distinct: Option[Int])(using

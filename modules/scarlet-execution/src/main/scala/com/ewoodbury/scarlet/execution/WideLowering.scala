@@ -101,15 +101,16 @@ private[execution] object WideLowering:
       key2: Option[Int],
       distinct: Option[Int],
       textMin: Option[Int],
+      sum2: Option[Int],
       lowerChild: com.ewoodbury.scarlet.core.Plan[_] => Option[PhysicalOp],
   ): Option[PhysicalOp] =
     lowerChild(source).flatMap { child =>
       fieldsOf(child) match
         case Some(fields)
             if com.ewoodbury.scarlet.core.WideAggregate
-              .output(fields, key, measure, key2, distinct, textMin)
+              .output(fields, key, measure, key2, distinct, textMin, sum2)
               .isDefined =>
-          Some(PhysicalOp.WideGroup(child, key, measure, key2, distinct, textMin))
+          Some(PhysicalOp.WideGroup(child, key, measure, key2, distinct, textMin, sum2))
         case Some(_) =>
           LoweringTrace.note("WideGroupOp", child.kind, "WideLowering")
           None
@@ -198,10 +199,10 @@ private[execution] object WideLowering:
       joinedFields(left, right, rightKey)
     case PhysicalOp.WideBroadcastLeftJoin(left, right, _, rightKey) =>
       joinedFields(left, right, rightKey)
-    case PhysicalOp.WideGroup(child, key, measure, key2, distinct, textMin) =>
+    case PhysicalOp.WideGroup(child, key, measure, key2, distinct, textMin, sum2) =>
       fieldsOf(child).flatMap { fields =>
         com.ewoodbury.scarlet.core.WideAggregate
-          .output(fields, key, measure, key2, distinct, textMin)
+          .output(fields, key, measure, key2, distinct, textMin, sum2)
       }
     case PhysicalOp.WideSort(child, _, _) => fieldsOf(child)
     case PhysicalOp.WideLimit(child, _) => fieldsOf(child)

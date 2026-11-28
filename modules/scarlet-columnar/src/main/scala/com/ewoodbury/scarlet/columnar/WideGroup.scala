@@ -25,9 +25,11 @@ object WideGroup:
       key2: Option[Int] = None,
       distinct: Option[Int] = None,
       textMin: Option[Int] = None,
+      sum2: Option[Int] = None,
   ): (Vector[ColumnField], ColumnBatch) =
     val text = textKey(fields, key) || key2.exists(second => textKey(fields, second))
     val stringMeasure = textKey(fields, measure)
+    WideAggregate.checkSum(fields, key, measure, key2, sum2)
     refuseSecond(fields, measure, stringMeasure, textMin)
     val built =
       if stringMeasure then
@@ -37,16 +39,29 @@ object WideGroup:
         key2 match
           case Some(second) => WideGroupPair.aggregate(batches, fields, key, second, measure)
           case None => aggregateOne(batches, fields, key, measure)
-    distinct match
+    val summed = sum2 match
       case None => built
       case Some(ordinal) =>
-        val full =
-          WideAggregate.output(fields, key, measure, key2, Some(ordinal), textMin).getOrElse {
+        val batch = WideSecondSum.attach(built._2, batches, fields, key, ordinal)
+        val full = WideAggregate
+          .output(fields, key, measure, key2, None, textMin, Some(ordinal))
+          .getOrElse {
+            throw new IllegalArgumentException(
+              s"column $ordinal of ${fields.map(_.kind)} is not a second sum",
+            )
+          }
+        (full, batch)
+    distinct match
+      case None => summed
+      case Some(ordinal) =>
+        val full = WideAggregate
+          .output(fields, key, measure, key2, Some(ordinal), textMin, sum2)
+          .getOrElse {
             throw new IllegalArgumentException(
               s"column $ordinal of ${fields.map(_.kind)} is not a distinct count",
             )
           }
-        val batch = WideDistinct.attach(built._2, batches, fields, key, key2, ordinal)
+        val batch = WideDistinct.attach(summed._2, batches, fields, key, key2, ordinal)
         (full, batch)
 
   private def textKey(fields: Vector[ColumnField], ordinal: Int): Boolean =
