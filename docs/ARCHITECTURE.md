@@ -462,7 +462,8 @@ That exception does not extend `ClassCastException`, so a refusal does not rerun
 - `scarlet-tests` runs in two forked JVMs. Suites inside one JVM stay sequential
   (`Test / testForkedParallel := false`): `ScarletConf`, `ScarletRuntime`, and `ExecutionService`
   are process-global; suites mutate them. `Test / parallelExecution` on that project only
-  schedules the two JVMs. Other projects keep `Test / parallelExecution := false`.
+  schedules the two JVMs. `Test / fork` stays false, so `runMain` stays in the sbt JVM.
+  The two JVMs come from `testGrouping`. Other projects keep `Test / parallelExecution := false`.
 - `ScarletConf` is global mutable state: tests that change it restore defaults in `afterEach`.
 - Retry tests set `baseRetryDelayMs = 1L` or they take seconds.
 - Test logs are silenced to WARN via `modules/scarlet-tests/src/test/resources/log4j2-test.xml`.

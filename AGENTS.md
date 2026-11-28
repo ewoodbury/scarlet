@@ -38,7 +38,7 @@ Branches
 - One imperative sentence per commit. Do not amend a commit that has been pushed.
 
 Testing
-- `scarlet-tests` runs in two forked JVMs. Suites inside one JVM stay sequential (`Test / testForkedParallel := false`). `Test / parallelExecution` on that project only schedules the two JVMs. Do not enable parallelism inside one JVM. Other projects keep `Test / parallelExecution := false`.
+- `scarlet-tests` runs in two forked JVMs. Suites inside one JVM stay sequential (`Test / testForkedParallel := false`). `Test / parallelExecution` on that project only schedules the two JVMs. `Test / fork` stays false, so `runMain` stays in the sbt JVM. The two JVMs come from `testGrouping`. Do not enable parallelism inside one JVM. Other projects keep `Test / parallelExecution := false`.
 - `ScarletConf` is global mutable state. Restore it in `afterEach` or `finally`. `ScarletRuntime` uses the same set/restore pattern.
 - Retry-related tests must set `baseRetryDelayMs = 1L`, or they take seconds.
 - Cover behavior through `DistCollection` when possible. Unit-test internals only for invariants such as graph structure, partitioning, and sorting.

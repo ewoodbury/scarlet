@@ -153,9 +153,10 @@ lazy val `scarlet-tests` = (project in file("modules/scarlet-tests"))
     // and testForkedParallel stays false. parallelExecution only schedules those JVMs.
     // Each JVM gets its own temp directory so the default spill directory does not collide.
     // Each fork is 3 GB. A 2 GB fork ran out of heap on the large suites.
+    // Test / fork stays false. The groups below are the subprocesses. runMain stays in the
+    // sbt JVM, which is what the bench measures.
     Test / testForkedParallel := false,
     Test / parallelExecution := true,
-    Test / fork := true,
     Test / javaOptions ++= Seq("-Xmx3g", "-XX:+ExitOnOutOfMemoryError"),
     Test / testGrouping := {
       val suites = (Test / definedTests).value
