@@ -6,7 +6,7 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 import com.ewoodbury.scarlet.support.Check
 
 /**
- * Seventeen ClickBench queries on 4096 generated rows. This is not the hits table.
+ * Twenty-three ClickBench queries on 4096 generated rows. This is not the hits table.
  *
  * Numbers follow the 0-based order of `clickhouse/queries.sql`. An average is the long sum and the
  * count. Query 2's width average is 3679360 / 4096. Query 3's user average is 8386588672 / 4096.
@@ -65,6 +65,24 @@ object ClickBenchSlice:
   val distinctGroups: Long = 8L
   val distinctMix: Long = 6945918260932055340L
 
+  /** Present URLs matching `%google%`. Null URLs are dropped. */
+  val likeUrlsCount: Long = 2315L
+
+  /** UTF-16 length of every present URL. A null adds nothing. */
+  val urlLengthSum: Long = 63655L
+
+  /** Ten largest UserIDs among the LIKE matches, in engine order. */
+  val likeSortMix: Long = 1088793507528100824L
+
+  /** Phrase groups of the LIKE matches. The checker applies the order. Min is `agoogle`. */
+  val stringMinMix: Long = 859446720053382657L
+
+  /** Ten smallest non-empty phrases, in engine order. */
+  val phraseSortMix: Long = -5808577833312032032L
+
+  /** Ten largest UserIDs whose phrase is greater than `p1`, in engine order. */
+  val phraseFilterSortMix: Long = 7829478632560354530L
+
   val note: Vector[String] = Vector(
     "0 count. This file.",
     "1 count where AdvEngineID is not 0. This file.",
@@ -86,14 +104,14 @@ object ClickBenchSlice:
     "17 long and string group key. Same keys as query 16. Limit without an order waits.",
     "18 minute extracted from a timestamp. Missing: calendar arithmetic.",
     "19 long equality. Same compare as query 1. Not in this slice.",
-    "20 string pattern match. Missing: string LIKE.",
-    "21 pattern match and the min of a string. Missing: string LIKE.",
-    "22 pattern match and a distinct count. Missing: string LIKE.",
-    "23 pattern match, then sort. Missing: string LIKE.",
-    "24 string filter, then sort and limit. Missing: string predicate.",
-    "25 sort by a string. Missing: string predicate.",
-    "26 sort by a time and a string. Missing: string predicate.",
-    "27 length of a string. Missing: string length.",
+    "20 string pattern match. This file.",
+    "21 pattern match and the min of a string. This file. The checker applies the order.",
+    "22 pattern match, two string mins, and a distinct count. Missing: a second string min.",
+    "23 pattern match, then sort. This file.",
+    "24 string filter, then sort and limit. This file.",
+    "25 sort by a string. This file.",
+    "26 sort by a time and a string. Missing: a second sort key.",
+    "27 length of a string. This file.",
     "28 regular expression replace. Missing: regex.",
     "29 add a literal to a column. This file.",
     "30 two-column group and a string filter. Missing: multi-column group.",
@@ -171,6 +189,56 @@ object ClickBenchSlice:
       .ofColumns(columns, partitions)
       .filterColumn(3, ColumnCompare(CompareOp.Ne, ColumnLiteral.Utf8("")))
 
+  /** Query 20: `URL LIKE '%google%'`. */
+  def likeUrls(): DistCollection[WideRow] =
+    urls().filterColumn(3, ColumnCompare(CompareOp.Like, ColumnLiteral.Utf8("%google%")))
+
+  /**
+   * Query 21: LIKE, then the min of that URL by phrase. The phrase is never empty. Each phrase
+   * sees `agoogle` and a longer URL, so the min is not the first dictionary code.
+   */
+  def likeGroups(): DistCollection[WideRow] =
+    phrasesAndUrls()
+      .filterColumn(4, ColumnCompare(CompareOp.Like, ColumnLiteral.Utf8("%google%")))
+      .filterColumn(3, ColumnCompare(CompareOp.Ne, ColumnLiteral.Utf8("")))
+      .groupColumns(3, 4)
+
+  /** Query 23: LIKE, then the long UserID standing in for EventTime, then ten rows. */
+  def likeSorted(): DistCollection[WideRow] =
+    likeUrls().sortColumn(2, descending = true).limitColumns(10)
+
+  /** Query 24: a string filter, then the long UserID sort, then ten rows. */
+  def filteredPhrases(): DistCollection[WideRow] =
+    notEmptyPhrase()
+      .filterColumn(3, ColumnCompare(CompareOp.Gt, ColumnLiteral.Utf8("p1")))
+      .sortColumn(2, descending = true)
+      .limitColumns(10)
+
+  /** Query 25: non-empty phrases, sorted by the phrase, then ten rows. */
+  def sortedPhrases(): DistCollection[WideRow] =
+    notEmptyPhrase().sortColumn(3, descending = false).limitColumns(10)
+
+  /** Query 27: sum of the UTF-16 length. Average and HAVING stay out. */
+  def urlLengths(): DistCollection[WideRow] =
+    urls()
+      .compute(ColumnExpr.Len(3), "n")
+      .compute(ColumnExpr.Cast(4, ColumnKind.Int64), "n64")
+
+  def urls(): DistCollection[WideRow] =
+    DistCollection.ofColumns(scanInputs() :+ urlColumn(), partitions)
+
+  def phrasesAndUrls(): DistCollection[WideRow] =
+    DistCollection.ofColumns(scanInputs() :+ phraseColumn("p", 4) :+ urlColumn(), partitions)
+
+  def stringGroupChecksum(rows: Iterable[WideRow]): Long =
+    rows.toVector.sortWith(stringGroupBefore).foldLeft(0L)(mixStringGroup)
+
+  def userPhraseChecksum(rows: Iterable[WideRow]): Long =
+    rows.foldLeft(0L)(mixUserPhrase)
+
+  def userChecksum(rows: Iterable[WideRow]): Long =
+    rows.foldLeft(0L)((acc, row) => acc * 31L + longAt(row, 2))
+
   def advAsLong(): DistCollection[WideRow] =
     scan().compute(ColumnExpr.Cast(0, ColumnKind.Int64), "adv64")
 
@@ -247,6 +315,22 @@ object ClickBenchSlice:
   private def tagged(): DistCollection[WideRow] =
     DistCollection.ofColumns(scanInputs() :+ phraseColumn("s", 3), partitions)
 
+  private def urlColumn(): WideInput =
+    WideInput.nullableStrings(
+      "URL",
+      Array.tabulate(rowCount)(urlText),
+      Array.tabulate(rowCount)(index => index % 17 != 0),
+    )
+
+  private def urlText(index: Int): String =
+    val kind = (index / 4) % 5
+    if kind == 0 then "https://www.google.com/search"
+    else if kind == 1 then "https://news.google.com/a"
+    else if kind == 2 then "agoogle"
+    else if kind == 3 then "https://example.com/"
+    else if index % 8 < 4 then "é"
+    else "e\u0301"
+
   private def phraseColumn(prefix: String, width: Int): WideInput =
     WideInput.strings(
       "SearchPhrase",
@@ -305,6 +389,22 @@ object ClickBenchSlice:
         "WideCompute(WideCompute(WideCompute(Scan)))",
       ),
       summed("query 29", widthPlus().plan, 5, sumWidthPlus),
+      shaped("query 20", likeUrls().plan, "WideFilter3(Scan)"),
+      counted("query 20", likeUrls().plan, likeUrlsCount),
+      shaped("query 21", likeGroups().plan, "WideGroup(WideFilter3(WideFilter4(Scan)))"),
+      counted("query 21", likeGroups().plan, 4L),
+      shaped("query 23", likeSorted().plan, "WideLimit(WideSort(WideFilter3(Scan)))"),
+      counted("query 23", likeSorted().plan, 10L),
+      shaped(
+        "query 24",
+        filteredPhrases().plan,
+        "WideLimit(WideSort(WideFilter3(WideFilter3(Scan))))",
+      ),
+      counted("query 24", filteredPhrases().plan, 10L),
+      shaped("query 25", sortedPhrases().plan, "WideLimit(WideSort(WideFilter3(Scan)))"),
+      counted("query 25", sortedPhrases().plan, 10L),
+      shaped("query 27", urlLengths().plan, "WideCompute(WideCompute(Scan))"),
+      summed("query 27", urlLengths().plan, 5, urlLengthSum),
     ).flatten
 
   private def bothPaths(): List[String] =
@@ -326,6 +426,12 @@ object ClickBenchSlice:
       both("query 16", longStringMix)(longStringChecksum(groupedLongString().collect())),
       both("query 15", topUserMix)(topUserChecksum(topUsers().collect())),
       both("query 29", sumWidthPlus)(widthPlus().sumLongColumn(5)),
+      both("query 20", likeUrlsCount)(likeUrls().count()),
+      both("query 21", stringMinMix)(stringGroupChecksum(likeGroups().collect())),
+      both("query 23", likeSortMix)(userChecksum(likeSorted().collect())),
+      both("query 24", phraseFilterSortMix)(userPhraseChecksum(filteredPhrases().collect())),
+      both("query 25", phraseSortMix)(userPhraseChecksum(sortedPhrases().collect())),
+      both("query 27", urlLengthSum)(urlLengths().sumLongColumn(5)),
     ).flatten
 
   private def mixExtremum(): Long =
@@ -517,6 +623,20 @@ object ClickBenchSlice:
 
   private def foldText(acc: Long, text: String): Long =
     text.foldLeft(acc)((hash, ch) => hash * 31L + ch.toLong)
+
+  private def stringGroupBefore(left: WideRow, right: WideRow): Boolean =
+    val leftCount = longAt(left, 1)
+    val rightCount = longAt(right, 1)
+    leftCount > rightCount ||
+    (leftCount == rightCount && textAt(left, 0).compareTo(textAt(right, 0)) < 0)
+
+  private def mixStringGroup(acc: Long, row: WideRow): Long = cells(row) match
+    case Vector(Cell.Utf8(key), Cell.Int64(count), Cell.Utf8(min), Cell.Utf8(max)) =>
+      foldText(foldText(foldText(acc, key) * 31L + count, min), max)
+    case other => refuse(other.size)
+
+  private def mixUserPhrase(acc: Long, row: WideRow): Long =
+    foldText(acc * 31L + longAt(row, 2), textAt(row, 3))
 
   private def textBefore(left: WideRow, right: WideRow): Boolean =
     val order = textAt(left, 0).compareTo(textAt(right, 0))

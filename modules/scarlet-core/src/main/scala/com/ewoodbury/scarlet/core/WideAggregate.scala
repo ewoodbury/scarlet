@@ -3,9 +3,10 @@ package com.ewoodbury.scarlet.core
 /**
  * Output schema of a group over one wide-row column.
  *
- * A key is an int, a long, or a string. The measure is an int, a long, a double, or a float. Count
- * is a long. Sum is a long for an int or long measure, and a double for a float or double measure.
- * Min and max keep the measure's kind. A bool or string measure is not in this set. A null key is
+ * A key is an int, a long, or a string. A numeric measure emits count, sum, min, and max. Count is
+ * a long. Sum is a long for an int or long measure, and a double for a float or double measure.
+ * Min and max keep the measure's kind. A string measure emits count, min, and max, and has no sum.
+ * Those strings compare with JVM `compareTo`. A bool measure is not in this set. A null key is
  * dropped. A null measure is counted and is not a sum, min, or max. `distinct` appends one long
  * column when that source column is an int, a long, or a string.
  */
@@ -21,18 +22,13 @@ private[scarlet] object WideAggregate:
     fieldAt(fields, key).flatMap { keyField =>
       secondField(fields, key, key2).flatMap { extra =>
         fieldAt(fields, measure).flatMap { measureField =>
-          summed(measureField.kind).flatMap { sumKind =>
-            if (groupKey(keyField.kind) && extra.forall(field => groupKey(field.kind))) then
-              counted(fields, distinct).map { extraCount =>
-                Vector(keyField) ++ extra.toVector ++ Vector(
-                  ColumnField("count", ColumnKind.Int64),
-                  ColumnField("sum", sumKind),
-                  ColumnField("min", measureField.kind),
-                  ColumnField("max", measureField.kind),
-                ) ++ extraCount
+          if (groupKey(keyField.kind) && extra.forall(field => groupKey(field.kind))) then
+            counted(fields, distinct).flatMap { extraCount =>
+              body(measureField).map { middle =>
+                Vector(keyField) ++ extra.toVector ++ middle ++ extraCount
               }
-            else None
-          }
+            }
+          else None
         }
       }
     }
@@ -70,6 +66,29 @@ private[scarlet] object WideAggregate:
     case ColumnKind.Int32 | ColumnKind.Int64 | ColumnKind.Utf8 => true
     case ColumnKind.Float64 | ColumnKind.Bool | ColumnKind.Float32 => false
     case ColumnKind.Decimal(_, _) => false
+
+  private def body(measure: ColumnField): Option[Vector[ColumnField]] =
+    summed(measure.kind) match
+      case Some(sumKind) =>
+        Some(
+          Vector(
+            ColumnField("count", ColumnKind.Int64),
+            ColumnField("sum", sumKind),
+            ColumnField("min", measure.kind),
+            ColumnField("max", measure.kind),
+          ),
+        )
+      case None =>
+        measure.kind match
+          case ColumnKind.Utf8 =>
+            Some(
+              Vector(
+                ColumnField("count", ColumnKind.Int64),
+                ColumnField("min", ColumnKind.Utf8),
+                ColumnField("max", ColumnKind.Utf8),
+              ),
+            )
+          case _ => None
 
   private def summed(kind: ColumnKind): Option[ColumnKind] = kind match
     case ColumnKind.Int32 | ColumnKind.Int64 => Some(ColumnKind.Int64)

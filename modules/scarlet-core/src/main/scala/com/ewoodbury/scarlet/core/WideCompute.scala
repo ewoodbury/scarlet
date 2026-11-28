@@ -205,6 +205,11 @@ private[scarlet] object WideCompute:
           Cell.Bool(!boolAt(columns(input), row))
         case ColumnExpr.Cast(input, to) =>
           cast(columns(input).cell(row), to)
+        case ColumnExpr.Len(input) =>
+          columns(input).cell(row) match
+            case Cell.Utf8(value) => Cell.Int32(value.length)
+            case other =>
+              throw new IllegalArgumentException(s"length of $other is not supported")
 
   private def binary(
       kind: ColumnKind,
@@ -237,6 +242,7 @@ private[scarlet] object WideCompute:
         case CompareOp.Le => intAt(left, row) <= intAt(right, row)
         case CompareOp.Eq => intAt(left, row) == intAt(right, row)
         case CompareOp.Ne => intAt(left, row) != intAt(right, row)
+        case CompareOp.Like | CompareOp.Unlike => pattern(op)
     case ColumnKind.Int64 =>
       op match
         case CompareOp.Gt => longAt(left, row) > longAt(right, row)
@@ -245,6 +251,7 @@ private[scarlet] object WideCompute:
         case CompareOp.Le => longAt(left, row) <= longAt(right, row)
         case CompareOp.Eq => longAt(left, row) == longAt(right, row)
         case CompareOp.Ne => longAt(left, row) != longAt(right, row)
+        case CompareOp.Like | CompareOp.Unlike => pattern(op)
     case ColumnKind.Float32 =>
       op match
         case CompareOp.Gt => floatAt(left, row) > floatAt(right, row)
@@ -253,6 +260,7 @@ private[scarlet] object WideCompute:
         case CompareOp.Le => floatAt(left, row) <= floatAt(right, row)
         case CompareOp.Eq => floatAt(left, row) == floatAt(right, row)
         case CompareOp.Ne => floatAt(left, row) != floatAt(right, row)
+        case CompareOp.Like | CompareOp.Unlike => pattern(op)
     case ColumnKind.Float64 =>
       op match
         case CompareOp.Gt => doubleAt(left, row) > doubleAt(right, row)
@@ -261,6 +269,7 @@ private[scarlet] object WideCompute:
         case CompareOp.Le => doubleAt(left, row) <= doubleAt(right, row)
         case CompareOp.Eq => doubleAt(left, row) == doubleAt(right, row)
         case CompareOp.Ne => doubleAt(left, row) != doubleAt(right, row)
+        case CompareOp.Like | CompareOp.Unlike => pattern(op)
     case _ => throw new IllegalArgumentException(s"compare result $kind")
 
   private def cast(cell: Cell, to: ColumnKind): Cell = (to, cell) match
@@ -300,6 +309,7 @@ private[scarlet] object WideCompute:
       case ColumnExpr.Or(left, right) => on(columns, left, row) && on(columns, right, row)
       case ColumnExpr.Not(input) => on(columns, input, row)
       case ColumnExpr.Cast(input, _) => on(columns, input, row)
+      case ColumnExpr.Len(input) => on(columns, input, row)
 
   private def divInt(left: Int, right: Int): Int =
     if (right == 0) then refuseZero() else left / right
@@ -351,13 +361,10 @@ private[scarlet] object WideCompute:
     case Cell.Decimal(precision, scale, value) => (value, precision, scale)
     case other => throw new IllegalArgumentException(s"expected a decimal, found $other")
 
-  private def decimalOrder(op: CompareOp, order: Int): Boolean = op match
-    case CompareOp.Gt => order > 0
-    case CompareOp.Ge => order >= 0
-    case CompareOp.Lt => order < 0
-    case CompareOp.Le => order <= 0
-    case CompareOp.Eq => order == 0
-    case CompareOp.Ne => order != 0
+  private def decimalOrder(op: CompareOp, order: Int): Boolean = CompareOp.signed(op, order)
+
+  private def pattern(op: CompareOp): Nothing =
+    throw new IllegalArgumentException(s"a pattern is not ordered: $op")
 
   private def on(columns: Vector[WideColumn], ordinal: Int, row: Int): Boolean =
     columns(ordinal).isPresent(row)

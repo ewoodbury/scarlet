@@ -21,8 +21,10 @@ import com.ewoodbury.scarlet.core.*
 /**
  * One SELECT: registered tables, one int or long equi-join, comparisons combined with AND, OR, and
  * NOT, arithmetic, count, sum, min, max, and an exact count of distinct values. A string compares
- * equal or not equal. A group is one or two keys, each an int, a long, or a string. Order is one
- * int or long column, then a limit. Anything else names its node.
+ * with JVM order. `LIKE` uses `%` and `_`, and it combines with AND and NOT. OR of `LIKE` names
+ * the node. `length` is the UTF-16 length. A group is one or two keys, each an int, a long, or a
+ * string. A string measure emits count, min, and max. Order is one int, long, or string column,
+ * then a limit. Anything else names its node.
  */
 private object SqlConvert:
 
@@ -60,7 +62,7 @@ private object SqlConvert:
       else group(plain, keys(grouped.getGroupByExpressionList, filtered), filtered)
     finish(plain, selected)
 
-  /** One int or long order, then a row count. A scalar names the node that asked. */
+  /** One int, long, or string order, then a row count. A scalar names the node that asked. */
   private def finish(plain: PlainSelect, result: SqlResult): SqlResult =
     limit(plain, orderBy(plain, result))
 
@@ -103,7 +105,7 @@ private object SqlConvert:
     if ordinal < 0 then unsupported(element)
     val field = fields.lift(ordinal).getOrElse(unsupported(element))
     field.kind match
-      case ColumnKind.Int32 | ColumnKind.Int64 => ordinal
+      case ColumnKind.Int32 | ColumnKind.Int64 | ColumnKind.Utf8 => ordinal
       case _ => unsupported(element)
 
   /** `count`, `sum`, `min`, `max`, or `distinct` when that name is an output column. */
@@ -213,6 +215,8 @@ private object SqlConvert:
       if measures.isEmpty then keys.head
       else if measures.distinct.size == 1 then measures.head
       else throw new IllegalArgumentException("sum, min, and max must use one column")
+    if chosen.exists(item => item._1 == "sum") && kindAt(frame, measure) == ColumnKind.Utf8 then
+      throw new IllegalArgumentException("sum of a string is not supported")
     (measure, chosen.map(_._1).toVector, distincts.headOption)
 
   private def groupList(): Nothing =
@@ -221,22 +225,23 @@ private object SqlConvert:
     )
 
   /**
-   * The kernel emits count, sum, min, and max, plus distinct when the select asks for it. A
-   * shorter list drops the rest.
+   * The kernel emits its aggregate columns, including distinct when the select asks for it. A
+   * string measure has no sum. A shorter list drops the rest. Columns are found by name, so min
+   * stays min when sum is absent.
    */
   private def projectGroup(
       rows: DistCollection[WideRow],
       keyCount: Int,
       names: Vector[String],
   ): DistCollection[WideRow] =
-    val emitted =
-      if names.lastOption.contains("distinct") then aggregateOrder else aggregateOrder.dropRight(1)
+    val fields = WideFields.known(rows.plan).getOrElse(groupList())
+    val emitted = fields.drop(keyCount).map(_.name)
     if names == emitted then rows
     else
-      val fields = WideFields.known(rows.plan).getOrElse(groupList())
       val keys = (0 until keyCount).toVector.map(ordinal => (ordinal, fields(ordinal).name))
       val kept = names.map { name =>
-        val ordinal = keyCount + aggregateOrder.indexOf(name)
+        val ordinal = fields.indexWhere(field => field.name == name, keyCount)
+        if ordinal < 0 then groupList()
         (ordinal, fields(ordinal).name)
       }
       rows.projectColumns(keys ++ kept)
@@ -316,17 +321,16 @@ private object SqlConvert:
     case ne: NotEqualsTo =>
       wideOrBool(CompareOp.Eq, ne.getLeftExpression, ne.getRightExpression, frame)
     case gt: GreaterThan =>
-      refuseStringOrder(gt, gt.getLeftExpression, gt.getRightExpression, frame)
       wideOrBool(CompareOp.Le, gt.getLeftExpression, gt.getRightExpression, frame)
     case ge: GreaterThanEquals =>
-      refuseStringOrder(ge, ge.getLeftExpression, ge.getRightExpression, frame)
       wideOrBool(CompareOp.Lt, ge.getLeftExpression, ge.getRightExpression, frame)
     case lt: MinorThan =>
-      refuseStringOrder(lt, lt.getLeftExpression, lt.getRightExpression, frame)
       wideOrBool(CompareOp.Ge, lt.getLeftExpression, lt.getRightExpression, frame)
     case le: MinorThanEquals =>
-      refuseStringOrder(le, le.getLeftExpression, le.getRightExpression, frame)
       wideOrBool(CompareOp.Gt, le.getLeftExpression, le.getRightExpression, frame)
+    case like: LikeExpression =>
+      val flipped = if like.isNot then CompareOp.Like else CompareOp.Unlike
+      likeFrame(flipped, like, frame)
     case other =>
       val (built, ordinal) = boolExpr(other, frame)
       val (negated, column) = built.bind(ColumnExpr.Not(ordinal))
@@ -416,40 +420,28 @@ private object SqlConvert:
     case ColumnKind.Int32 | ColumnKind.Int64 => true
     case _ => false
 
-  private def refuseStringOrder(
-      node: AnyRef,
-      left: Expression,
-      right: Expression,
-      frame: Frame,
-  ): Unit =
-    if stringOperand(left, frame) || stringOperand(right, frame) then unsupported(node)
-
-  private def stringOperand(expr: Expression, frame: Frame): Boolean = unwrap(expr) match
-    case _: StringValue => true
-    case column: Column =>
-      kindAt(frame, columnOrdinal(frame, column)) match
-        case ColumnKind.Utf8 => true
-        case _ => false
-    case _ => false
-
   private def compare(expr: Expression, frame: Frame): Frame = unwrap(expr) match
     case eq: EqualsTo =>
       wideOrBool(CompareOp.Eq, eq.getLeftExpression, eq.getRightExpression, frame)
     case ne: NotEqualsTo =>
       wideOrBool(CompareOp.Ne, ne.getLeftExpression, ne.getRightExpression, frame)
     case gt: GreaterThan =>
-      refuseStringOrder(gt, gt.getLeftExpression, gt.getRightExpression, frame)
       wideOrBool(CompareOp.Gt, gt.getLeftExpression, gt.getRightExpression, frame)
     case ge: GreaterThanEquals =>
-      refuseStringOrder(ge, ge.getLeftExpression, ge.getRightExpression, frame)
       wideOrBool(CompareOp.Ge, ge.getLeftExpression, ge.getRightExpression, frame)
     case lt: MinorThan =>
-      refuseStringOrder(lt, lt.getLeftExpression, lt.getRightExpression, frame)
       wideOrBool(CompareOp.Lt, lt.getLeftExpression, lt.getRightExpression, frame)
     case le: MinorThanEquals =>
-      refuseStringOrder(le, le.getLeftExpression, le.getRightExpression, frame)
       wideOrBool(CompareOp.Le, le.getLeftExpression, le.getRightExpression, frame)
+    case like: LikeExpression =>
+      val op = if like.isNot then CompareOp.Unlike else CompareOp.Like
+      likeFrame(op, like, frame)
     case other => unsupported(other)
+
+  private def likeFrame(op: CompareOp, like: LikeExpression, frame: Frame): Frame =
+    if like.getEscape != null || like.isCaseInsensitive || like.isUseBinary then unsupported(like)
+    if like.getLikeKeyWord != LikeExpression.KeyWord.LIKE then unsupported(like)
+    wideOrBool(op, like.getLeftExpression, like.getRightExpression, frame)
 
   private def wideOrBool(
       op: CompareOp,
@@ -488,6 +480,8 @@ private object SqlConvert:
     case CompareOp.Le => CompareOp.Ge
     case CompareOp.Eq => CompareOp.Eq
     case CompareOp.Ne => CompareOp.Ne
+    case CompareOp.Like | CompareOp.Unlike =>
+      throw new IllegalArgumentException("a pattern is not ordered")
 
   private def boolExpr(expr: Expression, frame: Frame): (Frame, Int) = unwrap(expr) match
     case and: AndExpression =>
@@ -539,7 +533,17 @@ private object SqlConvert:
     case sub: Subtraction => binary(sub, frame, ColumnExpr.Sub.apply)
     case mul: Multiplication => binary(mul, frame, ColumnExpr.Mul.apply)
     case div: Division => binary(div, frame, ColumnExpr.Div.apply)
+    case function: Function => lengthOf(function, frame)
     case other => unsupported(other)
+
+  private def lengthOf(function: Function, frame: Frame): (Frame, Int) =
+    val name = function.getName
+    if function.isDistinct || function.isUnique || name == null || !name.equalsIgnoreCase("length")
+    then unsupported(function)
+    val args = arguments(function)
+    if args.size != 1 then unsupported(function)
+    val (placed, ordinal) = side(args.head, frame)
+    placed.bind(ColumnExpr.Len(ordinal))
 
   private def binary(
       expr: BinaryExpression,

@@ -6,12 +6,12 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
 import com.ewoodbury.scarlet.support.Check
-import com.ewoodbury.scarlet.support.Check.shouldBeEmpty
 
 /**
  * Equality and inequality of a string column against a literal.
  *
- * A null cell does not pass. A null literal is refused. Ordering stays off the columnar plan.
+ * A null cell does not pass. A null literal is refused. Order and `LIKE` use the string, not the
+ * dictionary code.
  */
 class TestStringFilter extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -70,10 +70,22 @@ class TestStringFilter extends AnyFlatSpec with Matchers with BeforeAndAfterEach
     thrown.getMessage should include("must not be null")
   }
 
-  "ordering" should "stay off the columnar plan" in {
+  "ordering" should "compare the string" in {
     val compare = ColumnCompare(CompareOp.Gt, ColumnLiteral.Utf8("a"))
     val planned = table.filterColumn(1, compare)
-    ColumnarPlanner.lower(planned.plan).shouldBeEmpty
+    ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some("WideFilter1(Scan)")
+    idsOf(planned) shouldBe Vector(4)
+  }
+
+  "like" should "match a pattern and drop a null" in {
+    val planned = table.filterColumn(1, ColumnCompare(CompareOp.Like, ColumnLiteral.Utf8("%a%")))
+    idsOf(planned) shouldBe Vector(1)
+  }
+
+  "not like" should "keep a present string that does not match" in {
+    val planned =
+      table.filterColumn(1, ColumnCompare(CompareOp.Unlike, ColumnLiteral.Utf8("%a%")))
+    idsOf(planned) shouldBe Vector(2, 4, 5)
   }
 
   private def idsOf(planned: DistCollection[WideRow]): Vector[Int] =

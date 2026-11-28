@@ -7,7 +7,9 @@ import org.scalatest.matchers.should.Matchers
 import com.ewoodbury.scarlet.api.DistCollection
 import com.ewoodbury.scarlet.core.*
 
-/** Global sort of one int column, then a limit. A null orders as zero and stays. */
+/**
+ * Global sort of one int or string column, then a limit. A null number orders as zero and stays.
+ */
 class TestWideSort extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
   private val originalConf = ScarletConf.get
@@ -80,13 +82,59 @@ class TestWideSort extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     both(planned).length shouldBe 4
   }
 
-  "a string column" should "be refused" in {
-    val thrown = the[IllegalArgumentException] thrownBy {
-      val _ = DistCollection
-        .ofColumns(Vector(WideInput.strings("s", Array("b", "a"))), 1)
-        .sortColumn(0, descending = false)
-    }
-    thrown.getMessage should include("Utf8")
+  "a string column" should "order by the characters" in {
+    val planned = DistCollection
+      .ofColumns(Vector(WideInput.strings("s", Array("b", "a", "b"))), 1)
+      .sortColumn(0, descending = false)
+    ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some("WideSort(Scan)")
+    both(planned) shouldBe List(
+      Vector(Cell.Utf8("a")),
+      Vector(Cell.Utf8("b")),
+      Vector(Cell.Utf8("b")),
+    )
+  }
+
+  "a descending string" should "keep the earlier tie" in {
+    val planned = DistCollection
+      .ofColumns(Vector(WideInput.strings("s", Array("b", "a", "b"))), 1)
+      .sortColumn(0, descending = true)
+    both(planned) shouldBe List(
+      Vector(Cell.Utf8("b")),
+      Vector(Cell.Utf8("b")),
+      Vector(Cell.Utf8("a")),
+    )
+  }
+
+  "a null string beside an empty string" should "tie on empty and keep the cell" in {
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.nullableStrings("s", Array("", "a", "b"), Array(true, false, true)),
+        ),
+        1,
+      )
+      .sortColumn(0, descending = false)
+    both(planned) shouldBe List(
+      Vector(Cell.Utf8("")),
+      Vector(Cell.Null),
+      Vector(Cell.Utf8("b")),
+    )
+  }
+
+  "a null string" should "order as empty and stay null" in {
+    val planned = DistCollection
+      .ofColumns(
+        Vector(
+          WideInput.nullableStrings("s", Array("b", "a", "c"), Array(true, false, true)),
+        ),
+        1,
+      )
+      .sortColumn(0, descending = false)
+    both(planned) shouldBe List(
+      Vector(Cell.Null),
+      Vector(Cell.Utf8("b")),
+      Vector(Cell.Utf8("c")),
+    )
   }
 
   "a negative limit" should "be refused" in {

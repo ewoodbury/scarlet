@@ -185,13 +185,7 @@ object WideDecimal:
     )
     batch.columns(ordinal)
 
-  private def keep(op: CompareOp, order: Int): Boolean = op match
-    case CompareOp.Gt => order > 0
-    case CompareOp.Ge => order >= 0
-    case CompareOp.Lt => order < 0
-    case CompareOp.Le => order <= 0
-    case CompareOp.Eq => order == 0
-    case CompareOp.Ne => order != 0
+  private def keep(op: CompareOp, order: Int): Boolean = CompareOp.signed(op, order)
 
   private def packed(bits: Array[Boolean]): Validity =
     Validity.pack(bits.length, row => bits(row))

@@ -3,9 +3,11 @@ package com.ewoodbury.scarlet.columnar
 /**
  * Global sort and limit of wide batches.
  *
- * Sort concatenates batches in order, then orders one int or long column. A null cell compares as
- * zero and stays null. Ties keep the input index, and a descending sort does not reverse them. The
- * result is one batch. String dictionaries are rebuilt, because codes belong to one batch.
+ * Sort concatenates batches in order, then orders one int, long, or string column. A null number
+ * compares as zero and stays null. A null string compares as empty and stays null. Ties keep the
+ * input index, and a descending sort does not reverse them. The result is one batch. String
+ * dictionaries are rebuilt, because codes belong to one batch. String order is JVM `compareTo`,
+ * not dictionary code order.
  */
 @SuppressWarnings(Array("org.wartremover.warts.Var"))
 object WideOrder:
@@ -15,13 +17,16 @@ object WideOrder:
     val indexed = batches.toIndexedSeq
     sameWidth(indexed)
     val key = columnAt(atBatch(indexed, 0), ordinal)
+    val total = indexed.foldLeft(0)((sum, batch) => sum + batch.length)
     key.logicalType match
-      case LogicalType.Int32 | LogicalType.Int64 => ()
+      case LogicalType.Int32 | LogicalType.Int64 =>
+        if total == 0 then atBatch(indexed, 0)
+        else gather(indexed, orderOf(keysOf(indexed, ordinal, total), descending))
+      case LogicalType.Utf8Dict =>
+        if total == 0 then atBatch(indexed, 0)
+        else gather(indexed, orderOfText(textsOf(indexed, ordinal, total), descending))
       case other =>
         throw new IllegalArgumentException(s"sort column $ordinal is $other")
-    val total = indexed.foldLeft(0)((sum, batch) => sum + batch.length)
-    if total == 0 then atBatch(indexed, 0)
-    else gather(indexed, orderOf(keysOf(indexed, ordinal, total), descending))
 
   def limit(batches: Seq[ColumnBatch], count: Int): ColumnBatch =
     require(count >= 0, "limit must not be negative")
@@ -77,6 +82,52 @@ object WideOrder:
       order(index) = boxed(index).intValue
       index += 1
     order
+
+  private def textsOf(batches: IndexedSeq[ColumnBatch], ordinal: Int, total: Int): Array[String] =
+    val keys = new Array[String](total)
+    var batch = 0
+    var at = 0
+    while batch < batches.size do
+      val column = columnAt(atBatch(batches, batch), ordinal)
+      val length = atBatch(batches, batch).length
+      column match
+        case texts: DictUtf8Column =>
+          var row = 0
+          while row < length do
+            keys(at) = if texts.isValid(row) then texts.dictionary(texts.codes(row)) else ""
+            at += 1
+            row += 1
+        case other =>
+          throw new IllegalArgumentException(s"sort column $ordinal is ${other.logicalType}")
+      batch += 1
+    keys
+
+  private def orderOfText(keys: Array[String], descending: Boolean): Array[Int] =
+    val boxed = new Array[Integer](keys.length)
+    var index = 0
+    while index < keys.length do
+      boxed(index) = Integer.valueOf(index)
+      index += 1
+    java.util.Arrays.sort(boxed, textComparator(keys, descending))
+    val order = new Array[Int](keys.length)
+    index = 0
+    while index < keys.length do
+      order(index) = boxed(index).intValue
+      index += 1
+    order
+
+  private def textComparator(
+      keys: Array[String],
+      descending: Boolean,
+  ): java.util.Comparator[Integer] =
+    new java.util.Comparator[Integer]:
+      def compare(left: Integer, right: Integer): Int =
+        val first = left.intValue
+        val second = right.intValue
+        val cmp =
+          if descending then keys(second).compareTo(keys(first))
+          else keys(first).compareTo(keys(second))
+        if cmp != 0 then cmp else java.lang.Integer.compare(first, second)
 
   private def comparator(keys: Array[Long], descending: Boolean): java.util.Comparator[Integer] =
     new java.util.Comparator[Integer]:

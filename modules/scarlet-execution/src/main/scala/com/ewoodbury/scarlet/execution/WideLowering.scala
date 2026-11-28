@@ -135,7 +135,8 @@ private[execution] object WideLowering:
     fields.lift(ordinal).exists { field =>
       field.kind match
         case com.ewoodbury.scarlet.core.ColumnKind.Int32 |
-            com.ewoodbury.scarlet.core.ColumnKind.Int64 =>
+            com.ewoodbury.scarlet.core.ColumnKind.Int64 |
+            com.ewoodbury.scarlet.core.ColumnKind.Utf8 =>
           true
         case _ => false
     }
