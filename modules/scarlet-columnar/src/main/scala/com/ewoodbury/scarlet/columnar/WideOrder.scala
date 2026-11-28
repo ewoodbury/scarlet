@@ -75,18 +75,15 @@ object WideOrder:
     keys
 
   private def orderOf(keys: Array[Long], descending: Boolean): Array[Int] =
-    val boxed = new Array[Integer](keys.length)
-    var index = 0
-    while index < keys.length do
-      boxed(index) = Integer.valueOf(index)
-      index += 1
-    java.util.Arrays.sort(boxed, comparator(keys, descending))
-    val order = new Array[Int](keys.length)
-    index = 0
-    while index < keys.length do
-      order(index) = boxed(index).intValue
-      index += 1
-    order
+    sortIndices(
+      keys.length,
+      new IndexOrder:
+        def before(left: Int, right: Int): Boolean =
+          val cmp =
+            if descending then java.lang.Long.compare(keys(right), keys(left))
+            else java.lang.Long.compare(keys(left), keys(right))
+          if cmp != 0 then cmp < 0 else left < right,
+    )
 
   private def textsOf(batches: IndexedSeq[ColumnBatch], ordinal: Int, total: Int): Array[String] =
     val keys = new Array[String](total)
@@ -125,19 +122,16 @@ object WideOrder:
     case SortKey.Text(values, descending) => orderOfText(values, descending)
 
   private def orderOfPair(first: SortKey, second: SortKey): Array[Int] =
-    val length = keyLength(first)
-    val boxed = new Array[Integer](length)
-    var index = 0
-    while index < length do
-      boxed(index) = Integer.valueOf(index)
-      index += 1
-    java.util.Arrays.sort(boxed, pairComparator(first, second))
-    val order = new Array[Int](length)
-    index = 0
-    while index < length do
-      order(index) = boxed(index).intValue
-      index += 1
-    order
+    sortIndices(
+      keyLength(first),
+      new IndexOrder:
+        def before(left: Int, right: Int): Boolean =
+          val primary = keyCompare(first, left, right)
+          if primary != 0 then primary < 0
+          else
+            val next = keyCompare(second, left, right)
+            if next != 0 then next < 0 else left < right,
+    )
 
   private def sortKey(
       batches: IndexedSeq[ColumnBatch],
@@ -152,17 +146,6 @@ object WideOrder:
         SortKey.Text(textsOf(batches, ordinal, total), descending)
       case other =>
         throw new IllegalArgumentException(s"sort column $ordinal is $other")
-
-  private def pairComparator(first: SortKey, second: SortKey): java.util.Comparator[Integer] =
-    new java.util.Comparator[Integer]:
-      def compare(left: Integer, right: Integer): Int =
-        val earlier = left.intValue
-        val later = right.intValue
-        val primary = keyCompare(first, earlier, later)
-        if primary != 0 then primary
-        else
-          val next = keyCompare(second, earlier, later)
-          if next != 0 then next else java.lang.Integer.compare(earlier, later)
 
   private def keyCompare(key: SortKey, left: Int, right: Int): Int = key match
     case SortKey.Number(values, descending) =>
@@ -187,41 +170,61 @@ object WideOrder:
     case Text(values: Array[String], descending: Boolean)
 
   private def orderOfText(keys: Array[String], descending: Boolean): Array[Int] =
-    val boxed = new Array[Integer](keys.length)
+    sortIndices(
+      keys.length,
+      new IndexOrder:
+        def before(left: Int, right: Int): Boolean =
+          val cmp =
+            if descending then TextRule.compare(keys(right), keys(left))
+            else TextRule.compare(keys(left), keys(right))
+          if cmp != 0 then cmp < 0 else left < right,
+    )
+
+  /** Orders row indexes. `before` is a strict total order, including the input index. */
+  private abstract class IndexOrder:
+    def before(left: Int, right: Int): Boolean
+
+  private def sortIndices(length: Int, orderBy: IndexOrder): Array[Int] =
+    val order = new Array[Int](length)
     var index = 0
-    while index < keys.length do
-      boxed(index) = Integer.valueOf(index)
+    while index < length do
+      order(index) = index
       index += 1
-    java.util.Arrays.sort(boxed, textComparator(keys, descending))
-    val order = new Array[Int](keys.length)
-    index = 0
-    while index < keys.length do
-      order(index) = boxed(index).intValue
-      index += 1
-    order
-
-  private def textComparator(
-      keys: Array[String],
-      descending: Boolean,
-  ): java.util.Comparator[Integer] =
-    new java.util.Comparator[Integer]:
-      def compare(left: Integer, right: Integer): Int =
-        val first = left.intValue
-        val second = right.intValue
-        val cmp =
-          if descending then TextRule.compare(keys(second), keys(first))
-          else TextRule.compare(keys(first), keys(second))
-        if cmp != 0 then cmp else java.lang.Integer.compare(first, second)
-
-  private def comparator(keys: Array[Long], descending: Boolean): java.util.Comparator[Integer] =
-    new java.util.Comparator[Integer]:
-      def compare(left: Integer, right: Integer): Int =
-        val first = left.intValue
-        val second = right.intValue
-        val cmp =
-          if descending then java.lang.Long.compare(keys(second), keys(first))
-          else java.lang.Long.compare(keys(first), keys(second))
-        if cmp != 0 then cmp else java.lang.Integer.compare(first, second)
+    if length < 2 then order
+    else
+      val scratch = new Array[Int](length)
+      var width = 1
+      var src = order
+      var dst = scratch
+      var swapped = false
+      while width < length do
+        var start = 0
+        while start < length do
+          val mid = math.min(start + width, length)
+          val end = math.min(start + width + width, length)
+          var left = start
+          var right = mid
+          var out = start
+          while out < end do
+            val takeLeft =
+              if right == end then true
+              else if left == mid then false
+              else orderBy.before(src(left), src(right))
+            if takeLeft then
+              dst(out) = src(left)
+              left += 1
+            else
+              dst(out) = src(right)
+              right += 1
+            out += 1
+          start = end
+        val swap = src
+        src = dst
+        dst = swap
+        swapped = !swapped
+        width += width
+      if swapped then System.arraycopy(src, 0, order, 0, length)
+      order
 
   private def gather(batches: IndexedSeq[ColumnBatch], order: Array[Int]): ColumnBatch =
     val starts = prefix(batches)

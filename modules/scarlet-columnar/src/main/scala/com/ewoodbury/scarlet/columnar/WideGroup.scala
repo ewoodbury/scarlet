@@ -116,23 +116,44 @@ object WideGroup:
     case ColumnKind.Float32 => Family.Floats
     case other => throw new IllegalArgumentException(s"measure $other does not aggregate")
 
-  /** Count, sum, min, and max addressed by the same slot as the key table. */
+  /**
+   * Count, sum, min, and max for one numeric family, addressed by the same slot as the key table.
+   * The other families stay empty, so a grow copies only the arrays that family notes.
+   */
   @SuppressWarnings(Array("org.wartremover.warts.Var"))
   private[columnar] final class Measures(kind: ColumnKind):
     private val familyKind = family(kind)
+    private val keepInt = familyKind == Family.Ints
+    private val keepLong = familyKind == Family.Longs
+    private val keepDouble = familyKind == Family.Doubles
+    private val keepFloat = familyKind == Family.Floats
+    private val longSum = keepInt || keepLong
+    private val doubleSum = keepDouble || keepFloat
     private var cap = 16
     private var counts = new Array[Long](cap)
     private var seen = new Array[Boolean](cap)
-    private var longSums = new Array[Long](cap)
-    private var doubleSums = new Array[Double](cap)
-    private var intMin = new Array[Int](cap)
-    private var intMax = new Array[Int](cap)
-    private var longMin = new Array[Long](cap)
-    private var longMax = new Array[Long](cap)
-    private var doubleMin = new Array[Double](cap)
-    private var doubleMax = new Array[Double](cap)
-    private var floatMin = new Array[Float](cap)
-    private var floatMax = new Array[Float](cap)
+    private var longSums = longs(longSum, cap)
+    private var doubleSums = doubles(doubleSum, cap)
+    private var intMin = ints(keepInt, cap)
+    private var intMax = ints(keepInt, cap)
+    private var longMin = longs(keepLong, cap)
+    private var longMax = longs(keepLong, cap)
+    private var doubleMin = doubles(keepDouble, cap)
+    private var doubleMax = doubles(keepDouble, cap)
+    private var floatMin = floats(keepFloat, cap)
+    private var floatMax = floats(keepFloat, cap)
+
+    private def ints(keep: Boolean, width: Int): Array[Int] =
+      if (keep) then new Array[Int](width) else Array.empty[Int]
+
+    private def longs(keep: Boolean, width: Int): Array[Long] =
+      if (keep) then new Array[Long](width) else Array.empty[Long]
+
+    private def doubles(keep: Boolean, width: Int): Array[Double] =
+      if (keep) then new Array[Double](width) else Array.empty[Double]
+
+    private def floats(keep: Boolean, width: Int): Array[Float] =
+      if (keep) then new Array[Float](width) else Array.empty[Float]
 
     def count(slot: Int): Unit = counts(slot) += 1L
 
@@ -180,36 +201,42 @@ object WideGroup:
         if (value > floatMax(slot)) then floatMax(slot) = value
         doubleSums(slot) += value.toDouble
 
-    /** Moves accumulators into the grown key table. `mapping(old)` is the new slot, or `-1`. */
+    /**
+     * Moves live accumulators into the grown key table. `mapping(old)` is the new slot, or `-1`.
+     */
     def reindex(mapping: Array[Int], oldCap: Int, next: Int): Unit =
       val nextCounts = new Array[Long](next)
       val nextSeen = new Array[Boolean](next)
-      val nextLongSums = new Array[Long](next)
-      val nextDoubleSums = new Array[Double](next)
-      val nextIntMin = new Array[Int](next)
-      val nextIntMax = new Array[Int](next)
-      val nextLongMin = new Array[Long](next)
-      val nextLongMax = new Array[Long](next)
-      val nextDoubleMin = new Array[Double](next)
-      val nextDoubleMax = new Array[Double](next)
-      val nextFloatMin = new Array[Float](next)
-      val nextFloatMax = new Array[Float](next)
+      val nextLongSums = longs(longSum, next)
+      val nextDoubleSums = doubles(doubleSum, next)
+      val nextIntMin = ints(keepInt, next)
+      val nextIntMax = ints(keepInt, next)
+      val nextLongMin = longs(keepLong, next)
+      val nextLongMax = longs(keepLong, next)
+      val nextDoubleMin = doubles(keepDouble, next)
+      val nextDoubleMax = doubles(keepDouble, next)
+      val nextFloatMin = floats(keepFloat, next)
+      val nextFloatMax = floats(keepFloat, next)
       var row = 0
       while (row < oldCap) {
         val at = mapping(row)
         if (at >= 0) then
           nextCounts(at) = counts(row)
           nextSeen(at) = seen(row)
-          nextLongSums(at) = longSums(row)
-          nextDoubleSums(at) = doubleSums(row)
-          nextIntMin(at) = intMin(row)
-          nextIntMax(at) = intMax(row)
-          nextLongMin(at) = longMin(row)
-          nextLongMax(at) = longMax(row)
-          nextDoubleMin(at) = doubleMin(row)
-          nextDoubleMax(at) = doubleMax(row)
-          nextFloatMin(at) = floatMin(row)
-          nextFloatMax(at) = floatMax(row)
+          if (longSum) then nextLongSums(at) = longSums(row)
+          if (doubleSum) then nextDoubleSums(at) = doubleSums(row)
+          if (keepInt) then
+            nextIntMin(at) = intMin(row)
+            nextIntMax(at) = intMax(row)
+          if (keepLong) then
+            nextLongMin(at) = longMin(row)
+            nextLongMax(at) = longMax(row)
+          if (keepDouble) then
+            nextDoubleMin(at) = doubleMin(row)
+            nextDoubleMax(at) = doubleMax(row)
+          if (keepFloat) then
+            nextFloatMin(at) = floatMin(row)
+            nextFloatMax(at) = floatMax(row)
         row += 1
       }
       cap = next
