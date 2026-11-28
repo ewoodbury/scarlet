@@ -117,6 +117,29 @@ class TestTpch extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     TpchSlice.outerChecksum(planned.collect()) shouldBe TpchSlice.outerMix
   }
 
+  "query 4" should "keep an order that has a late line" in {
+    val planned = TpchSlice.priorityPlan()
+    val shape =
+      "WideGroup(WideHashJoin(WideFilter1(WideFilter1(Scan)),WideProject(WideGroup(WideFilter3(WideCompute(Scan))))))"
+    ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some(shape)
+    ColumnarPlanner.tryCount(planned.plan) shouldBe Some(TpchSlice.priorityGroups)
+    TpchSlice.priorityChecksum(planned.collect()) shouldBe TpchSlice.priorityMix
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = false))
+    TpchSlice.priorityChecksum(planned.collect()) shouldBe TpchSlice.priorityMix
+  }
+
+  "query 15" should "keep the greatest total" in {
+    val planned = TpchSlice.topPlan()
+    ColumnarPlanner.lower(planned.plan).map(_.shape) shouldBe Some("WideFilter1(Scan)")
+    ColumnarPlanner.tryCount(planned.plan) shouldBe Some(TpchSlice.topRows)
+    planned.collect().toSeq.headOption.map(_.cells) shouldBe Some(
+      Vector(Cell.Int32(2), Cell.Int64(40L)),
+    )
+    TpchSlice.topChecksum(planned.collect()) shouldBe TpchSlice.topMix
+    ScarletConf.set(ScarletConf.get.copy(columnarExecution = false))
+    TpchSlice.topChecksum(planned.collect()) shouldBe TpchSlice.topMix
+  }
+
   "the slice" should "agree with the row path" in {
     TpchSlice.failures() shouldBe Nil
   }

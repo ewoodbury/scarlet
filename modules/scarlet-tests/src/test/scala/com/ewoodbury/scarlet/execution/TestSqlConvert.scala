@@ -471,6 +471,78 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     named("select count(*) from tiny full join tiny on id = id", "Join")
   }
 
+  "an exists" should "keep an order that has a late line" in {
+    val tables = Map("orders" -> TpchSlice.existsOrders(), "lineitem" -> TpchSlice.existsLines())
+    val sql =
+      """select count(*) from orders
+        |where orderdate >= 10 and orderdate < 20 and exists (
+        |select * from lineitem
+        |where lineitem.orderkey = orders.orderkey and commit < receipt)""".stripMargin
+    val (result, shape) = value(sql, tables)
+    result shouldBe 2L
+    shape shouldBe "WideHashJoin(WideFilter1(WideFilter1(Scan)),WideProject(WideGroup(WideFilter3(WideCompute(Scan)))))"
+  }
+
+  "a scalar subquery" should "keep the greatest total" in {
+    val tables = Map("revenue" -> TpchSlice.maxRevenue())
+    val sql =
+      "select count(*) from revenue where total = (select max(total) from revenue)"
+    val (result, shape) = value(sql, tables)
+    result shouldBe 1L
+    shape shouldBe "WideFilter1(Scan)"
+  }
+
+  "not exists" should "name the pattern" in {
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(
+        "select count(*) from tiny where not exists (select * from tiny where id = id)",
+        Map("tiny" -> tiny()),
+      )
+    }
+    thrown.getMessage should include("not exists")
+  }
+
+  "a correlated scalar" should "name the pattern" in {
+    val tables = Map("orders" -> TpchSlice.existsOrders(), "lineitem" -> TpchSlice.existsLines())
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(
+        """select count(*) from orders where orderkey = (
+          |select max(orderkey) from lineitem where lineitem.orderkey = orders.orderkey
+          |)""".stripMargin,
+        tables,
+      )
+    }
+    thrown.getMessage should include("correlated")
+  }
+
+  "an outer column inside a scalar" should "name the pattern" in {
+    val tables = Map("orders" -> TpchSlice.existsOrders(), "lineitem" -> TpchSlice.existsLines())
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(
+        "select count(*) from orders where orderkey = (select max(orders.orderkey) from lineitem)",
+        tables,
+      )
+    }
+    thrown.getMessage should include("correlated")
+  }
+
+  "a joined scalar" should "name the pattern" in {
+    val tables = Map("orders" -> TpchSlice.existsOrders(), "lineitem" -> TpchSlice.existsLines())
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(
+        """select count(*) from orders where orderkey = (
+          |select max(lineitem.orderkey) from lineitem
+          |join orders on lineitem.orderkey = orders.orderkey)""".stripMargin,
+        tables,
+      )
+    }
+    thrown.getMessage should include("correlated")
+  }
+
+  "an in subquery" should "name the node" in {
+    named("select count(*) from tiny where id in (select id from tiny)", "InExpression")
+  }
+
   "an ordered string" should "sort one string column" in {
     val sql =
       "select SearchPhrase from hits where SearchPhrase <> '' order by SearchPhrase limit 1"
