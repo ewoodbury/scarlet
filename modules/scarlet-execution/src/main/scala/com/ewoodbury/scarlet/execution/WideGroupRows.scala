@@ -10,9 +10,9 @@ import com.ewoodbury.scarlet.core.*
  *
  * A null key is dropped. A null measure increments count and is skipped by sum, min, and max. A
  * key whose measures are all null still emits a row. A string measure emits count, min, and max,
- * and has no sum. String order is JVM `compareTo`. `distinct` appends the size of that key's set
- * after max. Int sums widen to long. Long sums wrap. The plan is not `GroupByKey`, and this fold
- * does not build a list of values.
+ * and has no sum. `textMin` appends the min of one other string. String order is JVM `compareTo`.
+ * `distinct` appends the size of that key's set after those strings. Int sums widen to long. Long
+ * sums wrap. The plan is not `GroupByKey`, and this fold does not build a list of values.
  */
 private[execution] object WideGroupRows:
 
@@ -20,7 +20,14 @@ private[execution] object WideGroupRows:
     val (fields, rows) = materialize(group.source)
     val out =
       WideAggregate
-        .output(fields, group.key, group.measure, group.key2, group.distinct)
+        .output(
+          fields,
+          group.key,
+          group.measure,
+          group.key2,
+          group.distinct,
+          group.textMin,
+        )
         .getOrElse {
           throw new IllegalArgumentException(
             s"columns ${group.key}, ${group.key2}, and ${group.measure} of ${fields.map(_.kind)} do not group",
@@ -28,7 +35,15 @@ private[execution] object WideGroupRows:
         }
     val folded = group.key2 match
       case None =>
-        fold(rows, group.key, group.measure, fields(group.measure).kind, out, group.distinct)
+        fold(
+          rows,
+          group.key,
+          group.measure,
+          fields(group.measure).kind,
+          out,
+          group.distinct,
+          group.textMin,
+        )
       case Some(second) =>
         foldTwo(
           rows,
@@ -38,6 +53,7 @@ private[execution] object WideGroupRows:
           fields(group.measure).kind,
           out,
           group.distinct,
+          group.textMin,
         )
     Seq(Partition(folded))
 
@@ -74,6 +90,8 @@ private[execution] object WideGroupRows:
     var floatMax: Float = 0.0f
     var textMin: String = ""
     var textMax: String = ""
+    var secondSeen: Boolean = false
+    var secondText: String = ""
     private val distinctValues: Option[mutable.HashSet[Cell]] =
       if trackDistinct then Some(mutable.HashSet.empty[Cell]) else None
 
@@ -148,6 +166,12 @@ private[execution] object WideGroupRows:
         if (value.compareTo(textMin) < 0) then textMin = value
         if (value.compareTo(textMax) > 0) then textMax = value
 
+    def addSecond(value: String): Unit =
+      if (!secondSeen) then
+        secondSeen = true
+        secondText = value
+      else if (value.compareTo(secondText) < 0) then secondText = value
+
   private def fold(
       rows: Vector[WideRow],
       key: Int,
@@ -155,6 +179,7 @@ private[execution] object WideGroupRows:
       measureKind: ColumnKind,
       fields: Vector[ColumnField],
       distinct: Option[Int],
+      second: Option[Int],
   ): Vector[WideRow] =
     val groups = mutable.LinkedHashMap.empty[Cell, Acc]
     rows.foreach { row =>
@@ -164,12 +189,13 @@ private[execution] object WideGroupRows:
           val acc = groups.getOrElseUpdate(keyCell, new Acc(distinct.isDefined))
           acc.count += 1L
           addMeasure(acc, cellAt(row, measure))
+          noteSecond(acc, row, second)
           distinct.foreach(ordinal => acc.noteDistinct(cellAt(row, ordinal)))
     }
     groups.iterator.map { (keyCell, acc) =>
       finished(
         fields,
-        Vector(keyCell, Cell.Int64(acc.count)) ++ aggregateCells(acc, measureKind),
+        Vector(keyCell, Cell.Int64(acc.count)) ++ aggregateCells(acc, measureKind, second),
         acc,
       )
     }.toVector
@@ -182,6 +208,7 @@ private[execution] object WideGroupRows:
       measureKind: ColumnKind,
       fields: Vector[ColumnField],
       distinct: Option[Int],
+      second: Option[Int],
   ): Vector[WideRow] =
     val groups = mutable.LinkedHashMap.empty[(Cell, Cell), Acc]
     rows.foreach { row =>
@@ -190,13 +217,14 @@ private[execution] object WideGroupRows:
           val acc = groups.getOrElseUpdate((left, right), new Acc(distinct.isDefined))
           acc.count += 1L
           addMeasure(acc, cellAt(row, measure))
+          noteSecond(acc, row, second)
           distinct.foreach(ordinal => acc.noteDistinct(cellAt(row, ordinal)))
         case _ => ()
     }
     groups.iterator.map { case ((left, right), acc) =>
       finished(
         fields,
-        Vector(left, right, Cell.Int64(acc.count)) ++ aggregateCells(acc, measureKind),
+        Vector(left, right, Cell.Int64(acc.count)) ++ aggregateCells(acc, measureKind, second),
         acc,
       )
     }.toVector
@@ -223,8 +251,21 @@ private[execution] object WideGroupRows:
     case other =>
       throw new IllegalArgumentException(s"measure $other does not aggregate")
 
-  private def aggregateCells(acc: Acc, measureKind: ColumnKind): Vector[Cell] =
-    measureKind match
+  private def noteSecond(acc: Acc, row: WideRow, second: Option[Int]): Unit =
+    second.foreach { ordinal =>
+      cellAt(row, ordinal) match
+        case Cell.Null => ()
+        case Cell.Utf8(value) => acc.addSecond(value)
+        case other =>
+          throw new IllegalArgumentException(s"measure $other does not aggregate")
+    }
+
+  private def aggregateCells(
+      acc: Acc,
+      measureKind: ColumnKind,
+      second: Option[Int],
+  ): Vector[Cell] =
+    val primary = measureKind match
       case ColumnKind.Utf8 =>
         if (!acc.seen) then Vector(Cell.Null, Cell.Null)
         else Vector(Cell.Utf8(acc.textMin), Cell.Utf8(acc.textMax))
@@ -247,6 +288,11 @@ private[execution] object WideGroupRows:
         )
       case other =>
         throw new IllegalArgumentException(s"measure $other does not aggregate")
+    val extra = second match
+      case None => Vector.empty
+      case Some(_) if !acc.secondSeen => Vector(Cell.Null)
+      case Some(_) => Vector(Cell.Utf8(acc.secondText))
+    primary ++ extra
 
   private def cellAt(row: WideRow, ordinal: Int): Cell =
     if (ordinal >= 0 && ordinal < row.cells.size) then row.cells(ordinal)

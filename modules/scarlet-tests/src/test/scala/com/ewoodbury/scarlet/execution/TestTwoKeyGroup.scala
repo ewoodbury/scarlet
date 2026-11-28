@@ -46,7 +46,7 @@ class TestTwoKeyGroup extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     val measurePresent = Array.tabulate(count)(index => index % 13 != 0)
     val table = ints(left, leftPresent, right, rightPresent, measure, measurePresent)
     table.plan match
-      case Plan.WideGroupOp(_, _, _, Some(_), None) =>
+      case Plan.WideGroupOp(_, _, _, Some(_), None, None) =>
         Check.text(table.plan).contains("GroupByKey") shouldBe false
       case other =>
         fail(Check.text(other))

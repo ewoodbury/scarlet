@@ -6,9 +6,10 @@ package com.ewoodbury.scarlet.core
  * A key is an int, a long, or a string. A numeric measure emits count, sum, min, and max. Count is
  * a long. Sum is a long for an int or long measure, and a double for a float or double measure.
  * Min and max keep the measure's kind. A string measure emits count, min, and max, and has no sum.
- * Those strings compare with JVM `compareTo`. A bool measure is not in this set. A null key is
- * dropped. A null measure is counted and is not a sum, min, or max. `distinct` appends one long
- * column when that source column is an int, a long, or a string.
+ * Those strings compare with JVM `compareTo`. `textMin` appends the min of one other string column
+ * after max. A bool measure is not in this set. A null key is dropped. A null measure is counted
+ * and is not a sum, min, or max. `distinct` appends one long column when that source column is an
+ * int, a long, or a string.
  */
 private[scarlet] object WideAggregate:
 
@@ -18,20 +19,38 @@ private[scarlet] object WideAggregate:
       measure: Int,
       key2: Option[Int] = None,
       distinct: Option[Int] = None,
+      textMin: Option[Int] = None,
   ): Option[Vector[ColumnField]] =
     fieldAt(fields, key).flatMap { keyField =>
       secondField(fields, key, key2).flatMap { extra =>
         fieldAt(fields, measure).flatMap { measureField =>
-          if (groupKey(keyField.kind) && extra.forall(field => groupKey(field.kind))) then
-            counted(fields, distinct).flatMap { extraCount =>
-              body(measureField).map { middle =>
-                Vector(keyField) ++ extra.toVector ++ middle ++ extraCount
+          addedMin(fields, measure, measureField.kind, textMin).flatMap { second =>
+            if (groupKey(keyField.kind) && extra.forall(field => groupKey(field.kind))) then
+              counted(fields, distinct).flatMap { extraCount =>
+                body(measureField, second).map { middle =>
+                  Vector(keyField) ++ extra.toVector ++ middle ++ extraCount
+                }
               }
-            }
-          else None
+            else None
+          }
         }
       }
     }
+
+  /** True when the extra string min is emitted. None refuses the group. */
+  private def addedMin(
+      fields: Vector[ColumnField],
+      measure: Int,
+      measureKind: ColumnKind,
+      textMin: Option[Int],
+  ): Option[Boolean] = textMin match
+    case None => Some(false)
+    case Some(ordinal) if ordinal != measure =>
+      fieldAt(fields, ordinal).flatMap { field =>
+        if (measureKind == ColumnKind.Utf8 && field.kind == ColumnKind.Utf8) then Some(true)
+        else None
+      }
+    case Some(_) => None
 
   /** The appended distinct column, or an empty vector when the group does not ask for one. */
   private def counted(
@@ -67,9 +86,9 @@ private[scarlet] object WideAggregate:
     case ColumnKind.Float64 | ColumnKind.Bool | ColumnKind.Float32 => false
     case ColumnKind.Decimal(_, _) => false
 
-  private def body(measure: ColumnField): Option[Vector[ColumnField]] =
+  private def body(measure: ColumnField, second: Boolean): Option[Vector[ColumnField]] =
     summed(measure.kind) match
-      case Some(sumKind) =>
+      case Some(sumKind) if !second =>
         Some(
           Vector(
             ColumnField("count", ColumnKind.Int64),
@@ -78,16 +97,16 @@ private[scarlet] object WideAggregate:
             ColumnField("max", measure.kind),
           ),
         )
+      case Some(_) => None
       case None =>
         measure.kind match
           case ColumnKind.Utf8 =>
-            Some(
-              Vector(
-                ColumnField("count", ColumnKind.Int64),
-                ColumnField("min", ColumnKind.Utf8),
-                ColumnField("max", ColumnKind.Utf8),
-              ),
+            val columns = Vector(
+              ColumnField("count", ColumnKind.Int64),
+              ColumnField("min", ColumnKind.Utf8),
+              ColumnField("max", ColumnKind.Utf8),
             )
+            Some(if (second) then columns :+ ColumnField("min2", ColumnKind.Utf8) else columns)
           case _ => None
 
   private def summed(kind: ColumnKind): Option[ColumnKind] = kind match
