@@ -72,7 +72,7 @@ object TpchSlice:
     "11 Missing: having.",
     "12 Missing: a conditional count.",
     "13 This file. Left outer join. The published query also filters a comment and groups by count.",
-    "14 Missing: string LIKE.",
+    "14 Missing: case. The published query also adds a date interval.",
     "15 This file. An uncorrelated max. The published query builds that total in a view.",
     "16 Missing: not in.",
     "17 Missing: correlated average.",

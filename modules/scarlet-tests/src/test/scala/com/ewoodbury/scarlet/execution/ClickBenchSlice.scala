@@ -6,7 +6,7 @@ import com.ewoodbury.scarlet.runtime.local.LocalTaskScheduler
 import com.ewoodbury.scarlet.support.Check
 
 /**
- * Twenty-six ClickBench queries on 4096 generated rows. This is not the hits table.
+ * Twenty-eight ClickBench queries on 4096 generated rows. This is not the hits table.
  *
  * Numbers follow the 0-based order of `clickhouse/queries.sql`. An average is the long sum and the
  * count. Query 2's width average is 3679360 / 4096. Query 3's user average is 8386588672 / 4096.
@@ -65,6 +65,14 @@ object ClickBenchSlice:
   val distinctGroups: Long = 8L
   val distinctMix: Long = 6945918260932055340L
 
+  /** One generated UserID. The published literal is not in this file. */
+  val oneUser: Long = 1L
+  val matchedId: Long = 7L
+
+  /** Present URLs. A null URL is dropped. Six strings, sorted by the URL. */
+  val urlMix: Long = -1500008808850017596L
+  val urlGroups: Long = 6L
+
   /** Present URLs matching `%google%`. Null URLs are dropped. */
   val likeUrlsCount: Long = 2315L
 
@@ -118,7 +126,7 @@ object ClickBenchSlice:
     "16 long and string group key. This file. The checker applies the order.",
     "17 long and string group key. Same keys as query 16. Limit without an order waits.",
     "18 minute of an int64 epoch. This file. The checker applies the order.",
-    "19 long equality. Same compare as query 1. Not in this slice.",
+    "19 This file. One long equality. The published query names a literal this file does not hold.",
     "20 string pattern match. This file.",
     "21 pattern match and the min of a string. This file. The checker applies the order.",
     "22 pattern match, two string mins, and a distinct count. Missing: a second string min.",
@@ -132,7 +140,7 @@ object ClickBenchSlice:
     "30 two-column group and a string filter. Missing: multi-column group.",
     "31 two-column group. Missing: multi-column group.",
     "32 two int keys. This file. The checker applies the order.",
-    "33 group by a string. Same key as query 12. Not in this slice.",
+    "33 This file. One string group. The published query also sorts by the count and limits.",
     "34 group by a constant and a string. Missing: string group key.",
     "35 group by one int expression. This file. The checker applies the order.",
     "36 date range and a string group. Missing: a date literal.",
@@ -189,6 +197,10 @@ object ClickBenchSlice:
 
   def filtered(): DistCollection[WideRow] =
     scan().filterColumn(0, ColumnCompare(CompareOp.Ne, ColumnLiteral.Int32(0)))
+
+  /** Query 19: `UserID = 7`. The published literal is not in this file. */
+  def matchedUser(): DistCollection[WideRow] =
+    scan().filterColumn(2, ColumnCompare(CompareOp.Eq, ColumnLiteral.Int64(7L)))
 
   /** Query 10: `SearchPhrase <> ''`. A null phrase is dropped. The phrase is an extra column. */
   def notEmptyPhrase(): DistCollection[WideRow] =
@@ -314,6 +326,10 @@ object ClickBenchSlice:
   def groupedPhrase(): DistCollection[WideRow] =
     phrases().groupColumns(3, 0)
 
+  /** Query 33: the URL is the one string key. A null URL is dropped. */
+  def groupedUrl(): DistCollection[WideRow] =
+    urls().groupColumns(3, 0)
+
   /** Query 11: two string keys. */
   def groupedPhones(): DistCollection[WideRow] =
     phones().groupColumns(3, 4, 0)
@@ -409,6 +425,10 @@ object ClickBenchSlice:
       counted("query 0", scan().plan, countAll),
       shaped("query 1", filtered().plan, "WideFilter0(Scan)"),
       counted("query 1", filtered().plan, countAdv),
+      shaped("query 19", matchedUser().plan, "WideFilter2(Scan)"),
+      counted("query 19", matchedUser().plan, oneUser),
+      shaped("query 33", groupedUrl().plan, "WideGroup(Scan)"),
+      counted("query 33", groupedUrl().plan, urlGroups),
       shaped("query 2 adv", advAsLong().plan, "WideCompute(Scan)"),
       summed("query 2 adv", advAsLong().plan, 3, sumAdv),
       summed("query 2 width", widthAsLong().plan, 3, sumWidth),
@@ -468,6 +488,8 @@ object ClickBenchSlice:
     List(
       both("query 0", countAll)(scan().count()),
       both("query 1", countAdv)(filtered().count()),
+      both("query 19", matchedId)(matchedUser().sumLongColumn(2)),
+      both("query 33", urlMix)(phraseChecksum(groupedUrl().collect())),
       both("query 2", mixedSums)(mixSums()),
       both("query 3", sumUser)(scan().sumLongColumn(2)),
       both("query 4", distinctUsers)(scan().countDistinctColumn(2)),

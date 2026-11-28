@@ -45,6 +45,15 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     shape shouldBe "WideFilter0(Scan)"
   }
 
+  "a long equality" should "match query 19" in {
+    val (result, shape) = value(
+      "select sum(UserID) from hits where UserID = 7",
+      Map("hits" -> ClickBenchSlice.scan()),
+    )
+    result shouldBe ClickBenchSlice.matchedId
+    shape shouldBe "WideFilter2(Scan)"
+  }
+
   "an added literal" should "match query 29" in {
     val (result, shape) = value(
       "select sum(ResolutionWidth + 11) from hits",
@@ -192,6 +201,17 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     cells shouldBe rows
     cells.map(_.cells) shouldBe List(Vector(Cell.Int32(4)), Vector(Cell.Int32(3)))
     shape shouldBe "WideLimit(WideSort(WideProject(Scan)))"
+  }
+
+  "a url group" should "match query 33" in {
+    val (result, shape) = grouped(
+      """select URL, count(*), sum(AdvEngineID), min(AdvEngineID), max(AdvEngineID)
+        |from hits group by URL""".stripMargin,
+      Map("hits" -> ClickBenchSlice.urls()),
+      ClickBenchSlice.phraseChecksum,
+    )
+    result shouldBe ClickBenchSlice.urlMix
+    shape shouldBe "WideGroup(Scan)"
   }
 
   "a string group" should "match query 12" in {
