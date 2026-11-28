@@ -503,6 +503,30 @@ class TestSqlConvert extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
     shape shouldBe "WideHashJoin(WideFilter1(WideFilter1(Scan)),WideProject(WideGroup(WideFilter3(WideCompute(Scan)))))"
   }
 
+  "a correlated min" should "keep the matching cost" in {
+    val tables = Map("supply" -> TpchSlice.supply(), "offer" -> TpchSlice.offers())
+    val sql =
+      """select count(*) from supply where cost = (
+        |select min(cost) from offer
+        |where offer.part = supply.part and offer.cost >= 8)""".stripMargin
+    val (result, shape) = value(sql, tables)
+    result shouldBe TpchSlice.minCostRows
+    shape shouldBe
+      "WideFilter3(WideCompute(WideHashJoin(Scan,WideProject(WideGroup(WideFilter1(Scan))))))"
+  }
+
+  "a greater correlated min" should "name the pattern" in {
+    val tables = Map("supply" -> TpchSlice.supply(), "offer" -> TpchSlice.offers())
+    val thrown = the[IllegalArgumentException] thrownBy {
+      val _ = Sql.run(
+        """select count(*) from supply where cost > (
+          |select min(cost) from offer where offer.part = supply.part)""".stripMargin,
+        tables,
+      )
+    }
+    thrown.getMessage should include("correlated")
+  }
+
   "a scalar subquery" should "keep the greatest total" in {
     val tables = Map("revenue" -> TpchSlice.maxRevenue())
     val sql =
